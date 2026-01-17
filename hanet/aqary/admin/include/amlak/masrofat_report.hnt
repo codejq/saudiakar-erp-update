@@ -1,0 +1,514 @@
+<?php
+
+/**
+ * Maintenance & Expenses Report - Modernized
+ * Display maintenance and expenses report for properties
+ *
+ * @version 2.0
+ * @updated 2025-11-18
+ */
+
+// Set page variables
+$sc_title = "تقارير الصيانة";
+$sc_id = "47";
+
+// Extract request variables
+extract($_REQUEST);
+
+// Initialize variables to avoid warnings
+$report = isset($report) ? $report : 0;
+$idaqar = isset($idaqar) ? intval($idaqar) : 0;
+$idsubaqar = isset($idsubaqar) ? intval($idsubaqar) : 0;
+$startfrom = isset($startfrom) ? $startfrom : '';
+$enddate = isset($enddate) ? $enddate : '';
+$startfromx = isset($startfromx) ? $startfromx : '';
+$enddatex = isset($enddatex) ? $enddatex : '';
+
+// Check if this is an AJAX request
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+	include_once "../../../nocash.hnt";
+	if ($report == 1) {
+		include_once "../../../report_header.hnt";
+	} else {
+		include_once "../../../header.hnt";
+	}
+} else {
+	include_once "../../../reqloginajax.hnt";
+}
+
+// Include required classes
+require '../arabicTools.class.hnt';
+include_once "arabic_num.class.hnt";
+include_once "amlakfunctions.hnt";
+
+// Initialize Arabic_num instance for number to text conversion
+$arabicNum = new Arabic_num();
+$arabicTools = new ArabicTools();
+
+// Get idaqar from idsubaqar if not provided
+if (!$idaqar && isset($_REQUEST['idsubaqar']) && $_REQUEST['idsubaqar']) {
+	$idaqarRow = mysql_fetch_array(mysql_query("SELECT idaqar FROM amlakdetails WHERE idsubaqar='" . intval($_REQUEST['idsubaqar']) . "'", $link));
+	if ($idaqarRow) {
+		$idaqar = intval($idaqarRow['idaqar']);
+	}
+}
+
+// Date range calculation
+if (!$hnt_dll && $hnt_supper_dll != 5) {
+	$ers = 15277248; // Hijri year in seconds
+} else {
+	$ers = 15768000; // Gregorian 6 months
+}
+
+if ($startfrom) {
+	$daxx = explode("-", "0-0-0-" . $startfrom);
+	$dax2 = explode("-", "0-0-0-" . $enddate);
+
+	// Convert Hijri to Gregorian if needed
+	if (($daxx[5] < 1500) && ($daxx[5] > 1400)) {
+		$startfrom = str_replace("-", "/", $startfrom);
+		$startfrom = arabicTools::dateHejri2Geo($startfrom);
+		$enddate = str_replace("-", "/", $enddate);
+		$enddate = arabicTools::dateHejri2Geo($enddate);
+	}
+
+	$daxx = explode("-", "0-0-0-" . $startfrom);
+	$startfrom = mktime(0, 0, 0, $daxx[4], $daxx[3], $daxx[5]);
+	$dax2 = explode("-", "0-0-0-" . $enddate);
+	$enddate = mktime(0, 0, 0, $dax2[4], $dax2[3], $dax2[5]);
+} else {
+	$startfrom = time() - $ers;
+	$enddate = time();
+}
+
+// Format dates for display
+if (!$hnt_dll && $hnt_supper_dll != 5) {
+	$daxx = explode("-", arabicDate('hj:s-i-h-d-m-Y', $startfrom));
+	$dax2 = explode("-", arabicDate('hj:s-i-h-d-m-Y', $enddate));
+} else {
+	$daxx = explode("-", arabicDate('ar:s-i-h-d-m-Y', $startfrom));
+	$dax2 = explode("-", date('s-i-h-d-m-Y', $enddate));
+}
+
+if ($startfromx) {
+	$startfrom = $startfromx;
+	$enddate = $enddatex;
+}
+
+// Build WHERE clause
+$where = "";
+if ($idsubaqar) {
+	$where .= " AND idsubaqar = '" . intval($idsubaqar) . "'";
+}
+if ($startfrom) {
+	$where .= " AND payeddate >= '" . intval($startfrom) . "'";
+}
+if ($enddate) {
+	$where .= " AND payeddate <= '" . intval($enddate) . "'";
+}
+
+// Fetch expenses data
+$sql = "SELECT * FROM masrofat WHERE idaqar='" . intval($idaqar) . "' {$where} ORDER BY payeddate DESC";
+$resultData = mysql_query($sql, $link);
+$totalCount = mysql_num_rows($resultData);
+
+// Calculate total amount
+$sqlTotal = "SELECT SUM(amount) as xp FROM masrofat WHERE idaqar='" . intval($idaqar) . "' {$where}";
+$rowTotal = mysql_fetch_array(mysql_query($sqlTotal, $link));
+$totalAmount = $rowTotal['xp'] ? $rowTotal['xp'] : 0;
+
+// Get property name
+$propertyName = "";
+if ($idaqar) {
+	$sqlProperty = "SELECT aqarname FROM amlak WHERE idaqar='" . intval($idaqar) . "'";
+	$rowProperty = mysql_fetch_array(mysql_query($sqlProperty, $link));
+	if ($rowProperty) {
+		$propertyName = $rowProperty['aqarname'];
+	}
+}
+
+// Current date for report
+$daxxNow = date("H/i/s/m/d/Y");
+$daxxNow = explode("/", $daxxNow);
+$h_date = mktime($daxxNow[0], $daxxNow[1], $daxxNow[2], $daxxNow[3], $daxxNow[4], $daxxNow[5]);
+$h_date2 = arabicDate("ar:l d/F -Y h:iA", $h_date);
+$h_date1 = arabicDate('hj:l d-F-Y هـ', $h_date);
+$currentDate = ($hnt_dll || $hnt_supper_dll == 5) ? $h_date2 : $h_date1;
+
+// Only render HTML if NOT AJAX request
+if (!$is_ajax_request) {
+?>
+
+	<!-- Bootstrap 5.3 Toast Container -->
+	<div id="toast-container" class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 9999;"></div>
+
+	<style>
+		.report-header {
+			background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+			color: white;
+			padding: 1.5rem;
+			border-radius: 8px;
+			margin-bottom: 1.5rem;
+			text-align: center;
+		}
+
+		.report-info {
+			background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+			padding: 1rem;
+			border-radius: 6px;
+			margin-bottom: 1rem;
+		}
+
+		.expenses-table thead tr {
+			background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%) !important;
+		}
+
+		.expenses-table th {
+			background: transparent;
+			color: white;
+			font-weight: 600;
+			text-align: center;
+			padding: 0.75rem 0.5rem;
+			white-space: nowrap;
+			border: none;
+		}
+
+		.expenses-table td {
+			text-align: center;
+			padding: 0.75rem 0.5rem;
+			vertical-align: middle;
+		}
+
+		.expenses-table tbody tr:hover {
+			background-color: #f8f9fa;
+		}
+
+		.total-row {
+			background: linear-gradient(135deg, #e9ecef 0%, #dee2e6 100%);
+			font-weight: 700;
+			font-size: 1.1rem;
+		}
+
+		.amount-highlight {
+			color: #dc3545;
+			font-weight: 700;
+			font-size: 1.1rem;
+		}
+
+		@media print {
+			.screenonlyonly {
+				display: none !important;
+			}
+
+			.card {
+				box-shadow: none !important;
+				border: 1px solid #dee2e6 !important;
+			}
+		}
+	</style>
+
+	<script>
+		/**
+		 * Bootstrap 5.3 Toast Notification System
+		 */
+		function showBootstrapNotification(message, type = 'success', duration = 3000) {
+			const toastId = 'toast-' + Date.now();
+
+			const iconMap = {
+				'success': 'bi-check-circle-fill text-success',
+				'error': 'bi-x-circle-fill text-danger',
+				'info': 'bi-info-circle-fill text-info'
+			};
+
+			const bgMap = {
+				'success': 'bg-success-subtle',
+				'error': 'bg-danger-subtle',
+				'info': 'bg-info-subtle'
+			};
+
+			const icon = iconMap[type] || iconMap['success'];
+			const bgClass = bgMap[type] || bgMap['success'];
+
+			const toastHtml = `
+        <div id="${toastId}" class="toast ${bgClass} border-0 shadow-lg" role="alert">
+            <div class="toast-body d-flex align-items-center gap-3 p-3">
+                <i class="bi ${icon} fs-4"></i>
+                <div class="flex-grow-1" dir="rtl">${message}</div>
+                <button type="button" class="btn-close" data-bs-dismiss="toast"></button>
+            </div>
+        </div>
+    `;
+
+			const container = document.getElementById('toast-container');
+			if (container) {
+				container.insertAdjacentHTML('beforeend', toastHtml);
+				const toastElement = document.getElementById(toastId);
+				const toast = new bootstrap.Toast(toastElement, {
+					autohide: true,
+					delay: duration
+				});
+				toast.show();
+				toastElement.addEventListener('hidden.bs.toast', () => toastElement.remove());
+			}
+		}
+
+		/**
+		 * Update report based on selections
+		 */
+		function updateReport() {
+			const idaqar = document.getElementById('idaqar').value;
+			const idsubaqar = document.getElementById('idsubaqar').value;
+			const dd = document.getElementById('dd').value;
+			const mm = document.getElementById('mm').value;
+			const yy = document.getElementById('yy').value;
+			const dd2 = document.getElementById('dd2').value;
+			const mm2 = document.getElementById('mm2').value;
+			const yy2 = document.getElementById('yy2').value;
+
+			if (!idaqar) {
+				showBootstrapNotification('الرجاء اختيار العقار أولاً', 'error');
+				return;
+			}
+
+			const url = `masrofat_report.hnt?idaqar=${idaqar}&idsubaqar=${idsubaqar}&startfrom=${dd}-${mm}-${yy}&enddate=${dd2}-${mm2}-${yy2}`;
+			window.location.href = url;
+		}
+
+		/**
+		 * Generate print report
+		 */
+		function generatePrintReport() {
+			const currentUrl = window.location.href;
+			const separator = currentUrl.includes('?') ? '&' : '?';
+			window.location.href = currentUrl + separator + 'report=1';
+		}
+
+		/**
+		 * Handle property selection change
+		 */
+		function handlePropertyChange(select) {
+			const url = select.value;
+			if (url && url !== 'masrofat_report.hnt') {
+				window.location.href = url;
+			}
+		}
+	</script>
+
+	<div class="container-fluid py-3">
+		<!-- Page Header -->
+		<?php if ($report != 1) { ?>
+			<div class="card shadow-sm border-0 mb-4 screenonlyonly">
+				<div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+					<h4 class="mb-0">
+						<i class="bi bi-tools me-2"></i>
+						<?= $sc_title ?>
+					</h4>
+				</div>
+			</div>
+		<?php } ?>
+
+		<!-- Filter Section -->
+		<?php if ($report != 1) { ?>
+			<div class="card shadow-sm border-0 mb-4 screenonlyonly">
+				<div class="card-header" style="background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);">
+					<h5 class="mb-0 text-white">
+						<i class="bi bi-funnel me-2"></i>
+						خيارات التقرير
+					</h5>
+				</div>
+				<div class="card-body p-4">
+					<form method="get" action="masrofat_report.hnt">
+						<input type='hidden' name="formuid" id="formuid"
+							value="<?= str_replace('.', '', microtime() . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+						<input type='hidden' name='idaqar' id='idaqar' value='<?= intval($idaqar) ?>'>
+
+						<div class="row g-3">
+							<!-- Property Selection -->
+							<div class="col-md-6">
+								<label class="form-label">
+									<i class="bi bi-building text-primary me-1"></i>
+									اختر العقار <span class="text-danger">*</span>
+								</label>
+								<select name="site" class="form-select" onchange="handlePropertyChange(this)">
+									<option value='masrofat_report.hnt'>اختر العقار</option>
+									<?php
+									$sql = "SELECT idaqar, aqarname FROM amlak";
+									$result = mysql_query($sql, $link);
+									while ($row = mysql_fetch_array($result)) {
+										$selected = ($idaqar == $row['idaqar']) ? "selected" : "";
+										echo "<option value='masrofat_report.hnt?idaqar=" . intval($row['idaqar']) . "' {$selected}>" . htmlspecialchars($row['aqarname'], ENT_QUOTES, 'UTF-8') . "</option>";
+									}
+									?>
+								</select>
+							</div>
+
+							<!-- Unit Selection -->
+							<div class="col-md-6">
+								<label class="form-label">
+									<i class="bi bi-house-door text-primary me-1"></i>
+									اختر الوحدة
+								</label>
+								<select name="idsubaqar" id="idsubaqar" class="form-select" onchange="updateReport()">
+									<option value=''>جميع الوحدات</option>
+									<?php
+									if ($idaqar) {
+										$sql = "SELECT amlakdetails.idsubaqar, CONCAT(aqarsubtype.aqarsubtypename, ' - ', amlakdetails.rakam) as unitname
+                                        FROM amlakdetails, aqarsubtype
+                                        WHERE amlakdetails.aqarsubtype = aqarsubtype.aqarsubtype
+                                        AND amlakdetails.idaqar='" . intval($idaqar) . "'";
+										$result = mysql_query($sql, $link);
+										while ($row = mysql_fetch_array($result)) {
+											$sel = ($row['idsubaqar'] == $idsubaqar) ? "selected" : "";
+											echo "<option value='" . intval($row['idsubaqar']) . "' {$sel}>" . htmlspecialchars($row['unitname'], ENT_QUOTES, 'UTF-8') . "</option>";
+										}
+									}
+									?>
+								</select>
+							</div>
+
+							<!-- Date Range -->
+							<div class="col-md-6">
+								<label class="form-label">
+									<i class="bi bi-calendar-range text-primary me-1"></i>
+									من تاريخ
+								</label>
+								<div class="input-group">
+									<input type="text" class="form-control" id="dd" name="dd" placeholder="يوم" value="<?= htmlspecialchars($daxx[3], ENT_QUOTES, 'UTF-8') ?>" maxlength="2">
+									<span class="input-group-text">/</span>
+									<input type="text" class="form-control" id="mm" name="mm" placeholder="شهر" value="<?= htmlspecialchars($daxx[4], ENT_QUOTES, 'UTF-8') ?>" maxlength="2">
+									<span class="input-group-text">/</span>
+									<input type="text" class="form-control" id="yy" name="yy" placeholder="سنة" value="<?= htmlspecialchars($daxx[5], ENT_QUOTES, 'UTF-8') ?>" maxlength="4">
+								</div>
+							</div>
+
+							<div class="col-md-6">
+								<label class="form-label">
+									<i class="bi bi-calendar-check text-primary me-1"></i>
+									إلى تاريخ
+								</label>
+								<div class="input-group">
+									<input type="text" class="form-control" id="dd2" name="dd2" placeholder="يوم" value="<?= htmlspecialchars($dax2[3], ENT_QUOTES, 'UTF-8') ?>" maxlength="2">
+									<span class="input-group-text">/</span>
+									<input type="text" class="form-control" id="mm2" name="mm2" placeholder="شهر" value="<?= htmlspecialchars($dax2[4], ENT_QUOTES, 'UTF-8') ?>" maxlength="2">
+									<span class="input-group-text">/</span>
+									<input type="text" class="form-control" id="yy2" name="yy2" placeholder="سنة" value="<?= htmlspecialchars($dax2[5], ENT_QUOTES, 'UTF-8') ?>" maxlength="4">
+								</div>
+							</div>
+
+							<!-- Action Buttons -->
+							<div class="col-12">
+								<div class="d-flex gap-2 justify-content-center">
+									<button type="button" class="btn btn-primary" onclick="updateReport()">
+										<i class="bi bi-arrow-clockwise me-1"></i>
+										إعادة الحساب
+									</button>
+									<button type="button" class="btn btn-success" onclick="generatePrintReport()">
+										<i class="bi bi-printer me-1"></i>
+										تقرير للطباعة
+									</button>
+									<a href="/aqary/admin/amlak.hnt" class="btn btn-outline-secondary">
+										<i class="bi bi-arrow-counterclockwise me-1"></i>
+										إلغاء وعودة
+									</a>
+								</div>
+							</div>
+						</div>
+					</form>
+				</div>
+			</div>
+		<?php } ?>
+
+		<!-- Report Header -->
+		<div class="report-header">
+			<h3 class="mb-2">
+				<i class="bi bi-file-earmark-bar-graph me-2"></i>
+				تقرير الصيانات والمصروفات
+			</h3>
+			<div class="report-info">
+				<div class="row">
+					<div class="col-md-6 text-center">
+						<strong>العقار:</strong> <?= htmlspecialchars($propertyName, ENT_QUOTES, 'UTF-8') ?>
+					</div>
+					<div class="col-md-6 text-center">
+						<strong>تاريخ التقرير:</strong> <?= $currentDate ?>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<!-- Expenses Table -->
+		<div class="card shadow-sm border-0">
+			<div class="card-body p-0">
+				<div class="table-responsive">
+					<table class="table table-hover expenses-table mb-0">
+						<thead>
+							<tr>
+								<th>البيان</th>
+								<th>الوحدة الفرعية</th>
+								<th>المبلغ المدفوع</th>
+								<th>مدفوع عن طريق</th>
+								<th>تاريخ الصيانة</th>
+							</tr>
+						</thead>
+						<tbody>
+							<?php
+							if ($totalCount == 0) {
+								echo "<tr><td colspan='5' class='text-center py-5'>";
+								echo "<i class='bi bi-inbox fs-1 text-muted d-block mb-3'></i>";
+								echo "<span class='text-muted'>لا يوجد أي مصروفات لهذا العقار حالياً</span>";
+								echo "</td></tr>";
+							}
+
+							while ($row = mysql_fetch_array($resultData)) {
+								// Get unit details
+								$sqlUnit = "SELECT aqarsubtype, rakam FROM amlakdetails WHERE idsubaqar='" . intval($row['idsubaqar']) . "'";
+								$rowdUnit = mysql_fetch_array(mysql_query($sqlUnit, $link));
+
+								$unitDisplay = "";
+								if ($rowdUnit && isset($rowdUnit['aqarsubtype']) && $rowdUnit['aqarsubtype'] > 0) {
+									$unitDisplay = displaysubtype($rowdUnit['aqarsubtype']) . " رقم <span class='text-danger fw-bold'>" . htmlspecialchars($rowdUnit['rakam'], ENT_QUOTES, 'UTF-8') . "</span>";
+								} else {
+									$unitDisplay = "العقار بالكامل";
+								}
+
+								$maintenanceDate = $arabicTools->arabicDate('hj:d/m/Y', $row['payeddate']);
+							?>
+								<tr>
+									<td><?= htmlspecialchars($row['payeddue'], ENT_QUOTES, 'UTF-8') ?></td>
+									<td><?= $unitDisplay ?></td>
+									<td class="amount-highlight"><?= number_format($row['amount'], 2) ?></td>
+									<td><?= htmlspecialchars($row['payedby'], ENT_QUOTES, 'UTF-8') ?></td>
+									<td><?= $maintenanceDate ?></td>
+								</tr>
+							<?php } ?>
+
+							<!-- Total Row -->
+							<?php if ($totalCount > 0) { ?>
+								<tr class="total-row">
+									<td colspan="2" class="text-center">
+										<i class="bi bi-calculator me-2"></i>
+										إجمالي المصروفات
+									</td>
+									<td colspan="3">
+										<span class="amount-highlight"><?= number_format($totalAmount, 2) ?></span> <?= $myomla ?>
+										<br>
+										<small class="text-muted"><?= $arabicNum->numtostr($totalAmount) ?> <?= $myomla ?> فقط لا غير</small>
+									</td>
+								</tr>
+							<?php } ?>
+						</tbody>
+					</table>
+				</div>
+			</div>
+		</div>
+	</div>
+
+<?php
+	if ($report != 1) {
+		require("../../../foter.hnt");
+	}
+}
+?>

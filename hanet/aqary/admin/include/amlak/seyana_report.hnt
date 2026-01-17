@@ -1,0 +1,424 @@
+<?php
+// Set page variables
+$sc_title = "بيان مصاريف الصيانة";
+$sc_id = "102";
+
+// Extract request variables
+extract($_REQUEST);
+
+// Initialize variables
+$idaqar = isset($idaqar) ? intval($idaqar) : 0;
+$report = isset($report) ? intval($report) : 0;
+$delidmasrof = isset($delidmasrof) ? intval($delidmasrof) : 0;
+
+// Check if this is an AJAX request
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Include authentication and database
+if ($is_ajax_request) {
+    include_once "../../../reqloginajax.hnt";
+} else {
+    include_once "../../../nocash.hnt";
+    $_SERVER['HTTP_REFERER'] = "showeditaqar.hnt?idaqar=$idaqar";
+    $canscroll = 1;
+
+    if ($report == 1) {
+        include_once "../../../report_header.hnt";
+    } else {
+        include_once "../../../header.hnt";
+    }
+}
+
+// Include required classes
+require_once '../arabicTools.class.hnt';
+include_once "arabic_num.class.hnt";
+
+// Instantiate classes
+$arabicTools = new ArabicTools();
+$arabicNum = new Arabic_num();
+
+// Handle delete expense
+if ($delidmasrof > 0) {
+    $rid = mysql_fetch_array(mysql_query("SELECT idmasrof FROM masrofat WHERE idmasrof='" . intval($delidmasrof) . "'", $link));
+    if ($rid['idmasrof']) {
+        loginfo("critical", "delete", "تم حذف المصروف رقم $delidmasrof", "", "masrofat", $delidmasrof, $link);
+    }
+    $sql = "DELETE FROM masrofat WHERE idmasrof='" . intval($delidmasrof) . "'";
+    mysql_query($sql, $link);
+
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم حذف المصروف بنجاح'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+}
+
+// Get property data
+$sql = "SELECT aqarname FROM amlak WHERE idaqar='" . intval($idaqar) . "'";
+$property_result = mysql_query($sql, $link);
+$property_data = mysql_fetch_array($property_result);
+$property_name = $property_data['aqarname'] ?? 'غير محدد';
+
+// Get current date
+$current_time = time();
+if (!$hnt_dll && $hnt_supper_dll != 5) {
+    $current_date_hijri = $arabicTools->arabicDate('hj:l d-F-Y هـ', $current_time);
+    $current_date_gregorian = date('l d/F/Y', $current_time);
+} else {
+    $current_date_gregorian = date('l d/F/Y', $current_time);
+    $current_date_hijri = $arabicTools->arabicDate('hj:l d-F-Y هـ', $current_time);
+}
+
+// Get expenses
+$sql = "SELECT * FROM masrofat WHERE idaqar='" . intval($idaqar) . "' ORDER BY payeddate DESC";
+$result = mysql_query($sql, $link);
+
+// Calculate total
+$sql_total = "SELECT SUM(amount) as total FROM masrofat WHERE idaqar='" . intval($idaqar) . "'";
+$total_result = mysql_query($sql_total, $link);
+$total_data = mysql_fetch_array($total_result);
+$total_amount = $total_data['total'] ?? 0;
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.expense-table {
+    width: 100%;
+    margin-top: 1rem;
+}
+
+.expense-table th {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    padding: 0.75rem;
+    text-align: center;
+    font-weight: 600;
+    border: 1px solid #dee2e6;
+}
+
+.expense-table td {
+    padding: 0.75rem;
+    text-align: center;
+    border: 1px solid #dee2e6;
+    vertical-align: middle;
+}
+
+.expense-table tbody tr:nth-child(odd) {
+    background-color: #f8f9fa;
+}
+
+.expense-table tbody tr:nth-child(even) {
+    background-color: #ffffff;
+}
+
+.expense-table tbody tr:hover {
+    background-color: #fff3cd !important;
+    transition: background-color 0.2s;
+}
+
+.expense-table tfoot tr {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    font-weight: 600;
+}
+
+.expense-table tfoot td {
+    padding: 1rem;
+    border: 1px solid #dee2e6;
+}
+
+.report-header {
+    text-align: center;
+    margin: 2rem 0;
+}
+
+.report-header h3 {
+    color: #0891b2;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}
+
+.report-header .property-name {
+    font-size: 1.25rem;
+    color: #189c2aff;
+    font-weight: 600;
+    margin: 1rem 0;
+}
+
+.report-header .report-date {
+    color: #6c757d;
+    font-size: 0.95rem;
+}
+
+@media print {
+    .no-print {
+        display: none !important;
+    }
+
+    .expense-table {
+        page-break-inside: avoid;
+    }
+}
+
+.empty-state {
+    text-align: center;
+    padding: 3rem;
+    color: #6c757d;
+}
+
+.empty-state i {
+    font-size: 4rem;
+    color: #dee2e6;
+    margin-bottom: 1rem;
+}
+</style>
+
+<div class="container-fluid py-3">
+    <?php if ($report != 1) { ?>
+    <!-- Page Header -->
+    <div class="card shadow-sm border-0 mb-4 no-print">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-tools me-2"></i>
+                <?= $sc_title ?>
+            </h4>
+        </div>
+    </div>
+    <?php } ?>
+
+    <!-- Report Content -->
+    <div class="card shadow-sm border-0">
+        <div class="card-body p-4">
+            <!-- Report Header -->
+            <div class="report-header">
+                <h3>
+                    <i class="bi bi-wrench-adjustable-circle text-primary me-2"></i>
+                    تقرير الصيانات والمصروفات
+                </h3>
+                <div class="property-name">
+                    <i class="bi bi-building me-2"></i>
+                    <?= htmlspecialchars($property_name, ENT_QUOTES, 'UTF-8') ?>
+                </div>
+                <div class="report-date">
+                    <i class="bi bi-calendar-event me-1"></i>
+                    بتاريخ: <?= $current_date_gregorian ?>
+                    <br>
+                    الموافق: <?= $current_date_hijri ?>
+                </div>
+            </div>
+
+            <?php if ($report != 1) { ?>
+            <!-- Action Buttons -->
+            <div class="text-center mb-4 no-print">
+                <button type="button" class="btn btn-primary" onclick="window.open('seyana_report.hnt?idaqar=<?= $idaqar ?>&report=1', '_blank');">
+                    <i class="bi bi-printer me-2"></i>
+                    عرض تقرير صالح للطباعة
+                </button>
+                <button type="button" class="btn btn-success" onclick="window.print();">
+                    <i class="bi bi-file-pdf me-2"></i>
+                    طباعة / حفظ PDF
+                </button>
+                <a href="showeditaqar.hnt?idaqar=<?= $idaqar ?>" class="btn btn-outline-secondary">
+                    <i class="bi bi-arrow-right me-2"></i>
+                    العودة للعقار
+                </a>
+            </div>
+            <?php } ?>
+
+            <!-- Expenses Table -->
+            <?php
+            $counx = 0;
+            $has_records = false;
+
+            // Check if there are any records
+            mysql_data_seek($result, 0);
+            while ($row = mysql_fetch_array($result)) {
+                $has_records = true;
+                break;
+            }
+            mysql_data_seek($result, 0);
+
+            if ($has_records) {
+            ?>
+            <div class="table-responsive">
+                <table class="table expense-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 40%;"><i class="bi bi-card-text me-1"></i>البيان</th>
+                            <th style="width: 15%;"><i class="bi bi-cash me-1"></i>المبلغ المدفوع</th>
+                            <th style="width: 15%;"><i class="bi bi-credit-card me-1"></i>مدفوع عن طريق</th>
+                            <th style="width: 15%;"><i class="bi bi-calendar-check me-1"></i>تاريخ الصيانة</th>
+                            <?php if ($report != 1) { ?>
+                            <th style="width: 15%;" class="no-print"><i class="bi bi-gear me-1"></i>إجراءات</th>
+                            <?php } ?>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php
+                        while ($row = mysql_fetch_array($result)) {
+                            $counx++;
+                            if ($hnt_dll || $hnt_supper_dll == 5) {
+                                $date_display = date("d/m/Y", $row['payeddate']);
+                            } else {
+                                $date_display = $arabicTools->arabicDate('hj:d/m/Y', $row['payeddate']);
+                            }
+                        ?>
+                        <tr>
+                            <td><?= htmlspecialchars($row['payeddue'], ENT_QUOTES, 'UTF-8') ?></td>
+                            <td>
+                                <span class="badge bg-danger">
+                                    <?= number_format($row['amount'], 2) ?> <?= $myomla ?>
+                                </span>
+                            </td>
+                            <td><?= htmlspecialchars($row['payedby'], ENT_QUOTES, 'UTF-8') ?></td>
+                            <td><?= $date_display ?></td>
+                            <?php if ($report != 1) { ?>
+                            <td class="no-print">
+                                <button type="button" class="btn btn-sm btn-danger <?= "policy_" . $sc_id . "_deleetes" ?> delete-expense-btn"
+                                        data-expense-id="<?= $row['idmasrof'] ?>"
+                                        data-property-id="<?= $idaqar ?>">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </td>
+                            <?php } ?>
+                        </tr>
+                        <?php } ?>
+                    </tbody>
+                    <tfoot>
+                        <tr>
+                            <td style="text-align: right;">
+                                <strong><i class="bi bi-calculator me-2"></i>إجمالي المصروفات</strong>
+                            </td>
+                            <td colspan="<?= $report != 1 ? '4' : '3' ?>">
+                                <strong><?= number_format($total_amount, 2) ?> <?= $myomla ?></strong>
+                                <br>
+                                <small>(<?= $arabicNum->numtostr($total_amount) ?> <?= $myomla ?> فقط لا غير)</small>
+                            </td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+            <?php } else { ?>
+            <!-- Empty State -->
+            <div class="empty-state">
+                <i class="bi bi-inbox"></i>
+                <h5>لا توجد مصروفات</h5>
+                <p>لا يوجد أي مصروفات لهذا العقار حالياً</p>
+                <?php if ($report != 1) { ?>
+                <a href="showeditaqar.hnt?idaqar=<?= $idaqar ?>" class="btn btn-primary mt-3">
+                    <i class="bi bi-arrow-right me-2"></i>
+                    العودة للعقار
+                </a>
+                <?php } ?>
+            </div>
+            <?php } ?>
+        </div>
+    </div>
+
+    <?php if ($report == 1) { ?>
+    <!-- Report Footer -->
+    <div class="text-center mt-4" style="border-top: 2px solid #000; padding-top: 1rem;">
+        <p>
+            <strong>ت:</strong> <?= htmlspecialchars($bayantel ?? '', ENT_QUOTES, 'UTF-8') ?>
+            &nbsp;&nbsp;&nbsp;&nbsp;
+            <strong>العنوان:</strong> <?= htmlspecialchars($bayanaddress ?? '', ENT_QUOTES, 'UTF-8') ?>
+        </p>
+    </div>
+    <?php } ?>
+</div>
+
+<?php if ($report != 1) { ?>
+<script>
+$(document).ready(function() {
+    // Delete expense with AJAX
+    $('.delete-expense-btn').on('click', function() {
+        const expenseId = $(this).data('expense-id');
+        const propertyId = $(this).data('property-id');
+        const $button = $(this);
+        const $row = $button.closest('tr');
+
+       confirm('هل أنت متأكد من حذف هذا المصروف؟','تأكيد الحذف',() => {
+           doDelete(expenseId, propertyId, $button, $row);
+       })
+
+    });
+
+    const doDelete = async (expenseId, propertyId , deleteButton,  row) => {
+        // Disable button during request
+        deleteButton.prop('disabled', true);
+        deleteButton.html('<i class="bi bi-hourglass-split"></i>');
+
+        $.ajax({
+            url: 'seyana_report.hnt',
+            type: 'POST',
+            data: {
+                ajax_submit: '1',
+                delidmasrof: expenseId,
+                idaqar: propertyId
+            },
+            dataType: 'json',
+            success: function(response) {
+                if (response.success) {
+                    // Fade out and remove row
+                    row.fadeOut(400, function() {
+                        $(this).remove();
+
+                        // Check if table is now empty
+                        if ($('.expense-table tbody tr').length === 0) {
+                            location.reload();
+                        } else {
+                            // Recalculate total
+                            recalculateTotal();
+                        }
+                    });
+
+                    // Show success notification if available
+                    if (typeof showBootstrapNotification === 'function') {
+                        showBootstrapNotification('تم حذف المصروف بنجاح', 'success', 3000);
+                    }
+                } else {
+                    alert('حدث خطأ أثناء حذف المصروف');
+                    deleteButton.prop('disabled', false);
+                    deleteButton.html('<i class="bi bi-trash"></i>');
+                }
+            },
+            error: function() {
+                alert('حدث خطأ في الاتصال بالخادم');
+                deleteButton.prop('disabled', false);
+                deleteButton.html('<i class="bi bi-trash"></i>');
+            }
+        });
+    }
+
+    // Recalculate total after deletion
+    function recalculateTotal() {
+        let total = 0;
+        $('.expense-table tbody tr').each(function() {
+            const amountText = $(this).find('td:eq(1) .badge').text();
+            const amount = parseFloat(amountText.replace(/[^0-9.-]+/g, ''));
+            if (!isNaN(amount)) {
+                total += amount;
+            }
+        });
+
+        // Update total display
+        const formattedTotal = total.toLocaleString('en-US', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        });
+
+        $('.expense-table tfoot td:last strong:first').html(formattedTotal + ' <?= $myomla ?>');
+    }
+});
+</script>
+<?php } ?>
+
+<?php
+    require('../../../foter.hnt');
+} // End if (!$is_ajax_request)
+?>

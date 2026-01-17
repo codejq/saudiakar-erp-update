@@ -1,0 +1,343 @@
+<?php
+/**
+ * System Settings & Options
+ * Refactored version with Bootstrap 5
+ */
+
+$sc_title = "خيارات النظام";
+$sc_id = "84";
+if(isset($_POST['update_system']) && $_POST['update_system']==1){
+	@unlink("../../../aso/scheduler.txt");
+	header('Content-Type: application/json; charset=utf-8');
+	echo json_encode([
+		'success' => true,
+		'message' => 'تم بدء عملية التحديث'
+	], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+	exit();
+}
+
+include_once "../nocash.hnt";
+include_once "../header.hnt";
+?>
+
+<style>
+.icon-card {
+    min-height: 150px;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.icon-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+}
+
+.icon-card a {
+    text-decoration: none;
+    color: #333;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    padding: 1rem;
+}
+
+.icon-card .icon48 {
+    margin-bottom: 0.5rem;
+}
+
+/* Icon colors for different option types */
+.option-logo .icon48 { color: #189c2aff; }
+.option-user .icon48 { color: #0d9488; }
+.option-notification .icon48 { color: #f59e0b; }
+.option-backup .icon48 { color: #dc2626; }
+.option-permissions .icon48 { color: #8b5cf6; }
+.option-reports .icon48 { color: #29a0f0ff; }
+.option-location .icon48 { color: #10b981; }
+.option-datetime .icon48 { color: #06b6d4; }
+.option-appearance .icon48 { color: #ec4899; }
+.option-favorite .icon48 { color: #fbbf24; }
+.option-vouchers .icon48 { color: #14b8a6; }
+.option-departments .icon48 { color: #3b82f6; }
+.option-search .icon48 { color: #6366f1; }
+.option-designer .icon48 { color: #a855f7; }
+.option-templates .icon48 { color: #22c55e; }
+.option-word .icon48 { color: #2563eb; }
+.option-contracts .icon48 { color: #f97316; }
+.option-database .icon48 { color: #0891b2; }
+.option-numbering .icon48 { color: #64748b; }
+.option-branches .icon48 { color: #0e7490; }
+.option-logs .icon48 { color: #7c3aed; }
+.option-maintenance .icon48 { color: #dc3545; }
+.option-zatca .icon48 { color: #059669; }
+</style>
+
+<!-- Main Content -->
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <!-- Page Header -->
+            <div class="card mb-4 shadow-sm border-0">
+                <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+                    <h4 class="mb-0">
+                        <i class="bi bi-gear-wide-connected me-2"></i>
+                        <?= $sc_title ?>
+                    </h4>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-0">
+                        <i class="bi bi-info-circle me-2"></i>
+                        تحديث النظام لآخر اصدار
+                    </p>
+                </div>
+            </div>
+
+            <!-- Update Section -->
+            <div class="card shadow-sm border-0">
+                <div class="card-body p-4">
+                    <div class="text-center">
+                        <div class="mb-4">
+                            <i class="bi bi-cloud-download text-primary" style="font-size: 64px;"></i>
+                        </div>
+
+                        <h5 class="mb-3">تحديث النظام</h5>
+
+                        <div class="mb-3">
+                            <p class="text-muted mb-2">الإصدار الحالي:</p>
+                            <h4 class="text-primary mb-0" id="currentVersion">
+                                <i class="bi bi-hourglass-split"></i> جاري التحميل...
+                            </h4>
+                        </div>
+
+                        <div class="mb-4" id="updateProgress" style="display: none;">
+                            <div class="progress" style="height: 30px;">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated bg-success"
+                                     role="progressbar"
+                                     id="progressBar"
+                                     style="width: 0%"
+                                     aria-valuenow="0"
+                                     aria-valuemin="0"
+                                     aria-maxvalue="100">
+                                    <span id="progressText">0%</span>
+                                </div>
+                            </div>
+                            <small class="text-muted mt-2 d-block">جاري تحديث النظام، الرجاء الانتظار...</small>
+                        </div>
+
+                        <div class="mb-3" id="updateStatus"></div>
+
+                        <button type="button" class="btn btn-success btn-lg px-5" id="updateButton">
+                            <i class="bi bi-arrow-repeat me-2"></i>
+                            تحديث النظام الآن
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+$(document).ready(function() {
+    let currentVersionText = '';
+    let updateInterval = null;
+    let progressInterval = null;
+    const UPDATE_TIMEOUT = 120; // 120 seconds
+
+    // Get current version on page load
+    function getCurrentVersion() {
+        $.ajax({
+            url: '/aqary/ver.hnt',
+            type: 'GET',
+            cache: false,
+            success: function(response) {
+                currentVersionText = response.trim();
+                $('#currentVersion').html('<i class="bi bi-code-square me-2"></i>' + currentVersionText);
+            },
+            error: function() {
+                $('#currentVersion').html('<i class="bi bi-x-circle text-danger me-2"></i>فشل في جلب معلومات الإصدار');
+            }
+        });
+    }
+
+    // Initial version check
+    getCurrentVersion();
+
+    // Update button click handler
+    $('#updateButton').on('click', function() {
+        const $button = $(this);
+
+      confirm('هل أنت متأكد من تحديث النظام؟\n\nسيتم تحديث النظام لآخر إصدار متاح. هذه العملية قد تستغرق بضع دقائق.' ,'تأكيد',() => {
+        doUpdate($button);
+      })
+
+    });
+
+    const doUpdate = (updateButton) => {
+
+        // Disable button
+       updateButton.prop('disabled', true);
+        updateButton.html('<i class="bi bi-hourglass-split me-2"></i>جاري التحديث...');
+
+        // Show progress bar
+        $('#updateProgress').fadeIn();
+        $('#updateStatus').html('');
+
+        // Start update process
+        $.ajax({
+            url: 'system-update.hnt',
+            type: 'POST',
+            data: {
+                update_system: 1
+            },
+            dataType: 'json',
+            success: function(response) {
+                if (response.success) {
+                    startProgressBar();
+                    startVersionPolling();
+                } else {
+                    showError('فشل في بدء عملية التحديث');
+                }
+            },
+            error: function() {
+                showError('حدث خطأ في الاتصال بالخادم');
+            }
+        });
+
+    }
+    // Start progress bar animation
+    function startProgressBar() {
+        let progress = 0;
+        const increment = 100 / UPDATE_TIMEOUT; // Increment per second
+
+        progressInterval = setInterval(function() {
+            progress += increment;
+
+            if (progress >= 100) {
+                progress = 100;
+                clearInterval(progressInterval);
+            }
+
+            const progressPercent = Math.round(progress);
+            $('#progressBar').css('width', progressPercent + '%');
+            $('#progressBar').attr('aria-valuenow', progressPercent);
+            $('#progressText').text(progressPercent + '%');
+        }, 1000); // Update every second
+    }
+
+    // Poll version endpoint to check if update completed
+    function startVersionPolling() {
+        let attempts = 0;
+        const maxAttempts = UPDATE_TIMEOUT / 5; // Check every 5 seconds
+
+        updateInterval = setInterval(function() {
+            attempts++;
+
+            $.ajax({
+                url: '/aqary/ver.hnt',
+                type: 'GET',
+                cache: false,
+                success: function(response) {
+                    const newVersion = response.trim();
+
+                    // Check if version changed
+                    if (newVersion !== currentVersionText && newVersion !== '') {
+                        clearInterval(updateInterval);
+                        clearInterval(progressInterval);
+
+                        // Set progress to 100%
+                        $('#progressBar').css('width', '100%');
+                        $('#progressBar').attr('aria-valuenow', 100);
+                        $('#progressText').text('100%');
+
+                        // Show success message
+                        showSuccess(newVersion);
+                    }
+                },
+                error: function() {
+                    // Continue polling even on error
+                }
+            });
+
+            // Stop after max attempts
+            if (attempts >= maxAttempts) {
+                clearInterval(updateInterval);
+                clearInterval(progressInterval);
+                showWarning();
+            }
+        }, 5000); // Poll every 5 seconds
+    }
+
+    // Show success message
+    function showSuccess(newVersion) {
+        $('#updateStatus').html(`
+            <div class="alert alert-success" role="alert">
+                <i class="bi bi-check-circle-fill me-2"></i>
+                <strong>تم التحديث بنجاح!</strong>
+                <br>
+                تم تحديث النظام إلى الإصدار: <strong>${newVersion}</strong>
+                <br>
+                <small>يرجى إعادة تحميل الصفحة لتطبيق التحديثات.</small>
+            </div>
+        `);
+
+        $('#updateButton').html('<i class="bi bi-arrow-clockwise me-2"></i>إعادة تحميل الصفحة');
+        $('#updateButton').prop('disabled', false);
+        $('#updateButton').off('click').on('click', function() {
+            location.reload();
+        });
+
+        $('#currentVersion').html('<i class="bi bi-code-square me-2"></i>' + newVersion);
+        currentVersionText = newVersion;
+
+        // Show bootstrap notification if available
+        if (typeof showBootstrapNotification === 'function') {
+            showBootstrapNotification('تم تحديث النظام بنجاح!', 'success', 5000);
+        }
+
+        // Auto-reload after 5 seconds
+        setTimeout(function() {
+            location.reload();
+        }, 5000);
+    }
+
+    // Show error message
+    function showError(message) {
+        clearInterval(updateInterval);
+        clearInterval(progressInterval);
+
+        $('#updateProgress').fadeOut();
+        $('#updateStatus').html(`
+            <div class="alert alert-danger" role="alert">
+                <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                <strong>خطأ!</strong> ${message}
+            </div>
+        `);
+
+        $('#updateButton').html('<i class="bi bi-arrow-repeat me-2"></i>تحديث النظام الآن');
+        $('#updateButton').prop('disabled', false);
+    }
+
+    // Show warning message (timeout)
+    function showWarning() {
+        $('#updateStatus').html(`
+            <div class="alert alert-warning" role="alert">
+                <i class="bi bi-clock-history me-2"></i>
+                <strong>انتهى وقت التحديث</strong>
+                <br>
+                قد يستغرق التحديث وقتاً أطول من المتوقع. يرجى التحقق لاحقاً أو الاتصال بالدعم الفني.
+            </div>
+        `);
+
+        $('#updateButton').html('<i class="bi bi-arrow-clockwise me-2"></i>التحقق من التحديث');
+        $('#updateButton').prop('disabled', false);
+        $('#updateButton').off('click').on('click', function() {
+            location.reload();
+        });
+    }
+});
+</script>
+
+<?php
+require('../foter.hnt');
+?>
