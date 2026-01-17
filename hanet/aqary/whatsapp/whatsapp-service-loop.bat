@@ -189,10 +189,10 @@ echo Calling auto_add_installments.api.hnt ...
 
 "%~dp0../tools/curl/curl.exe" "http://127.0.0.1:9009/aqary/admin/reports/weekly_financial_report.hnt?auto=1"
 
-REM Return to script directory
-cd /d "%~dp0"
+"%~dp0../tools/curl/curl.exe" "http://127.0.0.1:9009/aqary/excuteupdate.hnt"
 
-call ..\..\..\aso\update-app.bat
+
+REM Return to script directory
 
 cd /d "%~dp0"
 

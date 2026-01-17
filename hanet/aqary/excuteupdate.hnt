@@ -1,0 +1,65 @@
+<?php
+/**
+ * System Update Executor
+ * Executes the update batch file with execution lock
+ */
+
+// Lock file to prevent concurrent executions
+$batLockFile = __DIR__ . '/../../aso/scheduler.txt';
+$lockFile = __DIR__ . '/../../aso/update.lock';
+$batchFile = __DIR__ . '/../../aso/update-app.bat';
+
+// Check if batch file exists
+if (!file_exists($batchFile)) {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => false,
+        'message' => 'ملف التحديث غير موجود'
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit();
+}
+
+if (file_exists($batLockFile)) {
+    $lockAge = intval(file_get_contents($batLockFile));
+    if($lockAge == intval(date('d'))) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => false,
+            'message' => 'تم التحديث لهذا اليوم سيتم البحث عن التحديثات مرة اخرى بعد مرور 24 ساعة'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    }
+}
+
+// Check if already executing
+if (file_exists($lockFile)) {
+    $lockAge = time() - filemtime($lockFile);
+
+    // If lock is older than 10 minutes, assume it's stale and remove it
+    if ($lockAge > 600) {
+        @unlink($lockFile);
+    } else {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => false,
+            'message' => 'التحديث قيد التنفيذ بالفعل'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    }
+}
+
+// Create lock file
+file_put_contents($lockFile, date('Y-m-d H:i:s'));
+
+// Execute the batch file in background
+$command = 'start /B cmd /c "' . realpath($batchFile) . '"';
+pclose(popen($command, 'r'));
+
+// Return success
+header('Content-Type: application/json; charset=utf-8');
+echo json_encode([
+    'success' => true,
+    'message' => 'تم بدء عملية التحديث بنجاح'
+], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+exit();
+?>
