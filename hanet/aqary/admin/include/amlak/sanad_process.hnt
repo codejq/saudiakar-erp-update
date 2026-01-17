@@ -1,0 +1,241 @@
+<?php
+// Payment Processing Logic for Receipt Vouchers
+// This file handles the payment submission and contract renewal
+
+if (!isset($maksanad)) $maksanad = isset($_POST['maksanad']) ? intval($_POST['maksanad']) : 0;
+if (!isset($renewfromoutside)) $renewfromoutside = false;
+
+// Load installment data
+if ($idsubaqar) {
+    $kastid_sql = "SELECT MIN(kastid) AS kastid FROM aksat WHERE iscomplete=0 AND idsubaqar='$idsubaqar'";
+    $kastid_result = mysql_fetch_array(mysql_query($kastid_sql, $link));
+    $kastid = isset($kastid_result['kastid']) ? $kastid_result['kastid'] : 0;
+
+    $sql = "SELECT * FROM amlakdetails WHERE idsubaqar=$idsubaqar";
+    $result = mysql_query($sql, $link);
+    $row = mysql_fetch_array($result);
+
+    $sql = "SELECT * FROM egar WHERE rakam3akdid='" . $row['rakam3akdid'] . "'";
+    $result = mysql_query($sql, $link);
+    $rowegar = mysql_fetch_array($result);
+
+    $sql = "SELECT * FROM aksat WHERE kastid='$kastid'";
+    $rowk = mysql_fetch_array(mysql_query($sql, $link));
+
+    $rentValue = $rowk['kastvalue'] - $rowk['water'] - $rowk['sa3ee'] - $rowk['services'];
+}
+
+// Calculate VAT
+$commesion_vat = 0;
+$depositeamount_vat = 0;
+if (isset($rowegar["vat_type"])) {
+    if ($rowegar["vat_type"] == 1) {
+        $commesion_vat = number_format(($rowk['sa3ee'] * 0.15), 2, '.', '');
+    }
+    if ($rowegar["vat_type"] == 2) {
+        $commesion_vat = number_format(($rowk['sa3ee'] * 0.15), 2, '.', '');
+        $depositeamount_vat = number_format(($rentValue * 0.15), 2, '.', '');
+    }
+}
+
+// Process payment submission
+if ($maksanad == 2) {
+    // Extract and sanitize POST data
+    $depositeamount = isset($_POST['depositeamount']) ? floatval($_POST['depositeamount']) : 0;
+    $kastid = isset($_POST['kastid']) ? intval($_POST['kastid']) : 0;
+    $idaqar = isset($_POST['cidaqar']) ? intval($_POST['cidaqar']) : 0;
+    $idsubaqar = isset($_POST['cidsubaqar']) ? intval($_POST['cidsubaqar']) : 0;
+    $mostagername = isset($_POST['mostagername']) ? mysql_real_escape_string($_POST['mostagername'], $link) : '';
+    $mostagerid = isset($_POST['mostagerid']) ? intval($_POST['mostagerid']) : 0;
+    $recivername = isset($_POST['recivername']) ? mysql_real_escape_string($_POST['recivername'], $link) : '';
+    $mybyan = isset($_POST['mybyan']) ? mysql_real_escape_string($_POST['mybyan'], $link) : '';
+    $sanadrakam = isset($_POST['sanadrakam']) ? intval($_POST['sanadrakam']) : 0;
+    $period = isset($_POST['period']) ? mysql_real_escape_string($_POST['period'], $link) : '';
+    $cheqnumber = isset($_POST['cheqnumber']) ? mysql_real_escape_string($_POST['cheqnumber'], $link) : '';
+    $cheqon = isset($_POST['cheqon']) ? mysql_real_escape_string($_POST['cheqon'], $link) : '';
+    $cheqdate1 = isset($_POST['cheqdate1']) ? mysql_real_escape_string($_POST['cheqdate1'], $link) : '';
+    $nakda = isset($_POST['nakda']) ? intval($_POST['nakda']) : 1;
+    $notes = isset($_POST['notes']) ? mysql_real_escape_string($_POST['notes'], $link) : '';
+    $oldsanad = isset($_POST['oldsanad']) ? intval($_POST['oldsanad']) : 0;
+    $total_vat = isset($_POST['total_vat']) ? floatval($_POST['total_vat']) : 0;
+
+    // Update installment payment
+    $sql = "SELECT dof3at_tafsel, dof3at FROM aksat WHERE kastid='$kastid'";
+    $dof3at_tafsel = mysql_fetch_array(mysql_query($sql, $link));
+    $dofx = $dof3at_tafsel['dof3at'];
+    $dof3at_tafsel = $dof3at_tafsel['dof3at_tafsel'] . " + " . $depositeamount;
+
+    $sql = "UPDATE aksat SET
+        dof3at = dof3at + $depositeamount,
+        dof3at_tafsel = '$dof3at_tafsel'
+        WHERE kastid='$kastid'";
+
+    if (!$renewfromoutside) {
+        mysql_query($sql, $link);
+    }
+
+    // Check if installment is complete
+    $sql = "SELECT dof3at, kastvalue, kastname, water, sa3ee, services FROM aksat WHERE kastid='$kastid'";
+    $rowks = mysql_fetch_array(mysql_query($sql, $link));
+    $mysa3ee = $rowks['sa3ee'];
+    $mywater = $rowks['water'];
+    $services = $rowks['services'];
+
+    if ($rowks['dof3at'] >= ($commesion_vat + $depositeamount_vat + $rowks['kastvalue']) ||
+        abs($rowks['dof3at'] - ($commesion_vat + $depositeamount_vat + $rowks['kastvalue'])) < 0.2) {
+        $sql = "UPDATE aksat SET iscomplete=1 WHERE kastid='$kastid'";
+        if (!$renewfromoutside) {
+            mysql_query($sql, $link);
+
+            // Check if we need to add more installments (backup trigger)
+            if (file_exists(__DIR__ . '/payment_trigger_installments.hnt')) {
+                require_once 'payment_trigger_installments.hnt';
+                checkAndAddInstallmentsAfterPayment($kastid, $link);
+            }
+        }
+    }
+
+    // Process payment date
+    $payeddate = isset($_REQUEST['paymentdate']) ? $_REQUEST['paymentdate'] : date('d/m/Y');
+    $payeddate = explode("/", $payeddate);
+    if (count($payeddate) == 3 && $payeddate[2] < 1900) {
+        $dateo = $dcal->u2g($payeddate[0], $payeddate[1], $payeddate[2]);
+        $payeddate[0] = $dateo['day'];
+        $payeddate[1] = $dateo['month'];
+        $payeddate[2] = $dateo['year'];
+    }
+    $payeddate = mktime(0, 0, 0, $payeddate[1], $payeddate[0], $payeddate[2]);
+    $paymentdate = $payeddate;
+
+    // Detect commission percentage
+    $sql = "SELECT persentage FROM amlak WHERE idaqar='$idaqar'";
+    $rowp = mysql_fetch_array(mysql_query($sql, $link));
+    $persentage = isset($rowp['persentage']) ? $rowp['persentage'] : 0;
+
+    if ($dofx > 0) {
+        $mysa3ee = 0;
+        $mywater = 0;
+        $services = 0;
+    }
+
+    if (!$cheqnumber) {
+        $cheqdate1 = '';
+    }
+
+    // Insert revenue record
+    $sql = "INSERT INTO eradat SET
+        idaqar='$idaqar',
+        idsubaqar='$idsubaqar',
+        mostagername='$mostagername',
+        mostagerid='$mostagerid',
+        recivername='$recivername',
+        amount='$depositeamount',
+        paymentdate='$paymentdate',
+        pymentdesription='$mybyan',
+        sanadrakam='$sanadrakam',
+        kastid='$kastid',
+        mysa3ee='$mysa3ee',
+        mywater='$mywater',
+        services='$services',
+        formuid='" . $_REQUEST['formuid'] . "'";
+
+    if (!$renewfromoutside && $oldsanad != 1) {
+        mysql_query($sql, $link);
+    }
+
+    // Insert receipt voucher
+    $sql = "INSERT INTO sanad SET
+        period='$period',
+        mostagerid='$mostagerid',
+        mostagername='$mostagername',
+        depositeamount='$depositeamount',
+        recivername='$recivername',
+        mybyan='$mybyan',
+        sanadrakam='$sanadrakam',
+        idaqar='$idaqar',
+        idsubaqar='$idsubaqar',
+        sanaddate='$paymentdate',
+        cheqnumber='$cheqnumber',
+        cheqon='$cheqon',
+        cheqdate1='$cheqdate1',
+        attachedimages='" . (isset($_POST['attachedimages']) ? mysql_real_escape_string($_POST['attachedimages'], $link) : '') . "',
+        kastid='$kastid',
+        commesion_vat='$commesion_vat',
+        depositeamount_vat='$total_vat',
+        payment_type='$nakda',
+        notes='" . addslashes($notes) . "',
+        formuid='" . $_REQUEST['formuid'] . "'";
+
+    if (!$renewfromoutside) {
+        mysql_query($sql, $link);
+        $idsanad = mysql_insert_id();
+
+        if ($idsanad > 0) {
+            if (strlen($_REQUEST['formuid']) > 5) {
+                mysql_query("UPDATE eradat SET sanadrakam = '$idsanad' WHERE formuid = '" . $_REQUEST['formuid'] . "'", $link);
+                mysql_query("UPDATE sanad SET sanadrakam = '$idsanad' WHERE formuid = '" . $_REQUEST['formuid'] . "'", $link);
+            }
+
+            // Generate QR code
+            $qr_path = qr_path('vouchers.receive', "$idsanad.png");
+            ensure_dir(dirname($qr_path));
+
+            require('../../../phpqrcode.php');
+            $vat_number = isset($vat_number) ? $vat_number : '';
+            $barcodedata = "سند قبض رقم : $idsanad \r\n العميل: $mostagername  \r\n  المبلغ : $depositeamount
+                \r\n الضريبة : " . ($depositeamount_vat + $commesion_vat) . " \r\n الرقم الضريبي : $vat_number
+                \r\n البيان : $mybyan \r\n تاريخ الدفع  :   " . date("d/m/Y", $paymentdate) . " \r\n تاريخ الاصدار : " . date("d/m/Y") . "
+            ";
+            $brcodetext = $barcodedata;
+            QRcode::png($brcodetext, $qr_path, 'L', 2, 2);
+        }
+
+        mysql_query("UPDATE mostagereen SET mostagervatnumber='" . (isset($_REQUEST['mostagervatnumber']) ? mysql_real_escape_string($_REQUEST['mostagervatnumber'], $link) : '') . "'
+          WHERE mostagerid='$mostagerid'", $link);
+    }
+
+    if (function_exists('loginfo')) {
+        loginfo("critical", "insert", $barcodedata, "", "sanad", $idsanad, $link);
+    }
+
+    // Prepare success message
+    $mytitile = "<div class='alert alert-success text-center'>
+        <h5><i class='bi bi-check-circle me-2'></i>تم إدراج السند رقم $idsanad بنجاح</h5>
+        <div class='mt-3'>
+            <a class='btn btn-primary me-2' href='../../../sendsms.hnt?idsanad=$idsanad' target='_blank'>
+                <i class='bi bi-phone me-1'></i>نسخة إلى جوال المستأجر
+            </a>
+            <button class='btn btn-primary me-2' onclick=\"window.location.href='selectprintform.hnt?formtype=recivevoucher&id=$idsanad';\">
+                <i class='bi bi-printer me-1'></i>عرض السند للطباعة
+            </button>
+            <button class='btn btn-secondary me-2' onclick=\"window.location.href='sanad.hnt'\">
+                <i class='bi bi-plus-circle me-1'></i>تحرير سند جديد
+            </button>
+            <button class='btn btn-info me-2' onclick=\"window.location.href='/aqary/admin/include/amlak/egarstatus.hnt';\">
+                <i class='bi bi-list me-1'></i>حالة الإيجارات
+            </button>
+            <button class='btn btn-outline-secondary' onclick=\"window.location.href='/aqary/admin/amlak.hnt';\">
+                <i class='bi bi-building me-1'></i>إدارة الأملاك
+            </button>
+        </div>
+    </div>";
+
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم إدراج السند رقم ' . $idsanad . ' بنجاح',
+            'idsanad' => $idsanad,
+            'html' => $mytitile
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    // Include contract renewal logic
+    include 'sanad_renew.hnt';
+
+    if ($renewfromoutside) {
+        exit();
+    }
+}
+?>

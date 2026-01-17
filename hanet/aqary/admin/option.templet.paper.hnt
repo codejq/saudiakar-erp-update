@@ -1,0 +1,705 @@
+<?php
+/**
+ * Paper Templates Management
+ * Manage contract and document background templates
+ */
+
+$sc_title = "تعديل العقود والسندات والقوالب";
+$sc_id = "84";
+
+// Extract request variables
+extract($_REQUEST);
+
+// Check if this is an AJAX request
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Handle restore paper request BEFORE any output
+if (isset($_REQUEST['restorepaper']) && $_REQUEST['restorepaper']) {
+    $paperFile = $_REQUEST['restorepaper'];
+    $allowed_files = ['paper.jpg', 'halfpaper.jpg', 'towhalf.jpg'];
+
+    if (in_array($paperFile, $allowed_files)) {
+        $source = upload_path('documents.templates.original', $paperFile);
+        $dest = upload_path('documents.templates.word', $paperFile);
+
+        if (file_exists($source)) {
+            copy($source, $dest);
+
+            if ($is_ajax_request) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'تم استعادة الورقة الافتراضية بنجاح'
+                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                exit;
+            }
+        }
+    }
+
+    if (!$is_ajax_request) {
+        exit();
+    }
+}
+
+// Handle toggle background setting
+if (isset($_POST['toggle_setting']) && isset($_POST['setting_name']) && isset($_POST['setting_value'])) {
+    include_once "../connectdb.hnt";
+
+    $setting_name = addslashes($_POST['setting_name']);
+    $setting_value = intval($_POST['setting_value']);
+
+    $sql = "UPDATE global SET valuribalevalue = '{$setting_value}' WHERE variblename = '{$setting_name}'";
+    mysql_query($sql, $link);
+
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم تحديث الإعدادات بنجاح',
+            'new_value' => $setting_value
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+}
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../nocash.hnt";
+    include_once "../header.hnt";
+}
+
+// Get current settings from database
+include_once "../connectdb.hnt";
+$result = mysql_query("SELECT * FROM global", $link);
+$settings = [];
+while ($gl = mysql_fetch_array($result)) {
+    $settings[$gl['variblename']] = $gl['valuribalevalue'];
+}
+
+// Handle file upload
+if (isset($_FILES['paperfile']) && $_FILES['paperfile']['name']) {
+    $targetpic = $_POST['targetpic'] ?? '';
+    $allowed_targets = ['word/paper.jpg', 'word/halfpaper.jpg', 'word/towhalf.jpg'];
+
+    if (!in_array($targetpic, $allowed_targets)) {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'error' => 'مسار الملف غير صالح'
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        echo "<script>showBootstrapNotification('مسار الملف غير صالح', 'error', 3000);</script>";
+    } else {
+        $upload_error = '';
+
+        // Check file type
+        $allowed_types = ['image/jpeg', 'image/jpg', 'image/pjpeg'];
+        if (!in_array($_FILES['paperfile']['type'], $allowed_types)) {
+            $upload_error = 'يجب أن يكون نوع الصورة JPG';
+        }
+
+        // Check file size (1MB max)
+        if ($_FILES['paperfile']['size'] > 1000000) {
+            $upload_error = 'أقصى حجم مسموح به 1 ميجا - يجب تقليل حجم الصورة';
+        }
+
+        if ($upload_error) {
+            if ($is_ajax_request) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode([
+                    'success' => false,
+                    'error' => $upload_error
+                ], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            echo "<script>showBootstrapNotification('{$upload_error}', 'error', 5000);</script>";
+        } else {
+            // Upload file
+            if (move_uploaded_file($_FILES['paperfile']['tmp_name'], $targetpic)) {
+                if ($is_ajax_request) {
+                    header('Content-Type: application/json; charset=utf-8');
+                    echo json_encode([
+                        'success' => true,
+                        'message' => 'تم استبدال الورقة بنجاح',
+                        'file_url' => '/' . $targetpic . '?v=' . time()
+                    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    exit;
+                }
+                echo "<script>window.location.href='option.templet.paper.hnt';</script>";
+            } else {
+                if ($is_ajax_request) {
+                    header('Content-Type: application/json; charset=utf-8');
+                    echo json_encode([
+                        'success' => false,
+                        'error' => 'فشل رفع الملف'
+                    ], JSON_UNESCAPED_UNICODE);
+                    exit;
+                }
+            }
+        }
+    }
+}
+
+// Only render HTML if NOT AJAX
+if (!$is_ajax_request) {
+?>
+
+<!-- Bootstrap Toast Container -->
+<div id="toast-container" class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 9999;"></div>
+
+<style>
+.section-header {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1.5rem;
+    margin-top: 1.5rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.1rem;
+}
+
+.paper-preview-card {
+    background: #f8f9fa;
+    border: 2px solid #dee2e6;
+    border-radius: 8px;
+    padding: 1rem;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+.paper-preview-iframe {
+    flex-grow: 1;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    background: white;
+    min-height: 400px;
+}
+
+.paper-controls {
+    background: white;
+    border-radius: 8px;
+    padding: 1.5rem;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.paper-info {
+    background: linear-gradient(135deg, #d1f4e0 0%, #e0f7fa 100%);
+    border-left: 4px solid #0891b2;
+    border-radius: 6px;
+    padding: 1rem;
+}
+
+.form-label {
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: #495057;
+    text-align: right;
+}
+
+/* Bootstrap Toast Customization */
+.toast {
+    min-width: 350px;
+    backdrop-filter: blur(10px);
+}
+
+.toast-body {
+    font-size: 0.95rem;
+    font-weight: 500;
+}
+
+.bg-success-subtle {
+    background-color: #d1e7dd !important;
+    border-left: 4px solid #198754;
+}
+
+.bg-danger-subtle {
+    background-color: #f8d7da !important;
+    border-left: 4px solid #dc3545;
+}
+
+.bg-warning-subtle {
+    background-color: #fff3cd !important;
+    border-left: 4px solid #ffc107;
+}
+
+.bg-info-subtle {
+    background-color: #cff4fc !important;
+    border-left: 4px solid #0dcaf0;
+}
+
+.btn-toggle {
+    min-width: 200px;
+}
+</style>
+
+<script>
+/**
+ * Bootstrap 5.3 Toast Notification System
+ */
+function showBootstrapNotification(message, type = 'success', duration = 3000) {
+    const toastId = 'toast-' + Date.now();
+
+    const iconMap = {
+        'success': 'bi-check-circle-fill text-success',
+        'error': 'bi-x-circle-fill text-danger',
+        'warning': 'bi-exclamation-triangle-fill text-warning',
+        'loading': 'bi-hourglass-split text-info'
+    };
+
+    const bgMap = {
+        'success': 'bg-success-subtle',
+        'error': 'bg-danger-subtle',
+        'warning': 'bg-warning-subtle',
+        'loading': 'bg-info-subtle'
+    };
+
+    const icon = iconMap[type] || iconMap['success'];
+    const bgClass = bgMap[type] || bgMap['success'];
+
+    const toastHtml = `
+        <div id="${toastId}" class="toast ${bgClass} border-0 shadow-lg" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="toast-body d-flex align-items-center gap-3 p-3">
+                <i class="bi ${icon} fs-4"></i>
+                <div class="flex-grow-1" dir="rtl">${message}</div>
+                ${type !== 'loading' ? '<button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>' : ''}
+            </div>
+        </div>
+    `;
+
+    const container = document.getElementById('toast-container');
+    if (!container) {
+        console.error('Toast container not found');
+        return null;
+    }
+
+    container.insertAdjacentHTML('beforeend', toastHtml);
+
+    const toastElement = document.getElementById(toastId);
+    const toast = new bootstrap.Toast(toastElement, {
+        autohide: type !== 'loading',
+        delay: duration
+    });
+
+    toast.show();
+
+    toastElement.addEventListener('hidden.bs.toast', function () {
+        toastElement.remove();
+    });
+
+    return toast;
+}
+
+/**
+ * Handle file upload with AJAX
+ */
+function handlePaperUpload(formElement, previewIframeId) {
+    const formData = new FormData(formElement);
+    formData.append('ajax_submit', '1');
+
+    const loadingToast = showBootstrapNotification('جاري رفع الملف...', 'loading');
+
+    fetch('option.templet.paper.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (loadingToast) loadingToast.hide();
+
+        if (data.success) {
+            showBootstrapNotification(data.message, 'success', 3000);
+
+            // Reload preview iframe
+            if (previewIframeId && data.file_url) {
+                const iframe = document.getElementById(previewIframeId);
+                if (iframe) {
+                    iframe.src = data.file_url;
+                }
+            }
+
+            // Reset form
+            formElement.reset();
+        } else {
+            showBootstrapNotification(data.error || 'حدث خطأ أثناء الرفع', 'error', 5000);
+        }
+    })
+    .catch(error => {
+        if (loadingToast) loadingToast.hide();
+        console.error('Error:', error);
+        showBootstrapNotification('حدث خطأ في الاتصال. يرجى المحاولة مرة أخرى', 'error', 5000);
+    });
+
+    return false;
+}
+
+/**
+ * Restore default paper
+ */
+function restorePaper(paperFile, previewIframeId) {
+    if (!confirm('هل ترغب بالفعل في حذف الورقة المعدلة واستعادة الورقة الافتراضية؟')) {
+        return false;
+    }
+
+    const loadingToast = showBootstrapNotification('جاري استعادة الورقة الافتراضية...', 'loading');
+
+    const formData = new FormData();
+    formData.append('restorepaper', paperFile);
+    formData.append('ajax_submit', '1');
+
+    fetch('option.templet.paper.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (loadingToast) loadingToast.hide();
+
+        if (data.success) {
+            showBootstrapNotification(data.message, 'success', 3000);
+
+            // Reload preview iframe
+            if (previewIframeId) {
+                const iframe = document.getElementById(previewIframeId);
+                if (iframe) {
+                    iframe.src = iframe.src.split('?')[0] + '?v=' + Date.now();
+                }
+            }
+        } else {
+            showBootstrapNotification(data.error || 'فشل استعادة الورقة', 'error', 5000);
+        }
+    })
+    .catch(error => {
+        if (loadingToast) loadingToast.hide();
+        console.error('Error:', error);
+        showBootstrapNotification('حدث خطأ في الاتصال', 'error', 5000);
+    });
+
+    return false;
+}
+
+/**
+ * Toggle background setting
+ */
+function toggleBackground(settingName, currentValue, buttonElement) {
+    const newValue = currentValue == 1 ? 0 : 1;
+
+    const formData = new FormData();
+    formData.append('toggle_setting', '1');
+    formData.append('setting_name', settingName);
+    formData.append('setting_value', newValue);
+    formData.append('ajax_submit', '1');
+
+    const originalText = buttonElement.innerHTML;
+    buttonElement.disabled = true;
+    buttonElement.innerHTML = '<i class="bi bi-hourglass-split me-2"></i>جاري التحديث...';
+
+    fetch('option.templet.paper.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        buttonElement.disabled = false;
+
+        if (data.success) {
+            showBootstrapNotification(data.message, 'success', 2000);
+
+            // Update button text based on new value
+            if (settingName === 'fullpaper') {
+                buttonElement.innerHTML = (newValue == 1 ? 'عدم ' : '') + 'استخدام خلفية للعقود';
+            } else {
+                buttonElement.innerHTML = (newValue == 1 ? 'عدم ' : '') + 'استخدام خلفية للسندات';
+            }
+
+            // Update onclick with new value
+            const onclickAttr = buttonElement.getAttribute('onclick');
+            const updatedOnclick = onclickAttr.replace(/,\s*\d+,/, ', ' + newValue + ',');
+            buttonElement.setAttribute('onclick', updatedOnclick);
+        } else {
+            buttonElement.innerHTML = originalText;
+            showBootstrapNotification(data.error || 'فشل التحديث', 'error', 5000);
+        }
+    })
+    .catch(error => {
+        buttonElement.disabled = false;
+        buttonElement.innerHTML = originalText;
+        console.error('Error:', error);
+        showBootstrapNotification('حدث خطأ في الاتصال', 'error', 5000);
+    });
+}
+
+/**
+ * Download paper for editing
+ */
+function downloadPaper(iframeId, filename) {
+    try {
+        const iframe = document.getElementById(iframeId);
+        if (iframe && iframe.contentDocument) {
+            iframe.contentDocument.execCommand("SaveAs", null, filename);
+        } else {
+            showBootstrapNotification('المتصفح الحالي لا يدعم هذه الميزة. استخدم Internet Explorer', 'warning', 5000);
+        }
+    } catch (e) {
+        showBootstrapNotification('فشل تحميل الملف. جرب Internet Explorer للحصول على دعم كامل', 'error', 5000);
+    }
+}
+</script>
+
+<div class="container-fluid py-3">
+    <!-- Page Header -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-file-earmark-text me-2"></i>
+                <?= $sc_title ?>
+            </h4>
+        </div>
+    </div>
+
+    <!-- Official Contract Paper (الورقة الرسمية) -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-body p-4">
+            <div class="section-header">
+                <i class="bi bi-file-earmark-richtext"></i>
+                <span>الورقة الرسمية للعقود</span>
+            </div>
+
+            <div class="row g-4">
+                <!-- Controls Column -->
+                <div class="col-lg-4">
+                    <div class="paper-controls">
+                        <h6 class="mb-3"><i class="bi bi-gear text-primary me-2"></i>إعدادات الورقة</h6>
+
+                        <!-- Upload Form -->
+                        <form method="post" enctype="multipart/form-data"
+                              onsubmit="return handlePaperUpload(this, 'preview_paper');" class="mb-3">
+                            <input type="hidden" name="targetpic" value="word/paper.jpg">
+
+                            <label class="form-label">
+                                <i class="bi bi-upload text-success me-1"></i>
+                                استبدال الورقة الرسمية
+                            </label>
+                            <div class="input-group mb-3">
+                                <input type="file" name="paperfile" class="form-control" accept="image/jpeg,image/jpg">
+                                <button type="submit" class="btn btn-success">
+                                    <i class="bi bi-upload me-1"></i>رفع
+                                </button>
+                            </div>
+                        </form>
+
+                        <!-- Action Buttons -->
+                        <div class="d-grid gap-2">
+                            <button type="button" class="btn btn-warning btn-toggle"
+                                    onclick="toggleBackground('fullpaper', <?= isset($settings['fullpaper']) && $settings['fullpaper'] == 1 ? '1' : '0' ?>, this)">
+                                <i class="bi bi-image me-2"></i>
+                                <?= (isset($settings['fullpaper']) && $settings['fullpaper'] == 1) ? 'عدم ' : '' ?>استخدام خلفية للعقود
+                            </button>
+
+                            <button type="button" class="btn btn-info"
+                                    onclick="downloadPaper('preview_paper', 'paper.jpg');">
+                                <i class="bi bi-download me-2"></i>تحميل الورقة لتعديلها
+                            </button>
+
+                            <button type="button" class="btn btn-outline-danger"
+                                    onclick="restorePaper('paper.jpg', 'preview_paper');">
+                                <i class="bi bi-arrow-counterclockwise me-2"></i>استعادة الورقة الافتراضية
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Info Box -->
+                    <div class="paper-info mt-3">
+                        <h6 class="mb-2"><i class="bi bi-info-circle text-info me-2"></i>معلومات</h6>
+                        <p class="mb-1 small">يمكنك تعديل خلفية العقود الخاصة بك عن طريق استبدال الصورة بصورة الورقة الرسمية لديك</p>
+                        <p class="mb-0 small"><strong>أبعاد الصورة:</strong></p>
+                        <ul class="mb-0 small">
+                            <li>العرض: 600 بكسل</li>
+                            <li>الطول: 850 بكسل</li>
+                            <li>النوع: JPG</li>
+                            <li>الحجم الأقصى: 1 ميجا</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Preview Column -->
+                <div class="col-lg-8">
+                    <div class="paper-preview-card">
+                        <h6 class="mb-3"><i class="bi bi-eye text-success me-2"></i>معاينة الورقة</h6>
+                        <iframe id="preview_paper" class="paper-preview-iframe w-100"
+                                src="/aqary/admin/word/paper.jpg?v=<?= time() ?>">
+                        </iframe>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Receipt/Disbursement Paper (سندات القبض والصرف) -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-body p-4">
+            <div class="section-header">
+                <i class="bi bi-receipt"></i>
+                <span>سندات القبض والصرف</span>
+            </div>
+
+            <div class="row g-4">
+                <!-- Controls Column -->
+                <div class="col-lg-4">
+                    <div class="paper-controls">
+                        <h6 class="mb-3"><i class="bi bi-gear text-primary me-2"></i>إعدادات السندات</h6>
+
+                        <!-- Upload Form -->
+                        <form method="post" enctype="multipart/form-data"
+                              onsubmit="return handlePaperUpload(this, 'preview_halfpaper');" class="mb-3">
+                            <input type="hidden" name="targetpic" value="word/halfpaper.jpg">
+
+                            <label class="form-label">
+                                <i class="bi bi-upload text-success me-1"></i>
+                                استبدال ورقة السندات
+                            </label>
+                            <div class="input-group mb-3">
+                                <input type="file" name="paperfile" class="form-control" accept="image/jpeg,image/jpg">
+                                <button type="submit" class="btn btn-success">
+                                    <i class="bi bi-upload me-1"></i>رفع
+                                </button>
+                            </div>
+                        </form>
+
+                        <!-- Action Buttons -->
+                        <div class="d-grid gap-2">
+                            <button type="button" class="btn btn-warning btn-toggle"
+                                    onclick="toggleBackground('halfpaper', <?= isset($settings['halfpaper']) && $settings['halfpaper'] == 1 ? '1' : '0' ?>, this)">
+                                <i class="bi bi-image me-2"></i>
+                                <?= (isset($settings['halfpaper']) && $settings['halfpaper'] == 1) ? 'عدم ' : '' ?>استخدام خلفية للسندات
+                            </button>
+
+                            <button type="button" class="btn btn-info"
+                                    onclick="downloadPaper('preview_halfpaper', 'halfpaper.jpg');">
+                                <i class="bi bi-download me-2"></i>تحميل الورقة لتعديلها
+                            </button>
+
+                            <button type="button" class="btn btn-outline-danger"
+                                    onclick="restorePaper('halfpaper.jpg', 'preview_halfpaper');">
+                                <i class="bi bi-arrow-counterclockwise me-2"></i>استعادة الورقة الافتراضية
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Info Box -->
+                    <div class="paper-info mt-3">
+                        <h6 class="mb-2"><i class="bi bi-info-circle text-info me-2"></i>معلومات</h6>
+                        <p class="mb-1 small">يمكنك تعديل خلفية السندات الخاصة بك عن طريق استبدال الصورة بصورة الورقة الرسمية لديك</p>
+                        <p class="mb-0 small"><strong>أبعاد الصورة:</strong></p>
+                        <ul class="mb-0 small">
+                            <li>العرض: 600 بكسل</li>
+                            <li>الطول: 360 بكسل</li>
+                            <li>النوع: JPG</li>
+                            <li>الحجم الأقصى: 1 ميجا</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Preview Column -->
+                <div class="col-lg-8">
+                    <div class="paper-preview-card">
+                        <h6 class="mb-3"><i class="bi bi-eye text-success me-2"></i>معاينة السندات</h6>
+                        <iframe id="preview_halfpaper" class="paper-preview-iframe w-100"
+                                src="/aqary/admin/word/halfpaper.jpg?v=<?= time() ?>">
+                        </iframe>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Split Paper (الورقة المقسمة) -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-body p-4">
+            <div class="section-header">
+                <i class="bi bi-layout-split"></i>
+                <span>الورقة المقسمة</span>
+            </div>
+
+            <div class="row g-4">
+                <!-- Controls Column -->
+                <div class="col-lg-4">
+                    <div class="paper-controls">
+                        <h6 class="mb-3"><i class="bi bi-gear text-primary me-2"></i>إعدادات الورقة المقسمة</h6>
+
+                        <!-- Upload Form -->
+                        <form method="post" enctype="multipart/form-data"
+                              onsubmit="return handlePaperUpload(this, 'preview_towhalf');" class="mb-3">
+                            <input type="hidden" name="targetpic" value="word/towhalf.jpg">
+
+                            <label class="form-label">
+                                <i class="bi bi-upload text-success me-1"></i>
+                                استبدال الورقة المقسمة
+                            </label>
+                            <div class="input-group mb-3">
+                                <input type="file" name="paperfile" class="form-control" accept="image/jpeg,image/jpg">
+                                <button type="submit" class="btn btn-success">
+                                    <i class="bi bi-upload me-1"></i>رفع
+                                </button>
+                            </div>
+                        </form>
+
+                        <!-- Action Buttons -->
+                        <div class="d-grid gap-2">
+                            <button type="button" class="btn btn-warning btn-toggle <?= "policy_".$sc_id."_edits" ?>"
+                                    onclick="toggleBackground('towhalf', <?= isset($settings['towhalf']) && $settings['towhalf'] == 1 ? '1' : '0' ?>, this)">
+                                <i class="bi bi-image me-2"></i>
+                                <?= (isset($settings['towhalf']) && $settings['towhalf'] == 1) ? 'عدم ' : '' ?>استخدام خلفية للسندات
+                            </button>
+
+                            <button type="button" class="btn btn-info"
+                                    onclick="downloadPaper('preview_towhalf', 'towhalf.jpg');">
+                                <i class="bi bi-download me-2"></i>تحميل الورقة لتعديلها
+                            </button>
+
+                            <button type="button" class="btn btn-outline-danger"
+                                    onclick="restorePaper('towhalf.jpg', 'preview_towhalf');">
+                                <i class="bi bi-arrow-counterclockwise me-2"></i>استعادة الورقة الافتراضية
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Info Box -->
+                    <div class="paper-info mt-3">
+                        <h6 class="mb-2"><i class="bi bi-info-circle text-info me-2"></i>معلومات</h6>
+                        <p class="mb-1 small">يمكنك تعديل خلفية الورقة المقسمة الخاصة بك عن طريق استبدال الصورة بصورة الورقة الرسمية لديك</p>
+                        <p class="mb-0 small"><strong>أبعاد الصورة:</strong></p>
+                        <ul class="mb-0 small">
+                            <li>العرض: 600 بكسل</li>
+                            <li>الطول: 850 بكسل</li>
+                            <li>النوع: JPG</li>
+                            <li>الحجم الأقصى: 1 ميجا</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Preview Column -->
+                <div class="col-lg-8">
+                    <div class="paper-preview-card">
+                        <h6 class="mb-3"><i class="bi bi-eye text-success me-2"></i>معاينة الورقة المقسمة</h6>
+                        <iframe id="preview_towhalf" class="paper-preview-iframe w-100"
+                                src="/aqary/admin/word/towhalf.jpg?v=<?= time() ?>">
+                        </iframe>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<?php
+    require("../foter.hnt");
+}
+?>

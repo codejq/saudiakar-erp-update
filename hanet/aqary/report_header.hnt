@@ -1,0 +1,1086 @@
+<?php
+
+/**
+ * Report Header - Modern refactored version
+ * Provides navigation, toolbar, and header for report pages
+ */
+
+// Extract REQUEST variables
+extract($_REQUEST);
+
+// Security headers
+header('Access-Control-Allow-Origin: *');
+header('X-UA-Compatible: IE=edge, chrome=1');
+header('Content-Type: text/html; charset=UTF-8');
+
+// Error reporting (keep disabled for production)
+error_reporting(7);
+
+// Initialize variables
+$cashforpdf = isset($cashforpdf) ? intval($cashforpdf) : 0;
+$cashforpdffooter = isset($cashforpdffooter) ? intval($cashforpdffooter) : 0;
+$page = isset($page) ? intval($page) : 1;
+$passcode = isset($passcode) ? $passcode : "2255";
+
+// Authentication
+if (!$cashforpdf) {
+	include_once "reqlogin.hnt";
+}
+
+// Load configuration
+require "hjerymelady.ip";
+if (!$myomla) {
+	$myomla = " ريال ";
+}
+if (!$mysubomla) {
+	$mysubomla = " هلله ";
+}
+
+// Emulate register_globals (legacy compatibility)
+if (!ini_get('register_globals')) {
+	$superglobals = array($_SERVER, $_ENV, $_FILES, $_COOKIE, $_POST, $_GET);
+	if (isset($_SESSION)) {
+		array_unshift($superglobals, $_SESSION);
+	}
+	foreach ($superglobals as $superglobal) {
+		extract($superglobal, EXTR_SKIP);
+	}
+	ini_set('register_globals', true);
+}
+
+// Include required files
+include_once "colorvariable.hnt";
+include_once "arabicDate.function.hnt";
+include_once "connectdb.hnt";
+include_once "data.hnt";
+include_once "admin/include/functions.hnt";
+
+// Get user data
+$userid = isset($_SESSION['useridv']) ? intval($_SESSION['useridv']) : 0;
+$sql = "SELECT * FROM user WHERE userid='$userid'";
+$user_data = mysql_fetch_array(mysql_query($sql, $link));
+
+// Validate user data result
+if ($user_data === false || !is_array($user_data)) {
+	$user_data = [
+		'groupid' => 0,
+		'notificationscount' => 0
+	];
+} else {
+	$user_data['groupid'] = intval($user_data['groupid']);
+	$user_data['notificationscount'] = isset($user_data['notificationscount']) ? intval($user_data['notificationscount']) : 0;
+}
+
+// Notification badge
+$bgnotifi = "";
+if ($user_data['notificationscount'] > 0 && $user_data['notificationscount'] < 7) {
+	$bgnotifi = " style=\"background-image:url('/aqary/admin/hnt-office/img/bgreen.gif');\" ";
+}
+
+// Check privileges
+$allprevilage_result = mysql_fetch_array(mysql_query("SELECT allprevilage FROM usergroups WHERE groupid=" . intval($user_data['groupid']), $link));
+$allprevilage = ($allprevilage_result !== false && is_array($allprevilage_result)) ? $allprevilage_result['allprevilage'] : 0;
+if ($allprevilage && isset($_SESSION)) {
+	$_SESSION['seeothermasder'] = 1;
+}
+?>
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<meta http-equiv="pragma" content="no-cache">
+	<meta http-equiv="Expires" content="Mon, 26 Jul 1997 05:00:00 GMT">
+	<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+	<meta http-equiv="Cache-Control" content="post-check=0, pre-check=0">
+	<meta http-equiv="Content-Language" content="ar-sa">
+
+	<title>برنامج سعودي عقار</title>
+
+	<?php if (!$cashforpdf) { ?>
+		<object id="lunc" style="display:none;"></object>
+	<?php } ?>
+
+
+
+	<!-- jQuery and jQuery UI (jQuery 3 compatible) -->
+	<link href="<?= $urlh ?>/css/smoothness/jquery-ui-1.10.4.custom.css" rel="stylesheet">
+	<link href="<?= $urlh ?>/css/fonts/fontawesome/css/font-awesome.min.css" rel="stylesheet">
+		<script src="<?= $urlh ?>/js/jquery-3.7.1.min.js"></script>
+		<script src="<?= $urlh ?>/js/jquery-ui-1.10.4.custom.min.js" ></script>
+ 
+	 
+
+
+	<script language=javascript>
+		function blockError(e) {
+			try {
+				console.log(e);
+			} catch (err) {
+
+			}
+			return true;
+		}
+		window.onerror = blockError;
+
+		function checkdotnetobj() {
+			try {
+				if (window.external.isdotnet()) {
+
+					return;
+				}
+			} catch (err) {
+				document.getElementById('lunc').classid = "clsid:9910BEE9-58ED-4636-A852-DF89C76A9384";
+				document.getElementById('lunc').CODEBASE = "\\aqary\\lunc.cab";
+			}
+		}
+
+		checkdotnetobj();
+
+		function openInWord() {
+			document.getElementById('myP').contentEditable = 'false';
+			try {
+				shellme('winword.exe', '<?php echo "http://" . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI']; ?>&username=<?= $user_data['username']; ?>&password=<?= $user_data['password'] ?>');
+			} catch (e) {
+				exportHTML('word');
+			}
+		}
+
+		function openInExcel() {
+			document.getElementById('myP').contentEditable = 'false';
+			try {
+				shellme('excel.exe', '<?php echo "http://" . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI']; ?>&username=<?= $user_data['username']; ?>&password=<?= $user_data['password'] ?>');
+			} catch (e) {
+				exportHTML('excel');
+			}
+		}
+
+		function exportHTML(exportType) {
+			var header = "<html xmlns:o='urn:schemas-microsoft-com:office:office' " +
+				"xmlns:w='urn:schemas-microsoft-com:office:" + exportType + "' " +
+				"xmlns='http://www.w3.org/TR/REC-html40'>" +
+				"<head><meta charset='utf-8'><title>Export HTML to " + exportType + " Document with JavaScript</title></head><body>";
+			var footer = "</body></html>";
+			var sourceHTML = header + document.getElementById("main_report_data").innerHTML + footer;
+
+			var source = 'data:application/vnd.ms-' + exportType + ';charset=utf-8,' + encodeURIComponent(sourceHTML);
+			var fileDownload = document.createElement("a");
+			document.body.appendChild(fileDownload);
+			fileDownload.href = source;
+			fileDownload.download = 'document.doc';
+			if (exportType == "excel") {
+				fileDownload.download = 'document.xls';
+			}
+			fileDownload.click();
+			document.body.removeChild(fileDownload);
+		}
+
+		$(document).ready(function() {
+			window.old_print = window.print;
+			window.print = function() {
+				try {
+					var OLECMDID = 7;
+					/* OLECMDID values:
+					 * 6 - print
+					 * 7 - print preview
+					 * 1 - open window
+					 * 4 - Save As
+					 */
+					var PROMPT = 1; // 2 DONTPROMPTUSER
+					var WebBrowser = '<OBJECT ID="WebBrowser1"  name="WebBrowser1" WIDTH=0 HEIGHT=0 CLASSID="CLSID:8856F961-340A-11D0-A96B-00C04FD705A2"></OBJECT>';
+					document.body.insertAdjacentHTML('beforeEnd', WebBrowser);
+					WebBrowser1.ExecWB(OLECMDID, PROMPT);
+					WebBrowser1.outerHTML = "";
+				} catch (err) {
+					window.old_print();
+				}
+			};
+
+			<?php
+			if (isset($_SERVER['ANDROID_DATA']) && $_SERVER['ANDROID_DATA']) {
+				//this for android devices
+			?>
+				window.print = function() {
+					try {
+						android.print();
+					} catch (err) {
+						window.old_print();
+					}
+				};
+
+			<? } ?>
+
+		});
+
+		window.old_alert = window.alert;
+
+		function alert(message, fallback, callback) {
+			if (typeof(callback) == 'undefined') {
+				callback = "";
+			}
+			$(document).ready(function() {
+				if (fallback) {
+					old_alert(message);
+					return;
+				}
+				$(document.createElement('div'))
+					.attr({
+						title: 'رسالة',
+						'class': 'uifont16'
+					})
+					.html(message)
+					.dialog({
+						buttons: [{
+								text: "اغلاق",
+								"class": 'uifont16 button blue closealertbtn',
+								click: function() {
+									$(this).dialog('close');
+								}
+							}
+							/*,
+												{
+													text: "Save",
+													"class": 'saveButtonClass',
+													click: function() {
+														// Save code here
+													}
+												}*/
+						],
+						close: function() {
+							$(this).remove();
+							if (typeof callback != 'string') {
+								callback();
+							}
+						},
+						draggable: true,
+						modal: true,
+						resizable: false,
+						width: '300px'
+					});
+			});
+		}
+
+
+		function confirm(message, confirmtitle, callback) {
+			if (typeof(confirmtitle) == 'undefined') {
+				confirmtitle = "  تأكيد";
+			}
+			if (typeof(callback) == 'undefined') {
+				callback = "";
+			}
+			$(document).ready(function() {
+
+				$(document.createElement('div'))
+					.attr({
+						title: confirmtitle,
+						'class': 'uifont18'
+					})
+					.html(message)
+					.dialog({
+						buttons: [{
+								text: "موافق",
+								"class": 'uifont16 button ',
+								click: function() {
+									$(this).dialog('close');
+									return (typeof callback == 'string') ?
+										window.location.href = callback :
+										callback();
+								}
+							},
+							{
+								text: "الغاء",
+								"class": 'uifont16 button ',
+								click: function() {
+									$(this).remove();
+								}
+							}
+						],
+						close: function() {
+							$(this).remove();
+						},
+						draggable: true,
+						modal: true,
+						resizable: false,
+						width: '300px'
+					});
+			});
+		};
+
+
+
+		$(function() {
+			$(".pdfbtn").on("click", function(event) {
+				var pdfbtn = $(this);
+				pdfbtn.attr("src", "/aqary/admin/images/loadingsmall.gif");
+				$.getJSON("/aqary/report.generator.hnt", {
+						reportpath: pdfbtn.attr("reportpath"),
+						username: "<?= $_SESSION['usernamev'] ?>",
+						password: "<?= $_SESSION['passwordv'] ?>"
+					})
+					.done(function(data) {
+						if (data.success && data.filename) {
+							window.location.href = data.filename;
+						} else if (data.error) {
+							alert('خطأ في إنشاء PDF: ' + data.error +
+								(data.details && data.details.output ? '\n\nالتفاصيل:\n' + data.details.output : ''));
+							console.error('PDF Generation Error:', data.details);
+						}
+					})
+					.fail(function(jqXHR, textStatus, errorThrown) {
+						alert('خطأ في الاتصال بخادم PDF\n' + textStatus + ': ' + errorThrown);
+						console.error('AJAX Error:', textStatus, errorThrown);
+					})
+					.always(function() {
+						pdfbtn.attr("src", "/aqary/admin/images/pdf.png");
+					});
+			});
+		});
+
+		$(function() {
+			$(".sharebtn").on("click", function(event) {
+				var sharebtn = $(this);
+				sharebtn.attr("src", "/aqary/admin/images/loadingsmall.gif");
+
+				$.post("/aqary/social-media/createimage.php", {
+						twitText: $("#reportpagedata").html(),
+						tweettitle: ' بسم الله',
+						userid: "<?= $_SESSION['useridv'] ?>",
+						mailreadydata: $("#smstxtbody").val()
+					})
+					.done(function(data) {
+						//console.log( "second success" );
+						//window.open(data);
+						alert("اختر موقع التواصل  لنشر المنشور اليه :" +
+							"<br> <a href='/aqary/social-media/process.php?image=" + data + "' style='margin:5px' target='_blank' ><i class='bluetext fa fa-twitter-square fa-3x'></i></a>" +
+							"<a href=# style='margin:5px' disabled title='هذه الخاصية في انتظار التفعيل من قبل موقع التواصل الاجتماعي' ><i class='bluetext fa fa-facebook-square fa-3x'></i></a>" +
+							"<a href=# style='margin:5px' disabled title='هذه الخاصية في انتظار التفعيل من قبل موقع التواصل الاجتماعي'><i class='bluetext fa fa-instagram fa-3x'></i></a>" +
+							"<a href=# style='margin:5px' disabled title='هذه الخاصية في انتظار التفعيل من قبل موقع التواصل الاجتماعي'><i class='bluetext fa fa-google-plus-square fa-3x'></i></a>" +
+							"<a href='/aqary/social-media/forcedownload.php?image=" + data +
+							"' style='margin:5px' ><i class='bluetext fa fa-download fa-3x'></i></a>" +
+							"<br><img src='" + data + "' onclick='window.open(this.src);' height='320'>"
+
+
+						);
+						//alert(data.result);
+					})
+					//.fail(function(jqXHR, textStatus, errorThrown) { alert('request failed! ' + textStatus); })
+					.fail(function(data) {
+						//console.log( "error " );
+						//alert("error ");
+					})
+					.always(function() {
+						//console.log( "complete" );
+						sharebtn.attr("src", "/aqary/admin/images/sahre.png");
+					});
+
+
+			});
+		});
+
+
+
+
+
+		function isValidEmailAddress(emailAddress) {
+			var vemail = (emailAddress.replace(",", ";").split(';'))[0];
+			var pattern = new RegExp(/^(("[\w-+\s]+")|([\w-+]+(?:\.[\w-+]+)*)|("[\w-+\s]+")([\w-+]+(?:\.[\w-+]+)*))(@((?:[\w-+]+\.)*\w[\w-+]{0,66})\.([a-z]{2,6}(?:\.[a-z]{2})?)$)|(@\[?((25[0-5]\.|2[0-4][\d]\.|1[\d]{2}\.|[\d]{1,2}\.))((25[0-5]|2[0-4][\d]|1[\d]{2}|[\d]{1,2})\.){2}(25[0-5]|2[0-4][\d]|1[\d]{2}|[\d]{1,2})\]?$)/i);
+			return pattern.test(vemail);
+		}
+
+		$(function() {
+			$('body').on('click', ".resendbtn", function() {
+				if (isValidEmailAddress($("#emailalert").val())) {
+					$("#mailto").val($("#emailalert").val());
+					$(".closealertbtn").click();
+					$(".sendmailbtn").click();
+				} else {
+					$(".closealertbtn").click();
+					alert('البريد المدخل غير صحيح ');
+				}
+			});
+		});
+
+		function updatecode() {
+			$('#pincodeval').val($('#pincode').val());
+		}
+
+		$(function() {
+			$(".sendmailbtn").on("click", function(event) {
+				var sendmailbtn = $(this);
+				if ($("#mailto").val() == "" || !isValidEmailAddress($("#mailto").val())) {
+					sendmailbtn.attr("src", "/aqary/admin/images/send-email.png");
+					alert('لايحتوي هذا المستند على بريد الكتروني متعلق من فضلك ادخل البريد ليتم الارسال اليه \n ' +
+						+'يمكنك  ادخال اكثر من بريد وفصلهم بفاصلة عادية او منقوطة' +
+						'<br><input type="email" id="emailalert" name="emailalert" class="input bigtext  email uifont12" > ' +
+						'<input type="button" value="حفظ وإرسال" class="button blue uifont12 resendbtn" >'
+					);
+
+					return;
+				}
+
+				var pagetitle = $(document).find("title").text();
+				if ($("#pagetitle").val() != "") {
+					pagetitle = $("#pagetitle").val();
+				}
+				$(this).attr("src", "/aqary/admin/images/loadingsmall.gif");
+				$.getJSON("/aqary/report.generator.hnt", {
+						reportpath: $(this).attr("reportpath"),
+						username: "<?= $_SESSION['usernamev'] ?>",
+						password: "<?= $_SESSION['passwordv'] ?>",
+						mailto: $("#mailto").val(),
+						title: pagetitle,
+						mailbody: $("#mailbody").val()
+					})
+					.done(function(data) {
+						//console.log( "second success" );
+						alert(data.sendresult);
+					})
+					.fail(function() {
+						//console.log( "error " );
+						alert("خطأ في انشاء التقرير");
+					})
+					.always(function() {
+						//console.log( "complete" );
+						sendmailbtn.attr("src", "/aqary/admin/images/send-email.png");
+					});
+			});
+		});
+
+
+		/*
+		function shellme(exefile,exepram)
+		{
+			if(typeof(exepram)=='undefined'){exepram="";}
+			if(typeof(document.getElementById('lunc'))=='undefined'){return;}
+			document.getElementById('lunc').shellme(exefile,exepram);
+		}
+		*/
+
+		function shellme(exefile, exepram) {
+			if (typeof(exepram) == 'undefined') {
+				exepram = "";
+			}
+			try {
+				if (window.external.isdotnet()) {
+					window.external.shellme(exefile, exepram);
+					return;
+				}
+			} catch (err) {}
+
+			if (typeof(document.getElementById('lunc')) != 'undefined') {
+				document.getElementById('lunc').shellme(exefile, exepram);
+			}
+
+		}
+
+
+
+		function msgboxme(boxmssage, boxtitle, boxtype) {
+
+			if (typeof(boxtitle) == 'undefined') {
+				boxtitle = " ";
+			}
+			if (typeof(boxtype) == 'undefined') {
+				boxtype = 1;
+			}
+			alert(boxmssage);
+			return;
+
+			try {
+				if (window.external.isdotnet()) {
+					return window.external.msgboxme(boxmssage, boxtitle, boxtype);
+
+				}
+			} catch (err) {}
+
+			if (typeof(document.getElementById('lunc')) != 'undefined') {
+				boxresult = document.getElementById('lunc').msgboxme(boxtitle, boxmssage, boxtype);
+				return boxresult;
+			}
+		}
+
+		function openvbs(url) {
+
+
+			try {
+				url = url + "&username=<?= $usernamev; ?>&password=<?= $passwordv; ?>";
+				if (window.external.isdotnet()) {
+					showProgress();
+					setTimeout("hideProgress()", 40000);
+					return window.external.openvbs(url);
+
+				}
+			} catch (err) {}
+
+
+			wordd.location.href = url;
+			return boxresult;
+		}
+
+
+
+
+
+		$(document).ready(function() {
+			$("#menupalceholder").height($("#realmenu").height());
+			$(".pagecontent").css("min-height", $(window).height() - 70);
+			//$(".pagecontent").height($( window ).height() -560);
+			$(window).resize(function() {
+				$("#menupalceholder").height($("#realmenu").height());
+			});
+			setTimeout(function() {
+				$("#menupalceholder").height($("#realmenu").height())
+			}, 1000);
+			setTimeout(function() {
+				$("#menupalceholder").height($("#realmenu").height())
+			}, 5000);
+
+		});
+
+		/*
+		(function() {
+			window.old_print = window.print;
+			window.print = function() {
+			try{
+				var OLECMDID = 7;
+				 OLECMDID values:
+				* 6 - print
+				* 7 - print preview
+				* 1 - open window
+				* 4 - Save As
+				*
+				var PROMPT = 1; // 2 DONTPROMPTUSER
+				var WebBrowser = '<OBJECT ID="WebBrowser1" WIDTH=0 HEIGHT=0 CLASSID="CLSID:8856F961-340A-11D0-A96B-00C04FD705A2"></OBJECT>';
+				document.body.insertAdjacentHTML('beforeEnd', WebBrowser);
+				WebBrowser1.ExecWB(OLECMDID, PROMPT);
+				WebBrowser1.outerHTML = "";
+			}
+			catch(err){
+				window.old_print();
+			}
+			};
+
+		})();
+		*/
+	</script>
+</head>
+<?php
+
+
+
+?>
+<?php
+// Initialize HTTP_REFERER if not set
+if (!isset($_SERVER['HTTP_REFERER']) || $_SERVER['HTTP_REFERER'] == '') {
+	$servername = isset($servername) ? $servername : 'http://' . $_SERVER['HTTP_HOST'];
+	$_SERVER['HTTP_REFERER'] = $servername . "/aqary/admin/index.hnt";
+}
+?>
+<script langauage=javascript>
+	function gotorefere() {
+		window.location.href = "<?= $_SERVER['HTTP_REFERER'] ?>";
+	}
+</script>
+
+
+
+
+<LINK href='<?= $urlh ?>/style_report.hnt' type=text/css rel=StyleSheet>
+<LINK href='<?= $urlh ?>/fonts.css' type=text/css rel=StyleSheet>
+<link rel="stylesheet" type="text/css" href="<?= $urlh ?>/images.css" media="all" /> <!-- Images STYLES -->
+<link rel="stylesheet" type="text/css" href="<?= $urlh ?>/css/kickstart-menus.css" media="all" /> <!-- KICKSTART -->
+<link rel="stylesheet" type="text/css" href="<?= $urlh ?>/css/kickstart-buttons.css" media="all" /> <!-- KICKSTART -->
+<link rel="stylesheet" type="text/css" href="<?= $urlh ?>/css/custom-report.css" media="all" /> <!-- CUSTOM STYLES -->
+<?php
+// Load global settings from database
+$result = mysql_query("SELECT * FROM global", $link);
+while ($gl = mysql_fetch_array($result)) {
+	$GLOBALS[$gl['variblename']] = $gl['valuribalevalue'];
+}
+
+// Set default values if not defined
+if (!isset($sharwidth)) {
+	$sharwidth = "99";
+	$sharheight = "89";
+}
+
+if (!isset($passcode)) {
+	$passcode = "2255";
+}
+?>
+
+<body id="myP" contentEditable='false' topmargin="0"
+
+	onxcontextmenu="return false;" style="margin:0; ">
+
+	<input type="hidden" name="mailto" id="mailto" value="">
+	<input type="hidden" name="mailbody" id="mailbody" value="">
+	<input type="hidden" name="pagetitle" id="pagetitle" value="">
+	<input type="hidden" name="pincodeval" id="pincodeval" value="">
+
+	<style>
+		thead {
+			display: table-header-group
+		}
+
+		tfoot {
+			display: table-row-group
+		}
+
+		tr {
+			page-break-inside: avoid
+		}
+
+		.hidereport {
+			display: none !important;
+		}
+
+		.reporttable {
+			border-collapse: collapse;
+			border: 1px solid #000000;
+		}
+
+		@media print {
+			@page {
+				margin-top: 0.4cm;
+				margin-bottom: 0.4cm;
+			}
+
+			body {
+				background-color: #ffffff !important;
+			}
+		}
+	</style>
+
+	<?php if ($cashforpdf) { ?>
+		<style>
+			body {
+				margin-top: 1.2cm !important;
+				padding-top: 1.2cm !important;
+			}
+		</style>
+	<?php } ?>
+
+
+	<?php if (!$cashforpdf) { ?>
+
+
+		<!-############شريط الادوات ################->
+
+			<!--hewere -->
+
+
+			<div class="clearfix screenonly  " align='center' id='cccfixeddiv' contentEditable='false'>
+
+
+
+				<input type=button name='print' class='button blue uifont16' value="طباعة  "
+					onclick="document.getElementById('myP').contentEditable = 'false';window.print();"
+					title="طباعة الصفحة الحالية">
+
+
+
+				<input type=button name=print value="إزالة الخريطة" class='button  uifont16'
+					onclick="$('#allnearplace,#map_canvas').toggle('slow');">
+				<input type=button name=print value="إزالة الاماكن" class='button  uifont16'
+					onclick="$('#allnearplace').toggle('slow');">
+
+				<input type=button name=print value="فتح بالوورد" class='button  uifont16'
+					onclick="openInWord();"
+					title="فتح التقرير التالي فى برنامج ميكروسوفت ورد ">
+
+				<input type=button name=print value="فتح بالاكسل" class='button  uifont16'
+					onclick="openInExcel();"
+					title="فتح التقرير التالي فى برنامج ميكروسوفت  اكسل">
+
+
+				<input type=button name=print value="تحرير " class='button  uifont16' id='editbtn'
+					onclick="
+var myPElement = document.getElementById('myP');
+if(myPElement.contentEditable == 'true'){
+	myPElement.contentEditable = 'false';this.value='تحرير';
+	myPElement.focus();
+	return;
+}
+
+if($('#pincodeval').val() == '<?= $passcode ?>' ){
+	if(myPElement.contentEditable == 'false'){
+		myPElement.contentEditable = 'true';
+		$('#editbtn').attr('value', 'اغلاق التحرير');
+		myPElement.focus();
+	}
+	return;
+}
+
+confirm('أدخل كلمة المرور الخاصة بالتعديل <br> <input type=password name=pincode id=pincode onkeyup='updatecode();'>'
+,'صلاحية التعديل'
+,function() {
+	if($('#pincodeval').val() !='<?= $passcode ?>' ){
+		alert('كود خاطئ');
+		return;
+	}
+	var myPElement = document.getElementById('myP');
+	if(myPElement.contentEditable == 'false'){
+		myPElement.contentEditable = 'true';
+		$('#editbtn').attr('value', 'اغلاق التحرير');
+		myPElement.focus();
+	}
+
+});
+
+
+
+
+
+"
+					title="تفعيل التحرير فى الصفحة الحالية بحيث يمكنك  التعديل والكتابة فى الصفحة بغرض الطباعة فقط ">
+
+				<img src="/aqary/admin/images/send-email.png" class="sendmailbtn"
+					reportpath="<?= $_SERVER['REQUEST_URI']; ?>" height='40'
+					title='ارسال المستند كملف مرفق بالبريد '>
+
+				<img src="/aqary/admin/images/pdf.png" class="pdfbtn" reportpath="<?= $_SERVER['REQUEST_URI']; ?>" height='40'
+					title='تصدير المستند الي صيغة بي دي اف '>
+
+				<img src="/aqary/admin/images/sahre.png" class="sharebtn" reportpath="<?= $_SERVER['REQUEST_URI']; ?>" height='40'
+					title='تصدير المستند الي صيغة بي دي اف '>
+
+
+
+				<input type=button name=print value="استعادة الاصل" class='button  uifont16'
+					onclick="window.location.reload();"
+					title="استعادة اصل الصفحة قبل تحريرها من قبل المستخدم ">
+
+				<input type=button name=removeheader value="اخفاء الترويسة" class='button  uifont16'
+					onclick="$('.footnote,.qbarcodepng,.wkhtmltopdf').css('visibility', $('.footnote,.qbarcodepng,.wkhtmltopdf').css('visibility') == 'hidden' ? 'visible' : 'hidden');"
+					title="اخفاء رأس الصفحة ">
+
+				<input type=button name=removeheader value="ازالة الترويسة" class='button  uifont16'
+					onclick="$('.footnote,.qbarcodepng,.wkhtmltopdf').toggle('slow');"
+					title="ازالة الترويسة ">
+
+				<img border=0 src="/aqary/admin/images/n1.gif" onclick="gofirst();" class='midleimage' title="اذهب الى الصفحة الاولى ">
+
+				<img border=0 src="/aqary/admin/images/n4.gif" onclick="goprevious();" class='midleimage' title="اذهب الى الصفحة السابقة">
+
+				<input type="text" id="currentpage"
+					style="width:20px;height:15px;font-size:11px;text-align:center" class='midleimage'
+					value="<?= $page; ?>"
+					title="رقم الصفحة الحالية :<?= $page; ?> ">
+
+				<img border=0 src="/aqary/admin/images/n3.gif" onclick="gonext();" class='midleimage' title="اذهب الى الصفحة التالية ">
+
+
+				<img border=0 src="/aqary/admin/images/n2.gif" onclick="golast();" class='midleimage' title="اذهب الى الصفحة المحددة  ">
+
+
+
+
+			</div>
+
+			<div class="cleardix col_12 screenonly" style="height:50px" id='menupalceholder2'></div>
+
+
+			<div class="pagepaper">
+
+				<base id="rnumber" target="">
+
+
+
+				<script language="javascript">
+					if (parent.location.href != self.location.href) {
+						document.getElementById("goback1").style.display = "none";
+						document.getElementById("goback2").style.display = "none";
+					}
+
+
+
+					function gofirst() {
+						var str = window.location.href;
+
+						str = str.replace(/(page=)([0-9]*)/, "page=" + 1);
+						window.location.href = str;
+
+					}
+
+
+
+					function goprevious() {
+						var str = window.location.href;
+
+						page = str.match(/(page=)([0-9]*)/);
+						page = page[0].replace("page=", "");
+
+
+						if (page == "") {
+							page = 0;
+						}
+						page = parseInt(page) - 1;
+						if (page <= 0) {
+							page = page + 1;
+						}
+
+
+						str = str.replace(/(page=)([0-9]*)/, "page=" + page);
+						window.location.href = str;
+					}
+
+
+					function gonext() {
+
+						var str = window.location.href;
+
+						page = str.match(/(page=)([0-9]*)/);
+						page = page[0].replace("page=", "");
+
+
+						if (page == "") {
+							page = 0;
+						}
+						page = parseInt(page) + 1;
+
+
+						str = str.replace(/(page=)([0-9]*)/, "page=" + page);
+						window.location.href = str;
+
+
+					}
+
+					function golast() {
+						var str = window.location.href;
+
+						page = parseInt(document.getElementById("currentpage").value);
+
+						str = str.replace(/(page=)([0-9]*)/, "page=" + page);
+						window.location.href = str;
+
+					}
+				</script>
+
+
+				<script language="javascript">
+					rty = 0
+
+					function deleteheader2() {
+
+						if (!rty) {
+							if (document.getElementById("5041").deleteRow(0));
+						}
+						rty++;
+
+					}
+
+
+					function deleteheader() {
+
+
+						$("#5043").toggle();
+						$("#5041").toggle();
+						/*
+						if(document.getElementById("5041").style.display=='block' || document.getElementById("5041").style.display=='')
+						{
+							document.getElementById("5041").style.display='none';
+
+						}
+						else
+						{
+							document.getElementById("5041").style.display='block';
+
+						}
+						*/
+					}
+
+					function delRow(event) {
+						event = event || window.event;
+						var current = event.target || event.srcElement;
+						//here we will delete the line
+						while ((current = current.parentElement || current.parentNode) && current.tagName != "TR");
+						if (current && current.parentElement) {
+							current.parentElement.removeChild(current);
+						} else if (current && current.parentNode) {
+							current.parentNode.removeChild(current);
+						}
+					}
+				</script>
+
+				<script language="JavaScript1.2">
+					<!--
+					// Modern cross-browser mouse position tracking (jQuery 3 compatible)
+
+					// Temporary variables to hold mouse x-y pos.s
+					var tempX = 0
+					var tempY = 0
+
+					// Main function to retrieve mouse x-y pos.s
+					function getMouseXY(e) {
+						e = e || window.event;
+						if (e.pageX || e.pageY) {
+							tempX = e.pageX;
+							tempY = e.pageY;
+						} else if (e.clientX || e.clientY) {
+							tempX = e.clientX + (document.documentElement.scrollLeft || document.body.scrollLeft);
+							tempY = e.clientY + (document.documentElement.scrollTop || document.body.scrollTop);
+						}
+						// catch possible negative values
+						if (tempX < 0) {
+							tempX = 0
+						}
+						if (tempY < 0) {
+							tempY = 0
+						}
+
+						return true
+					}
+
+					function getMouseX(e) {
+						e = e || window.event;
+						if (e.pageX) {
+							tempX = e.pageX;
+						} else if (e.clientX) {
+							tempX = e.clientX + (document.documentElement.scrollLeft || document.body.scrollLeft);
+						}
+						// catch possible negative values
+						if (tempX < 0) {
+							tempX = 0
+						}
+						return tempX
+					}
+
+					function getMouseY(e) {
+						e = e || window.event;
+						if (e.pageY) {
+							tempY = e.pageY;
+						} else if (e.clientY) {
+							tempY = e.clientY + (document.documentElement.scrollTop || document.body.scrollTop);
+						}
+						// catch possible negative values
+						if (tempY < 0) {
+							tempY = 0
+						}
+						return tempY
+					}
+
+
+
+					function movepice(x) {
+						document.getElementById(x).style.left = getMouseX() - 24;
+						document.getElementById(x).style.top = getMouseY() - 24;
+					}
+
+
+
+					//
+					-->
+					$(function()
+					{
+					$(
+					".rtl-date"
+					).each(function(
+					index
+					)
+					{
+					$(
+					this
+					).text(
+					$(
+					this
+					).text().split("/").reverse().join('-')
+					);
+					});
+					});
+
+				</script>
+
+				<?
+				if (str_replace("\\", "/", __FILE__) != $_SERVER['SCRIPT_FILENAME']) {
+					if (strrpos($_SERVER['HTTP_USER_AGENT'], "wkhtmltopdf") > -1) {
+						echo "<style>.wkhtmltopdf{display:none !important;}</style>";
+					}
+				}
+				?>
+
+			<?php
+		} // end cash condition
+			?>
+
+			<?php
+			if (!$cashforpdffooter ) {
+			?>
+				<TABLE border="0" style="width:100%;border:0;" id="main_report_data" name="main_report_data">
+					<THEAD class='wkhtmltopdf'>
+						<TR>
+							<TH style="background-color:#ffffff">
+								<?
+
+								if (file_exists($_SERVER['DOCUMENT_ROOT'] . "/aqary/admin/images/headerimage.jpg")) {
+									echo "<img   src='/aqary/admin/images/headerimage.jpg?rand=<?=rand().rand();?>'   style='width:100%;vertical-align: middle;max-height:50mm;'  > ";
+								} else {
+								?>
+									<div class="clearfix " style="display: table ;table-layout: fixed;text-align:center;border:0px solid red;width:100%; ">
+										<div class="goodfont" style="display: table-cell;text-align:right;fxloat:right;line-height: 35px;">
+											<? if ($bayanmaktabname) {
+												echo "<span style='font-size:18px'>" . $bayanmaktabname . "</span>";
+											} ?>
+											<? if ($bayannashat) {
+												echo "<br><span style='font-size:16px'>" . $bayannashat . "</span>";
+											}; ?>
+											<? if ($bayanst) {
+												echo "<br><span style='font-size:16px'> س.ت.:" . $bayanst . "</span>";
+											} ?>
+										</div>
+										<div style="display: table-cell;text-align:center;fxloat:left;">
+											<img src="http://<? echo "$url"; ?>/admin/images/sh3ar.gif?rand=<?= rand() . rand(); ?>"
+												width=<?= $sharwidth; ?> height=<?= $sharheight; ?> style="vertical-align:text-top;">
+										</div>
+
+										<div class="goodfont2" style="display: table-cell;text-align:left;fxloat:left;line-height: 35px;">
+											<? if ($bayanmaktabname) {
+												echo "<span style='font-size:22px'>" . trim($bayanmaktabname_en) . "</span>";
+											} ?>
+											<? if ($bayannashat) {
+												echo "<br><span style='font-size:18px'>" . $bayannashat_en . "</span>";
+											}; ?>
+											<? if ($bayanst) {
+												echo "<br><span style='font-size:18px'> C.R.:" . $bayanst . "</span>";
+											} ?>
+										</div>
+
+									</div>
+									<hr class="clearfix " style='border-top:3px solid #000;width:100%;clear:both' />
+
+								<? } ?>
+
+							</TH>
+						</TR>
+					</THEAD>
+					<?
+
+					// if print to pdf
+
+					if (str_replace("\\", "/", __FILE__) == $_SERVER['SCRIPT_FILENAME']) {
+
+						// if cash condition and direct access
+						if ($_REQUEST['cashforpdf']) {
+							echo "</table>";
+							exit();
+						}
+
+						// direct access to file
+						if (strrpos($_SERVER['HTTP_USER_AGENT'], "wkhtmltopdf") > -1) {
+							echo "</table>";
+							exit();
+						}
+					}
+
+
+
+					?>
+
+					<TBODY>
+						<TR>
+							<TD id='reportpagedata'>
+							<?
+						} // end cashforpdffooter
+							?>

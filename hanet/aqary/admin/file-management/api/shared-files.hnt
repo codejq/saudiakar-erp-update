@@ -1,0 +1,134 @@
+<?php
+require_once'../../../connectdb.hnt';
+require_once'../../../reqloginajax.hnt';
+
+// Installation check
+require_once'../lib/DatabaseInstaller.class.php';
+require_once'../lib/SharingManager.class.php';
+
+try {
+    $installer = new DatabaseInstaller($link);
+    if (!$installer->tablesExist()) {
+        http_response_code(503);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => false,
+            'message' => 'Database not initialized',
+            'redirect' => '../index.hnt'
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+} catch (Exception $e) {
+    http_response_code(500);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['success' => false, 'message' => 'خطأ في النظام'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+header('Content-Type: application/json; charset=utf-8');
+
+// Check if user is authenticated
+if (!isset($_SESSION['useridv'])) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+$userid = $_SESSION['useridv'];
+$sharingManager = new SharingManager($link);
+
+// Get parameters
+$view = isset($_GET['view']) ? $_GET['view'] : 'with_me'; // 'with_me' or 'by_me'
+$page = isset($_GET['page']) ? intval($_GET['page']) : 1;
+$limit = isset($_GET['limit']) ? intval($_GET['limit']) : 20;
+$offset = ($page - 1) * $limit;
+
+if ($view == 'with_me') {
+    // Get files shared with me
+    $files = $sharingManager->getSharedFilesWithMe($userid, $limit, $offset);
+
+    // Get total count
+    $userid_int = intval($userid);
+    $count_sql = "SELECT COUNT(DISTINCT file_id) as total FROM file_sharing
+                  WHERE shared_with_userid = $userid_int AND is_active = 1
+                  AND (expiry_date IS NULL OR expiry_date > NOW())";
+    $result = mysql_query($count_sql, $link);
+    $count_row = mysql_fetch_assoc($result);
+    $total = $count_row['total'];
+    mysql_free_result($result);
+} else {
+    // Get files shared by me
+    $files = $sharingManager->getSharedFilesByUser($userid, $limit, $offset);
+
+    // Get total count
+    $userid_int = intval($userid);
+    $count_sql = "SELECT COUNT(DISTINCT file_id) as total FROM file_sharing
+                  WHERE shared_by_userid = $userid_int AND is_active = 1";
+    $result = mysql_query($count_sql, $link);
+    $count_row = mysql_fetch_assoc($result);
+    $total = $count_row['total'];
+    mysql_free_result($result);
+}
+
+// Format file data
+$formatted_files = [];
+foreach ($files as $file) {
+    $formatted_files[] = [
+        'file_id' => $file['file_id'],
+        'filename' => isset($file['original_filename']) ? $file['original_filename'] : $file['filename'],
+        'file_size' => $file['file_size'],
+        'file_size_formatted' => formatFileSize($file['file_size']),
+        'file_type' => isset($file['file_type']) ? $file['file_type'] : '',
+        'category' => isset($file['category']) ? $file['category'] : '',
+        'description' => isset($file['description']) ? $file['description'] : '',
+        'created_date' => $file['created_date'],
+        'created_date_formatted' => formatDate($file['created_date']),
+        'shared_date' => isset($file['shared_date']) ? $file['shared_date'] : $file['created_date'],
+        'shared_date_formatted' => formatDate(isset($file['shared_date']) ? $file['shared_date'] : $file['created_date']),
+        'shared_by' => isset($file['shared_by']) ? $file['shared_by'] : 'Unknown',
+        'shared_by_username' => isset($file['shared_by_username']) ? $file['shared_by_username'] : 'Unknown',
+        'shared_count' => isset($file['shared_count']) ? $file['shared_count'] : 0,
+        'permission_type' => isset($file['permission_type']) ? $file['permission_type'] : '',
+        'permission_description' => isset($file['permission_type']) ? SharingManager::getPermissionDescription($file['permission_type']) : ''
+    ];
+}
+
+http_response_code(200);
+echo json_encode([
+    'success' => true,
+    'files' => $formatted_files,
+    'pagination' => [
+        'page' => $page,
+        'limit' => $limit,
+        'total' => $total,
+        'pages' => ceil($total / $limit)
+    ],
+    'view' => $view
+], JSON_UNESCAPED_UNICODE);
+
+function formatFileSize($bytes) {
+    if ($bytes == 0) return '0 B';
+
+    $k = 1024;
+    $sizes = ['B', 'KB', 'MB', 'GB'];
+    $i = floor(log($bytes, $k));
+
+    return round($bytes / pow($k, $i), 2) . ' ' . $sizes[$i];
+}
+
+function formatDate($date) {
+    $time = strtotime($date);
+    $now = time();
+    $diff = $now - $time;
+
+    if ($diff < 3600) {
+        return 'منذ ' . intval($diff / 60) . ' دقيقة';
+    } elseif ($diff < 86400) {
+        return 'منذ ' . intval($diff / 3600) . ' ساعة';
+    } elseif ($diff < 604800) {
+        return 'منذ ' . intval($diff / 86400) . ' أيام';
+    } else {
+        return date('Y-m-d', $time);
+    }
+}
+?>

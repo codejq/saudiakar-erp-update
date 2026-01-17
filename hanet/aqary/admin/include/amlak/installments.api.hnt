@@ -1,0 +1,831 @@
+<?php
+/**
+ * Installments API - Handle installment operations
+ *
+ * Actions:
+ * - get_installment
+ * - record_payment
+ * - update_installment
+ * - cancel_installment
+ * - get_payment_history
+ * - calculate_late_fees
+ *
+ * @version 1.0
+ * @date 2025-12-04
+ */
+
+// Set response type to JSON
+header('Content-Type: application/json; charset=utf-8');
+
+// Include required files
+include_once "../../../reqloginajax.hnt";
+include_once "../../../connectdb.hnt";
+require_once 'CalendarManager.class.hnt';
+
+// Initialize
+$calendar = new CalendarManager();
+
+// Initialize user data from session
+$user_data = isset($_SESSION['user_data']) ? $_SESSION['user_data'] : ['name' => 'Unknown', 'userid' => 1];
+
+// Get action
+$action = isset($_REQUEST['action']) ? $_REQUEST['action'] : '';
+
+// Response array
+$response = ['success' => false, 'message' => '', 'data' => null];
+
+try {
+    switch ($action) {
+        case 'get_installment':
+            $response = getInstallment($_REQUEST, $link, $calendar);
+            break;
+
+        case 'record_payment':
+            $response = recordPayment($_REQUEST, $link, $user_data);
+            break;
+
+        case 'update_installment':
+            $response = updateInstallment($_REQUEST, $link, $calendar, $user_data);
+            break;
+
+        case 'cancel_installment':
+            $response = cancelInstallment($_REQUEST, $link, $user_data);
+            break;
+
+        case 'get_payment_history':
+            $response = getPaymentHistory($_REQUEST, $link);
+            break;
+
+        case 'calculate_late_fees':
+            $response = calculateLateFees($_REQUEST, $link, $user_data);
+            break;
+
+        case 'add_installment':
+            $response = addInstallment($_REQUEST, $link, $user_data, $calendar);
+            break;
+
+        case 'mark_all_paid':
+            $response = markAllAsPaid($_REQUEST, $link, $user_data);
+            break;
+
+        case 'bulk_payment':
+            $response = bulkPayment($_REQUEST, $link, $user_data);
+            break;
+
+        default:
+            $response['message'] = 'Invalid action';
+    }
+} catch (Exception $e) {
+    $response['success'] = false;
+    $response['message'] = 'Error: ' . $e->getMessage();
+}
+
+// Output JSON response
+echo json_encode($response, JSON_UNESCAPED_UNICODE);
+exit;
+
+/**
+ * Get single installment data
+ */
+function getInstallment($data, $link, $calendar) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    $kastid = isset($data['kastid']) ? intval($data['kastid']) : 0;
+
+    $sql = "SELECT a.*, e.calendar_type
+            FROM aksat a
+            LEFT JOIN egar e ON a.egar_id = e.rakam3akdid
+            WHERE a.kastid = '$kastid'";
+    $result = mysql_query($sql, $link);
+
+    if ($row = mysql_fetch_assoc($result)) {
+        $calendarType = isset($row['calendar_type']) ? intval($row['calendar_type']) : 0;
+
+        // Format date for display
+        $row['kastdate_formatted'] = $calendar->formatDateForDisplay($row['kastdate'], $calendarType);
+
+        // Calculate total and remaining amounts
+        $totalAmount = $row['kastvalue'] +
+                      ($row['water'] ?? 0) +
+                      ($row['sa3ee'] ?? 0) +
+                      ($row['services'] ?? 0) +
+                      ($row['late_fee'] ?? 0);
+
+        $row['total_amount'] = $totalAmount;
+        $row['amount_remaining'] = $totalAmount - ($row['amount_paid'] ?? 0);
+
+        $response['success'] = true;
+        $response['data'] = $row;
+    } else {
+        $response['message'] = 'القسط غير موجود';
+    }
+
+    return $response;
+}
+
+/**
+ * Record payment for installment
+ */
+function recordPayment($data, $link, $user_data) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    mysql_query("START TRANSACTION", $link);
+
+    try {
+        $kastid = isset($data['kastid']) ? intval($data['kastid']) : 0;
+        $amount = isset($data['amount']) ? floatval($data['amount']) : 0;
+        $paymentDate = isset($data['payment_date']) ? $data['payment_date'] : date('d/m/Y');
+        $paymentMethod = isset($data['payment_method']) ? mysql_real_escape_string($data['payment_method']) : 'cash';
+        $referenceNumber = isset($data['reference_number']) ? mysql_real_escape_string($data['reference_number']) : '';
+        $notes = isset($data['notes']) ? mysql_real_escape_string($data['notes']) : '';
+        $createReceipt = isset($data['create_receipt']) && $data['create_receipt'];
+
+        // Get installment
+        $sql = "SELECT * FROM aksat WHERE kastid = '$kastid'";
+        $result = mysql_query($sql, $link);
+        $installment = mysql_fetch_assoc($result);
+
+        if (!$installment) {
+            throw new Exception('القسط غير موجود');
+        }
+
+        // Calculate total amount
+        $totalAmount = $installment['kastvalue'] +
+                      ($installment['water'] ?? 0) +
+                      ($installment['sa3ee'] ?? 0) +
+                      ($installment['services'] ?? 0) +
+                      ($installment['late_fee'] ?? 0);
+
+        // Calculate new amount paid
+        $newAmountPaid = ($installment['amount_paid'] ?? 0) + $amount;
+        $newAmountRemaining = $totalAmount - $newAmountPaid;
+
+        // Validate amount
+        if ($amount <= 0) {
+            throw new Exception('المبلغ يجب أن يكون أكبر من صفر');
+        }
+
+        if ($newAmountPaid > $totalAmount) {
+            throw new Exception('المبلغ المدفوع أكبر من المطلوب');
+        }
+
+        // Determine new status
+        $newStatus = 'paid';
+        if ($newAmountRemaining > 0) {
+            $newStatus = 'partial';
+        }
+
+        // Parse payment date
+        list($day, $month, $year) = explode('/', $paymentDate);
+        if ($year < 1900) {
+            // Hijri date
+            $calendar = new CalendarManager();
+            $paymentTimestamp = $calendar->dateToTimestamp($paymentDate, 0);
+        } else {
+            $paymentTimestamp = mktime(0, 0, 0, $month, $day, $year);
+        }
+
+        // Update installment
+        $sql = "UPDATE aksat SET
+                status = '$newStatus',
+                amount_paid = '$newAmountPaid',
+                amount_remaining = '$newAmountRemaining',
+                paid_date = '$paymentTimestamp',
+                iscomplete = " . ($newStatus == 'paid' ? 1 : 0) . ",
+                updated_at = " . time() . "
+                WHERE kastid = '$kastid'";
+
+        if (!mysql_query($sql, $link)) {
+            throw new Exception('فشل تحديث القسط: ' . mysql_error($link));
+        }
+
+        // Record payment history
+        $sql = "INSERT INTO aksat_payment_history SET
+                kastid = '$kastid',
+                payment_date = '$paymentTimestamp',
+                amount_paid = '$amount',
+                payment_method = '$paymentMethod',
+                reference_number = '$referenceNumber',
+                notes = '$notes',
+                created_by_userid = " . ($user_data['userid'] ?? 1) . ",
+                created_at = " . time();
+
+        mysql_query($sql, $link);
+        $paymentHistoryId = mysql_insert_id();
+
+        // Create receipt if requested
+        if ($createReceipt) {
+            // Get contract and tenant info
+            $sql = "SELECT e.*, m.mostagername, m.mostagertel
+                    FROM egar e
+                    LEFT JOIN mostagereen m ON e.mostagerid = m.mostagerid
+                    WHERE e.rakam3akdid = " . $installment['egar_id'];
+            $contractResult = mysql_query($sql, $link);
+            $contract = mysql_fetch_assoc($contractResult);
+
+            if ($contract) {
+                // Create sanad (receipt)
+                $formuid = str_replace('.', '', microtime() . rand(11111, 99999));
+                $sql = "INSERT INTO sanad SET
+                        sanadno = (SELECT IFNULL(MAX(sanadno), 0) + 1 FROM sanad s2 WHERE s2.sanadtype = 'eradat'),
+                        sanadtype = 'eradat',
+                        sanadamount = '$amount',
+                        sanaddatemelady = '$paymentTimestamp',
+                        sanaddatehegry = '$paymentTimestamp',
+                        mostagerid = " . $contract['mostagerid'] . ",
+                        rakam3akdid = " . $installment['egar_id'] . ",
+                        kastid = '$kastid',
+                        sanaddesc = 'دفعة قسط إيجار - قسط رقم " . $installment['kastname'] . "',
+                        userid = " . ($user_data['userid'] ?? 1) . ",
+                        formuid = '$formuid'";
+
+                mysql_query($sql, $link);
+                $sanadId = mysql_insert_id();
+
+                // Update payment history with sanad ID
+                mysql_query("UPDATE aksat_payment_history SET sanad_id = '$sanadId' WHERE payment_history_id = '$paymentHistoryId'", $link);
+            }
+        }
+
+        // Update contract status if needed
+        updateContractStatusFromInstallments($installment['egar_id'], $link);
+
+        // Commit transaction
+        mysql_query("COMMIT", $link);
+
+        $response['success'] = true;
+        $response['message'] = 'تم تسجيل الدفعة بنجاح';
+        $response['data'] = [
+            'new_amount_paid' => $newAmountPaid,
+            'new_amount_remaining' => $newAmountRemaining,
+            'new_status' => $newStatus,
+            'payment_history_id' => $paymentHistoryId
+        ];
+
+    } catch (Exception $e) {
+        mysql_query("ROLLBACK", $link);
+        $response['message'] = $e->getMessage();
+    }
+
+    return $response;
+}
+
+/**
+ * Update installment details
+ */
+function updateInstallment($data, $link, $calendar, $user_data) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    mysql_query("START TRANSACTION", $link);
+
+    try {
+        $kastid = isset($data['kastid']) ? intval($data['kastid']) : 0;
+
+        // Get old values for history
+        $sql = "SELECT * FROM aksat WHERE kastid = '$kastid'";
+        $result = mysql_query($sql, $link);
+        $oldValues = mysql_fetch_assoc($result);
+
+        if (!$oldValues) {
+            throw new Exception('القسط غير موجود');
+        }
+
+        // Parse date if provided
+        $kastdate = $oldValues['kastdate'];
+        if (isset($data['kastdate']) && !empty($data['kastdate'])) {
+            // Get calendar type from contract
+            $sql = "SELECT calendar_type FROM egar WHERE rakam3akdid = " . $oldValues['egar_id'];
+            $result = mysql_query($sql, $link);
+            $contract = mysql_fetch_assoc($result);
+            $calendarType = $contract['calendar_type'] ?? 0;
+
+            $kastdate = $calendar->dateToTimestamp($data['kastdate'], $calendarType);
+        }
+
+        // Get new values
+        $kastname = isset($data['kastname']) ? mysql_real_escape_string($data['kastname']) : $oldValues['kastname'];
+        $kastvalue = isset($data['kastvalue']) ? floatval($data['kastvalue']) : $oldValues['kastvalue'];
+        $water = isset($data['water']) ? floatval($data['water']) : $oldValues['water'];
+        $sa3ee = isset($data['sa3ee']) ? floatval($data['sa3ee']) : $oldValues['sa3ee'];
+        $services = isset($data['services']) ? floatval($data['services']) : $oldValues['services'];
+        $status = isset($data['status']) ? mysql_real_escape_string($data['status']) : $oldValues['status'];
+        $lateFee = isset($data['late_fee']) ? floatval($data['late_fee']) : $oldValues['late_fee'];
+
+        // Recalculate amounts if values changed
+        $totalAmount = $kastvalue + $water + $sa3ee + $services + $lateFee;
+        $amountRemaining = $totalAmount - ($oldValues['amount_paid'] ?? 0);
+
+        // Update installment
+        $sql = "UPDATE aksat SET
+                kastname = '$kastname',
+                kastvalue = '$kastvalue',
+                kastdate = '$kastdate',
+                water = '$water',
+                sa3ee = '$sa3ee',
+                services = '$services',
+                status = '$status',
+                late_fee = '$lateFee',
+                amount_remaining = '$amountRemaining',
+                updated_at = " . time() . "
+                WHERE kastid = '$kastid'";
+
+        if (!mysql_query($sql, $link)) {
+            throw new Exception('فشل تحديث القسط: ' . mysql_error($link));
+        }
+
+        // Log to history (if contract_lifecycle.api.hnt is available)
+        if (file_exists('contract_lifecycle.api.hnt')) {
+            require_once 'contract_lifecycle.api.hnt';
+            logInstallmentChange($kastid, 'updated', $oldValues, $data, $user_data, $link);
+        }
+
+        // Commit transaction
+        mysql_query("COMMIT", $link);
+
+        $response['success'] = true;
+        $response['message'] = 'تم تحديث القسط بنجاح';
+
+    } catch (Exception $e) {
+        mysql_query("ROLLBACK", $link);
+        $response['message'] = $e->getMessage();
+    }
+
+    return $response;
+}
+
+/**
+ * Cancel installment (soft delete)
+ */
+function cancelInstallment($data, $link, $user_data) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    mysql_query("START TRANSACTION", $link);
+
+    try {
+        $kastid = isset($data['kastid']) ? intval($data['kastid']) : 0;
+
+        // Check if already paid
+        $sql = "SELECT status, amount_paid FROM aksat WHERE kastid = '$kastid'";
+        $result = mysql_query($sql, $link);
+        $installment = mysql_fetch_assoc($result);
+
+        if (!$installment) {
+            throw new Exception('القسط غير موجود');
+        }
+
+        if ($installment['amount_paid'] > 0) {
+            throw new Exception('لا يمكن إلغاء قسط تم دفعه جزئياً أو كلياً');
+        }
+
+        // Update status to cancelled
+        $sql = "UPDATE aksat SET
+                status = 'cancelled',
+                updated_at = " . time() . "
+                WHERE kastid = '$kastid'";
+
+        if (!mysql_query($sql, $link)) {
+            throw new Exception('فشل إلغاء القسط: ' . mysql_error($link));
+        }
+
+        // Commit transaction
+        mysql_query("COMMIT", $link);
+
+        $response['success'] = true;
+        $response['message'] = 'تم إلغاء القسط بنجاح';
+
+    } catch (Exception $e) {
+        mysql_query("ROLLBACK", $link);
+        $response['message'] = $e->getMessage();
+    }
+
+    return $response;
+}
+
+/**
+ * Get payment history for installment
+ */
+function getPaymentHistory($data, $link) {
+    $response = ['success' => false, 'message' => '', 'data' => []];
+
+    $kastid = isset($data['kastid']) ? intval($data['kastid']) : 0;
+
+    $sql = "SELECT aph.*, u.username
+            FROM aksat_payment_history aph
+            LEFT JOIN users u ON aph.created_by_userid = u.userid
+            WHERE aph.kastid = '$kastid'
+            ORDER BY aph.payment_date DESC";
+
+    $result = mysql_query($sql, $link);
+    $payments = [];
+
+    while ($row = mysql_fetch_assoc($result)) {
+        $row['payment_date'] = date('Y-m-d', $row['payment_date']);
+
+        // Translate payment method
+        $paymentMethods = [
+            'cash' => 'نقدي',
+            'bank_transfer' => 'تحويل بنكي',
+            'check' => 'شيك',
+            'online' => 'دفع إلكتروني'
+        ];
+        $row['payment_method_ar'] = $paymentMethods[$row['payment_method']] ?? $row['payment_method'];
+
+        $payments[] = $row;
+    }
+
+    $response['success'] = true;
+    $response['data'] = $payments;
+
+    return $response;
+}
+
+/**
+ * Calculate late fees for overdue installments
+ */
+function calculateLateFees($data, $link, $user_data) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    mysql_query("START TRANSACTION", $link);
+
+    try {
+        $egarId = isset($data['egar_id']) ? intval($data['egar_id']) : 0;
+        $lateFeePercentage = isset($data['late_fee_percentage']) ? floatval($data['late_fee_percentage']) : 0.01; // 1% default
+        $lateFeePerDay = isset($data['late_fee_per_day']) ? floatval($data['late_fee_per_day']) : 0;
+        $maxLateFee = isset($data['max_late_fee']) ? floatval($data['max_late_fee']) : 0;
+
+        $now = time();
+        $totalFees = 0;
+        $updatedCount = 0;
+
+        // Get overdue installments
+        $sql = "SELECT * FROM aksat
+                WHERE egar_id = '$egarId'
+                AND status = 'overdue'
+                AND kastdate < $now
+                AND idsubaqar > 0";
+
+        $result = mysql_query($sql, $link);
+
+        while ($installment = mysql_fetch_assoc($result)) {
+            // Calculate days overdue
+            $daysOverdue = ceil(($now - $installment['kastdate']) / (60 * 60 * 24));
+
+            // Calculate late fee
+            $baseAmount = $installment['amount_remaining'] > 0 ? $installment['amount_remaining'] :
+                         ($installment['kastvalue'] + ($installment['water'] ?? 0) +
+                          ($installment['sa3ee'] ?? 0) + ($installment['services'] ?? 0));
+
+            $lateFee = 0;
+            if ($lateFeePerDay > 0) {
+                $lateFee = $lateFeePerDay * $daysOverdue;
+            } else {
+                $lateFee = $baseAmount * $lateFeePercentage * $daysOverdue;
+            }
+
+            // Apply max late fee if set
+            if ($maxLateFee > 0 && $lateFee > $maxLateFee) {
+                $lateFee = $maxLateFee;
+            }
+
+            // Update installment with late fee
+            $sql2 = "UPDATE aksat SET
+                    late_fee = '$lateFee',
+                    amount_remaining = amount_remaining + ($lateFee - IFNULL(late_fee, 0)),
+                    updated_at = " . time() . "
+                    WHERE kastid = " . $installment['kastid'];
+
+            mysql_query($sql2, $link);
+
+            $totalFees += $lateFee;
+            $updatedCount++;
+        }
+
+        // Commit transaction
+        mysql_query("COMMIT", $link);
+
+        $response['success'] = true;
+        $response['message'] = "تم حساب غرامات التأخير لـ $updatedCount قسط";
+        $response['data'] = [
+            'updated_count' => $updatedCount,
+            'total_fees' => $totalFees
+        ];
+
+    } catch (Exception $e) {
+        mysql_query("ROLLBACK", $link);
+        $response['message'] = $e->getMessage();
+    }
+
+    return $response;
+}
+
+/**
+ * Update contract status based on installment statuses
+ */
+function updateContractStatusFromInstallments($egarId, $link) {
+    // Check for overdue installments
+    $sql = "SELECT COUNT(*) as count FROM aksat
+            WHERE egar_id = '$egarId'
+            AND status = 'overdue'
+            AND idsubaqar > 0";
+    $result = mysql_query($sql, $link);
+    $row = mysql_fetch_assoc($result);
+
+    if ($row['count'] > 0) {
+        // Has overdue installments - set contract to active_arrears
+        $sql = "UPDATE egar SET
+                status = 'active_arrears',
+                updated_at = " . time() . "
+                WHERE rakam3akdid = '$egarId'
+                AND status = 'active'";
+        mysql_query($sql, $link);
+    } else {
+        // No overdue installments - set back to active if was in arrears
+        $sql = "UPDATE egar SET
+                status = 'active',
+                updated_at = " . time() . "
+                WHERE rakam3akdid = '$egarId'
+                AND status = 'active_arrears'";
+        mysql_query($sql, $link);
+    }
+}
+
+/**
+ * Log installment change to history
+ */
+function logInstallmentChange($kastid, $action, $oldValues, $newValues, $user_data, $link) {
+    $changedFields = [];
+    foreach ($newValues as $key => $value) {
+        if (isset($oldValues[$key]) && $oldValues[$key] != $value) {
+            $changedFields[] = $key;
+        }
+    }
+
+    $sql = "INSERT INTO egar_history SET
+            rakam3akdid = " . $oldValues['egar_id'] . ",
+            action = 'installment_$action',
+            old_values = '" . mysql_real_escape_string(json_encode($oldValues)) . "',
+            new_values = '" . mysql_real_escape_string(json_encode($newValues)) . "',
+            changed_fields = '" . implode(',', $changedFields) . "',
+            changed_by_userid = " . ($user_data['userid'] ?? 1) . ",
+            changed_at = " . time() . ",
+            ip_address = '" . mysql_real_escape_string($_SERVER['REMOTE_ADDR']) . "',
+            notes = 'تعديل القسط رقم " . $oldValues['kastname'] . "'";
+
+    mysql_query($sql, $link);
+}
+
+/**
+ * Add new installment
+ */
+function addInstallment($data, $link, $user_data, $calendar) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    mysql_query("START TRANSACTION", $link);
+
+    try {
+        $egarId = isset($data['egar_id']) ? intval($data['egar_id']) : 0;
+        $idsubaqar = isset($data['idsubaqar']) ? intval($data['idsubaqar']) : 0;
+        $kastname = isset($data['kastname']) ? mysql_real_escape_string($data['kastname']) : '';
+        $kastvalue = isset($data['kastvalue']) ? floatval($data['kastvalue']) : 0;
+        $water = isset($data['water']) ? floatval($data['water']) : 0;
+        $sa3ee = isset($data['sa3ee']) ? floatval($data['sa3ee']) : 0;
+        $services = isset($data['services']) ? floatval($data['services']) : 0;
+        $kastdate = isset($data['kastdate']) ? $data['kastdate'] : date('d/m/Y');
+
+        if (!$egarId || !$kastname || $kastvalue <= 0) {
+            throw new Exception('بيانات غير مكتملة');
+        }
+
+        // Get contract to determine calendar type
+        $sql = "SELECT calendar_type FROM egar WHERE rakam3akdid = '$egarId'";
+        $result = mysql_query($sql, $link);
+        $contract = mysql_fetch_assoc($result);
+
+        if (!$contract) {
+            throw new Exception('العقد غير موجود');
+        }
+
+        $calendarType = $contract['calendar_type'] ?? 0;
+
+        // Convert date to timestamp
+        $kastTimestamp = $calendar->dateToTimestamp($kastdate, $calendarType);
+
+        // Calculate total amount
+        $totalAmount = $kastvalue + $water + $sa3ee + $services;
+
+        // Insert new installment
+        $sql = "INSERT INTO aksat SET
+                egar_id = '$egarId',
+                idsubaqar = '$idsubaqar',
+                kastname = '$kastname',
+                kastvalue = '$kastvalue',
+                water = '$water',
+                sa3ee = '$sa3ee',
+                services = '$services',
+                kastdate = '$kastTimestamp',
+                status = 'pending',
+                iscomplete = 0,
+                amount_paid = 0,
+                amount_remaining = '$totalAmount',
+                late_fee = 0,
+                created_at = " . time() . ",
+                updated_at = " . time();
+
+        if (!mysql_query($sql, $link)) {
+            throw new Exception('فشل إضافة القسط: ' . mysql_error($link));
+        }
+
+        $kastid = mysql_insert_id();
+
+        // Commit transaction
+        mysql_query("COMMIT", $link);
+
+        $response['success'] = true;
+        $response['message'] = 'تم إضافة القسط بنجاح';
+        $response['data'] = ['kastid' => $kastid];
+
+    } catch (Exception $e) {
+        mysql_query("ROLLBACK", $link);
+        $response['message'] = $e->getMessage();
+    }
+
+    return $response;
+}
+
+/**
+ * Mark all unpaid installments as paid
+ */
+function markAllAsPaid($data, $link, $user_data) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    mysql_query("START TRANSACTION", $link);
+
+    try {
+        $egarId = isset($data['egar_id']) ? intval($data['egar_id']) : 0;
+
+        if (!$egarId) {
+            throw new Exception('معرف العقد مطلوب');
+        }
+
+        $now = time();
+
+        // Get count of unpaid installments
+        $sql = "SELECT COUNT(*) as count FROM aksat
+                WHERE egar_id = '$egarId'
+                AND iscomplete = 0
+                AND status NOT IN ('cancelled', 'paid')";
+        $result = mysql_query($sql, $link);
+        $row = mysql_fetch_assoc($result);
+        $count = $row['count'];
+
+        if ($count == 0) {
+            throw new Exception('لا توجد أقساط غير مدفوعة');
+        }
+
+        // Update all unpaid installments
+        $sql = "UPDATE aksat SET
+                status = 'paid',
+                iscomplete = 1,
+                paid_date = '$now',
+                amount_paid = kastvalue + IFNULL(water, 0) + IFNULL(sa3ee, 0) + IFNULL(services, 0) + IFNULL(late_fee, 0),
+                amount_remaining = 0,
+                updated_at = '$now'
+                WHERE egar_id = '$egarId'
+                AND iscomplete = 0
+                AND status NOT IN ('cancelled', 'paid')";
+
+        if (!mysql_query($sql, $link)) {
+            throw new Exception('فشل تحديث الأقساط: ' . mysql_error($link));
+        }
+
+        // Update contract status
+        updateContractStatusFromInstallments($egarId, $link);
+
+        // Commit transaction
+        mysql_query("COMMIT", $link);
+
+        $response['success'] = true;
+        $response['message'] = "تم تحديد $count قسط كمدفوع";
+        $response['data'] = ['updated_count' => $count];
+
+    } catch (Exception $e) {
+        mysql_query("ROLLBACK", $link);
+        $response['message'] = $e->getMessage();
+    }
+
+    return $response;
+}
+
+/**
+ * Record bulk payment across multiple installments
+ */
+function bulkPayment($data, $link, $user_data) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    mysql_query("START TRANSACTION", $link);
+
+    try {
+        $egarId = isset($data['egar_id']) ? intval($data['egar_id']) : 0;
+        $amount = isset($data['amount']) ? floatval($data['amount']) : 0;
+        $paymentMethod = isset($data['payment_method']) ? mysql_real_escape_string($data['payment_method']) : 'cash';
+        $referenceNumber = isset($data['reference_number']) ? mysql_real_escape_string($data['reference_number']) : '';
+
+        if (!$egarId || $amount <= 0) {
+            throw new Exception('بيانات غير صحيحة');
+        }
+
+        $now = time();
+        $remainingAmount = $amount;
+        $paidCount = 0;
+        $partialCount = 0;
+
+        // Get unpaid installments in chronological order
+        $sql = "SELECT * FROM aksat
+                WHERE egar_id = '$egarId'
+                AND iscomplete = 0
+                AND status NOT IN ('cancelled', 'paid')
+                ORDER BY kastdate ASC";
+
+        $result = mysql_query($sql, $link);
+
+        while ($installment = mysql_fetch_assoc($result) && $remainingAmount > 0) {
+            // Calculate total amount for this installment
+            $totalAmount = $installment['kastvalue'] +
+                          ($installment['water'] ?? 0) +
+                          ($installment['sa3ee'] ?? 0) +
+                          ($installment['services'] ?? 0) +
+                          ($installment['late_fee'] ?? 0);
+
+            $currentPaid = $installment['amount_paid'] ?? 0;
+            $amountNeeded = $totalAmount - $currentPaid;
+
+            if ($remainingAmount >= $amountNeeded) {
+                // Full payment
+                $paymentForThis = $amountNeeded;
+                $newPaid = $totalAmount;
+                $newRemaining = 0;
+                $newStatus = 'paid';
+                $isComplete = 1;
+                $paidCount++;
+            } else {
+                // Partial payment
+                $paymentForThis = $remainingAmount;
+                $newPaid = $currentPaid + $remainingAmount;
+                $newRemaining = $totalAmount - $newPaid;
+                $newStatus = 'partial';
+                $isComplete = 0;
+                $partialCount++;
+            }
+
+            // Update installment
+            $updateSql = "UPDATE aksat SET
+                            status = '$newStatus',
+                            iscomplete = '$isComplete',
+                            amount_paid = '$newPaid',
+                            amount_remaining = '$newRemaining',
+                            paid_date = " . ($isComplete ? "'$now'" : "paid_date") . ",
+                            updated_at = '$now'
+                            WHERE kastid = '{$installment['kastid']}'";
+
+            if (!mysql_query($updateSql, $link)) {
+                throw new Exception('فشل تحديث القسط: ' . mysql_error($link));
+            }
+
+            // Record payment history
+            $historySql = "INSERT INTO aksat_payment_history SET
+                            kastid = '{$installment['kastid']}',
+                            payment_date = '$now',
+                            amount_paid = '$paymentForThis',
+                            payment_method = '$paymentMethod',
+                            reference_number = '$referenceNumber',
+                            notes = 'دفعة جماعية',
+                            created_by_userid = " . ($user_data['userid'] ?? 1) . ",
+                            created_at = '$now'";
+
+            mysql_query($historySql, $link);
+
+            $remainingAmount -= $paymentForThis;
+        }
+
+        // Update contract status
+        updateContractStatusFromInstallments($egarId, $link);
+
+        // Commit transaction
+        mysql_query("COMMIT", $link);
+
+        $response['success'] = true;
+        $response['message'] = 'تم تسجيل الدفعة الجماعية بنجاح';
+        $response['data'] = [
+            'paid_count' => $paidCount,
+            'partial_count' => $partialCount,
+            'remaining_amount' => $remainingAmount
+        ];
+
+    } catch (Exception $e) {
+        mysql_query("ROLLBACK", $link);
+        $response['message'] = $e->getMessage();
+    }
+
+    return $response;
+}
+?>

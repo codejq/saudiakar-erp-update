@@ -1,0 +1,101 @@
+<?php
+require_once('../../../connectdb.hnt');
+$is_ajax_request = true;
+require_once('../../../reqloginajax.hnt');
+header('Content-Type: application/json; charset=utf-8');
+
+// Define application base path for URL generation
+if (!defined('APP_BASE_PATH')) {
+    define('APP_BASE_PATH', '/aqary');
+}
+require_once('../config.php');
+require_once('../lib/DatabaseInstaller.class.php');
+
+try {
+    $installer = new DatabaseInstaller($link);
+    if (!$installer->tablesExist()) {
+        http_response_code(503);
+        echo json_encode(['success' => false, 'message' => 'نظام الملفات غير مهيأ'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode(['success' => false, 'message' => 'خطأ في النظام'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (!isset($_SESSION['useridv']) || empty($_SESSION['useridv'])) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+try {
+    $userid = intval($_SESSION['useridv']);
+    $file_id = isset($_GET['file_id']) ? intval($_GET['file_id']) : 0;
+
+    if (!$file_id) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => 'معرف الملف مفقود'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $file_id = intval($file_id);
+    $file_sql = "SELECT * FROM file_management WHERE file_id = $file_id AND is_deleted = 0";
+    $file_result = mysql_query($file_sql, $link);
+
+    if (!$file_result) {
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => 'خطأ في قاعدة البيانات: ' . mysql_error($link)], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    if (mysql_num_rows($file_result) == 0) {
+        mysql_free_result($file_result);
+        http_response_code(404);
+        echo json_encode(['success' => false, 'message' => 'الملف غير موجود'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $file = mysql_fetch_assoc($file_result);
+    mysql_free_result($file_result);
+
+    if ($file['owner_userid'] != $userid) {
+        http_response_code(403);
+        echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    // Use centralized storage path
+    $file_path = UPLOAD_DIR . $file['stored_filename'];
+    if (!file_exists($file_path)) {
+        http_response_code(404);
+        echo json_encode(['success' => false, 'message' => 'الملف غير موجود في التخزين'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $ip = isset($_SERVER['REMOTE_ADDR']) ? mysql_real_escape_string($_SERVER['REMOTE_ADDR'], $link) : 'unknown';
+    $log_sql = "INSERT INTO file_access_log (file_id, userid, action, access_date, ip_address) VALUES ($file_id, $userid, 'preview', NOW(), '$ip')";
+    mysql_query($log_sql, $link);
+
+    // Generate URL to serve.hnt endpoint for inline viewing
+    $base_path = defined('APP_BASE_PATH') ? APP_BASE_PATH : '';
+    $serve_url = $base_path . '/admin/file-management/api/serve.hnt?file_id=' . $file_id;
+
+    http_response_code(200);
+    echo json_encode([
+        'success' => true,
+        'type' => 'file',
+        'file_id' => $file_id,
+        'filename' => $file['original_filename'],
+        'url' => $serve_url,
+        'mime_type' => $file['mime_type'],
+        'file_size' => $file['file_size']
+    ], JSON_UNESCAPED_UNICODE);
+
+} catch (Exception $e) {
+    error_log('Error: ' . $e->getMessage());
+    http_response_code(500);
+    echo json_encode(['success' => false, 'message' => 'خطأ في النظام'], JSON_UNESCAPED_UNICODE);
+}
+?>

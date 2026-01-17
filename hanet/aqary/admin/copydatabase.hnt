@@ -1,0 +1,239 @@
+<?php
+$sc_title = "استعادة النسخ الاحتياطي";
+$sc_id = "69";
+$showdhmltazkeer = 1;
+
+include_once "../nocash.hnt";
+include_once "../header.hnt";
+
+function flush_buffers() {
+    ob_end_flush();
+    ob_flush();
+    flush();
+    ob_start();
+}
+
+// Check admin permissions
+$sql = "SELECT userid AS dd FROM user WHERE username='admin'";
+$row = mysql_fetch_array(mysql_query($sql, $link));
+if (!isset($row['dd']) || $row['dd'] != $_SESSION['useridv']) {
+    echo "<script>";
+    echo "if (typeof showBootstrapNotification === 'function') {";
+    echo "    showBootstrapNotification('danger', 'ليس لديك صلاحية مدير النظام. قم بالدخول باسم admin');";
+    echo "} else {";
+    echo "    alert('ليس لديك صلاحية مدير النظام. قم بالدخول باسم admin');";
+    echo "}";
+    echo "</script>";
+    exit();
+}
+
+
+// Function to copy directory recursively
+function dircopy($srcdir, $dstdir, $verbose = false, $restd = false) {
+    $num = 0;
+    if (!is_dir($dstdir)) mkdir($dstdir);
+    if ($curdir = opendir($srcdir)) {
+        while ($file = readdir($curdir)) {
+            flush_buffers();
+            if ($file != '.' && $file != '..') {
+                $srcfile = $srcdir . '\\' . $file;
+                $dstfile = $dstdir . '\\' . $file;
+                if (is_file($srcfile)) {
+                    if (is_file($dstfile)) {
+                        $ow = filemtime($srcfile) - filemtime($dstfile);
+                    } else {
+                        $ow = 1;
+                    }
+                    if ($ow > 0 || $restd) {
+                        if ($verbose) {
+                            echo "<div class='restore-log'><i class='bi bi-arrow-right text-success'></i> نسخ: " . basename($srcfile) . "</div>";
+                        }
+                        if (copy($srcfile, $dstfile)) {
+                            touch($dstfile, filemtime($srcfile));
+                            $num++;
+                        } else {
+                            echo "<div class='restore-log text-danger'><i class='bi bi-x-circle'></i> خطأ في نسخ: $srcfile</div>";
+                        }
+                    }
+                } else if (is_dir($srcfile)) {
+                    $num += dircopy($srcfile, $dstfile, $verbose, $restd);
+                }
+            }
+        }
+        closedir($curdir);
+    }
+    return $num;
+}
+
+// Handle restore operation
+$restoring = false;
+$restore_complete = false;
+if (isset($_GET['restdate']) && $_GET['restdate']) {
+    $restdate = $_GET['restdate'];
+    $restoring = true;
+    flush_buffers();
+}
+?>
+
+<style>
+.backup-item {
+    background: #f8f9fa;
+    padding: 1rem;
+    border-radius: 6px;
+    margin-bottom: 0.75rem;
+    border-left: 4px solid #0891b2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.backup-item:hover {
+    background: #e9ecef;
+}
+.restore-log {
+    padding: 0.5rem;
+    border-bottom: 1px solid #dee2e6;
+    font-size: 0.9rem;
+}
+#restoreLog {
+    max-height: 500px;
+    overflow-y: auto;
+    background: #f8f9fa;
+    border-radius: 6px;
+    padding: 1rem;
+}
+</style>
+
+<div class="container-fluid py-3">
+    <div class="row">
+        <div class="col-lg-8">
+            <div class="card shadow-sm border-0">
+                <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+                    <h4 class="mb-0">
+                        <i class="bi bi-database-fill-down me-2"></i>
+                        استعادة النسخ الاحتياطي
+                    </h4>
+                </div>
+                <div class="card-body p-4" dir="rtl">
+                    <?php if (!$restoring): ?>
+                        <div class="alert alert-warning mb-4" role="alert">
+                            <i class="bi bi-exclamation-triangle me-2"></i>
+                            <strong>تحذير:</strong> سيتم استبدال البيانات الحالية بالكامل بالنسخة الاحتياطية المحددة.
+                        </div>
+
+                        <h5 class="mb-3">النسخ الاحتياطية المتوفرة:</h5>
+
+                        <div id="backupList">
+                            <?php
+                            flush_buffers();
+                            $files = glob('c:/aqary-backup/_.*', GLOB_ONLYDIR);
+                            array_multisort(array_map('filemtime', $files), SORT_NUMERIC, SORT_DESC, $files);
+
+                            if (count($files) > 0) {
+                                foreach ($files as $file) {
+                                    $filename = str_replace("c:/aqary-backup/", "", $file);
+                                    $filedate = filemtime($file);
+                                    echo "<div class='backup-item'>";
+                                    echo "<div>";
+                                    echo "<i class='bi bi-folder-fill text-primary me-2'></i>";
+                                    echo "<strong>" . htmlspecialchars($filename) . "</strong>";
+                                    echo "<br><small class='text-muted'>" . date('Y-m-d H:i:s', $filedate) . "</small>";
+                                    echo "</div>";
+                                    echo "<button type='button' class='btn btn-sm btn-outline-success restore-btn' data-backup='" . htmlspecialchars($filename) . "'>";
+                                    echo "<i class='bi bi-arrow-clockwise me-1'></i>استرجاع";
+                                    echo "</button>";
+                                    echo "</div>";
+                                }
+                            } else {
+                                echo "<div class='alert alert-info'>";
+                                echo "<i class='bi bi-info-circle me-2'></i>";
+                                echo "لا توجد نسخ احتياطية متوفرة";
+                                echo "</div>";
+                            }
+                            ?>
+                        </div>
+                    <?php else: ?>
+                        <div class="alert alert-info mb-4" role="alert">
+                            <i class="bi bi-hourglass-split me-2"></i>
+                            جاري استرجاع البيانات... الرجاء الانتظار (قد تستغرق العملية عدة دقائق)
+                        </div>
+
+                        <div class="progress mb-3" style="height: 25px;">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated bg-success" role="progressbar" style="width: 100%">
+                                <span>جاري الاسترجاع...</span>
+                            </div>
+                        </div>
+
+                        <h5 class="mb-3">سجل العملية:</h5>
+                        <div id="restoreLog">
+                            <?php
+                            echo "<div class='restore-log'><i class='bi bi-stop-circle text-warning'></i> إيقاف خدمة MySQL...</div>";
+                            flush_buffers();
+                            system('net stop "hanet-mysql"');
+
+                            echo "<div class='restore-log'><i class='bi bi-folder-symlink text-info'></i> بدء نسخ الملفات من: $restdate</div>";
+                            flush_buffers();
+
+                            $x = dircopy("c:/aqary-backup/" . $restdate, "..\..\..\aso\mysql5\data\aqary", true, $restdate);
+                            flush_buffers();
+
+                            if ($x) {
+                                echo "<div class='restore-log text-success'><i class='bi bi-check-circle'></i> تم نسخ $x ملف بنجاح</div>";
+                            }
+
+                            echo "<div class='restore-log'><i class='bi bi-play-circle text-success'></i> إعادة تشغيل خدمة MySQL...</div>";
+                            flush_buffers();
+                            system('net start "hanet-mysql"');
+
+                            echo "<div class='restore-log text-success'><strong><i class='bi bi-check-circle-fill'></i> اكتملت عملية الاسترجاع بنجاح!</strong></div>";
+                            flush_buffers();
+
+                            $restore_complete = true;
+                            @ob_end_clean();
+                            while (@ob_end_flush());
+                            ?>
+                        </div>
+
+                        <?php if ($restore_complete): ?>
+                            <div class="alert alert-success mt-3" role="alert">
+                                <i class="bi bi-check-circle me-2"></i>
+                                تم استرجاع البيانات بنجاح! يمكنك الآن <a href="copydatabase.hnt" class="alert-link">العودة للقائمة</a>
+                            </div>
+                        <?php endif; ?>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+$(document).ready(function() {
+    $('.restore-btn').on('click', function() {
+        const backupName = $(this).data('backup');
+
+        if (typeof confirm === 'function') {
+            confirm(
+                'سيتم مسح البيانات الموجودة حاليا واسترجاع البيانات من النسخة: ' + backupName + '. هل أنت متأكد؟',
+                'تحذير',
+                'copydatabase.hnt?restdate=' + encodeURIComponent(backupName)
+            );
+        } else {
+            if (window.confirm('سيتم مسح البيانات الموجودة حاليا واسترجاع البيانات من النسخة: ' + backupName + '. هل أنت متأكد؟')) {
+                window.location.href = 'copydatabase.hnt?restdate=' + encodeURIComponent(backupName);
+            }
+        }
+    });
+
+    // Auto-scroll restore log
+    const restoreLog = document.getElementById('restoreLog');
+    if (restoreLog) {
+        setInterval(function() {
+            restoreLog.scrollTop = restoreLog.scrollHeight;
+        }, 350);
+    }
+});
+</script>
+
+<?php
+require("../foter.hnt");
+?>

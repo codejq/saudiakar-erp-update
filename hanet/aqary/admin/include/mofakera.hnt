@@ -1,0 +1,872 @@
+<?php
+// Set page variables
+$sc_title = "المفكرة";
+$sc_id = "71";
+
+// Extract request variables early
+extract($_REQUEST);
+
+// Check if this is an AJAX request - handle it BEFORE any HTML output
+// Detect AJAX requests: POST with ajax_submit or delete operations
+$is_ajax_request = (isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1') ||
+                    (isset($_REQUEST['dmid']) && $_REQUEST['dmid']);
+
+// Start output buffering for AJAX requests to catch any unwanted output
+if ($is_ajax_request) {
+    ob_start();
+    error_reporting(E_ERROR | E_PARSE); // Suppress warnings for clean JSON
+}
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../nocash.hnt";
+    $nobacktome = 1;
+    $canscroll = 1;
+    include_once "../../header.hnt";
+} else {
+    // Always include authentication and database
+    include_once "../../reqloginajax.hnt";
+}
+
+// Load required services
+// Load uCal class for Hijri date support (suppress warnings during AJAX to ensure clean JSON)
+if ($is_ajax_request) {
+
+    require 'uCal.class.hnt';
+    $dcal = new uCal;
+
+    // Load email service
+    require_once('../../admin/todo/todo_init.hnt');
+    $todoManager = todo_init_manager();
+
+    // Load WhatsApp service
+    require_once('../../admin/include/whatsapp_init.hnt');
+
+} else {
+    require 'uCal.class.hnt';
+    $dcal = new uCal;
+
+    // Load email service
+    require_once('../todo/todo_init.hnt');
+    $todoManager = todo_init_manager();
+
+    // Load WhatsApp service
+    require_once('whatsapp_init.hnt');
+}
+
+// Auto-update database schema - Add notification columns if they don't exist
+$columns_to_add = [
+    'send_email' => "ALTER TABLE message ADD COLUMN send_email TINYINT(1) DEFAULT 0",
+    'send_whatsapp' => "ALTER TABLE message ADD COLUMN send_whatsapp TINYINT(1) DEFAULT 0",
+    'email_to' => "ALTER TABLE message ADD COLUMN email_to VARCHAR(255) DEFAULT ''",
+    'whatsapp_to' => "ALTER TABLE message ADD COLUMN whatsapp_to VARCHAR(50) DEFAULT ''"
+];
+
+foreach ($columns_to_add as $column => $alter_sql) {
+    // Check if column exists
+    $check = mysql_query("SHOW COLUMNS FROM message LIKE '$column'", $link);
+    if (mysql_num_rows($check) == 0) {
+        // Column doesn't exist, add it
+        mysql_query($alter_sql, $link);
+    }
+}
+
+// Get current date (Gregorian or Hijri based on system settings)
+$currentdate = date('d/m/Y');
+if (!isset($hnt_dll) || !$hnt_dll) {
+    $dateo = $dcal->g2u(date('d'), date('m'), date('Y'));
+    $currentdate = "{$dateo['day']}/{$dateo['month']}/{$dateo['year']}";
+}
+
+// Handle delete request
+if (isset($dmid) && $dmid) {
+    $sql = "DELETE FROM message WHERE messageid = '" . intval($dmid) . "' AND userid = '" . intval($_SESSION['useridv']) . "' LIMIT 1";
+    mysql_query($sql, $link);
+
+    if ($is_ajax_request) {
+        ob_clean(); // Clear any buffered output
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم حذف التذكير بنجاح'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+}
+
+// Handle form submission (Add new reminder)
+if (isset($messagebody) && $messagebody) {
+    try {
+        // Parse the reminder date
+        $reminderdate = explode("/", $reminderdate);
+        $st_date = intval($reminderdate[0]);
+        $st_month = intval($reminderdate[1]);
+        $st_year = intval($reminderdate[2]);
+
+    // Convert Hijri to Gregorian if needed
+    if ($st_year < 1900) {
+        $dateo = $dcal->u2g($st_date, $st_month, $st_year);
+        $st_date = $dateo['day'];
+        $st_month = $dateo['month'];
+        $st_year = $dateo['year'];
+    }
+
+    // Create start timestamp
+    $startdate = mktime(intval($hours ?? 0), intval($minutes ?? 0), 0, $st_month, $st_date, $st_year);
+
+    // Calculate duration in seconds
+    $duration = intval($duration ?? 1) * 24 * 60 * 60;
+
+    // Calculate end date
+    $enddate = $startdate + $duration;
+    $userid = intval($_SESSION['useridv']);
+
+    // Prepare notification fields
+    $send_email = isset($send_email) && $send_email ? 1 : 0;
+    $send_whatsapp = isset($send_whatsapp) && $send_whatsapp ? 1 : 0;
+    $email_to = addslashes($email_to ?? '');
+    $whatsapp_to = addslashes($whatsapp_to ?? '');
+
+    // Insert reminder
+    $sql = "INSERT INTO message SET
+            messagebody = '" . addslashes($messagebody) . "',
+            startdate = '" . intval($startdate) . "',
+            enddate = '" . intval($enddate) . "',
+            userid = '" . intval($userid) . "',
+            send_email = '" . intval($send_email) . "',
+            send_whatsapp = '" . intval($send_whatsapp) . "',
+            email_to = '" . $email_to . "',
+            whatsapp_to = '" . $whatsapp_to . "'";
+
+    $insert_result = mysql_query($sql, $link);
+
+    if (!$insert_result) {
+        throw new Exception('فشل حفظ التذكير في قاعدة البيانات: ' . mysql_error($link));
+    }
+
+    $reminder_id = mysql_insert_id($link);
+
+    if (!$reminder_id) {
+        throw new Exception('فشل الحصول على معرف التذكير');
+    }
+
+    // Queue email if requested
+    if ($send_email && $email_to) {
+        try {
+            $email_subject = 'تذكير: ' . mb_substr($messagebody, 0, 50) . '...';
+            $email_body = "<html><body dir='rtl'>";
+            $email_body .= "<h2>تذكير</h2>";
+            $email_body .= "<p><strong>الرسالة:</strong></p>";
+            $email_body .= "<p>" . nl2br(htmlspecialchars($messagebody, ENT_QUOTES, 'UTF-8')) . "</p>";
+            $email_body .= "<hr>";
+            $email_body .= "<p><small>تاريخ بداية التذكير: " . date('d/m/Y H:i', $startdate) . "</small></p>";
+            $email_body .= "<p><small>تاريخ نهاية التذكير: " . date('d/m/Y H:i', $enddate) . "</small></p>";
+            $email_body .= "</body></html>";
+
+            // Queue the email
+            if (isset($todoManager) && is_object($todoManager)) {
+                $todoManager->queueEmail(0, $userid, $email_to, $email_subject, $email_body);
+            }
+        } catch (Exception $e) {
+            // Don't fail the whole operation if email queueing fails
+            error_log("Failed to queue email: " . $e->getMessage());
+        }
+    }
+
+    // Queue WhatsApp message if requested
+    if ($send_whatsapp && $whatsapp_to) {
+        try {
+            // Validate phone number
+            if (function_exists('wa_validate_phone') && wa_validate_phone($whatsapp_to)) {
+                // Format the WhatsApp message
+                $wa_message = "*تذكير*\n\n";
+                $wa_message .= $messagebody . "\n\n";
+                $wa_message .= "━━━━━━━━━━━━━━━━\n";
+                $wa_message .= "📅 بداية التذكير: " . date('d/m/Y', $startdate) . "\n";
+                $wa_message .= "⏰ الساعة: " . date('H:i', $startdate) . "\n";
+                $wa_message .= "📅 نهاية التذكير: " . date('d/m/Y', $enddate);
+
+                // Prepare scheduled time (send at the reminder start time)
+                $scheduled_time = date('Y-m-d H:i:s', $startdate);
+
+                // Add to WhatsApp queue
+                $queueData = array(
+                    'recipient' => $whatsapp_to,
+                    'recipient_name' => $_SESSION['namev'] ?? 'مستخدم',
+                    'message_text' => $wa_message,
+                    'scheduled_time' => $scheduled_time,
+                    'priority' => 5,
+                    'status' => 'pending'
+                );
+
+                if (function_exists('wa_add_to_queue')) {
+                    wa_add_to_queue($queueData);
+                }
+            }
+        } catch (Exception $e) {
+            // Don't fail the whole operation if WhatsApp queueing fails
+            error_log("Failed to queue WhatsApp: " . $e->getMessage());
+        }
+    }
+
+        // Handle AJAX response
+        if ($is_ajax_request) {
+            ob_clean(); // Clear any buffered output
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم إضافة التذكير بنجاح' .
+                            ($send_email ? ' - تم جدولة البريد الإلكتروني' : '') .
+                            ($send_whatsapp ? ' - تم جدولة رسالة واتساب' : ''),
+                'redirect_url' => 'mofakera.hnt'
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            exit;
+        }
+    } catch (Exception $e) {
+        // Handle errors in AJAX requests
+        if ($is_ajax_request) {
+            ob_clean(); // Clear any buffered output
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'error' => 'حدث خطأ: ' . $e->getMessage()
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            exit;
+        }
+    }
+
+    // Non-AJAX fallback
+    echo "<script>
+    if (typeof showBootstrapNotification === 'function') {
+        showBootstrapNotification('تم إضافة التذكير بنجاح', 'success', 3000);
+    } else {
+        alert('تم إضافة التذكير بنجاح');
+    }
+    </script>";
+}
+
+// Only render HTML if NOT AJAX request
+if (!$is_ajax_request) {
+?>
+
+<!-- Bootstrap 5.3 Toast Container -->
+<div id="toast-container" class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 9999;"></div>
+
+<style>
+.section-header {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1.5rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.1rem;
+}
+
+.form-label {
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: #495057;
+}
+
+.form-label i {
+    color: #0891b2;
+}
+
+.required-mark {
+    color: #dc3545;
+    margin-right: 3px;
+}
+
+.card {
+    border: none;
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    margin-bottom: 1.5rem;
+}
+
+.card-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    font-weight: 600;
+    padding: 1rem 1.25rem;
+}
+
+.card-header h4 {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.btn-success {
+    background: linear-gradient(135deg, #0a7047 0%, #0d9488 100%);
+    border: none;
+    padding: 0.75rem 2rem;
+    font-weight: 600;
+}
+
+.btn-success:hover {
+    background: linear-gradient(135deg, #0d9488 0%, #0a7047 100%);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+}
+
+.btn-outline-secondary {
+    padding: 0.75rem 2rem;
+    font-weight: 600;
+}
+
+.reminder-table {
+    background: white;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+}
+
+.reminder-table table {
+    margin-bottom: 0;
+}
+
+.reminder-table thead {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+}
+
+.reminder-table thead th {
+    border: none;
+    padding: 1rem;
+    font-weight: 600;
+}
+
+.reminder-table tbody tr {
+    border-bottom: 1px solid #dee2e6;
+    transition: background-color 0.2s;
+}
+
+.reminder-table tbody tr:hover {
+    background-color: #f8f9fa;
+}
+
+.reminder-table tbody td {
+    padding: 0.75rem 1rem;
+    vertical-align: middle;
+}
+
+.loading-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    justify-content: center;
+    align-items: center;
+    z-index: 9998;
+}
+
+.loading-overlay.show {
+    display: flex;
+}
+
+.loading-spinner {
+    background: white;
+    padding: 2rem;
+    border-radius: 8px;
+    text-align: center;
+}
+
+/* Toast Customization */
+.toast {
+    min-width: 350px;
+    backdrop-filter: blur(10px);
+}
+
+.bg-success-subtle {
+    background-color: #d1e7dd !important;
+    border-left: 4px solid #198754;
+}
+
+.bg-danger-subtle {
+    background-color: #f8d7da !important;
+    border-left: 4px solid #dc3545;
+}
+
+.bg-warning-subtle {
+    background-color: #fff3cd !important;
+    border-left: 4px solid #ffc107;
+}
+
+.notification-card {
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    padding: 1rem;
+}
+
+.notification-options {
+    display: none;
+}
+
+.notification-options.show {
+    display: block;
+}
+</style>
+
+<?php
+// Set timezone to ensure correct time display
+date_default_timezone_set('Asia/Riyadh');
+
+// Calculate default time: current time + 5 minutes
+$default_time = time() + (5 * 60); // Add 5 minutes
+$default_hour = intval(date('H', $default_time));
+$default_minute = intval(date('i', $default_time));
+?>
+
+<div class="container-fluid py-3">
+    <!-- Add Reminder Card -->
+    <div class="card">
+        <div class="card-header">
+            <h4 class="mb-0">
+                <i class="bi bi-calendar-plus"></i>
+                إضافة تذكير جديد
+            </h4>
+        </div>
+        <div class="card-body p-4">
+            <form id="reminderForm" method="post" action="mofakera.hnt">
+                <input type="hidden" name="ajax_submit" value="1">
+                <input type="hidden" name="action" value="insert">
+
+                <div class="row g-4">
+                    <!-- Reminder Message -->
+                    <div class="col-12">
+                        <label class="form-label">
+                            <i class="bi bi-chat-text text-primary me-1"></i>
+                            نص التذكير
+                            <span class="required-mark">*</span>
+                        </label>
+                        <textarea name="messagebody" class="form-control" rows="4" required placeholder="اكتب نص التذكير هنا..."></textarea>
+                    </div>
+
+                    <!-- Reminder Date -->
+                    <div class="col-md-3">
+                        <label class="form-label">
+                            <i class="bi bi-calendar-date text-primary me-1"></i>
+                            بدء التذكير في
+                            <span class="required-mark">*</span>
+                        </label>
+                        <input type="text" name="reminderdate" id="reminderdate" class="form-control"
+                               value="<?= htmlspecialchars($currentdate, ENT_QUOTES, 'UTF-8') ?>"
+                               onblur="checkdateformat(this, this.value);"
+                               required
+                               placeholder="DD/MM/YYYY">
+                        <small class="text-muted">مثال: 25/12/1420</small>
+                    </div>
+
+                    <!-- Hour -->
+                    <div class="col-md-3">
+                        <label class="form-label">
+                            <i class="bi bi-clock text-primary me-1"></i>
+                            الساعة
+                        </label>
+                        <select name="hours" class="form-select">
+                            <?php for ($i = 0; $i < 24; $i++): ?>
+                                <option value="<?= $i ?>" <?= ($i == $default_hour) ? "selected" : "" ?>>
+                                    <?= str_pad($i, 2, '0', STR_PAD_LEFT) ?>
+                                </option>
+                            <?php endfor; ?>
+                        </select>
+                    </div>
+
+                    <!-- Minute -->
+                    <div class="col-md-3">
+                        <label class="form-label">
+                            <i class="bi bi-clock-history text-primary me-1"></i>
+                            الدقيقة
+                        </label>
+                        <select name="minutes" class="form-select">
+                            <?php for ($i = 0; $i < 60; $i++): ?>
+                                <option value="<?= $i ?>" <?= ($i == $default_minute) ? "selected" : "" ?>>
+                                    <?= str_pad($i, 2, '0', STR_PAD_LEFT) ?>
+                                </option>
+                            <?php endfor; ?>
+                        </select>
+                    </div>
+
+                    <!-- Duration -->
+                    <div class="col-md-3">
+                        <label class="form-label">
+                            <i class="bi bi-hourglass-split text-primary me-1"></i>
+                            مدة التذكير
+                        </label>
+                        <select name="duration" class="form-select">
+                            <option value="1">يوم واحد</option>
+                            <option value="2">يومين</option>
+                            <option value="3">3 أيام</option>
+                            <option value="5">5 أيام</option>
+                            <option value="7">7 أيام</option>
+                            <option value="10">10 أيام</option>
+                            <option value="14">14 يوم</option>
+                            <option value="30">30 يوم</option>
+                            <option value="60">شهرين</option>
+                            <option value="90">ثلاثة أشهر</option>
+                        </select>
+                    </div>
+
+                    <!-- Notification Options -->
+                    <div class="col-12">
+                        <div class="notification-card">
+                            <div class="section-header " style="margin-bottom: 1rem; cursor: pointer;" onclick="toggleNotifications()">
+                                <i class="bi bi-bell"></i>
+                                <span>خيارات الإشعارات</span>
+                                <i class="bi bi-chevron-down ms-auto" id="notificationChevron"></i>
+                            </div>
+
+                            <div class="notification-options show" id="notificationOptions">
+                                <div class="row g-3">
+                                    <!-- Email Notification -->
+                                    <div class="col-md-6">
+                                        <div class="card">
+                                            <div class="card-body">
+                                                <div class="form-check form-switch mb-3">
+                                                    <input class="form-check-input" type="checkbox" id="sendEmailCheck" name="send_email" value="1">
+                                                    <label class="form-check-label" for="sendEmailCheck">
+                                                        <i class="bi bi-envelope text-primary"></i>
+                                                        <strong>إرسال بريد إلكتروني</strong>
+                                                    </label>
+                                                </div>
+                                                <div id="emailFields" style="display: none;">
+                                                    <label class="form-label">
+                                                        <i class="bi bi-at text-primary me-1"></i>
+                                                        البريد الإلكتروني
+                                                    </label>
+                                                    <input type="email" name="email_to" class="form-control" placeholder="example@email.com">
+                                                    <small class="text-muted">سيتم إرسال التذكير في الموعد المحدد</small>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- WhatsApp Notification -->
+                                    <div class="col-md-6">
+                                        <div class="card">
+                                            <div class="card-body">
+                                                <div class="form-check form-switch mb-3">
+                                                    <input class="form-check-input" type="checkbox" id="sendWhatsAppCheck" name="send_whatsapp" value="1">
+                                                    <label class="form-check-label" for="sendWhatsAppCheck">
+                                                        <i class="bi bi-whatsapp text-success"></i>
+                                                        <strong>إرسال رسالة واتساب</strong>
+                                                    </label>
+                                                </div>
+                                                <div id="whatsappFields" style="display: none;">
+                                                    <label class="form-label">
+                                                        <i class="bi bi-phone text-primary me-1"></i>
+                                                        رقم الواتساب
+                                                    </label>
+                                                    <input type="text" name="whatsapp_to" class="form-control" placeholder="05xxxxxxxx">
+                                                    <small class="text-muted">سيتم إرسال التذكير في الموعد المحدد</small>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Submit Buttons -->
+                    <div class="col-12 text-center mt-4">
+                        <button type="submit" class="btn btn-success btn-lg px-5 me-2">
+                            <i class="bi bi-check-circle me-2"></i>إضافة التذكير
+                        </button>
+                        <button type="reset" class="btn btn-outline-secondary btn-lg px-4">
+                            <i class="bi bi-x-circle me-2"></i>مسح النموذج
+                        </button>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Reminders List Card -->
+    <div class="card">
+        <div class="card-header">
+            <h4 class="mb-0">
+                <i class="bi bi-list-ul"></i>
+                قائمة التذكيرات
+            </h4>
+        </div>
+        <div class="card-body p-0">
+            <div class="reminder-table">
+                <table class="table table-hover mb-0" id="remindersTable">
+                    <thead>
+                        <tr>
+                            <th width="40%">الرسالة</th>
+                            <th class="text-center">الساعة</th>
+                            <th class="text-center">بداية التذكير</th>
+                            <th class="text-center">نهاية التذكير</th>
+                            <th class="text-center">الإشعارات</th>
+                            <th class="text-center">الإجراءات</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php
+                        $sql = "SELECT * FROM message WHERE userid = '" . intval($_SESSION['useridv']) . "' ORDER BY startdate DESC";
+                        $result = mysql_query($sql, $link);
+
+                        if (mysql_num_rows($result) == 0) {
+                            echo '<tr><td colspan="6" class="text-center text-muted py-5">
+                                    <i class="bi bi-inbox display-4 d-block mb-3"></i>
+                                    لا توجد تذكيرات حالياً
+                                  </td></tr>';
+                        }
+
+                        while ($row = mysql_fetch_array($result)) {
+                            $remtime = date('H:i', $row['startdate']);
+                            $remdate = date('d/m/Y', $row['startdate']);
+                            $remdate_end = date('d/m/Y', $row['enddate']);
+
+                            // Convert to Hijri if needed
+                            if (!isset($hnt_dll) || !$hnt_dll) {
+                                $remdate_parts = explode("/", $remdate);
+                                $dateo = $dcal->g2u($remdate_parts[0], $remdate_parts[1], $remdate_parts[2]);
+                                $remdate = "{$dateo['day']}/{$dateo['month']}/{$dateo['year']}";
+
+                                $remdate_end_parts = explode("/", $remdate_end);
+                                $dateo = $dcal->g2u($remdate_end_parts[0], $remdate_end_parts[1], $remdate_end_parts[2]);
+                                $remdate_end = "{$dateo['day']}/{$dateo['month']}/{$dateo['year']}";
+                            }
+
+                            // Prepare notification badges
+                            $notifications = '';
+                            if (isset($row['send_email']) && $row['send_email']) {
+                                $notifications .= '<span class="badge bg-primary me-1" title="' . htmlspecialchars($row['email_to'], ENT_QUOTES, 'UTF-8') . '"><i class="bi bi-envelope"></i></span>';
+                            }
+                            if (isset($row['send_whatsapp']) && $row['send_whatsapp']) {
+                                $notifications .= '<span class="badge bg-success" title="' . htmlspecialchars($row['whatsapp_to'], ENT_QUOTES, 'UTF-8') . '"><i class="bi bi-whatsapp"></i></span>';
+                            }
+                            if (!$notifications) {
+                                $notifications = '<span class="text-muted">-</span>';
+                            }
+
+                            echo '<tr id="reminder-row-' . $row['messageid'] . '">';
+                            echo '<td>' . nl2br(htmlspecialchars($row['messagebody'], ENT_QUOTES, 'UTF-8')) . '</td>';
+                            echo '<td class="text-center">' . htmlspecialchars($remtime, ENT_QUOTES, 'UTF-8') . '</td>';
+                            echo '<td class="text-center">' . htmlspecialchars($remdate, ENT_QUOTES, 'UTF-8') . '</td>';
+                            echo '<td class="text-center">' . htmlspecialchars($remdate_end, ENT_QUOTES, 'UTF-8') . '</td>';
+                            echo '<td class="text-center">' . $notifications . '</td>';
+                            echo '<td class="text-center">';
+                            echo '<button type="button" class="btn btn-sm btn-outline-danger delete-reminder" data-id="' . $row['messageid'] . '">';
+                            echo '<i class="bi bi-trash me-1"></i>حذف';
+                            echo '</button>';
+                            echo '</td>';
+                            echo '</tr>';
+                        }
+                        ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Loading Overlay -->
+<div id="loadingOverlay" class="loading-overlay">
+    <div class="loading-spinner">
+        <div class="spinner-border text-primary" role="status" style="width: 3rem; height: 3rem;">
+            <span class="visually-hidden">جاري التحميل...</span>
+        </div>
+        <p class="mt-3 mb-0">جاري الحفظ...</p>
+    </div>
+</div>
+
+<script>
+// ========== TOAST NOTIFICATION FUNCTION ==========
+function showBootstrapNotification(message, type = 'success', duration = 3000) {
+    const toastId = 'toast-' + Date.now();
+    const iconMap = {
+        'success': 'bi-check-circle-fill text-success',
+        'error': 'bi-x-circle-fill text-danger',
+        'warning': 'bi-exclamation-triangle-fill text-warning',
+        'info': 'bi-info-circle-fill text-info'
+    };
+    const bgMap = {
+        'success': 'bg-success-subtle',
+        'error': 'bg-danger-subtle',
+        'warning': 'bg-warning-subtle',
+        'info': 'bg-info-subtle'
+    };
+
+    const toastHtml = `
+        <div id="${toastId}" class="toast align-items-center border-0" role="alert">
+            <div class="d-flex ${bgMap[type]}">
+                <div class="toast-body">
+                    <i class="bi ${iconMap[type]} me-2"></i>
+                    ${message}
+                </div>
+                <button type="button" class="btn-close btn-close-${type} me-2 m-auto" data-bs-dismiss="toast"></button>
+            </div>
+        </div>
+    `;
+
+    let toastContainer = document.getElementById('toast-container');
+    if (!toastContainer) {
+        toastContainer = document.createElement('div');
+        toastContainer.id = 'toast-container';
+        toastContainer.className = 'toast-container position-fixed top-0 end-0 p-3';
+        toastContainer.style.zIndex = '9999';
+        document.body.appendChild(toastContainer);
+    }
+
+    toastContainer.insertAdjacentHTML('beforeend', toastHtml);
+
+    const toastElement = document.getElementById(toastId);
+    const toast = new bootstrap.Toast(toastElement, { delay: duration });
+    toast.show();
+
+    toastElement.addEventListener('hidden.bs.toast', function() {
+        toastElement.remove();
+    });
+}
+
+// ========== NOTIFICATION OPTIONS TOGGLE ==========
+function toggleNotifications() {
+    const options = document.getElementById('notificationOptions');
+    const chevron = document.getElementById('notificationChevron');
+
+    if (options.classList.contains('show')) {
+        options.classList.remove('show');
+        chevron.classList.remove('bi-chevron-up');
+        chevron.classList.add('bi-chevron-down');
+    } else {
+        options.classList.add('show');
+        chevron.classList.remove('bi-chevron-down');
+        chevron.classList.add('bi-chevron-up');
+    }
+}
+
+// ========== AJAX FORM SUBMISSION ==========
+$(document).ready(function() {
+    // Handle email checkbox
+    $('#sendEmailCheck').on('change', function() {
+        $('#emailFields').toggle(this.checked);
+        if (this.checked) {
+            $('#notificationOptions').addClass('show');
+            $('#notificationChevron').removeClass('bi-chevron-down').addClass('bi-chevron-up');
+        }
+    });
+
+    // Handle WhatsApp checkbox
+    $('#sendWhatsAppCheck').on('change', function() {
+        $('#whatsappFields').toggle(this.checked);
+        if (this.checked) {
+            $('#notificationOptions').addClass('show');
+            $('#notificationChevron').removeClass('bi-chevron-down').addClass('bi-chevron-up');
+        }
+    });
+
+    // Handle form submission
+    $('#reminderForm').on('submit', function(e) {
+        e.preventDefault();
+
+        var formData = new FormData(this);
+        formData.set('ajax_submit', '1');
+
+        var submitBtn = $(this).find('button[type="submit"]');
+        var originalBtnText = submitBtn.html();
+        submitBtn.prop('disabled', true)
+                .html('<i class="bi bi-hourglass-split me-2"></i>جاري الحفظ...');
+
+        $('#loadingOverlay').addClass('show');
+
+        $.ajax({
+            url: 'mofakera.hnt',
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            dataType: 'json',
+            success: function(response) {
+                submitBtn.prop('disabled', false).html(originalBtnText);
+                $('#loadingOverlay').removeClass('show');
+
+                if (response.success) {
+                    showBootstrapNotification(response.message, 'success', 5000);
+
+                    // Reset form
+                    $('#reminderForm')[0].reset();
+                    $('#emailFields').hide();
+                    $('#whatsappFields').hide();
+                    $('#notificationOptions').removeClass('show');
+                    $('#notificationChevron').removeClass('bi-chevron-up').addClass('bi-chevron-down');
+
+                    // Reload page after short delay to show updated list
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 2000);
+                } else {
+                    showBootstrapNotification(response.error || 'حدث خطأ أثناء الحفظ', 'error', 5000);
+                }
+            },
+            error: function(xhr, status, error) {
+                submitBtn.prop('disabled', false).html(originalBtnText);
+                $('#loadingOverlay').removeClass('show');
+                console.error('AJAX Error:', error);
+                showBootstrapNotification('حدث خطأ في الاتصال. الرجاء المحاولة مرة أخرى.', 'error', 5000);
+            }
+        });
+    });
+
+    // Handle delete reminder
+    $(document).on('click', '.delete-reminder', function() {
+        var reminderId = $(this).data('id');
+        var rowElement = $('#reminder-row-' + reminderId);
+
+        confirm('هل أنت متأكد من حذف هذا التذكير؟', 'تأكيد الحذف', function() {
+            $.ajax({
+                url: 'mofakera.hnt',
+                type: 'POST',
+                data: {
+                    dmid: reminderId,
+                    ajax_submit: 1
+                },
+                dataType: 'json',
+                success: function(response) {
+                    if (response && response.success) {
+                        showBootstrapNotification('تم حذف التذكير بنجاح', 'success', 3000);
+
+                        // Fade out and remove the row
+                        rowElement.fadeOut(400, function() {
+                            $(this).remove();
+
+                            // Check if table is empty
+                            if ($('#remindersTable tbody tr').length === 0) {
+                                var emptyRow = '<tr><td colspan="6" class="text-center text-muted py-5">' +
+                                              '<i class="bi bi-inbox display-4 d-block mb-3"></i>' +
+                                              'لا توجد تذكيرات حالياً</td></tr>';
+                                $('#remindersTable tbody').html(emptyRow);
+                            }
+                        });
+                    } else {
+                        showBootstrapNotification('تم حذف التذكير', 'success', 3000);
+                        rowElement.fadeOut(400, function() {
+                            $(this).remove();
+                        });
+                    }
+                },
+                error: function() {
+                    showBootstrapNotification('حدث خطأ أثناء الحذف', 'error', 3000);
+                }
+            });
+        });
+    });
+});
+</script>
+
+<?php
+    require('../../foter.hnt');
+}
+?>

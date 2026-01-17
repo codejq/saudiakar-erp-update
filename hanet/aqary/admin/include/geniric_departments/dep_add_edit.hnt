@@ -1,0 +1,1530 @@
+<?php
+// Set page variables
+$sc_id = "26";
+
+// Include database connection and authentication FIRST
+include_once "../../../reqloginajax.hnt";
+
+// Extract POST variables
+extract($_REQUEST);
+
+// Check if this is an AJAX form submission - handle it BEFORE any HTML output
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Get department data
+$dep_id_safe = intval($_REQUEST['dep_id']);
+$sql = "select * from departments_name where dep_id='".$dep_id_safe."'";
+$dep_data = mysql_fetch_array(mysql_query($sql,$link));
+
+// Set page title and link
+$sc_link = isset($dep_data['dep_id']) ? "dep_show.hnt?dep_id=".$dep_data['dep_id'] : "";
+$sc_title = isset($dep_data['dep_name']) ? "قسم " . $dep_data['dep_name'] : "قسم غير معروف";
+
+// Check if editing mode
+if (isset($_REQUEST['edit_id']) && $_REQUEST['edit_id']) {
+    $sc_title = "تعديل " . $sc_title;
+}
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+}
+
+// Validate department ID
+if(!$_REQUEST['dep_id']){
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => false,
+            'error' => 'معذرة: لم استطع تحديد القسم المطلوب'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    } else {
+        echo "<div align=center><font color=red><br><br><a href='../../index.hnt'>معذرة : لم استطيع تحديد القسم المطلوب  انقر هنا للعودة </a></font></div>";
+        exit();
+    }
+}
+
+// Initialize variables to prevent PHP warnings
+$dep_waseet_isactive = "";
+$dep_malek_isactive = "";
+
+if(isset($dep_data['dep_waseet_isactive']) && $dep_data['dep_waseet_isactive'] == 2){
+	$dep_waseet_isactive = ".dep_waseet_isactive{display:none;}";
+}
+
+if(isset($dep_data['dep_malek_isactive']) && $dep_data['dep_malek_isactive'] == 2){
+	$dep_malek_isactive = ".dep_malek_isactive{display:none;}";
+}
+
+
+// Initialize edit data arrays to prevent warnings
+$edit_data = array();
+$edit_data_masder = array();
+$edit_data_malek = array();
+$edit_data_oldmalek = array();
+
+// Helper function to safely get array value
+function safe_array_get($array, $key, $default = '') {
+    return (isset($array[$key]) && $array[$key] !== null) ? $array[$key] : $default;
+}
+
+$actiontodo="insert";
+if(isset($_REQUEST['edit_id']) && $_REQUEST['edit_id']){
+$actiontodo="update";
+$edit_id_safe = intval($_REQUEST['edit_id']);
+$sql="select * from ".$dep_data['dep_table_name']." where id='".$edit_id_safe."'";
+$edit_data=mysql_fetch_array(mysql_query($sql,$link));
+
+if($edit_data){
+    $sql="select * from masder  where masderid='".intval($edit_data['masderid'])."'";
+    $edit_data_masder=mysql_fetch_array(mysql_query($sql,$link));
+    if(!$edit_data_masder) $edit_data_masder = array();
+
+    $sql="select * from malek  where malekid='".intval($edit_data['malekid'])."'";
+    $edit_data_malek=mysql_fetch_array(mysql_query($sql,$link));
+    if(!$edit_data_malek) $edit_data_malek = array();
+
+    $sql="select * from malek  where malekid='".intval($edit_data['oldmalekid'])."'";
+    $edit_data_oldmalek=mysql_fetch_array(mysql_query($sql,$link));
+    if(!$edit_data_oldmalek) $edit_data_oldmalek = array();
+}
+
+}
+
+// Get default map center
+$mainlat = 21.583061886336214;
+$mainlng = 39.20806601643562;
+$sql = "SELECT center_x, center_y FROM maps ORDER BY id DESC LIMIT 1";
+$row = mysql_fetch_array(mysql_query($sql, $link));
+if ($row && $row['center_x'] != 0) {
+    $mainlat = $row['center_x'];
+    $mainlng = $row['center_y'];
+}
+
+// Initialize polygon array for map
+$PolygonArray = '';
+if (isset($edit_data) && $edit_data && isset($edit_data['polypath']) && $edit_data['polypath']) {
+    $PolygonArray = str_replace("(", "Array(", $edit_data['polypath']);
+}
+
+// Update map center if editing and has coordinates
+if (isset($edit_data) && $edit_data && isset($edit_data['center_x']) && $edit_data['center_x'] != 0) {
+    $mainlat = $edit_data['center_x'];
+    $mainlng = $edit_data['center_y'];
+}
+
+/*
+   dep_id
+   dep_name
+   dep_en_name
+   dep_image
+   dep_image_small
+   dep_isactive
+   dep_table_name
+   dep_lastmodified
+   dep_isdeleted
+   dep_order
+
+*/
+
+
+?>
+
+<script type="text/javascript">
+ document.title =  document.title + ' <?=$dep_data['dep_name'];?>';
+</script>
+<style>
+<?=$dep_malek_isactive;?>
+<?=$dep_waseet_isactive;?>
+</style>
+
+
+<div class='col_12 uifont16'     >
+<script language="javascript">
+
+
+function getgooglenods(){
+
+if(document.getElementById('googlexyz')==null){return true;}
+ajaxpost('/aqary/googlemap.hnt?usergetmap=<?=$useridv;?>','','googlexyz');
+}
+
+//control layers
+function closallalyer()
+{
+/*
+document.getElementById('inputlayer1').style.display='none';
+document.getElementById('inputlayer2').style.display='none';
+document.getElementById('inputlayer3').style.display='none';
+*/
+
+
+}
+
+function openlayer(layerid)
+{
+closallalyer();
+document.getElementById('inputlayer' + layerid ).style.display='block';
+
+
+
+}
+
+
+
+
+//end control
+
+</script>
+
+
+<?php
+
+if(isset($_POST['actiontodo']) && $_POST['actiontodo']=="insert"){
+
+//###################update and add masder name ###################
+
+// Initialize variables to prevent undefined variable warnings
+$masdername = isset($masdername) ? $masdername : '';
+$masderid = isset($masderid) ? intval($masderid) : 0;
+$masdertel = isset($masdertel) ? $masdertel : '';
+$masderfax = isset($masderfax) ? $masderfax : '';
+$addationalinfo = isset($addationalinfo) ? $addationalinfo : '';
+$masderphone = isset($masderphone) ? $masderphone : '';
+$masderemail = isset($masderemail) ? $masderemail : '';
+$masderaddress = isset($masderaddress) ? $masderaddress : '';
+$malekid = isset($malekid) ? intval($malekid) : 0;
+$oldmalekid = isset($oldmalekid) ? intval($oldmalekid) : 0;
+$malekbayan1 = isset($malekbayan1) ? $malekbayan1 : '';
+$malekbayan2 = isset($malekbayan2) ? $malekbayan2 : '';
+$malekbayan3 = isset($malekbayan3) ? $malekbayan3 : '';
+$malekbayan4 = isset($malekbayan4) ? $malekbayan4 : '';
+$malekbayan5 = isset($malekbayan5) ? $malekbayan5 : '';
+$malekbayan6 = isset($malekbayan6) ? $malekbayan6 : '';
+$malekbayan7 = isset($malekbayan7) ? $malekbayan7 : '';
+$malekbayan8 = isset($malekbayan8) ? $malekbayan8 : '';
+$malekbayan9 = isset($malekbayan9) ? $malekbayan9 : '';
+$malekbayan10 = isset($malekbayan10) ? $malekbayan10 : '';
+$oldmalekbayan1 = isset($oldmalekbayan1) ? $oldmalekbayan1 : '';
+$oldmalekbayan2 = isset($oldmalekbayan2) ? $oldmalekbayan2 : '';
+$oldmalekbayan3 = isset($oldmalekbayan3) ? $oldmalekbayan3 : '';
+$oldmalekbayan4 = isset($oldmalekbayan4) ? $oldmalekbayan4 : '';
+$oldmalekbayan5 = isset($oldmalekbayan5) ? $oldmalekbayan5 : '';
+$oldmalekbayan6 = isset($oldmalekbayan6) ? $oldmalekbayan6 : '';
+$oldmalekbayan7 = isset($oldmalekbayan7) ? $oldmalekbayan7 : '';
+$oldmalekbayan8 = isset($oldmalekbayan8) ? $oldmalekbayan8 : '';
+$oldmalekbayan9 = isset($oldmalekbayan9) ? $oldmalekbayan9 : '';
+$oldmalekbayan10 = isset($oldmalekbayan10) ? $oldmalekbayan10 : '';
+
+if($masdername!="****************" and $masderid and $masdername ){
+$sql="update masder set
+masdername='" . addslashes($masdername) . "',
+masdertel='" . addslashes($masdertel) . "',
+masderfax='" . addslashes($masderfax) . "',
+addationalinfo='" . addslashes($addationalinfo) . "',
+masderphone='" . addslashes($masderphone) . "',
+masderemail='" . addslashes($masderemail) . "',
+masderaddress='" . addslashes($masderaddress) . "'
+where masderid='" . intval($masderid) . "'
+
+";
+
+
+mysql_query($sql,$link);
+
+}
+
+if(!$masderid  and $masdername and $masdername!="****************" ){
+	$sql="insert into  masder set
+	masdername='" . addslashes($masdername) . "',
+	masdertel='" . addslashes($masdertel) . "',
+	masderfax='" . addslashes($masderfax) . "',
+	addationalinfo='" . addslashes($addationalinfo) . "',
+	masderphone='" . addslashes($masderphone) . "',
+	masderemail='" . addslashes($masderemail) . "',
+	masderaddress='" . addslashes($masderaddress) . "'
+
+	";
+	mysql_query($sql,$link);
+	$masderid=mysql_insert_id();
+	}
+
+//######################end ###############################
+
+
+
+//##############check malek ################
+if($malekid){
+	$sql="update malek set
+		 malekbayan1='" . addslashes($malekbayan1) . "'
+		,malekbayan2='" . addslashes($malekbayan2) . "'
+		,malekbayan3='" . addslashes($malekbayan3) . "'
+		,malekbayan4='" . addslashes($malekbayan4) . "'
+		,malekbayan5='" . addslashes($malekbayan5) . "'
+		,malekbayan6='" . addslashes($malekbayan6) . "'
+		,malekbayan7='" . addslashes($malekbayan7) . "'
+		,malekbayan8='" . addslashes($malekbayan8) . "'
+		,malekbayan9='" . addslashes($malekbayan9) . "'
+		,malekbayan10='" . addslashes($malekbayan10) . "'
+		,userid='" . intval($_SESSION['useridv']) . "'  where malekid='" . intval($malekid) . "'";
+			if($malekbayan1){
+			mysql_query($sql,$link);}
+
+
+}
+
+if($oldmalekid){
+	$sql="update malek set
+		 malekbayan1='" . addslashes($oldmalekbayan1) . "'
+		,malekbayan2='" . addslashes($oldmalekbayan2) . "'
+		,malekbayan3='" . addslashes($oldmalekbayan3) . "'
+		,malekbayan4='" . addslashes($oldmalekbayan4) . "'
+		,malekbayan5='" . addslashes($oldmalekbayan5) . "'
+		,malekbayan6='" . addslashes($oldmalekbayan6) . "'
+		,malekbayan7='" . addslashes($oldmalekbayan7) . "'
+		,malekbayan8='" . addslashes($oldmalekbayan8) . "'
+		,malekbayan9='" . addslashes($oldmalekbayan9) . "'
+		,malekbayan10='" . addslashes($oldmalekbayan10) . "'
+		,userid='" . intval($_SESSION['useridv']) . "'  where malekid='" . intval($oldmalekid) . "'";
+			if($oldmalekbayan1){
+			mysql_query($sql,$link);}
+
+
+}
+
+
+
+
+
+if(!$malekid){
+$sqlmalek="select malekid from malek where
+ malekbayan1='" . addslashes($malekbayan1) . "' and
+ malekbayan2='" . addslashes($malekbayan2) . "' and
+ malekbayan3='" . addslashes($malekbayan3) . "'
+  ";
+$malekid_result=mysql_fetch_array(mysql_query($sqlmalek,$link));
+$malekid = $malekid_result ? $malekid_result['malekid'] : false;
+if(!$malekid)
+	{
+	$sql="insert into malek set
+		 malekbayan1='" . addslashes($malekbayan1) . "'
+		,malekbayan2='" . addslashes($malekbayan2) . "'
+		,malekbayan3='" . addslashes($malekbayan3) . "'
+		,malekbayan4='" . addslashes($malekbayan4) . "'
+		,malekbayan5='" . addslashes($malekbayan5) . "'
+		,malekbayan6='" . addslashes($malekbayan6) . "'
+		,malekbayan7='" . addslashes($malekbayan7) . "'
+		,malekbayan8='" . addslashes($malekbayan8) . "'
+		,malekbayan9='" . addslashes($malekbayan9) . "'
+		,malekbayan10='" . addslashes($malekbayan10) . "'
+		,userid='" . intval($_SESSION['useridv']) . "' ";
+			if($malekbayan1){
+			mysql_query($sql,$link);
+			$malekid=mysql_insert_id();
+			}
+	}
+}
+
+	//-------------------
+
+if(!$oldmalekid){
+$sqlmalek="select malekid from malek where
+ malekbayan1='" . addslashes($oldmalekbayan1) . "' and
+ malekbayan2='" . addslashes($oldmalekbayan2) . "' and
+ malekbayan3='" . addslashes($oldmalekbayan3) . "'
+  ";
+$oldmalekid_result=mysql_fetch_array(mysql_query($sqlmalek,$link));
+$oldmalekid = $oldmalekid_result ? $oldmalekid_result['malekid'] : false;
+if(!$oldmalekid)
+	{
+	$sql="insert into malek set
+		 malekbayan1='" . addslashes($oldmalekbayan1) . "'
+		,malekbayan2='" . addslashes($oldmalekbayan2) . "'
+		,malekbayan3='" . addslashes($oldmalekbayan3) . "'
+		,malekbayan4='" . addslashes($oldmalekbayan4) . "'
+		,malekbayan5='" . addslashes($oldmalekbayan5) . "'
+		,malekbayan6='" . addslashes($oldmalekbayan6) . "'
+		,malekbayan7='" . addslashes($oldmalekbayan7) . "'
+		,malekbayan8='" . addslashes($oldmalekbayan8) . "'
+		,malekbayan9='" . addslashes($oldmalekbayan9) . "'
+		,malekbayan10='" . addslashes($oldmalekbayan10) . "'
+		,userid='" . intval($_SESSION['useridv']) . "' ";
+			if($oldmalekbayan1){
+			mysql_query($sql,$link);
+			$oldmalekid=mysql_insert_id();
+			}
+
+	}
+}
+
+//###############end ######################
+@mkdir("../data");
+
+// File upload handling with security checks
+$_POST2 = array();
+foreach ($_FILES as $k => $v){
+    // Skip if no file was uploaded
+    if(empty($v["name"]) || $v["error"] == UPLOAD_ERR_NO_FILE){
+        continue;
+    }
+
+    // Check for upload errors
+    if($v["error"] != UPLOAD_ERR_OK){
+        continue;
+    }
+
+    // Get file extension
+    $exten = strtolower(strrchr($v["name"],'.'));
+    $tmp_name = $v["tmp_name"];
+
+    // Security: Validate file extension (allow only specific types)
+    $allowed_extensions = array('.jpg', '.jpeg', '.png', '.gif', '.pdf', '.doc', '.docx', '.xls', '.xlsx');
+    if(!in_array($exten, $allowed_extensions)){
+        continue;
+    }
+
+    // Generate unique filename
+    $newname = time() . rand() . $exten;
+
+    if($exten && is_uploaded_file($tmp_name))
+    {
+        $_POST2[$k]="/aqary/admin/include/data/$newname";
+        move_uploaded_file($tmp_name, "../data/$newname");
+    }
+}
+
+if(count($_POST2) > 0)
+{
+    $_POST=array_merge($_POST2,$_POST);
+}
+
+
+
+$sql="insert into ".$dep_data['dep_table_name']." set ";
+
+$op = "";
+foreach ($_POST as $k => $v){
+	if($k=="dep_id" or $k=="actiontodo"){continue;}
+	if($k=="masderid"){break;}
+
+	// Sanitize field name and value
+	$k_safe = preg_replace('/[^a-zA-Z0-9_]/', '', $k);
+	$v_safe = addslashes($v);
+
+	$sql=$sql.$op.$k_safe."='".$v_safe."'" ;
+
+	$op=" , ";
+	 }
+
+$sql=$sql." ,masderid='" . intval($masderid) . "' ,malekid='" . intval($malekid) . "'  , oldmalekid='" . intval($oldmalekid) . "'  ";
+
+mysql_query($sql,$link);
+$new_id = mysql_insert_id();
+
+// Return JSON response for AJAX requests
+if ($is_ajax_request) {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'تمت الإضافة بنجاح',
+        'new_id' => $new_id,
+        'redirect_url' => '?dep_id=' . $dep_id . '&edit_id=' . $new_id
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit();
+}
+
+echo"<script>alert(\"تمت الإضافة بنجاح. \");</script>";
+
+
+}
+
+
+if(isset($_POST['actiontodo']) && $_POST['actiontodo']=="update"){
+
+
+
+
+//###################update and add masder name ###################
+
+// Initialize variables to prevent undefined variable warnings
+$masdername = isset($masdername) ? $masdername : '';
+$masderid = isset($masderid) ? intval($masderid) : 0;
+$masdertel = isset($masdertel) ? $masdertel : '';
+$masderfax = isset($masderfax) ? $masderfax : '';
+$addationalinfo = isset($addationalinfo) ? $addationalinfo : '';
+$masderphone = isset($masderphone) ? $masderphone : '';
+$masderemail = isset($masderemail) ? $masderemail : '';
+$masderaddress = isset($masderaddress) ? $masderaddress : '';
+$malekid = isset($malekid) ? intval($malekid) : 0;
+$oldmalekid = isset($oldmalekid) ? intval($oldmalekid) : 0;
+$malekbayan1 = isset($malekbayan1) ? $malekbayan1 : '';
+$malekbayan2 = isset($malekbayan2) ? $malekbayan2 : '';
+$malekbayan3 = isset($malekbayan3) ? $malekbayan3 : '';
+$malekbayan4 = isset($malekbayan4) ? $malekbayan4 : '';
+$malekbayan5 = isset($malekbayan5) ? $malekbayan5 : '';
+$malekbayan6 = isset($malekbayan6) ? $malekbayan6 : '';
+$malekbayan7 = isset($malekbayan7) ? $malekbayan7 : '';
+$malekbayan8 = isset($malekbayan8) ? $malekbayan8 : '';
+$malekbayan9 = isset($malekbayan9) ? $malekbayan9 : '';
+$malekbayan10 = isset($malekbayan10) ? $malekbayan10 : '';
+$oldmalekbayan1 = isset($oldmalekbayan1) ? $oldmalekbayan1 : '';
+$oldmalekbayan2 = isset($oldmalekbayan2) ? $oldmalekbayan2 : '';
+$oldmalekbayan3 = isset($oldmalekbayan3) ? $oldmalekbayan3 : '';
+$oldmalekbayan4 = isset($oldmalekbayan4) ? $oldmalekbayan4 : '';
+$oldmalekbayan5 = isset($oldmalekbayan5) ? $oldmalekbayan5 : '';
+$oldmalekbayan6 = isset($oldmalekbayan6) ? $oldmalekbayan6 : '';
+$oldmalekbayan7 = isset($oldmalekbayan7) ? $oldmalekbayan7 : '';
+$oldmalekbayan8 = isset($oldmalekbayan8) ? $oldmalekbayan8 : '';
+$oldmalekbayan9 = isset($oldmalekbayan9) ? $oldmalekbayan9 : '';
+$oldmalekbayan10 = isset($oldmalekbayan10) ? $oldmalekbayan10 : '';
+
+if($masdername!="****************" and $masderid and $masdername ){
+$sql="update masder set
+masdername='" . addslashes($masdername) . "',
+masdertel='" . addslashes($masdertel) . "',
+masderfax='" . addslashes($masderfax) . "',
+addationalinfo='" . addslashes($addationalinfo) . "',
+masderphone='" . addslashes($masderphone) . "',
+masderemail='" . addslashes($masderemail) . "',
+masderaddress='" . addslashes($masderaddress) . "'
+where masderid='" . intval($masderid) . "'
+
+";
+
+
+mysql_query($sql,$link);
+
+}
+
+if(!$masderid  and $masdername and $masdername!="****************" ){
+	$sql="insert into  masder set
+	masdername='" . addslashes($masdername) . "',
+	masdertel='" . addslashes($masdertel) . "',
+	masderfax='" . addslashes($masderfax) . "',
+	addationalinfo='" . addslashes($addationalinfo) . "',
+	masderphone='" . addslashes($masderphone) . "',
+	masderemail='" . addslashes($masderemail) . "',
+	masderaddress='" . addslashes($masderaddress) . "'
+
+	";
+	mysql_query($sql,$link);
+	$masderid=mysql_insert_id();
+	}
+
+//######################end ###############################
+
+
+
+//##############check malek ################
+if($malekid){
+	$sql="update malek set
+		 malekbayan1='" . addslashes($malekbayan1) . "'
+		,malekbayan2='" . addslashes($malekbayan2) . "'
+		,malekbayan3='" . addslashes($malekbayan3) . "'
+		,malekbayan4='" . addslashes($malekbayan4) . "'
+		,malekbayan5='" . addslashes($malekbayan5) . "'
+		,malekbayan6='" . addslashes($malekbayan6) . "'
+		,malekbayan7='" . addslashes($malekbayan7) . "'
+		,malekbayan8='" . addslashes($malekbayan8) . "'
+		,malekbayan9='" . addslashes($malekbayan9) . "'
+		,malekbayan10='" . addslashes($malekbayan10) . "'
+		,userid='" . intval($_SESSION['useridv']) . "'  where malekid='" . intval($malekid) . "'";
+			if($malekbayan1){
+			mysql_query($sql,$link);}
+
+
+}
+
+if($oldmalekid){
+	$sql="update malek set
+		 malekbayan1='" . addslashes($oldmalekbayan1) . "'
+		,malekbayan2='" . addslashes($oldmalekbayan2) . "'
+		,malekbayan3='" . addslashes($oldmalekbayan3) . "'
+		,malekbayan4='" . addslashes($oldmalekbayan4) . "'
+		,malekbayan5='" . addslashes($oldmalekbayan5) . "'
+		,malekbayan6='" . addslashes($oldmalekbayan6) . "'
+		,malekbayan7='" . addslashes($oldmalekbayan7) . "'
+		,malekbayan8='" . addslashes($oldmalekbayan8) . "'
+		,malekbayan9='" . addslashes($oldmalekbayan9) . "'
+		,malekbayan10='" . addslashes($oldmalekbayan10) . "'
+		,userid='" . intval($_SESSION['useridv']) . "'  where malekid='" . intval($oldmalekid) . "'";
+			if($oldmalekbayan1){
+			mysql_query($sql,$link);}
+
+
+}
+
+
+
+
+
+if(!$malekid){
+$sqlmalek="select malekid from malek where
+ malekbayan1='" . addslashes($malekbayan1) . "' and
+ malekbayan2='" . addslashes($malekbayan2) . "' and
+ malekbayan3='" . addslashes($malekbayan3) . "'
+  ";
+$malekid_result=mysql_fetch_array(mysql_query($sqlmalek,$link));
+$malekid = $malekid_result ? $malekid_result['malekid'] : false;
+if(!$malekid)
+	{
+	$sql="insert into malek set
+		 malekbayan1='" . addslashes($malekbayan1) . "'
+		,malekbayan2='" . addslashes($malekbayan2) . "'
+		,malekbayan3='" . addslashes($malekbayan3) . "'
+		,malekbayan4='" . addslashes($malekbayan4) . "'
+		,malekbayan5='" . addslashes($malekbayan5) . "'
+		,malekbayan6='" . addslashes($malekbayan6) . "'
+		,malekbayan7='" . addslashes($malekbayan7) . "'
+		,malekbayan8='" . addslashes($malekbayan8) . "'
+		,malekbayan9='" . addslashes($malekbayan9) . "'
+		,malekbayan10='" . addslashes($malekbayan10) . "'
+		,userid='" . intval($_SESSION['useridv']) . "' ";
+			if($malekbayan1){
+			mysql_query($sql,$link);
+			$malekid=mysql_insert_id();
+			}
+	}
+}
+
+	//-------------------
+
+if(!$oldmalekid){
+$sqlmalek="select malekid from malek where
+ malekbayan1='" . addslashes($oldmalekbayan1) . "' and
+ malekbayan2='" . addslashes($oldmalekbayan2) . "' and
+ malekbayan3='" . addslashes($oldmalekbayan3) . "'
+  ";
+$oldmalekid_result=mysql_fetch_array(mysql_query($sqlmalek,$link));
+$oldmalekid = $oldmalekid_result ? $oldmalekid_result['malekid'] : false;
+if(!$oldmalekid)
+	{
+	$sql="insert into malek set
+		 malekbayan1='" . addslashes($oldmalekbayan1) . "'
+		,malekbayan2='" . addslashes($oldmalekbayan2) . "'
+		,malekbayan3='" . addslashes($oldmalekbayan3) . "'
+		,malekbayan4='" . addslashes($oldmalekbayan4) . "'
+		,malekbayan5='" . addslashes($oldmalekbayan5) . "'
+		,malekbayan6='" . addslashes($oldmalekbayan6) . "'
+		,malekbayan7='" . addslashes($oldmalekbayan7) . "'
+		,malekbayan8='" . addslashes($oldmalekbayan8) . "'
+		,malekbayan9='" . addslashes($oldmalekbayan9) . "'
+		,malekbayan10='" . addslashes($oldmalekbayan10) . "'
+		,userid='" . intval($_SESSION['useridv']) . "' ";
+			if($oldmalekbayan1){
+			mysql_query($sql,$link);
+			$oldmalekid=mysql_insert_id();
+			}
+
+	}
+}
+
+//###############end ######################
+
+// File upload handling with security checks
+$_POST2 = array();
+foreach ($_FILES as $k => $v){
+    // Skip if no file was uploaded
+    if(empty($v["name"]) || $v["error"] == UPLOAD_ERR_NO_FILE){
+        continue;
+    }
+
+    // Check for upload errors
+    if($v["error"] != UPLOAD_ERR_OK){
+        continue;
+    }
+
+    // Get file extension
+    $exten = strtolower(strrchr($v["name"],'.'));
+    $tmp_name = $v["tmp_name"];
+
+    // Security: Validate file extension (allow only specific types)
+    $allowed_extensions = array('.jpg', '.jpeg', '.png', '.gif', '.pdf', '.doc', '.docx', '.xls', '.xlsx');
+    if(!in_array($exten, $allowed_extensions)){
+        continue;
+    }
+
+    // Generate unique filename
+    $newname = time() . rand() . $exten;
+
+    if($exten && is_uploaded_file($tmp_name))
+    {
+        $_POST2[$k]="/aqary/admin/include/data/$newname";
+        move_uploaded_file($tmp_name, "../data/$newname");
+    }
+}
+
+if(count($_POST2) > 0)
+{
+    $_POST=array_merge($_POST2,$_POST);
+}
+
+// end prepaire files
+
+
+$sql="update  ".$dep_data['dep_table_name']." set ";
+
+$op = "";
+
+foreach ($_POST as $k => $v){
+	if($k=="dep_id" or $k=="actiontodo"){continue;}
+	if($k=="masderid"){break;}
+
+	// Sanitize field name and value
+	$k_safe = preg_replace('/[^a-zA-Z0-9_]/', '', $k);
+	$v_safe = addslashes($v);
+
+	$sql=$sql.$op.$k_safe."='".$v_safe."'" ;
+
+	$op=" , ";
+	 }
+
+$sql=$sql." ,masderid='" . intval($masderid) . "' ,malekid='" . intval($malekid) . "'  , oldmalekid='" . intval($oldmalekid) . "'
+where id='" . intval($_REQUEST['edit_id']) . "'";
+
+mysql_query($sql,$link);
+
+// Return JSON response for AJAX requests
+if ($is_ajax_request) {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'تم التعديل بنجاح',
+        'redirect_url' => '?dep_id=' . $dep_id . '&edit_id=' . $_REQUEST['edit_id']
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit();
+}
+
+echo"<script>alert(\"تم التعديل  بنجاح \");</script>";
+
+//############select again #############
+
+$sql="select * from ".$dep_data['dep_table_name']." where id='".$_REQUEST['edit_id']."'";
+$edit_data=mysql_fetch_array(mysql_query($sql,$link));
+
+$sql="select * from masder  where masderid='".$edit_data['masderid']."'";
+$edit_data_masder=mysql_fetch_array(mysql_query($sql,$link));
+
+$sql="select * from malek  where malekid='".$edit_data['malekid']."'";
+$edit_data_malek=mysql_fetch_array(mysql_query($sql,$link));
+
+$sql="select * from malek  where malekid='".$edit_data['oldmalekid']."'";
+$edit_data_oldmalek=mysql_fetch_array(mysql_query($sql,$link));
+
+
+//end update
+
+}
+
+
+
+
+
+
+$googlemappath=$_SERVER['DOCUMENT_ROOT']."/aqary/google.exe"
+?>
+
+<!-- Only output HTML if NOT an AJAX request -->
+<?php if (!$is_ajax_request): ?>
+
+<script type="text/javascript">
+ document.title = document.title + ' <?=$dep_data['dep_name'];?>';
+</script>
+
+<style>
+<?=$dep_malek_isactive;?>
+<?=$dep_waseet_isactive;?>
+
+/* Enhanced Modern Styling - Bootstrap 5.3 Compatible */
+.section-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 0.75rem 1rem;
+    border-radius: 8px 8px 0 0;
+    font-weight: 600;
+    font-size: 1.1rem;
+    margin-bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.section-content {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.form-section {
+    margin-bottom: 1.5rem;
+}
+
+.form-label, .label2 {
+    font-weight: 600;
+    color: #374151;
+    margin-bottom: 0.5rem;
+    display: inline-block;
+    margin-left: 0.5rem;
+}
+
+.form-control, .form-select, .biginput {
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    padding: 0.625rem 0.875rem;
+    font-size: 0.975rem;
+    transition: all 0.2s ease;
+    width: 100%;
+}
+
+.form-control:focus, .form-select:focus, .biginput:focus {
+    border-color: #189c2aff;
+    box-shadow: 0 0 0 3px rgba(24, 156, 42, 0.1);
+    outline: none;
+}
+
+.btn-submit {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    border: none;
+    padding: 0.75rem 2rem;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.btn-submit:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(24, 156, 42, 0.3);
+}
+
+.btn-reset {
+    background: #ef4444;
+    color: white;
+    border: none;
+    padding: 0.75rem 2rem;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.btn-reset:hover {
+    background: #dc2626;
+}
+
+.btn-select, .button.green {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.btn-select:hover, .button.green:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(8, 145, 178, 0.3);
+}
+
+/* Toast Container */
+.toast-container {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 9999;
+    width: 90%;
+    max-width: 500px;
+}
+
+.toast {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    margin-bottom: 10px;
+    overflow: hidden;
+}
+
+.toast-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid #e5e7eb;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+}
+
+.toast-body {
+    padding: 12px 16px;
+}
+
+/* Grid System */
+.row {
+    display: flex;
+    flex-wrap: wrap;
+    margin: 0 -0.5rem;
+}
+
+.col-md-4, .col_3 {
+    flex: 0 0 33.333333%;
+    max-width: 33.333333%;
+    padding: 0 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.col-12, .col_12 {
+    flex: 0 0 100%;
+    max-width: 100%;
+    padding: 0 0.5rem;
+}
+
+@media (max-width: 768px) {
+    .col-md-4, .col_3 {
+        flex: 0 0 100%;
+        max-width: 100%;
+    }
+}
+
+/* File Upload Display */
+.file-preview {
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    background: #f3f4f6;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+.file-preview a {
+    color: #189c2aff;
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.file-preview a:hover {
+    text-decoration: underline;
+}
+
+/* Radio and Checkbox Styling */
+.form-check {
+    margin-bottom: 0.5rem;
+}
+
+.form-check-input {
+    margin-left: 0.5rem;
+}
+
+.form-check-label {
+    margin-right: 0.5rem;
+}
+
+.center {
+    text-align: center;
+}
+
+hr {
+    border: none;
+    border-top: 2px solid #e5e7eb;
+    margin: 1.5rem 0;
+}
+
+</style>
+
+<div class="container-fluid px-3 py-3">
+
+<!-- Toast Container for Notifications -->
+<div class="toast-container" id="toastContainer"></div>
+
+<form action="?" method="post" id="departmentForm" enctype="multipart/form-data"  >
+<div id='inputlayer1' class="col_12">
+<input type=hidden name="dep_id" value="<?=$_REQUEST['dep_id'];?>">
+<input type=hidden name="actiontodo" value="<?=$actiontodo;?>">
+
+<!-- Basic Data Section -->
+<div class="section-header">
+    <i class="bi bi-card-list"></i>
+    البيانات الاساسية
+</div>
+<div class="section-content">
+    <div class="row">
+
+
+<?php
+$sql="select * from department_field  where dep_id ='".$_REQUEST['dep_id']."'";
+$result=mysql_query($sql,$link);
+while($field_data=mysql_fetch_array($result))
+{
+
+echo "<div class='col-md-4'>";
+
+$fld_en_name=$field_data['fld_en_name'];
+$field_value = isset($edit_data[$fld_en_name]) ? htmlspecialchars($edit_data[$fld_en_name], ENT_QUOTES, 'UTF-8') : '';
+
+switch ($field_data['fld_type']) {
+    case 0:
+        echo "<div class='alert alert-warning'>نوع الحقل غير معروف الرجاء تعديله</div>";
+        break;
+    case 1: // Text Input
+        echo "<label class='form-label'>{$field_data['fld_name']}</label>";
+        echo "<input type='text' name='{$field_data['fld_en_name']}' value='{$field_value}' title='{$field_data['fld_values']}' class='form-control' />";
+        break;
+    case 2: // Textarea
+        echo "<label class='form-label'>{$field_data['fld_name']}</label>";
+        echo "<textarea class='form-control' name='{$field_data['fld_en_name']}' title='{$field_data['fld_values']}' rows='4'>{$field_value}</textarea>";
+        break;
+    case 3: // Select Dropdown
+	$field_allvalues= explode("\r\n",$field_data['fld_values']);
+	echo "<label class='form-label'>{$field_data['fld_name']}</label>";
+	echo "<select name='{$field_data['fld_en_name']}' class='form-select'>";
+		foreach ($field_allvalues as $value) {
+		$sel = (isset($edit_data[$fld_en_name]) && $edit_data[$fld_en_name]==$value) ? " selected " : "";
+    	echo "<option value='{$value}' {$sel}>{$value}</option>";
+	}
+        echo "</select>";
+        break;
+    case 4: // Radio Buttons
+	$field_allvalues= explode("\r\n",$field_data['fld_values']);
+	echo "<label class='form-label d-block'>{$field_data['fld_name']}</label>";
+	foreach ($field_allvalues as $value) {
+		$checked = (isset($edit_data[$fld_en_name]) && $edit_data[$fld_en_name]==$value) ? " checked " : "";
+		$radio_id = $field_data['fld_en_name'] . '_' . md5($value);
+    	echo "<div class='form-check form-check-inline'>";
+		echo "<input class='form-check-input' type='radio' name='{$field_data['fld_en_name']}' id='{$radio_id}' value='{$value}' {$checked}>";
+		echo "<label class='form-check-label' for='{$radio_id}'>{$value}</label>";
+		echo "</div>";
+	}
+        break;
+    case 5: // Checkbox
+		$checkboxChecked = "";
+		$checkbox_value = $edit_data[$fld_en_name] ?? '';
+		if($checkbox_value == 'نعم' || $checkbox_value == 'on'){
+			$checkboxChecked = " checked ";
+		}
+		$checkbox_id = $field_data['fld_en_name'] . '_cbox';
+		echo "<input type='hidden' name='{$field_data['fld_en_name']}' id='{$field_data['fld_en_name']}' value='{$checkbox_value}' >";
+        echo "<div class='form-check'>";
+		echo "<input class='form-check-input' type='checkbox' id='{$checkbox_id}' value='نعم' {$checkboxChecked} ";
+		echo "onclick=\"if(this.checked){\$('#{$field_data['fld_en_name']}').val(this.value);} else{\$('#{$field_data['fld_en_name']}').val('');}\" />";
+		echo "<label class='form-check-label' for='{$checkbox_id}'>{$field_data['fld_name']}: {$field_data['fld_values']}</label>";
+		echo "</div>";
+        break;
+    case 6: // File Upload
+		echo "<label class='form-label'>{$field_data['fld_name']}</label>";
+		$file_value = $edit_data[$fld_en_name] ?? '';
+		if($file_value){
+			echo "<div class='file-preview'>";
+			if(strpos($file_value , "href")){
+				echo $file_value;
+			}
+			else{
+				echo "<a href='{$file_value}' target='_blank'><i class='bi bi-file-earmark'></i> عرض الملف</a>";
+			}
+			echo "</div>";
+		}
+        echo "<input type='file' name='{$field_data['fld_en_name']}' class='form-control' />";
+        break;
+    case 7: // Google Map (New Leaflet Implementation)
+        echo "<label class='form-label'>{$field_data['fld_name']}</label>";
+		echo "<div class='alert alert-info'>";
+		echo "<i class='bi bi-info-circle me-2'></i>";
+		echo "يمكنك رسم موقع العقار على الخريطة في نهاية الصفحة";
+		echo "</div>";
+		// Keep googlexyz field for backwards compatibility but make it readonly
+		echo "<input type='hidden' name='{$field_data['fld_en_name']}' value='{$field_value}' id='googlexyz' class='form-control' readonly />";
+        break;
+
+	}
+	echo "</div>";
+
+}
+
+
+?>
+
+    </div> <!-- End row -->
+</div> <!-- End section-content -->
+
+<!-- Broker Section -->
+<div id='inputlayer3' class="dep_waseet_isactive">
+<div class="section-header">
+    <i class="bi bi-person-badge"></i>
+    بيانات الوسيط
+</div>
+<div class="section-content">
+    <div class="row">
+
+<div class="col-md-4">
+    <label class="form-label">الوسيط</label>
+    <iframe name="readmasder" id="readmasder" width="270" style="position: absolute; top: 10px; display:none" src="../readmasder.hnt"></iframe>
+    <input type="hidden" name="masderid" id="masderid" value="<?=safe_array_get($edit_data_masder, 'masderid');?>" >
+    <button type="button" id="masderidPostion" class="btn btn-select w-100" onClick="
+        ajaxfilldiv('select masderid,masdername,masdertel,masderfax,masderemail,masderaddress,'
+            +'maktab,mtype,mtemp,addationalinfo,masderphone from masder where userid=0 or userid = '<?=$user_data['userid']?>'   ','masderid','masdername','masderid','masdername',1,this.id);
+            return false;">
+        <i class="bi bi-search"></i> أختر وسيط مسجل
+    </button>
+</div>
+
+<div class="col-md-4">
+    <label class="form-label">اسم الوسيط</label>
+    <input type="text" name="masdername" id="masdername" class="form-control"
+           value="<?=safe_array_get($edit_data_masder, 'masdername');?>"
+           title="اسم وسيط العمارة"
+           onkeyup="document.getElementById('masderid').value='';
+                    document.getElementById('masdertel').value='';
+                    document.getElementById('masderphone').value='';
+                    document.getElementById('masderfax').value='';
+                    document.getElementById('masderemail').value='';
+                    document.getElementById('masderaddress').value='';
+                    document.getElementById('addationalinfo').value='';" >
+</div>
+
+<div class="col-md-4">
+    <label class="form-label">الجوال</label>
+    <input type="text" name="masdertel" id="masdertel" class="form-control"
+           value="<?=safe_array_get($edit_data_masder, 'masdertel');?>" title="رقم التليفون" >
+</div>
+
+<div class="col-md-4">
+    <label class="form-label">هاتف</label>
+    <input type="text" name="masderphone" id="masderphone" class="form-control"
+           value="<?=safe_array_get($edit_data_masder, 'masderphone');?>" title="الثابت رقم التليفون" >
+</div>
+
+<div class="col-md-4">
+    <label class="form-label">فاكس</label>
+    <input type="text" name="masderfax" id="masderfax" class="form-control"
+           value="<?=safe_array_get($edit_data_masder, 'masderfax');?>" title="رقم الفاكس" >
+</div>
+
+<div class="col-md-4">
+    <label class="form-label">بريد الكتروني</label>
+    <input type="email" name="masderemail" id="masderemail" class="form-control"
+           value="<?=safe_array_get($edit_data_masder, 'masderemail');?>" title="البريد الإلكتروني إن وجد" >
+</div>
+
+<div class="col-md-4">
+    <label class="form-label">عنوان الوسيط</label>
+    <input type="text" name="masderaddress" id="masderaddress" class="form-control"
+           value="<?=safe_array_get($edit_data_masder, 'masderaddress');?>" title="عنوان المصدر" >
+</div>
+
+<div class="col-md-4">
+    <label class="form-label">بيانات إضافية</label>
+    <input type="text" name="addationalinfo" id="addationalinfo" class="form-control"
+           value="<?=safe_array_get($edit_data_masder, 'addationalinfo');?>" title="بيانات إضافية" >
+</div>
+
+    </div> <!-- End row -->
+</div> <!-- End section-content -->
+</div> <!-- End broker section -->
+
+
+<!-- Current Owner Section -->
+<div id='inputlayer2' class="dep_malek_isactive">
+<div class="section-header">
+    <i class="bi bi-person-fill"></i>
+    بيانات المالك الحالي
+</div>
+<div class="section-content">
+    <div class="row">
+        <div class="col-md-4">
+            <label class="form-label">اختر مالك مسجل</label>
+            <button type="button" id="msgbox2position" class="btn btn-select w-100" onClick="
+                ajaxfilldiv('select malekid,malekbayan1,malekbayan2,malekbayan3 '
+                    + ',malekbayan4 ,malekbayan5,malekbayan6,malekbayan7'
+                    +',malekbayan8,malekbayan9,malekbayan10'
+                    + '	from malek  where userid = '<?=$user_data['userid']?>' and  malekbayan1 <>'' ','malekid','malekbayan1','malekid','malekbayan1',1,this.id);
+                    return false;">
+                <i class="bi bi-search"></i> اختر مالك مسجل
+            </button>
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">اسم المالك</label>
+            <input type="hidden" name="malekid" class="malek" value="<?=safe_array_get($edit_data_malek, 'malekid');?>" id="malekid" >
+            <input type="text" name="malekbayan1" class="form-control" id="malekbayan1"
+                   onKeyUp="if($('#malekid').val()>0){$('.malek').val('');}" value="<?=safe_array_get($edit_data_malek, 'malekbayan1');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">الجوال</label>
+            <input type="text" name="malekbayan2" class="form-control malek" id="malekbayan2"
+                   value="<?=safe_array_get($edit_data_malek, 'malekbayan2');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">العنوان</label>
+            <input type="text" name="malekbayan3" class="form-control malek" id="malekbayan3"
+                   value="<?=safe_array_get($edit_data_malek, 'malekbayan3');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">رقم الصك</label>
+            <input type="text" name="malekbayan4" class="form-control malek" id="malekbayan4"
+                   value="<?=safe_array_get($edit_data_malek, 'malekbayan4');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">هاتف منزل</label>
+            <input type="text" name="malekbayan5" class="form-control malek" id="malekbayan5"
+                   value="<?=safe_array_get($edit_data_malek, 'malekbayan5');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">هاتف عمل</label>
+            <input type="text" name="malekbayan6" class="form-control malek" id="malekbayan6"
+                   value="<?=safe_array_get($edit_data_malek, 'malekbayan6');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">صندوق بريد</label>
+            <input type="text" name="malekbayan7" class="form-control malek" id="malekbayan7"
+                   value="<?=safe_array_get($edit_data_malek, 'malekbayan7');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">البريد الإلكتروني</label>
+            <input type="email" name="malekbayan8" class="form-control malek" id="malekbayan8"
+                   value="<?=safe_array_get($edit_data_malek, 'malekbayan8');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">جهة العمل</label>
+            <input type="text" name="malekbayan9" class="form-control malek" id="malekbayan9"
+                   value="<?=safe_array_get($edit_data_malek, 'malekbayan9');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">ملحوظات اضافية</label>
+            <input type="text" name="malekbayan10" class="form-control malek" id="malekbayan10"
+                   value="<?=safe_array_get($edit_data_malek, 'malekbayan10');?>">
+        </div>
+    </div> <!-- End row -->
+</div> <!-- End section-content -->
+
+<!-- Previous Owner Section -->
+<div class="section-header mt-3">
+    <i class="bi bi-person"></i>
+    بيانات المالك السابق
+</div>
+<div class="section-content">
+    <div class="row">
+        <div class="col-md-4">
+            <label class="form-label">اختر مالك مسجل</label>
+            <button type="button" id="msgbox3position" class="btn btn-select w-100" onClick="
+                ajaxfilldiv('select malekid as oldmalekid,malekbayan1 as oldmalekbayan1,malekbayan2 as oldmalekbayan2,malekbayan3 as oldmalekbayan3 '
+                    + ',malekbayan4 as oldmalekbayan4 ,malekbayan5 as oldmalekbayan5,malekbayan6 as  oldmalekbayan6,malekbayan7 as oldmalekbayan7'
+                    +',malekbayan8 as oldmalekbayan8,malekbayan9 as oldmalekbayan9,malekbayan10 as oldmalekbayan10'
+                    + '	from malek where  userid = '<?=$user_data['userid']?>'   ','oldmalekid','oldmalekbayan1','oldmalekid','oldmalekbayan1',1,this.id);
+                    return false;">
+                <i class="bi bi-search"></i> اختر مالك مسجل
+            </button>
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">اسم المالك</label>
+            <input type="hidden" name="oldmalekid" value="<?=safe_array_get($edit_data_oldmalek, 'malekid');?>" id="oldmalekid" class="oldmalek" >
+            <input type="text" name="oldmalekbayan1" id="oldmalekbayan1" class="form-control"
+                   onKeyUp="if($('#oldmalekid').val()>0){$('.oldmalek').val('');}"
+                   value="<?=safe_array_get($edit_data_oldmalek, 'malekbayan1');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">رقم الجوال</label>
+            <input type="text" name="oldmalekbayan2" class="form-control oldmalek" id="oldmalekbayan2"
+                   value="<?=safe_array_get($edit_data_oldmalek, 'malekbayan2');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">العنوان</label>
+            <input type="text" name="oldmalekbayan3" class="form-control oldmalek" id="oldmalekbayan3"
+                   value="<?=safe_array_get($edit_data_oldmalek, 'malekbayan3');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">رقم الصك</label>
+            <input type="text" name="oldmalekbayan4" class="form-control oldmalek" id="oldmalekbayan4"
+                   value="<?=safe_array_get($edit_data_oldmalek, 'malekbayan4');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">هاتف منزل</label>
+            <input type="text" name="oldmalekbayan5" class="form-control oldmalek" id="oldmalekbayan5"
+                   value="<?=safe_array_get($edit_data_oldmalek, 'malekbayan5');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">هاتف عمل</label>
+            <input type="text" name="oldmalekbayan6" class="form-control oldmalek" id="oldmalekbayan6"
+                   value="<?=safe_array_get($edit_data_oldmalek, 'malekbayan6');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">صندوق بريد</label>
+            <input type="text" name="oldmalekbayan7" class="form-control oldmalek" id="oldmalekbayan7"
+                   value="<?=safe_array_get($edit_data_oldmalek, 'malekbayan7');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">البريد الإلكتروني</label>
+            <input type="email" name="oldmalekbayan8" class="form-control oldmalek" id="oldmalekbayan8"
+                   value="<?=safe_array_get($edit_data_oldmalek, 'malekbayan8');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">جهة العمل</label>
+            <input type="text" name="oldmalekbayan9" class="form-control oldmalek" id="oldmalekbayan9"
+                   value="<?=safe_array_get($edit_data_oldmalek, 'malekbayan9');?>">
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label">ملحوظات اضافية</label>
+            <input type="text" name="oldmalekbayan10" class="form-control oldmalek" id="oldmalekbayan10"
+                   value="<?=safe_array_get($edit_data_oldmalek, 'malekbayan10');?>">
+        </div>
+    </div> <!-- End row -->
+</div> <!-- End section-content -->
+</div> <!-- End owner section -->
+
+<input type=hidden name=edit_id value="<?=isset($_REQUEST['edit_id']) ? intval($_REQUEST['edit_id']) : '';?>">
+
+<!-- Form Actions -->
+<div class="text-center mt-4 mb-4">
+    <button type="submit" class="btn-submit <?="policy_".$sc_id."_adds"?>">
+        <i class="bi bi-save"></i>
+        <?php echo (isset($_REQUEST['edit_id']) && $_REQUEST['edit_id']) ? 'تحديث البيانات' : 'اضافة وحفظ'; ?>
+    </button>
+    <button type="reset" class="btn-reset ms-3">
+        <i class="bi bi-x-circle"></i>
+        الغاء
+    </button>
+</div>
+
+<!-- Map Integration Section -->
+<div class="section-header mt-4">
+    <i class="bi bi-map"></i>
+    رسم موقع العقار على الخريطة
+</div>
+<div class="section-content">
+    <div class="alert alert-info">
+        <i class="bi bi-info-circle me-2"></i>
+        <strong>تعليمات الاستخدام:</strong>
+        <ul class="mb-0 mt-2">
+            <li>اضغط على الخريطة لإضافة نقاط تحديد الموقع</li>
+            <li>اسحب النقاط لتعديل الموقع</li>
+            <li>اضغط على أي نقطة لحذفها</li>
+            <li>استخدم زر "ملء الشاشة" للحصول على عرض أفضل</li>
+        </ul>
+    </div>
+
+    <!-- Map Hidden Fields -->
+    <input type="hidden" name="center_x" id="center_x" value="<?=safe_array_get($edit_data, 'center_x');?>">
+    <input type="hidden" name="center_y" id="center_y" value="<?=safe_array_get($edit_data, 'center_y');?>">
+    <input type="hidden" name="polypath" id="polypath" value="<?=safe_array_get($edit_data, 'polypath');?>">
+
+    <!-- Include Map Component -->
+    <?php include_once "../../../mapv3.html"; ?>
+</div>
+
+</form>
+</div> <!-- End inputlayer1 -->
+</div> <!-- End container-fluid -->
+
+<script>
+// Legacy JavaScript functions preserved for compatibility
+function getgooglenods() {
+    if(document.getElementById('googlexyz') == null) {
+        return true;
+    }
+    ajaxpost('/aqary/googlemap.hnt?usergetmap=<?=$useridv;?>', '', 'googlexyz');
+}
+
+function closallalyer() {
+    // Placeholder for layer control - preserved for compatibility
+}
+
+function openlayer(layerid) {
+    closallalyer();
+    var element = document.getElementById('inputlayer' + layerid);
+    if (element) {
+        element.style.display = 'block';
+    }
+}
+
+function changmok() {
+    var element = document.getElementById("addardframe");
+    if (element && document.getElementById('mokhatatidm')) {
+        element.src = 'addemara.hnt?mokhatatidm=' + document.getElementById('mokhatatidm').value +
+                      '&cityname=<?=$cityname;?>&cityidm=<?=$cityid;?>';
+    }
+}
+
+// Initialize layer
+openlayer(1);
+
+// Enhanced Toast Notification System
+function showBootstrapNotification(message, type = 'success', duration = 3000) {
+    const toastContainer = document.getElementById('toastContainer');
+    if (!toastContainer) {
+        console.error('Toast container not found');
+        return null;
+    }
+
+    // Generate unique ID for this toast
+    const toastId = 'toast-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+
+    // Icon and color mapping
+    const iconMap = {
+        'success': { icon: 'bi-check-circle-fill', color: '#0a7047', bg: '#d1fae5' },
+        'error': { icon: 'bi-exclamation-circle-fill', color: '#dc2626', bg: '#fee2e2' },
+        'warning': { icon: 'bi-exclamation-triangle-fill', color: '#f59e0b', bg: '#fef3c7' },
+        'info': { icon: 'bi-info-circle-fill', color: '#0891b2', bg: '#cffafe' },
+        'loading': { icon: 'bi-hourglass-split', color: '#6b7280', bg: '#f3f4f6' }
+    };
+
+    const config = iconMap[type] || iconMap['info'];
+
+    // Create toast element
+    const toastHTML = `
+        <div class="toast" id="${toastId}" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="toast-header" style="background-color: ${config.bg}; color: ${config.color};">
+                <i class="bi ${config.icon}" style="font-size: 1.2rem;"></i>
+                <strong class="me-auto ms-2">${type === 'loading' ? 'جاري التحميل' : (type === 'success' ? 'نجح' : (type === 'error' ? 'خطأ' : 'تنبيه'))}</strong>
+                <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close" style="margin-left: 0; margin-right: auto;"></button>
+            </div>
+            <div class="toast-body">${message}</div>
+        </div>
+    `;
+
+    // Insert toast
+    toastContainer.insertAdjacentHTML('beforeend', toastHTML);
+
+    const toastElement = document.getElementById(toastId);
+
+    // Setup close button
+    const closeButton = toastElement.querySelector('.btn-close');
+    if (closeButton) {
+        closeButton.addEventListener('click', function() {
+            toastElement.style.opacity = '0';
+            setTimeout(() => toastElement.remove(), 300);
+        });
+    }
+
+    // Show toast with animation
+    setTimeout(() => {
+        toastElement.style.opacity = '1';
+        toastElement.style.transition = 'opacity 0.3s ease-in-out';
+    }, 10);
+
+    // Auto-hide toast (except for loading type)
+    let hideTimeout;
+    if (type !== 'loading' && duration > 0) {
+        hideTimeout = setTimeout(() => {
+            toastElement.style.opacity = '0';
+            setTimeout(() => toastElement.remove(), 300);
+        }, duration);
+    }
+
+    // Return toast control object
+    return {
+        id: toastId,
+        element: toastElement,
+        hide: function() {
+            if (hideTimeout) clearTimeout(hideTimeout);
+            toastElement.style.opacity = '0';
+            setTimeout(() => toastElement.remove(), 300);
+        }
+    };
+}
+
+// AJAX Form Submission
+$(document).ready(function() {
+    $('#departmentForm').on('submit', function(e) {
+        e.preventDefault();
+
+        var formData = new FormData(this);
+        formData.append('ajax_submit', '1');
+
+        var submitBtn = $(this).find('button[type="submit"]');
+        var originalBtnText = submitBtn.html();
+
+        submitBtn.prop('disabled', true)
+                 .html('<i class="bi bi-hourglass-split me-2"></i>جاري الحفظ...');
+
+        var loadingToast = showBootstrapNotification('جاري حفظ البيانات...', 'loading');
+
+        $.ajax({
+            url: window.location.href.split('?')[0] + '?' + $.param(<?php echo json_encode($_GET, JSON_UNESCAPED_UNICODE); ?>),
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            dataType: 'json',
+            timeout: 60000,  // 60 seconds timeout
+            success: function(response) {
+                if (loadingToast) {
+                    loadingToast.hide();
+                }
+                submitBtn.prop('disabled', false).html(originalBtnText);
+
+                if (response.success) {
+                    showBootstrapNotification(response.message || 'تم الحفظ بنجاح', 'success', 2000);
+                    setTimeout(function() {
+                        if (response.redirect_url) {
+                            window.location.href = response.redirect_url;
+                        } else {
+                            window.location.reload();
+                        }
+                    }, 2000);
+                } else {
+                    showBootstrapNotification(response.error || 'حدث خطأ غير معروف', 'error', 5000);
+                }
+            },
+            error: function(xhr, status, error) {
+                if (loadingToast) {
+                    loadingToast.hide();
+                }
+                submitBtn.prop('disabled', false).html(originalBtnText);
+
+                var errorMessage = 'حدث خطأ في الاتصال. يرجى المحاولة مرة أخرى';
+                if (status === 'timeout') {
+                    errorMessage = 'انتهت مهلة الانتظار. يرجى المحاولة مرة أخرى';
+                } else if (xhr.status === 403) {
+                    errorMessage = 'ليس لديك الصلاحية لتنفيذ هذا الإجراء';
+                } else if (xhr.status === 404) {
+                    errorMessage = 'لم يتم العثور على الصفحة المطلوبة';
+                } else if (xhr.status === 500) {
+                    errorMessage = 'خطأ في الخادم. يرجى الاتصال بالدعم الفني';
+                }
+
+                showBootstrapNotification(errorMessage, 'error', 5000);
+                console.error('AJAX Error:', {
+                    status: status,
+                    error: error,
+                    response: xhr.responseText
+                });
+            }
+        });
+
+        return false;
+    });
+});
+</script>
+
+<iframe name="tooltipf" id="tooltipf" style="border:0px;position: absolute; top: 10px; display:none;width:350;z-index:15;" src=""></iframe>
+
+<?php endif; // End if (!$is_ajax_request) ?>
+
+<?php
+include_once "../../../foter.hnt";
+?>

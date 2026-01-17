@@ -1,0 +1,483 @@
+<?php
+/**
+ * Voucher Management - Receive/Payment Voucher
+ * Modern refactored version with AJAX support
+ */
+
+// Extract POST variables early for processing
+extract($_REQUEST);
+
+// Initialize variables
+$paymentvou = isset($paymentvou) ? intval($paymentvou) : 0;
+$period = isset($period) ? trim($period) : date("d/m/Y");
+$depositeamount = isset($depositeamount) ? floatval($depositeamount) : 0;
+$depositeamount_vat = isset($depositeamount_vat) ? floatval($depositeamount_vat) : 0;
+$mybyan = isset($mybyan) ? trim($mybyan) : '';
+$notes = isset($notes) ? trim($notes) : '';
+$mostagername = isset($mostagername) ? trim($mostagername) : '';
+$mostagervatnumber = isset($mostagervatnumber) ? trim($mostagervatnumber) : '';
+$suppliername = isset($suppliername) ? trim($suppliername) : '';
+$suppliervatnumber = isset($suppliervatnumber) ? trim($suppliervatnumber) : '';
+$payment_type = isset($payment_type) ? intval($payment_type) : 1;
+$chekorcashother = isset($chekorcashother) ? trim($chekorcashother) : '';
+$cheqnumber = isset($cheqnumber) ? trim($cheqnumber) : '';
+$cheqon = isset($cheqon) ? trim($cheqon) : '';
+$cheqdate1 = isset($cheqdate1) ? trim($cheqdate1) : '';
+$recivername = isset($recivername) ? trim($recivername) : '';
+$sanadrakam = isset($sanadrakam) ? trim($sanadrakam) : '';
+$idaqar = isset($idaqar) ? trim($idaqar) : '';
+$idsubaqar = isset($idsubaqar) ? trim($idsubaqar) : '';
+
+// Set page variables based on voucher type
+if ($paymentvou) {
+    $img = "payment.jpg";
+    $table = "payment_voucher";
+    $sc_title = "سند صرف حر";
+    $sc_id = "voucher_payment";
+} else {
+    $img = "recive.jpg";
+    $table = "recive_voucher";
+    $sc_title = "سند قبض حر";
+    $sc_id = "voucher_receive";
+}
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../nocash.hnt";
+    include_once "../../header.hnt";
+} else {
+    include_once "../../reqloginajax.hnt";
+}
+
+include_once "../../hjerymelady.ip";
+
+// Database schema updates (run silently)
+@mysql_query("ALTER TABLE payment_voucher CHANGE ryial ryial DECIMAL(10, 2) NOT NULL", $link);
+@mysql_query("ALTER TABLE recive_voucher CHANGE ryial ryial DECIMAL(10, 2) NOT NULL", $link);
+@mysql_query("ALTER TABLE payment_voucher ADD COLUMN notes VARCHAR(1000) NULL", $link);
+@mysql_query("ALTER TABLE recive_voucher ADD COLUMN notes VARCHAR(1000) NULL", $link);
+@mysql_query("ALTER TABLE payment_voucher ADD COLUMN vat DECIMAL(10, 2) NOT NULL", $link);
+@mysql_query("ALTER TABLE recive_voucher ADD COLUMN vat DECIMAL(10, 2) NOT NULL", $link);
+@mysql_query("ALTER TABLE payment_voucher ADD COLUMN mostagervatnumber VARCHAR(100) NOT NULL", $link);
+@mysql_query("ALTER TABLE recive_voucher ADD COLUMN mostagervatnumber VARCHAR(100) NOT NULL", $link);
+@mysql_query("ALTER TABLE payment_voucher ADD COLUMN suppliername VARCHAR(100) NOT NULL", $link);
+@mysql_query("ALTER TABLE recive_voucher ADD COLUMN suppliername VARCHAR(100) NOT NULL", $link);
+@mysql_query("ALTER TABLE payment_voucher ADD COLUMN suppliervatnumber VARCHAR(100) NOT NULL", $link);
+@mysql_query("ALTER TABLE recive_voucher ADD COLUMN suppliervatnumber VARCHAR(100) NOT NULL", $link);
+
+// Get max ID for reference
+$sql = "SELECT MAX(id) as dd FROM $table";
+$row = mysql_fetch_array(mysql_query($sql, $link));
+
+// Load global variables from database
+$result = mysql_query("SELECT * FROM global", $link);
+if ($result) {
+    while ($gl = mysql_fetch_array($result)) {
+        if (isset($gl['variblename']) && isset($gl['valuribalevalue'])) {
+            $varname = $gl['variblename'];
+            $$varname = $gl['valuribalevalue'];
+        }
+    }
+}
+
+// Handle AJAX form submission
+if ($is_ajax_request && isset($_POST['action']) && $_POST['action'] == 'save_voucher') {
+    header('Content-Type: application/json; charset=utf-8');
+
+    // Validate required fields
+    if (empty($depositeamount) || $depositeamount <= 0) {
+        echo json_encode([
+            'success' => false,
+            'message' => 'يرجى إدخال المبلغ'
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    if (empty($mostagername)) {
+        echo json_encode([
+            'success' => false,
+            'message' => 'يرجى إدخال اسم المستفيد'
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    // Insert voucher
+    $sql = "INSERT INTO $table SET
+        ryial = '" . floatval($depositeamount) . "',
+        sanaddate = '" . addslashes($period) . "',
+        receivedfrom = '" . addslashes($mostagername) . "',
+        receivedby = '" . addslashes($mostagername) . "',
+        chekorcash = '" . intval($payment_type) . "',
+        checknumber = '" . addslashes($cheqnumber) . "',
+        bankname = '" . addslashes($cheqon) . "',
+        checknumberen = '" . addslashes($cheqnumber) . "',
+        banknameen = '" . addslashes($cheqon) . "',
+        thrsumof = '" . floatval($depositeamount) . "',
+        dueto = '" . addslashes($mybyan) . "',
+        fmanger = '" . addslashes($recivername) . "',
+        accountant = '" . addslashes($recivername) . "',
+        casher = '" . addslashes($recivername) . "',
+        vat = '" . floatval($depositeamount_vat) . "',
+        notes = '" . addslashes($notes) . "',
+        suppliervatnumber = '" . addslashes($suppliervatnumber) . "',
+        suppliername = '" . addslashes($suppliername) . "',
+        mostagervatnumber = '" . addslashes($mostagervatnumber) . "'";
+
+		if(!$paymentvou){
+			$sql = "INSERT INTO sanad SET
+				period = '" . addslashes($period) . "',
+				mostagerid = '',
+				mostagername = '" . addslashes($mostagername) . "',
+				depositeamount = '" . floatval($depositeamount) . "',
+				recivername = '" . addslashes($recivername) . "',
+				mybyan = '" . addslashes($mybyan) . "',
+				sanadrakam = '" . addslashes($sanadrakam) . "',
+				idaqar = '" . addslashes($idaqar) . "',
+				idsubaqar = '" . addslashes($idsubaqar) . "',
+				sanaddate = '" . addslashes($period) . "',
+				cheqnumber = '" . addslashes($cheqnumber) . "',
+				cheqon = '" . addslashes($cheqon) . "',
+				cheqdate1 = '" . addslashes($cheqdate1) . "',
+				attachedimages = '',
+				kastid = '',
+				commesion_vat = '" . addslashes($mostagervatnumber) . "',
+				depositeamount_vat = '" . floatval($depositeamount_vat) . "',
+				payment_type = '" . intval($payment_type) . "',
+				notes = '" . addslashes($notes) . "',
+				suppliervatnumber = '" . addslashes($suppliervatnumber) . "',
+				suppliername = '" . addslashes($suppliername) . "',
+				mostagervatnumber = '" . addslashes($mostagervatnumber) . "',
+				formuid = '" . addslashes($_REQUEST['formuid']) . "'
+			";
+
+		}
+    $result = mysql_query($sql, $link);
+
+    if ($result) {
+        $voucher_id = mysql_insert_id($link);
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم حفظ السند بنجاح',
+            'voucher_id' => $voucher_id,
+            'redirect_url' => 'voucherhome.hnt'
+        ], JSON_UNESCAPED_UNICODE);
+    } else {
+        echo json_encode([
+            'success' => false,
+            'message' => 'حدث خطأ أثناء حفظ السند: ' . mysql_error($link)
+        ], JSON_UNESCAPED_UNICODE);
+    }
+    exit;
+}
+
+// Only output HTML if not AJAX request
+if (!$is_ajax_request):
+?>
+<!-- Main Content -->
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <!-- Page Header -->
+            <div class="card mb-4 shadow-sm border-0">
+                <div class="card-header text-white" style="background: <?= $paymentvou ? 'linear-gradient(135deg, #0891b2 0%, #0e7490 100%)' : 'linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%)' ?>;">
+                    <h4 class="mb-0">
+                        <i class="<?= $paymentvou ? 'bi bi-cash-coin' : 'bi bi-wallet2' ?> me-2"></i>
+                        <?= $sc_title ?>
+                    </h4>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-0">
+                        <i class="bi bi-info-circle me-2"></i>
+                        السند هنا سيستكمل على نفس مسلسل السندات والفواتير لديك فقط لن يكون مرتبط بأسم مستأجر معين
+                    </p>
+                </div>
+            </div>
+
+            <!-- Voucher Form -->
+            <div class="card shadow-sm">
+                <div class="card-body">
+                    <form id="voucherForm" method="post">
+                        <input type="hidden" name="ajax_submit" value="1">
+                        <input type="hidden" name="action" value="save_voucher">
+                        <input type="hidden" name="formuid" id="formuid"
+                               value="<?= str_replace('.', '', microtime(true) . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+                        <input type="hidden" name="paymentvou" value="<?= $paymentvou ?>">
+
+                        <div class="row g-3">
+                            <!-- Date -->
+                            <div class="col-md-3">
+                                <label for="period" class="form-label fw-bold">
+                                    <i class="fas fa-calendar me-1"></i>
+                                    تاريخ السند
+                                </label>
+                                <input type="text" class="form-control" id="period" name="period"
+                                       value="<?= htmlspecialchars($period) ?>" required>
+                            </div>
+
+                            <!-- Amount Including VAT -->
+                            <div class="col-md-3">
+                                <label for="depositeamount" class="form-label fw-bold">
+                                    <i class="fas fa-money-bill-wave me-1"></i>
+                                    المبلغ المدفوع شامل الضريبة
+                                </label>
+                                <input type="number" step="0.01" class="form-control" id="depositeamount"
+                                       name="depositeamount" value="<?= $depositeamount ?>" required>
+                            </div>
+
+                            <!-- VAT Amount -->
+                            <div class="col-md-3">
+                                <label for="depositeamount_vat" class="form-label fw-bold">
+                                    <i class="fas fa-percentage me-1"></i>
+                                    ضريبة القيمة المضافة
+                                </label>
+                                <input type="number" step="0.01" class="form-control" id="depositeamount_vat"
+                                       name="depositeamount_vat" value="<?= $depositeamount_vat ?>">
+                            </div>
+
+                            <!-- Description -->
+                            <div class="col-md-3">
+                                <label for="mybyan" class="form-label fw-bold">
+                                    <i class="fas fa-align-left me-1"></i>
+                                    البيان
+                                </label>
+                                <input type="text" class="form-control" id="mybyan" name="mybyan"
+                                       value="<?= htmlspecialchars($mybyan) ?>">
+                            </div>
+
+                            <!-- Notes -->
+                            <div class="col-12">
+                                <label for="notes" class="form-label fw-bold">
+                                    <i class="fas fa-sticky-note me-1"></i>
+                                    ملاحظات
+                                </label>
+                                <textarea class="form-control" id="notes" name="notes" rows="2"><?= htmlspecialchars($notes) ?></textarea>
+                            </div>
+
+                            <!-- Beneficiary Name -->
+                            <div class="col-md-3">
+                                <label for="mostagername" class="form-label fw-bold">
+                                    <i class="fas fa-user me-1"></i>
+                                    اسم المستفيد
+                                </label>
+                                <input type="text" class="form-control" id="mostagername" name="mostagername"
+                                       value="<?= htmlspecialchars($mostagername) ?>" required>
+                            </div>
+
+                            <!-- Beneficiary VAT Number -->
+                            <div class="col-md-3">
+                                <label for="mostagervatnumber" class="form-label fw-bold">
+                                    <i class="fas fa-hashtag me-1"></i>
+                                    رقم ضريبي المستفيد
+                                </label>
+                                <input type="text" class="form-control" id="mostagervatnumber" name="mostagervatnumber"
+                                       value="<?= htmlspecialchars($mostagervatnumber) ?>">
+                            </div>
+
+                            <!-- Supplier Name -->
+                            <div class="col-md-3">
+                                <label for="suppliername" class="form-label fw-bold">
+                                    <i class="fas fa-building me-1"></i>
+                                    اسم المورد
+                                </label>
+                                <input type="text" class="form-control" id="suppliername" name="suppliername"
+                                       value="<?= htmlspecialchars($suppliername) ?>">
+                            </div>
+
+                            <!-- Supplier VAT Number -->
+                            <div class="col-md-3">
+                                <label for="suppliervatnumber" class="form-label fw-bold">
+                                    <i class="fas fa-hashtag me-1"></i>
+                                    رقم ضريبي للمورد
+                                </label>
+                                <input type="text" class="form-control" id="suppliervatnumber" name="suppliervatnumber"
+                                       value="<?= htmlspecialchars($suppliervatnumber) ?>">
+                            </div>
+
+                            <!-- Payment Method -->
+                            <div class="col-12">
+                                <label class="form-label fw-bold">
+                                    <i class="fas fa-credit-card me-1"></i>
+                                    طريقة الدفع
+                                </label>
+                                <div class="d-flex flex-wrap gap-3">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="radio" name="payment_type"
+                                               id="cheqorchash1" value="1" <?= $payment_type == 1 ? 'checked' : '' ?>>
+                                        <label class="form-check-label" for="cheqorchash1">نقدا</label>
+                                    </div>
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="radio" name="payment_type"
+                                               id="cheqorchash2" value="2" <?= $payment_type == 2 ? 'checked' : '' ?>>
+                                        <label class="form-check-label" for="cheqorchash2">شيك</label>
+                                    </div>
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="radio" name="payment_type"
+                                               id="cheqorchash3" value="3" <?= $payment_type == 3 ? 'checked' : '' ?>>
+                                        <label class="form-check-label" for="cheqorchash3">طريقة اخرى</label>
+                                    </div>
+                                    <input type="text" class="form-control" style="max-width: 300px;"
+                                           id="chekorcashother" name="chekorcashother"
+                                           placeholder="حدد الطريقة الأخرى"
+                                           value="<?= htmlspecialchars($chekorcashother) ?>">
+                                </div>
+                            </div>
+
+                            <!-- Check Number -->
+                            <div class="col-md-4">
+                                <label for="cheqnumber" class="form-label fw-bold">
+                                    <i class="fas fa-file-invoice me-1"></i>
+                                    رقم الشيك
+                                </label>
+                                <input type="text" class="form-control" id="cheqnumber" name="cheqnumber"
+                                       value="<?= htmlspecialchars($cheqnumber) ?>">
+                            </div>
+
+                            <!-- Bank Name -->
+                            <div class="col-md-4">
+                                <label for="cheqon" class="form-label fw-bold">
+                                    <i class="fas fa-university me-1"></i>
+                                    اسم البنك
+                                </label>
+                                <input type="text" class="form-control" id="cheqon" name="cheqon"
+                                       value="<?= htmlspecialchars($cheqon) ?>">
+                            </div>
+
+                            <!-- Check Date -->
+                            <div class="col-md-4">
+                                <label for="cheqdate1" class="form-label fw-bold">
+                                    <i class="fas fa-calendar-check me-1"></i>
+                                    تاريخ الشيك
+                                </label>
+                                <input type="text" class="form-control" id="cheqdate1" name="cheqdate1"
+                                       value="<?= htmlspecialchars($cheqdate1) ?>">
+                            </div>
+
+                            <!-- Accountant -->
+                            <div class="col-12">
+                                <label for="recivername" class="form-label fw-bold">
+                                    <i class="fas fa-user-tie me-1"></i>
+                                    المحاسب
+                                </label>
+                                <input type="text" class="form-control" id="recivername" name="recivername"
+                                       value="<?= isset($user_data['name']) ? htmlspecialchars($user_data['name']) : '' ?>" readonly>
+                            </div>
+                        </div>
+
+                        <!-- Form Actions -->
+                        <div class="row mt-4">
+                            <div class="col-12">
+                                <div class="d-flex gap-2 justify-content-center">
+                                    <button type="submit" class="btn btn-primary btn-lg px-5" id="saveVoucherBtn">
+                                        <i class="fas fa-save me-2"></i>
+                                        حفظ السند
+                                    </button>
+                                    <button type="button" class="btn btn-secondary btn-lg px-4" onclick="window.location.href='voucherhome.hnt'">
+                                        <i class="fas fa-times me-2"></i>
+                                        إغلاق وعودة
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Toast Notification Container -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index: 11">
+    <div id="voucherToast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
+        <div class="toast-header">
+            <strong class="me-auto">إشعار</strong>
+            <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+        </div>
+        <div class="toast-body"></div>
+    </div>
+</div>
+
+<script>
+// Modern JavaScript for form handling
+document.addEventListener('DOMContentLoaded', function() {
+    const voucherForm = document.getElementById('voucherForm');
+    const saveBtn = document.getElementById('saveVoucherBtn');
+
+    // Form submission handler
+    voucherForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+
+        // Disable button to prevent double submission
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>جاري الحفظ...';
+
+        // Get form data
+        const formData = new FormData(voucherForm);
+
+        // Submit via AJAX
+        fetch('recive_voucher.hnt', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showNotification(data.message, 'success');
+
+                // Redirect after short delay
+                setTimeout(() => {
+                    if (data.redirect_url) {
+                        window.location.href = data.redirect_url;
+                    }
+                }, 1500);
+            } else {
+                showNotification(data.message, 'error');
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = '<i class="fas fa-save me-2"></i>حفظ السند';
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showNotification('حدث خطأ أثناء حفظ السند', 'error');
+            saveBtn.disabled = false;
+            saveBtn.innerHTML = '<i class="fas fa-save me-2"></i>حفظ السند';
+        });
+    });
+
+    // Show notification function
+    function showNotification(message, type) {
+        const toastEl = document.getElementById('voucherToast');
+        const toastBody = toastEl.querySelector('.toast-body');
+        const toastHeader = toastEl.querySelector('.toast-header');
+
+        // Set message
+        toastBody.textContent = message;
+
+        // Set color based on type
+        toastHeader.className = 'toast-header ' + (type === 'success' ? 'bg-success text-white' : 'bg-danger text-white');
+
+        // Show toast
+        const toast = new bootstrap.Toast(toastEl);
+        toast.show();
+    }
+
+    // Auto-calculate VAT if needed
+    const amountInput = document.getElementById('depositeamount');
+    const vatInput = document.getElementById('depositeamount_vat');
+
+    amountInput.addEventListener('input', function() {
+        // Optional: Auto-calculate VAT at 15%
+        // Uncomment if you want automatic VAT calculation
+        // const amount = parseFloat(this.value) || 0;
+        // const vat = (amount * 0.15 / 1.15).toFixed(2);
+        // vatInput.value = vat;
+    });
+});
+</script>
+
+<?php
+include_once "../../footer.hnt";
+endif;
+?>

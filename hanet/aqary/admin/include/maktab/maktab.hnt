@@ -1,0 +1,867 @@
+<?php
+// Set page variables
+$sc_title = "دليل هواتف المكاتب والوسطاء";
+$sc_id = "67";
+
+// Extract POST variables early
+extract($_REQUEST);
+
+// Check if this is an AJAX form submission - handle it BEFORE any HTML output
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+} else {
+    // Always include authentication and database
+    include_once "../../../reqloginajax.hnt";
+}
+
+// Delete handling
+if (isset($deletemaktab) && $deletemaktab && $deletemaktab != "**") {
+    $sql = "DELETE FROM masder WHERE masderid = '" . intval($deletemaktab) . "' LIMIT 1";
+    mysql_query($sql, $link);
+    echo "<script>showBootstrapNotification('تم حذف هذا السجل بنجاح', 'success', 3000);</script>";
+}
+
+if (isset($deletemaktab) && $deletemaktab == "**") {
+    echo "<script>showBootstrapNotification('تحتاج لصلاحية المدير العام لحذف هذا الوسيط', 'error', 5000);</script>";
+}
+
+// Update handling (editing existing record)
+if (isset($action) && $action == 'update' && isset($edit_masderid) && $edit_masderid) {
+    if (isset($masdername) && $masdername) {
+        $sqlmasder = "UPDATE masder SET
+            masdername = '" . addslashes($masdername) . "',
+            masdertel = '" . addslashes($masdertel ?? '') . "',
+            masderfax = '" . addslashes($masderfax ?? '') . "',
+            addationalinfo = '" . addslashes($addationalinfo ?? '') . "',
+            masderphone = '" . addslashes($masderphone ?? '') . "',
+            masderemail = '" . addslashes($masderemail ?? '') . "',
+            masderaddress = '" . addslashes($masderaddress ?? '') . "',
+            mtype = '" . addslashes($mtype ?? '') . "'
+            WHERE masderid = '" . intval($edit_masderid) . "' LIMIT 1";
+
+        mysql_query($sqlmasder, $link);
+
+        // Handle AJAX response
+        if ($is_ajax_request) {
+            // Build redirect URL with pagination context
+            $redirect_params = "";
+            if (isset($page) && $page && $page > 1) {
+                $redirect_params .= "page=" . intval($page);
+            }
+            if (isset($_REQUEST['showmasdersql']) && $_REQUEST['showmasdersql']) {
+                $redirect_params .= ($redirect_params ? "&" : "") . "showmasdersql=" . urlencode($_REQUEST['showmasdersql']);
+            }
+            if (isset($_REQUEST['showrakamsql']) && $_REQUEST['showrakamsql']) {
+                $redirect_params .= ($redirect_params ? "&" : "") . "showrakamsql=" . urlencode($_REQUEST['showrakamsql']);
+            }
+            if (isset($_REQUEST['mtypex']) && $_REQUEST['mtypex']) {
+                $redirect_params .= ($redirect_params ? "&" : "") . "mtypex=" . urlencode($_REQUEST['mtypex']);
+            }
+            if (isset($_REQUEST['mtype']) && $_REQUEST['mtype']) {
+                $redirect_params .= ($redirect_params ? "&" : "") . "mtype=" . urlencode($_REQUEST['mtype']);
+            }
+
+            echo json_encode(array(
+                'success' => true,
+                'message' => 'تم تحديث بيانات المكتب بنجاح',
+                'redirect_url' => 'maktab.hnt' . ($redirect_params ? '?' . $redirect_params : '')
+            ), JSON_UNESCAPED_UNICODE);
+            exit;
+        } else {
+            echo "<script>showBootstrapNotification('تم تحديث بيانات المكتب بنجاح', 'success', 3000);</script>";
+        }
+    }
+}
+
+// Insert handling (adding new record)
+if (isset($action) && $action == 'insert' && !isset($edit_masderid)) {
+    if (isset($masdername) && $masdername) {
+        // Check for duplicates
+        $sqlmasder = "SELECT masderid FROM masder WHERE masdername = '" . addslashes($masdername) . "'";
+        $masderid_check = mysql_query($sqlmasder, $link);
+        $masderid_row = mysql_fetch_array($masderid_check);
+        $masderid_check = $masderid_row ? $masderid_row['masderid'] : false;
+
+        $duplicate_warning = "";
+        if ($masderid_check) {
+            $duplicate_warning = "تلاحظ أن المكتب الذي تم إضافته مكرر قد يكون مجرد تشابه في الأسماء ولكننا وددنا أن نلفت انتباهكم";
+            if ($is_ajax_request) {
+                // For AJAX, we still proceed but include warning in response
+            } else {
+                echo "<script>showBootstrapNotification('" . addslashes($duplicate_warning) . "', 'warning', 6000);</script>";
+            }
+        }
+
+        // Insert new record
+        $sqlmasder = "INSERT INTO masder SET
+            masdername = '" . addslashes($masdername) . "',
+            masdertel = '" . addslashes($masdertel ?? '') . "',
+            masderfax = '" . addslashes($masderfax ?? '') . "',
+            addationalinfo = '" . addslashes($addationalinfo ?? '') . "',
+            masderphone = '" . addslashes($masderphone ?? '') . "',
+            masderemail = '" . addslashes($masderemail ?? '') . "',
+            masderaddress = '" . addslashes($masderaddress ?? '') . "',
+            mtype = '" . addslashes($mtype ?? '') . "'";
+
+        mysql_query($sqlmasder, $link);
+
+        // Handle AJAX response
+        if ($is_ajax_request) {
+            $message = 'تم إضافة المكتب بنجاح';
+            if ($duplicate_warning) {
+                $message .= ' - ' . $duplicate_warning;
+            }
+
+            echo json_encode(array(
+                'success' => true,
+                'message' => $message,
+                'redirect_url' => 'maktab.hnt'
+            ), JSON_UNESCAPED_UNICODE);
+            exit;
+        } else {
+            echo "<script>showBootstrapNotification('تم إضافة المكتب بنجاح', 'success', 3000);</script>";
+        }
+    }
+}
+
+?>
+
+<!-- Bootstrap 5.3 Toast Container -->
+<div id="toast-container" class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 9999;"></div>
+
+<style>
+.section-header {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1.5rem;
+    margin-top: 1.5rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.1rem;
+}
+
+.form-label {
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: #495057;
+    text-align: right;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.required-mark {
+    color: #dc3545;
+}
+
+/* Bootstrap 5.3 Toast Customization */
+.toast {
+    min-width: 350px;
+    backdrop-filter: blur(10px);
+}
+
+.toast-body {
+    font-size: 0.95rem;
+    font-weight: 500;
+}
+
+/* RTL Support for Arabic */
+.toast-body[dir="rtl"] {
+    text-align: right;
+}
+
+/* Custom background colors for better contrast */
+.bg-success-subtle {
+    background-color: #d1e7dd !important;
+    border-left: 4px solid #198754;
+}
+
+.bg-danger-subtle {
+    background-color: #f8d7da !important;
+    border-left: 4px solid #dc3545;
+}
+
+.bg-warning-subtle {
+    background-color: #fff3cd !important;
+    border-left: 4px solid #ffc107;
+}
+
+.bg-info-subtle {
+    background-color: #cff4fc !important;
+    border-left: 4px solid #0dcaf0;
+}
+</style>
+
+<script>
+/**
+ * Bootstrap 5.3 Toast Notification System
+ * Replaces deprecated showlayerbox() function
+ *
+ * @param {string} message - The message to display
+ * @param {string} type - Notification type: 'success', 'error', 'warning', 'loading'
+ * @param {number} duration - Auto-hide duration in milliseconds (default: 3000)
+ * @returns {bootstrap.Toast} Bootstrap Toast instance
+ */
+function showBootstrapNotification(message, type = 'success', duration = 3000) {
+    // Create unique toast ID
+    const toastId = 'toast-' + Date.now();
+
+    // Icon mapping for different notification types
+    const iconMap = {
+        'success': 'bi-check-circle-fill text-success',
+        'error': 'bi-x-circle-fill text-danger',
+        'warning': 'bi-exclamation-triangle-fill text-warning',
+        'loading': 'bi-hourglass-split text-info'
+    };
+
+    // Background color mapping
+    const bgMap = {
+        'success': 'bg-success-subtle',
+        'error': 'bg-danger-subtle',
+        'warning': 'bg-warning-subtle',
+        'loading': 'bg-info-subtle'
+    };
+
+    const icon = iconMap[type] || iconMap['success'];
+    const bgClass = bgMap[type] || bgMap['success'];
+
+    // Create toast HTML
+    const toastHtml = `
+        <div id="${toastId}" class="toast ${bgClass} border-0 shadow-lg" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="toast-body d-flex align-items-center gap-3 p-3">
+                <i class="bi ${icon} fs-4"></i>
+                <div class="flex-grow-1" dir="rtl">${message}</div>
+                ${type !== 'loading' ? '<button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>' : ''}
+            </div>
+        </div>
+    `;
+
+    // Add to container
+    const container = document.getElementById('toast-container');
+    if (!container) {
+        console.error('Toast container not found');
+        return null;
+    }
+
+    container.insertAdjacentHTML('beforeend', toastHtml);
+
+    // Initialize and show toast
+    const toastElement = document.getElementById(toastId);
+    const toast = new bootstrap.Toast(toastElement, {
+        autohide: type !== 'loading',
+        delay: duration
+    });
+
+    toast.show();
+
+    // Remove from DOM after hidden
+    toastElement.addEventListener('hidden.bs.toast', function () {
+        toastElement.remove();
+    });
+
+    return toast;
+}
+
+/**
+ * AJAX Form Submission Handler
+ * Prevents page refresh and browser resubmit dialog
+ */
+function submitMaktabForm(event) {
+    event.preventDefault();
+
+    const form = event.target;
+    const formData = new FormData(form);
+    const isEditMode = formData.get('action') === 'update';
+
+    // Show loading message
+    const loadingToast = showBootstrapNotification('جاري المعالجة...', 'loading');
+
+    // Add AJAX flag to identify AJAX requests
+    formData.append('ajax_submit', '1');
+
+    // Submit via AJAX
+    fetch('maktab.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .catch(error => {
+        console.error('Error:', error);
+        // Hide loading toast
+        if (loadingToast) {
+            loadingToast.hide();
+        }
+        showBootstrapNotification('حدث خطأ في الاتصال. يرجى المحاولة مرة أخرى', 'error', 5000);
+    })
+    .then(data => {
+        // Hide loading toast
+        if (loadingToast) {
+            loadingToast.hide();
+        }
+
+        if (data && data.success) {
+            // Show success message
+            showBootstrapNotification(data.message, 'success', 2000);
+
+            // Redirect after success to avoid resubmit
+            setTimeout(() => {
+                const redirectUrl = data.redirect_url || 'maktab.hnt';
+                window.location.href = redirectUrl;
+            }, 2000);
+        } else if (data && data.error) {
+            // Show error message
+            showBootstrapNotification(data.error, 'error', 5000);
+        }
+    })
+    .catch(error => {
+        console.error('JSON Parse Error:', error);
+        // Hide loading toast
+        if (loadingToast) {
+            loadingToast.hide();
+        }
+        showBootstrapNotification('حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى', 'error', 5000);
+    });
+
+    return false;
+}
+</script>
+
+<?php if (!$is_ajax_request) { ?>
+
+<div class="container-fluid py-3">
+    <!-- Page Header -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-telephone me-2"></i>
+                <?= $sc_title ?>
+            </h4>
+        </div>
+    </div>
+
+    <!-- Add/Edit Office Form -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-body p-4">
+            <?php
+            // Detect edit mode from dof=1 parameter
+            $is_edit_mode = isset($dof) && $dof == 1 && isset($masderid) && $masderid;
+
+            // Load existing data if editing
+            $form_data = array();
+            if ($is_edit_mode) {
+                $sql = "SELECT * FROM masder WHERE masderid = '" . intval($masderid) . "'";
+                $result = mysql_query($sql, $link);
+                $form_data = mysql_fetch_array($result);
+            }
+
+            // Build query string for pagination context
+            $pagination_query = "";
+            if (isset($page) && $page && $page > 1) {
+                $pagination_query .= "page=" . intval($page);
+            }
+            if (isset($_REQUEST['showmasdersql']) && $_REQUEST['showmasdersql']) {
+                $pagination_query .= ($pagination_query ? "&" : "") . "showmasdersql=" . urlencode($_REQUEST['showmasdersql']);
+            }
+            if (isset($_REQUEST['showrakamsql']) && $_REQUEST['showrakamsql']) {
+                $pagination_query .= ($pagination_query ? "&" : "") . "showrakamsql=" . urlencode($_REQUEST['showrakamsql']);
+            }
+            if (isset($_REQUEST['mtypex']) && $_REQUEST['mtypex']) {
+                $pagination_query .= ($pagination_query ? "&" : "") . "mtypex=" . urlencode($_REQUEST['mtypex']);
+            }
+            if (isset($_REQUEST['mtype']) && $_REQUEST['mtype']) {
+                $pagination_query .= ($pagination_query ? "&" : "") . "mtype=" . urlencode($_REQUEST['mtype']);
+            }
+            ?>
+
+            <!-- Edit Mode Section Header -->
+            <div class="section-header">
+                <i class="bi <?= $is_edit_mode ? 'bi-pencil-square' : 'bi-plus-circle' ?>"></i>
+                <span><?= $is_edit_mode ? 'تعديل بيانات المكتب أو الوسيط' : 'إضافة مكتب أو وسيط جديد' ?></span>
+            </div>
+
+            <form method="post" action="maktab.hnt<?= $pagination_query ? '?' . $pagination_query : '' ?>" class="p-3" onsubmit="submitMaktabForm(event)">
+                <!-- Hidden fields for pagination context -->
+                <?php if (isset($page) && $page) { ?>
+                    <input type="hidden" name="page" value="<?= intval($page) ?>">
+                <?php } ?>
+                <?php if (isset($_REQUEST['showmasdersql']) && $_REQUEST['showmasdersql']) { ?>
+                    <input type="hidden" name="showmasdersql" value="<?= htmlspecialchars($_REQUEST['showmasdersql'], ENT_QUOTES, 'UTF-8') ?>">
+                <?php } ?>
+                <?php if (isset($_REQUEST['showrakamsql']) && $_REQUEST['showrakamsql']) { ?>
+                    <input type="hidden" name="showrakamsql" value="<?= htmlspecialchars($_REQUEST['showrakamsql'], ENT_QUOTES, 'UTF-8') ?>">
+                <?php } ?>
+                <?php if (isset($_REQUEST['mtypex']) && $_REQUEST['mtypex']) { ?>
+                    <input type="hidden" name="mtypex" value="<?= htmlspecialchars($_REQUEST['mtypex'], ENT_QUOTES, 'UTF-8') ?>">
+                <?php } ?>
+
+                <div class="row g-4">
+                    <!-- Office Name -->
+                    <div class="col-lg-6">
+                        <label class="form-label">
+                            <i class="bi bi-building text-primary me-1"></i>
+                            اسم المكتب أو الوسيط
+                            <span class="required-mark">*</span>
+                        </label>
+                        <input type="text" name="masdername" class="form-control"
+                               value="<?= isset($form_data['masdername']) ? htmlspecialchars($form_data['masdername'], ENT_QUOTES, 'UTF-8') : '' ?>"
+                               placeholder="اسم الوسيط" required>
+                    </div>
+
+                    <!-- Mobile Phone -->
+                    <div class="col-lg-6">
+                        <label class="form-label">
+                            <i class="bi bi-telephone text-success me-1"></i>
+                            رقم الجوال
+                        </label>
+                        <input type="tel" name="masdertel" class="form-control"
+                               value="<?= isset($form_data['masdertel']) ? htmlspecialchars($form_data['masdertel'], ENT_QUOTES, 'UTF-8') : '' ?>"
+                               placeholder="رقم الجوال">
+                    </div>
+
+                    <!-- Fixed Phone -->
+                    <div class="col-lg-6">
+                        <label class="form-label">
+                            <i class="bi bi-telephone-inbound text-info me-1"></i>
+                            رقم الهاتف الثابت
+                        </label>
+                        <input type="tel" name="masderphone" class="form-control"
+                               value="<?= isset($form_data['masderphone']) ? htmlspecialchars($form_data['masderphone'], ENT_QUOTES, 'UTF-8') : '' ?>"
+                               placeholder="رقم الهاتف">
+                    </div>
+
+                    <!-- Fax -->
+                    <div class="col-lg-6">
+                        <label class="form-label">
+                            <i class="bi bi-printer text-warning me-1"></i>
+                            رقم الفاكس
+                        </label>
+                        <input type="tel" name="masderfax" class="form-control"
+                               value="<?= isset($form_data['masderfax']) ? htmlspecialchars($form_data['masderfax'], ENT_QUOTES, 'UTF-8') : '' ?>"
+                               placeholder="رقم الفاكس">
+                    </div>
+
+                    <!-- Email -->
+                    <div class="col-lg-6">
+                        <label class="form-label">
+                            <i class="bi bi-envelope text-danger me-1"></i>
+                            البريد الإلكتروني
+                        </label>
+                        <input type="email" name="masderemail" class="form-control"
+                               value="<?= isset($form_data['masderemail']) ? htmlspecialchars($form_data['masderemail'], ENT_QUOTES, 'UTF-8') : '' ?>"
+                               placeholder="البريد الإلكتروني">
+                    </div>
+
+                    <!-- Address -->
+                    <div class="col-lg-6">
+                        <label class="form-label">
+                            <i class="bi bi-geo-alt text-info me-1"></i>
+                            العنوان
+                        </label>
+                        <input type="text" name="masderaddress" class="form-control"
+                               value="<?= isset($form_data['masderaddress']) ? htmlspecialchars($form_data['masderaddress'], ENT_QUOTES, 'UTF-8') : '' ?>"
+                               placeholder="عنوان المكتب">
+                    </div>
+
+                    <!-- Additional Information -->
+                    <div class="col-lg-6">
+                        <label class="form-label">
+                            <i class="bi bi-info-circle text-secondary me-1"></i>
+                            بيانات إضافية
+                        </label>
+                        <input type="text" name="addationalinfo" class="form-control"
+                               value="<?= isset($form_data['addationalinfo']) ? htmlspecialchars($form_data['addationalinfo'], ENT_QUOTES, 'UTF-8') : '' ?>"
+                               placeholder="معلومات إضافية">
+                    </div>
+
+                    <!-- Classification Type -->
+                    <div class="col-lg-6">
+                        <label class="form-label">
+                            <i class="bi bi-tag text-info me-1"></i>
+                            التصنيف
+                        </label>
+                        <input type="text" name="mtype" class="form-control"
+                               value="<?= isset($form_data['mtype']) ? htmlspecialchars($form_data['mtype'], ENT_QUOTES, 'UTF-8') : '' ?>"
+                               placeholder="مثال: مسوق - مالك - وسيط">
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div class="col-12 d-flex flex-wrap gap-2 justify-content-end mt-4">
+                        <?php if ($is_edit_mode) { ?>
+                            <input type="hidden" name="action" value="update">
+                            <input type="hidden" name="edit_masderid" value="<?= intval($masderid) ?>">
+                            <button type="submit" class="btn btn-primary btn-lg <?= "policy_".$sc_id."_edits" ?>">
+                                <i class="bi bi-pencil-square me-2"></i>
+                                تحديث البيانات
+                            </button>
+                            <button type="button" class="btn btn-outline-secondary btn-lg"
+                                    onclick="window.location.href='maktab.hnt<?= $pagination_query ? '?' . $pagination_query : '' ?>';">
+                                <i class="bi bi-arrow-counterclockwise me-2"></i>
+                                إلغاء
+                            </button>
+                        <?php } else { ?>
+                            <input type="hidden" name="action" value="insert">
+                            <button type="submit" class="btn btn-success btn-lg <?= "policy_".$sc_id."_adds" ?>">
+                                <i class="bi bi-plus-circle me-2"></i>
+                                إضافة إلى الهواتف
+                            </button>
+                            <button type="button" class="btn btn-outline-secondary btn-lg"
+                                    onclick="window.location.href='maktab.hnt';">
+                                <i class="bi bi-arrow-counterclockwise me-2"></i>
+                                إدخال جديد
+                            </button>
+                        <?php } ?>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+<?php } ?>
+
+<?php
+// Build query parameters for types
+$sql = "SELECT DISTINCT mtype FROM masder WHERE mtype != '' ORDER BY mtype";
+$result = mysql_query($sql, $link);
+$type_options = array();
+while ($row = mysql_fetch_array($result)) {
+    if ($row['mtype']) {
+        $type_options[$row['mtype']] = $row['mtype'];
+    }
+}
+
+// Build search conditions
+$where = "";
+if (isset($showmasdersql) && $showmasdersql) {
+    $where = " WHERE BINARY masdername LIKE '%" . addslashes($showmasdersql) . "%'";
+    if (isset($mtype) && $mtype && $mtype != "الكل") {
+        $where .= " AND mtype = '" . addslashes($mtype) . "'";
+    }
+} elseif (isset($showrakamsql) && $showrakamsql) {
+    $where = " WHERE (BINARY masdertel LIKE '%" . addslashes($showrakamsql) . "%' OR BINARY masderphone LIKE '%" . addslashes($showrakamsql) . "%')";
+    if (isset($mtype) && $mtype && $mtype != "الكل") {
+        $where .= " AND mtype = '" . addslashes($mtype) . "'";
+    }
+} elseif (isset($mtypex) && $mtypex) {
+    $where = " WHERE mtype = '" . addslashes($mtypex) . "'";
+}
+
+// Pagination
+$sql = "SELECT COUNT(masderid) as dd FROM masder {$where}";
+$rownum = mysql_fetch_array(mysql_query($sql, $link));
+$rownum = isset($rownum['dd']) ? $rownum['dd'] : 0;
+$maxrows = 100;
+$pagenum = ceil($rownum / $maxrows);
+
+if (!isset($page) || $page == '' || $page < 1) {
+    $page = 1;
+}
+
+$limit = (($page - 1) * $maxrows) . "," . $maxrows;
+if ($page == 1 || $page == '') {
+    $limit = $maxrows;
+}
+
+// Get list of users with permissions
+$sql = "SELECT MIN(userid) as manager_id FROM user";
+$user_result = mysql_fetch_array(mysql_query($sql, $link));
+$manager_id = isset($user_result['manager_id']) ? $user_result['manager_id'] : 0;
+
+// Get user's associated offices for visibility checking
+$mymasderarr = array();
+$masder_types = array('arady', 'emara', 'vila');
+foreach ($masder_types as $type) {
+    $sqlmasderid = "SELECT DISTINCT masderid FROM {$type} WHERE custumerid = '" . intval($_SESSION['useridv']) . "'";
+    if ($type == 'arady') {
+        $sqlmasderid = "SELECT DISTINCT masderid FROM arady WHERE custummerid = '" . intval($_SESSION['useridv']) . "'";
+    }
+    $masderarr = mysql_query($sqlmasderid, $link);
+    while ($row = mysql_fetch_array($masderarr)) {
+        $mymasderarr[] = $row['masderid'];
+    }
+}
+?>
+
+<?php if (!$is_ajax_request) { ?>
+    <!-- Search and Filter Section -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header" style="background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);">
+            <h5 class="mb-0 text-white">
+                <i class="bi bi-search me-2"></i>
+                البحث والتصفية
+            </h5>
+        </div>
+        <div class="card-body p-4">
+            <div class="row g-3">
+                <!-- Search by Name -->
+                <div class="col-lg-4">
+                    <form method="get" action="maktab.hnt" class="d-flex gap-2">
+                        <div class="flex-grow-1">
+                            <label class="form-label">
+                                <i class="bi bi-search text-primary me-1"></i>
+                                بحث بالاسم
+                            </label>
+                            <input type="text" name="showmasdersql" class="form-control"
+                                   placeholder="ابحث بالاسم..." value="<?= isset($_REQUEST['showmasdersql']) ? htmlspecialchars($_REQUEST['showmasdersql'], ENT_QUOTES, 'UTF-8') : '' ?>">
+                        </div>
+                        <div style="width: 100px;">
+                            <label class="form-label">
+                                <i class="bi bi-filter text-info me-1"></i>
+                                التصنيف
+                            </label>
+                            <select name="mtype" class="form-select form-select-sm">
+                                <option value="">الكل</option>
+                                <?php foreach ($type_options as $type) { ?>
+                                    <option value="<?= htmlspecialchars($type, ENT_QUOTES, 'UTF-8') ?>"
+                                            <?= (isset($_REQUEST['mtype']) && $_REQUEST['mtype'] == $type) ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($type, ENT_QUOTES, 'UTF-8') ?>
+                                    </option>
+                                <?php } ?>
+                            </select>
+                        </div>
+                        <div style="display: flex; align-items: flex-end;">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="bi bi-search me-1"></i>
+                                بحث
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Search by Phone -->
+                <div class="col-lg-4">
+                    <form method="get" action="maktab.hnt" class="d-flex gap-2">
+                        <div class="flex-grow-1">
+                            <label class="form-label">
+                                <i class="bi bi-telephone text-success me-1"></i>
+                                بحث برقم
+                            </label>
+                            <input type="text" name="showrakamsql" class="form-control"
+                                   placeholder="ابحث برقم الهاتف..." value="<?= isset($_REQUEST['showrakamsql']) ? htmlspecialchars($_REQUEST['showrakamsql'], ENT_QUOTES, 'UTF-8') : '' ?>">
+                        </div>
+                        <div style="width: 100px;">
+                            <label class="form-label">
+                                <i class="bi bi-filter text-info me-1"></i>
+                                التصنيف
+                            </label>
+                            <select name="mtype" class="form-select form-select-sm">
+                                <option value="">الكل</option>
+                                <?php foreach ($type_options as $type) { ?>
+                                    <option value="<?= htmlspecialchars($type, ENT_QUOTES, 'UTF-8') ?>"
+                                            <?= (isset($_REQUEST['mtype']) && $_REQUEST['mtype'] == $type) ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($type, ENT_QUOTES, 'UTF-8') ?>
+                                    </option>
+                                <?php } ?>
+                            </select>
+                        </div>
+                        <div style="display: flex; align-items: flex-end;">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="bi bi-search me-1"></i>
+                                بحث
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Filter by Type -->
+                <div class="col-lg-4">
+                    <form method="get" action="maktab.hnt" class="d-flex gap-2">
+                        <div class="flex-grow-1">
+                            <label class="form-label">
+                                <i class="bi bi-funnel text-warning me-1"></i>
+                                عرض بالتصنيف
+                            </label>
+                            <select name="mtypex" class="form-select" onchange="this.form.submit();">
+                                <option value="">-- اختر التصنيف --</option>
+                                <?php foreach ($type_options as $type) { ?>
+                                    <option value="<?= htmlspecialchars($type, ENT_QUOTES, 'UTF-8') ?>"
+                                            <?= (isset($_REQUEST['mtypex']) && $_REQUEST['mtypex'] == $type) ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($type, ENT_QUOTES, 'UTF-8') ?>
+                                    </option>
+                                <?php } ?>
+                            </select>
+                        </div>
+                        <div style="display: flex; align-items: flex-end;">
+                            <a href="maktab.word.hnt" class="btn btn-outline-secondary" title="تصدير إلى Word">
+                                <i class="bi bi-file-earmark-word"></i>
+                            </a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Results Summary -->
+    <div class="alert alert-info mb-4" role="alert">
+        <i class="bi bi-info-circle me-2"></i>
+        <strong>عدد المكاتب والوسطاء:</strong> <?= $rownum ?> مكتب/وسيط
+    </div>
+
+    <!-- Pagination -->
+    <?php if ($pagenum > 1) { ?>
+        <div class="mb-4">
+            <nav aria-label="Pagination">
+                <ul class="pagination justify-content-center">
+                    <?php
+                    $query_string = "";
+                    if (isset($_REQUEST['showmasdersql']) && $_REQUEST['showmasdersql']) {
+                        $query_string .= "&showmasdersql=" . urlencode($_REQUEST['showmasdersql']);
+                    }
+                    if (isset($_REQUEST['showrakamsql']) && $_REQUEST['showrakamsql']) {
+                        $query_string .= "&showrakamsql=" . urlencode($_REQUEST['showrakamsql']);
+                    }
+                    if (isset($_REQUEST['mtypex']) && $_REQUEST['mtypex']) {
+                        $query_string .= "&mtypex=" . urlencode($_REQUEST['mtypex']);
+                    }
+                    if (isset($_REQUEST['mtype']) && $_REQUEST['mtype']) {
+                        $query_string .= "&mtype=" . urlencode($_REQUEST['mtype']);
+                    }
+
+                    for ($xi = 1; $xi <= $pagenum; $xi++) {
+                        if ($page == $xi) {
+                            echo "<li class='page-item active'><a class='page-link' href='maktab.hnt?page={$xi}{$query_string}'>{$xi}</a></li>";
+                        } elseif (($xi > ($page - 4) && $xi < ($page + 4)) || $xi == 1 || $xi == $pagenum || $xi < 4 || $xi > ($pagenum - 4)) {
+                            echo "<li class='page-item'><a class='page-link' href='maktab.hnt?page={$xi}{$query_string}'>{$xi}</a></li>";
+                        } elseif ($xi == ($page - 4)) {
+                            echo "<li class='page-item disabled'><span class='page-link'>...</span></li>";
+                        }
+                    }
+                    ?>
+                </ul>
+            </nav>
+        </div>
+    <?php } ?>
+
+<?php } ?>
+
+    <!-- Results Table -->
+    <div class="card shadow-sm border-0">
+        <div class="card-header" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h5 class="mb-0 text-white">
+                <i class="bi bi-list-check me-2"></i>
+                قائمة المكاتب والوسطاء
+            </h5>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover table-striped mb-0">
+                <thead style="background-color: #f8f9fa; border-top: 1px solid #dee2e6;">
+                    <tr>
+                        <th class="text-center">اسم المكتب</th>
+                        <th class="text-center">جوال</th>
+                        <th class="text-center">هاتف</th>
+                        <th class="text-center">فاكس</th>
+                        <th class="text-center">بريد</th>
+                        <th class="text-center">عنوان</th>
+                        <th class="text-center">التصنيف</th>
+                        <th class="text-center screenonly">الإجراءات</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php
+                    $sql = "SELECT * FROM masder {$where} ORDER BY BINARY TRIM(masdername) LIMIT {$limit}";
+                    $result = mysql_query($sql, $link);
+                    $counx = 0;
+                    $countother = 0;
+
+                    if (mysql_num_rows($result) == 0) {
+                        echo "<tr><td colspan='8' class='text-center py-4'>";
+                        echo "<i class='bi bi-inbox' style='font-size: 2rem; color: #ccc;'></i><br>";
+                        echo "<span class='text-muted'>لا توجد مكاتب أو وسطاء</span></td></tr>";
+                    }
+
+                    while ($row = mysql_fetch_array($result)) {
+                        // Permission-based visibility checking
+                        if ($_SESSION['useridv'] != $manager_id && $row['maktab'] != "1" && !$allprevilage) {
+                            if (!in_array($row['masderid'], $mymasderarr)) {
+                                $countother++;
+                                continue;
+                            }
+                        }
+
+                        $counx++;
+                        $rowClass = is_int($counx / 2) ? 'table-light' : '';
+                    ?>
+                    <tr class="<?= $rowClass ?>">
+                        <td class="text-center">
+                            <strong><?= htmlspecialchars($row['masdername'], ENT_QUOTES, 'UTF-8') ?></strong>
+                        </td>
+                        <td class="text-center" style="direction: ltr;">
+                            <?php if ($row['masdertel']) { ?>
+                                <a href="#" onclick="showmsgbox(this, '/aqary/admin/call.hnt?phone=<?= urlencode($row['masdertel']) ?>', getMouseY(), getMouseX()-300); return false;" title="اتصال">
+                                    <?= htmlspecialchars($row['masdertel'], ENT_QUOTES, 'UTF-8') ?>
+                                </a>
+                            <?php } else { ?>
+                                <span class="text-muted">--</span>
+                            <?php } ?>
+                        </td>
+                        <td class="text-center" style="direction: ltr;">
+                            <?php if ($row['masderphone']) { ?>
+                                <a href="#" onclick="showmsgbox(this, '/aqary/admin/call.hnt?phone=<?= urlencode($row['masderphone']) ?>', getMouseY(), getMouseX()-300); return false;" title="اتصال">
+                                    <?= htmlspecialchars($row['masderphone'], ENT_QUOTES, 'UTF-8') ?>
+                                </a>
+                            <?php } else { ?>
+                                <span class="text-muted">--</span>
+                            <?php } ?>
+                        </td>
+                        <td class="text-center" style="direction: ltr;">
+                            <?= $row['masderfax'] ? htmlspecialchars($row['masderfax'], ENT_QUOTES, 'UTF-8') : '<span class="text-muted">--</span>' ?>
+                        </td>
+                        <td class="text-center">
+                            <?php if ($row['masderemail']) { ?>
+                                <a href="#" onclick="gotolink('/aqary/sendmail.hnt?mailto=<?= urlencode($row['masderemail']) ?>'); return false;" title="بريد">
+                                    <i class="bi bi-envelope text-info"></i>
+                                </a>
+                            <?php } else { ?>
+                                <span class="text-muted">--</span>
+                            <?php } ?>
+                        </td>
+                        <td class="text-center">
+                            <small><?= htmlspecialchars($row['masderaddress'], ENT_QUOTES, 'UTF-8') ?: '--' ?></small>
+                        </td>
+                        <td class="text-center">
+                            <?php if ($row['mtype']) { ?>
+                                <span class="badge bg-info"><?= htmlspecialchars($row['mtype'], ENT_QUOTES, 'UTF-8') ?></span>
+                            <?php } else { ?>
+                                <span class="text-muted">--</span>
+                            <?php } ?>
+                        </td>
+                        <td class="text-center screenonly">
+                            <div class="btn-group" role="group">
+                                <a href="maktab.hnt?page=<?= intval($page) ?>&dof=1&masderid=<?= intval($row['masderid']) ?><?= $query_string ?>"
+                                   class="btn btn-sm btn-warning <?= "policy_".$sc_id."_edits" ?>" title="تعديل">
+                                    <i class="bi bi-pencil-square"></i>
+                                </a>
+                                <a href="maktab.hnt?page=<?= intval($page) ?>&deletemaktab=<?= intval($row['masderid']) ?><?= $query_string ?>"
+                                   class="btn btn-sm btn-danger <?= "policy_".$sc_id."_deleetes" ?>"
+                                   onclick="if(!confirm('هل ترغب بحذف هذا المكتب؟')){return false;}" title="حذف">
+                                    <i class="bi bi-trash"></i>
+                                </a>
+                            </div>
+                        </td>
+                    </tr>
+                    <?php } ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<?php
+if ($countother > 0) {
+    echo "<div class='alert alert-warning mt-4'>";
+    echo "<strong><i class='bi bi-info-circle me-2'></i>ملاحظة:</strong> يوجد عدد ({$countother}) إدخال في دليل الهواتف من مستخدمين آخرين يمكنك الاطلاع عليها بالرجوع إلى مدير النظام";
+    echo "</div>";
+}
+
+// Include footer
+require('../../../foter.hnt');
+?>

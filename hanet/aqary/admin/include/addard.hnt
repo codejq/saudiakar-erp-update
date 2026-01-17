@@ -1,0 +1,1877 @@
+<?php
+// Set page variables
+$sc_title = "إضافة أرض";
+$sc_id = "3";
+
+// Check if editing mode
+if (isset($_REQUEST['editid']) && $_REQUEST['editid']) {
+    $sc_id = "111";
+    $sc_title = "تعديل بيانات الأرض";
+}
+
+// Extract POST variables
+extract($_REQUEST);
+
+// Check if this is an AJAX form submission - handle it BEFORE any HTML output
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../nocash.hnt";
+    include_once "../../header.hnt";
+} else {
+    // Always include authentication and database for AJAX
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start();
+    }
+    include_once "../../reqloginajax.hnt";
+}
+
+// Define application base path for URL generation
+if (!defined('APP_BASE_PATH')) {
+    define('APP_BASE_PATH', '/aqary');
+}
+
+
+
+
+// Delete handling
+if (isset($deleteme) && $deleteme == "3" && isset($editid) && $editid) {
+    $rid = mysql_fetch_array(mysql_query("SELECT ardid FROM arady WHERE ardid='" . intval($editid) . "'", $link));
+    if ($rid['ardid']) {
+        loginfo("critical", "delete", "تم حذف الارض رقم {$editid}", "", "arady", $editid, $link);
+        mysql_query("DELETE FROM arady WHERE ardid='" . intval($editid) . "'", $link);
+
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم حذف الأرض بنجاح',
+                'redirect_url' => 'addard.hnt'
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            exit();
+        }
+
+        echo "<div class='alert alert-success text-center'>تم حذف الأرض رقم {$editid} بنجاح</div>";
+        require('../../foter.hnt');
+        exit();
+    }
+}
+
+// Archive handling
+if (isset($deleteme) && $deleteme == "4" && isset($editid) && $editid) {
+    $statusx = "4";
+    mysql_query("UPDATE arady SET statusx='" . intval($statusx) . "' WHERE ardid='" . intval($editid) . "'", $link);
+
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم نقل الأرض إلى الأرشيف بنجاح',
+            'redirect_url' => 'addard.hnt'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    }
+
+    echo "<div class='alert alert-success text-center'>تم نقل الأرض رقم {$editid} إلى الأرشيف بنجاح</div>";
+    require('../../foter.hnt');
+    exit();
+}
+
+// Update custom report template
+if (isset($chngereportid) && $chngereportid) {
+    $dql = "UPDATE userreport SET reportid='" . intval($chngereportid) . "'
+            WHERE reporttype='aradyform' AND userid='" . intval($_SESSION['useridv']) . "'";
+    mysql_query($dql, $link);
+
+    if (!mysql_affected_rows()) {
+        $dql = "INSERT INTO userreport SET userid='" . intval($_SESSION['useridv']) . "',
+                reportid='" . intval($chngereportid) . "', reporttype='aradyform'";
+        mysql_query($dql, $link);
+    }
+}
+
+// Check for duplicate form submission
+if (isset($_POST['formuid']) && $_POST['formuid']) {
+    $sql = "SELECT COUNT(ardid) as dd FROM arady WHERE formuid = '" . addslashes($_POST['formuid']) . "'";
+    $row = mysql_fetch_array(mysql_query($sql, $link));
+    if ($row['dd']) {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'error' => 'حدث خطأ: محاولة تكرار التسجيل'
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            exit();
+        }
+        echo "<div class='alert alert-danger text-center'><h5>حدث خطأ: محاولة تكرار التسجيل</h5></div>";
+        exit();
+    }
+}
+
+// Get default map center
+$mainlat = 21.583061886336214;
+$mainlng = 39.20806601643562;
+$sql = "SELECT center_x, center_y FROM maps ORDER BY id DESC LIMIT 1";
+$row = mysql_fetch_array(mysql_query($sql, $link));
+if ($row && $row['center_x'] != 0) {
+    $mainlat = $row['center_x'];
+    $mainlng = $row['center_y'];
+}
+
+// INSERT handler
+if (isset($action) && $action == 'insert' && (empty($_REQUEST['editid']) || $_REQUEST['editid'] == '')) {
+    // Sanitize numeric fields
+    $reversedfor = (isset($reversedfor1) ? $reversedfor1 : '') . " " . (isset($reversedfor2) ? $reversedfor2 : '');
+    $mesaha = isset($mesaha) ? str_replace(",", "", $mesaha) : '';
+    $tol = isset($tol) ? str_replace(",", "", $tol) : '';
+    $al3ard = isset($al3ard) ? str_replace(",", "", $al3ard) : '';
+    $price = isset($price) ? str_replace(",", "", $price) : '';
+    $pricesom = isset($pricesom) ? str_replace(",", "", $pricesom) : '';
+    $meterprice = isset($meterprice) ? str_replace(",", "", $meterprice) : '';
+    $meterpricehad = isset($meterpricehad) ? str_replace(",", "", $meterpricehad) : '';
+
+    // Handle broker (masder) - check if exists or create new
+    if (isset($masdername) && $masdername && !isset($masderid)) {
+        $sqlmasder = "SELECT masderid FROM masder WHERE masdername='" . addslashes($masdername) . "'";
+        $masderid_check = mysql_query($sqlmasder, $link);
+        $masderid_row = mysql_fetch_array($masderid_check);
+        $masderid = $masderid_row['masderid'] ?? null;
+
+        if ($masderid) {
+            // Duplicate warning
+            if (!$is_ajax_request) {
+                echo "<script>alert('تلاحظ أن المصدر الذي تم إضافته مكرر قد يكون مجرد تشابه في الأسماء ولكننا وددنا أن نلفت انتباهكم');</script>";
+            }
+        }
+
+        // Insert new broker
+        $sqlmasder = "INSERT INTO masder SET
+            masdername = '" . addslashes($masdername ?? '') . "',
+            masdertel = '" . addslashes($masdertel ?? '') . "',
+            masderphone = '" . addslashes($masderphone ?? '') . "',
+            masderfax = '" . addslashes($masderfax ?? '') . "',
+            masderemail = '" . addslashes($masderemail ?? '') . "',
+            masderaddress = '" . addslashes($masderaddress ?? '') . "',
+            addationalinfo = '" . addslashes($addationalinfo ?? '') . "'";
+        mysql_query($sqlmasder, $link);
+
+        $sqlmasder = "SELECT masderid FROM masder WHERE masdername='" . addslashes($masdername) . "'";
+        $masderid_result = mysql_query($sqlmasder, $link);
+        $masderid_row = mysql_fetch_array($masderid_result);
+        $masderid = $masderid_row['masderid'];
+    }
+
+    $date = date("m/d/Y");
+    $st_date = time();
+    $hedod = (isset($hedod0) ? $hedod0 : '') . ";" . (isset($hedod1) ? $hedod1 : '') . ";" .
+             (isset($hedod2) ? $hedod2 : '') . ";" . (isset($hedod3) ? $hedod3 : '');
+
+    // Handle current owner (malek)
+    if (!isset($malekid) || !$malekid) {
+        $sqlmalek = "SELECT malekid FROM malek WHERE
+            malekbayan1='" . addslashes($malekbayan1 ?? '') . "' AND
+            malekbayan2='" . addslashes($malekbayan2 ?? '') . "' AND
+            malekbayan3='" . addslashes($malekbayan3 ?? '') . "'";
+        $malekid_result = mysql_fetch_array(mysql_query($sqlmalek, $link));
+        $malekid = $malekid_result['malekid'] ?? null;
+
+        if (!$malekid) {
+            $sql = "INSERT INTO malek SET
+                malekbayan1 = '" . addslashes($malekbayan1 ?? '') . "',
+                malekbayan2 = '" . addslashes($malekbayan2 ?? '') . "',
+                malekbayan3 = '" . addslashes($malekbayan3 ?? '') . "',
+                malekbayan4 = '" . addslashes($malekbayan4 ?? '') . "',
+                malekbayan5 = '" . addslashes($malekbayan5 ?? '') . "',
+                malekbayan6 = '" . addslashes($malekbayan6 ?? '') . "',
+                malekbayan7 = '" . addslashes($malekbayan7 ?? '') . "',
+                malekbayan8 = '" . addslashes($malekbayan8 ?? '') . "',
+                malekbayan9 = '" . addslashes($malekbayan9 ?? '') . "',
+                malekbayan10 = '" . addslashes($malekbayan10 ?? '') . "',
+                userid = '" . intval($_SESSION['useridv']) . "'";
+            if (isset($malekbayan1) && $malekbayan1) {
+                mysql_query($sql, $link);
+                $malekid = mysql_insert_id();
+            }
+        }
+    }
+
+    // Handle previous owner (oldmalek)
+    if (!isset($oldmalekid) || !$oldmalekid) {
+        $sqlmalek = "SELECT malekid FROM malek WHERE
+            malekbayan1='" . addslashes($oldmalekbayan1 ?? '') . "' AND
+            malekbayan2='" . addslashes($oldmalekbayan2 ?? '') . "' AND
+            malekbayan3='" . addslashes($oldmalekbayan3 ?? '') . "'";
+        $oldmalekid_result = mysql_fetch_array(mysql_query($sqlmalek, $link));
+        $oldmalekid = $oldmalekid_result['malekid'] ?? null;
+
+        if (!$oldmalekid) {
+            $sql = "INSERT INTO malek SET
+                malekbayan1 = '" . addslashes($oldmalekbayan1 ?? '') . "',
+                malekbayan2 = '" . addslashes($oldmalekbayan2 ?? '') . "',
+                malekbayan3 = '" . addslashes($oldmalekbayan3 ?? '') . "',
+                malekbayan4 = '" . addslashes($oldmalekbayan4 ?? '') . "',
+                malekbayan5 = '" . addslashes($oldmalekbayan5 ?? '') . "',
+                malekbayan6 = '" . addslashes($oldmalekbayan6 ?? '') . "',
+                malekbayan7 = '" . addslashes($oldmalekbayan7 ?? '') . "',
+                malekbayan8 = '" . addslashes($oldmalekbayan8 ?? '') . "',
+                malekbayan9 = '" . addslashes($oldmalekbayan9 ?? '') . "',
+                malekbayan10 = '" . addslashes($oldmalekbayan10 ?? '') . "',
+                userid = '" . intval($_SESSION['useridv']) . "'";
+            if (isset($oldmalekbayan1) && $oldmalekbayan1) {
+                mysql_query($sql, $link);
+                $oldmalekid = mysql_insert_id();
+            }
+        }
+    }
+
+    // Handle map data
+    $mapid = null;
+    if (isset($polypath) && $polypath) {
+        $sql = "INSERT INTO maps SET
+            description = '" . addslashes($note ?? '') . "',
+            polypath = '" . addslashes($polypath) . "',
+            center_x = '" . addslashes($center_x ?? '') . "',
+            center_y = '" . addslashes($center_y ?? '') . "',
+            realtytable = 'arady',
+            realtyid = '',
+            ploycolor = '',
+            imagepath1 = '',
+            imagepath2 = ''";
+        mysql_query($sql, $link);
+        $mapid = mysql_insert_id();
+    }
+
+    // Insert land record
+    $sqlard = "INSERT INTO arady SET
+        mokhatatid = '" . addslashes($mokhatatid ?? '') . "',
+        ardrakam = '" . addslashes($ardrakam ?? '') . "',
+        hedod = '" . addslashes($hedod) . "',
+        price = '" . addslashes($price) . "',
+        pricesom = '" . addslashes($pricesom) . "',
+        hay = '" . addslashes($hay ?? '') . "',
+        s1 = '" . intval($s1 ?? 0) . "', s2 = '" . intval($s2 ?? 0) . "', s3 = '" . intval($s3 ?? 0) . "',
+        s4 = '" . intval($s4 ?? 0) . "', s5 = '" . intval($s5 ?? 0) . "', s6 = '" . intval($s6 ?? 0) . "',
+        s7 = '" . intval($s7 ?? 0) . "', s8 = '" . intval($s8 ?? 0) . "', s9 = '" . intval($s9 ?? 0) . "',
+        s10 = '" . intval($s10 ?? 0) . "', s11 = '" . intval($s11 ?? 0) . "', s12 = '" . intval($s12 ?? 0) . "',
+        s13 = '" . intval($s13 ?? 0) . "', s14 = '" . intval($s14 ?? 0) . "',
+        block = '" . addslashes($block ?? '') . "',
+        mesaha = '" . addslashes($mesaha) . "',
+        tol = '" . addslashes($tol) . "',
+        al3ard = '" . addslashes($al3ard) . "',
+        note = '" . addslashes($note ?? '') . "',
+        mobasher = '" . intval($mobasher ?? 0) . "',
+        masderid = '" . intval($masderid ?? 0) . "',
+        ardtype = '" . intval($ardtype ?? 1) . "',
+        st_date = '" . intval($st_date) . "',
+        en_date = '" . addslashes($en_date ?? '') . "',
+        custummerid = '" . intval($_SESSION['useridv']) . "',
+        malekbayan1 = '" . addslashes($malekbayan1 ?? '') . "',
+        malekbayan2 = '" . addslashes($malekbayan2 ?? '') . "',
+        malekbayan3 = '" . addslashes($malekbayan3 ?? '') . "',
+        malekbayan4 = '" . addslashes($malekbayan4 ?? '') . "',
+        malekbayan5 = '" . addslashes($malekbayan5 ?? '') . "',
+        malekbayan6 = '" . addslashes($malekbayan6 ?? '') . "',
+        malekbayan7 = '" . addslashes($malekbayan7 ?? '') . "',
+        malekbayan8 = '" . addslashes($malekbayan8 ?? '') . "',
+        malekbayan9 = '" . addslashes($malekbayan9 ?? '') . "',
+        malekbayan10 = '" . addslashes($malekbayan10 ?? '') . "',
+        oldmalekbayan1 = '" . addslashes($oldmalekbayan1 ?? '') . "',
+        oldmalekbayan2 = '" . addslashes($oldmalekbayan2 ?? '') . "',
+        oldmalekbayan3 = '" . addslashes($oldmalekbayan3 ?? '') . "',
+        oldmalekbayan4 = '" . addslashes($oldmalekbayan4 ?? '') . "',
+        oldmalekbayan5 = '" . addslashes($oldmalekbayan5 ?? '') . "',
+        oldmalekbayan6 = '" . addslashes($oldmalekbayan6 ?? '') . "',
+        oldmalekbayan7 = '" . addslashes($oldmalekbayan7 ?? '') . "',
+        oldmalekbayan8 = '" . addslashes($oldmalekbayan8 ?? '') . "',
+        oldmalekbayan9 = '" . addslashes($oldmalekbayan9 ?? '') . "',
+        oldmalekbayan10 = '" . addslashes($oldmalekbayan10 ?? '') . "',
+        secretinfo = '" . addslashes($secretinfo ?? '') . "',
+        share3 = '" . addslashes($share3 ?? '') . "',
+        share3f = '" . addslashes($share3f ?? '') . "',
+        khazina = '" . addslashes($khazina ?? '') . "',
+        dorg = '" . addslashes($dorg ?? '') . "',
+        raf = '" . addslashes($raf ?? '') . "',
+        paperfile = '" . addslashes($paperfile ?? '') . "',
+        khdma = '" . addslashes($khdma ?? '') . "',
+        meterprice = '" . addslashes($meterprice) . "',
+        meterpricehad = '" . addslashes($meterpricehad) . "',
+        tamweelmethod = '" . addslashes($tamweelmethod ?? '') . "',
+        daf3method = '" . addslashes($daf3method ?? '') . "',
+        Latitude = '" . addslashes($Latitude ?? '') . "',
+        Longitude = '" . addslashes($Longitude ?? '') . "',
+        malekid = '" . intval($malekid ?? 0) . "',
+        oldmalekid = '" . intval($oldmalekid ?? 0) . "',
+        googlexyz = '" . addslashes($googlexyz ?? '') . "',
+        enbleslideshow = '" . intval($enbleslideshow ?? 1) . "',
+        polypath = '" . addslashes($polypath ?? '') . "',
+        statusx = '" . intval($statusx ?? 0) . "',
+        reversedfor = '" . addslashes($reversedfor) . "',
+        center_x = '" . addslashes($center_x ?? '') . "',
+        center_y = '" . addslashes($center_y ?? '') . "',
+        mapid = '" . intval($mapid ?? 0) . "',
+        formuid = '" . addslashes($_POST['formuid'] ?? '') . "'";
+
+    mysql_query($sqlard, $link);
+    $mypicid = mysql_insert_id();
+
+    // Update map with property ID
+    if ($mapid) {
+        mysql_query("UPDATE maps SET realtyid = '" . intval($mypicid) . "' WHERE id = '" . intval($mapid) . "'", $link);
+    }
+
+    // Handle file uploads
+    $upload_dir = upload_path('properties.images');
+    ensure_dir($upload_dir);
+    for ($r = 0; $r < 15; $r++) {
+        $rfi = "pic" . $r;
+        if (isset($_FILES[$rfi]) && $_FILES[$rfi]['name']) {
+            $exten = strtolower(strrchr($_FILES[$rfi]['name'], '.'));
+            $target_file = upload_path('properties.images', "{$mypicid}_{$r}{$exten}");
+            move_uploaded_file($_FILES[$rfi]['tmp_name'], $target_file);
+        }
+    }
+
+    if ($mypicid) {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => true,
+                'message' => 'تمت الإضافة بنجاح',
+                'redirect_url' => "vieward.hnt?id={$mypicid}"
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            exit();
+        }
+
+        echo "<script>alert('تمت الإضافة بنجاح'); window.location.href='vieward.hnt?id={$mypicid}';</script>";
+    }
+}
+
+// UPDATE handler
+if (isset($_POST['editid']) && $_POST['editid']) {
+    $ardid = intval($_POST['editid']);
+    $hedod = (isset($hedod0) ? $hedod0 : '') . ";" . (isset($hedod1) ? $hedod1 : '') . ";" .
+             (isset($hedod2) ? $hedod2 : '') . ";" . (isset($hedod3) ? $hedod3 : '');
+    $reversedfor = (isset($reversedfor1) ? $reversedfor1 : '') . " " . (isset($reversedfor2) ? $reversedfor2 : '');
+
+    // Update current owner if exists
+    if (isset($malekid) && $malekid) {
+        $sql = "UPDATE malek SET
+            malekbayan1 = '" . addslashes($malekbayan1 ?? '') . "',
+            malekbayan2 = '" . addslashes($malekbayan2 ?? '') . "',
+            malekbayan3 = '" . addslashes($malekbayan3 ?? '') . "',
+            malekbayan4 = '" . addslashes($malekbayan4 ?? '') . "',
+            malekbayan5 = '" . addslashes($malekbayan5 ?? '') . "',
+            malekbayan6 = '" . addslashes($malekbayan6 ?? '') . "',
+            malekbayan7 = '" . addslashes($malekbayan7 ?? '') . "',
+            malekbayan8 = '" . addslashes($malekbayan8 ?? '') . "',
+            malekbayan9 = '" . addslashes($malekbayan9 ?? '') . "',
+            malekbayan10 = '" . addslashes($malekbayan10 ?? '') . "',
+            userid = '" . intval($_SESSION['useridv']) . "'
+            WHERE malekid = '" . intval($malekid) . "'";
+        if (isset($malekbayan1) && $malekbayan1) {
+            if ((($custummerid == $_SESSION['useridv']) || $_SESSION['seeothermasder']) || $allprevilage) {
+                mysql_query($sql, $link);
+            } else {
+                $errodata = "<div class='alert alert-warning'>ملحوظة: لم أتمكن من تحديث بيانات المالك - ليس لديك الصلاحية اللازمة</div>";
+            }
+        }
+    }
+
+    // Update previous owner if exists
+    if (isset($oldmalekid) && $oldmalekid) {
+        $sql = "UPDATE malek SET
+            malekbayan1 = '" . addslashes($oldmalekbayan1 ?? '') . "',
+            malekbayan2 = '" . addslashes($oldmalekbayan2 ?? '') . "',
+            malekbayan3 = '" . addslashes($oldmalekbayan3 ?? '') . "',
+            malekbayan4 = '" . addslashes($oldmalekbayan4 ?? '') . "',
+            malekbayan5 = '" . addslashes($oldmalekbayan5 ?? '') . "',
+            malekbayan6 = '" . addslashes($oldmalekbayan6 ?? '') . "',
+            malekbayan7 = '" . addslashes($oldmalekbayan7 ?? '') . "',
+            malekbayan8 = '" . addslashes($oldmalekbayan8 ?? '') . "',
+            malekbayan9 = '" . addslashes($oldmalekbayan9 ?? '') . "',
+            malekbayan10 = '" . addslashes($oldmalekbayan10 ?? '') . "',
+            userid = '" . intval($_SESSION['useridv']) . "'
+            WHERE malekid = '" . intval($oldmalekid) . "'";
+        if (isset($oldmalekbayan1) && $oldmalekbayan1) {
+            if ((($custummerid == $_SESSION['useridv']) || $_SESSION['seeothermasder']) || $allprevilage) {
+                mysql_query($sql, $link);
+            } else {
+                $errodata .= "<div class='alert alert-warning'>ملحوظة: لم أتمكن من تحديث بيانات المالك السابق - ليس لديك الصلاحية اللازمة</div>";
+            }
+        }
+    }
+
+    // Create owner if doesn't exist
+    if (!isset($malekid) || !$malekid) {
+        $sqlmalek = "SELECT malekid FROM malek WHERE
+            malekbayan1='" . addslashes($malekbayan1 ?? '') . "' AND
+            malekbayan2='" . addslashes($malekbayan2 ?? '') . "' AND
+            malekbayan3='" . addslashes($malekbayan3 ?? '') . "'";
+        $malekid_result = mysql_fetch_array(mysql_query($sqlmalek, $link));
+        $malekid = $malekid_result['malekid'] ?? null;
+
+        if (!$malekid) {
+            $sql = "INSERT INTO malek SET
+                malekbayan1 = '" . addslashes($malekbayan1 ?? '') . "',
+                malekbayan2 = '" . addslashes($malekbayan2 ?? '') . "',
+                malekbayan3 = '" . addslashes($malekbayan3 ?? '') . "',
+                malekbayan4 = '" . addslashes($malekbayan4 ?? '') . "',
+                malekbayan5 = '" . addslashes($malekbayan5 ?? '') . "',
+                malekbayan6 = '" . addslashes($malekbayan6 ?? '') . "',
+                malekbayan7 = '" . addslashes($malekbayan7 ?? '') . "',
+                malekbayan8 = '" . addslashes($malekbayan8 ?? '') . "',
+                malekbayan9 = '" . addslashes($malekbayan9 ?? '') . "',
+                malekbayan10 = '" . addslashes($malekbayan10 ?? '') . "',
+                userid = '" . intval($_SESSION['useridv']) . "'";
+            if (isset($malekbayan1) && $malekbayan1) {
+                mysql_query($sql, $link);
+                $malekid = mysql_insert_id();
+            }
+        }
+    }
+
+    // Create old owner if doesn't exist
+    if (!isset($oldmalekid) || !$oldmalekid) {
+        $sqlmalek = "SELECT malekid FROM malek WHERE
+            malekbayan1='" . addslashes($oldmalekbayan1 ?? '') . "' AND
+            malekbayan2='" . addslashes($oldmalekbayan2 ?? '') . "' AND
+            malekbayan3='" . addslashes($oldmalekbayan3 ?? '') . "'";
+        $oldmalekid_result = mysql_fetch_array(mysql_query($sqlmalek, $link));
+        $oldmalekid = $oldmalekid_result['malekid'] ?? null;
+
+        if (!$oldmalekid) {
+            $sql = "INSERT INTO malek SET
+                malekbayan1 = '" . addslashes($oldmalekbayan1 ?? '') . "',
+                malekbayan2 = '" . addslashes($oldmalekbayan2 ?? '') . "',
+                malekbayan3 = '" . addslashes($oldmalekbayan3 ?? '') . "',
+                malekbayan4 = '" . addslashes($oldmalekbayan4 ?? '') . "',
+                malekbayan5 = '" . addslashes($oldmalekbayan5 ?? '') . "',
+                malekbayan6 = '" . addslashes($oldmalekbayan6 ?? '') . "',
+                malekbayan7 = '" . addslashes($oldmalekbayan7 ?? '') . "',
+                malekbayan8 = '" . addslashes($oldmalekbayan8 ?? '') . "',
+                malekbayan9 = '" . addslashes($oldmalekbayan9 ?? '') . "',
+                malekbayan10 = '" . addslashes($oldmalekbayan10 ?? '') . "',
+                userid = '" . intval($_SESSION['useridv']) . "'";
+            if (isset($oldmalekbayan1) && $oldmalekbayan1) {
+                mysql_query($sql, $link);
+                $oldmalekid = mysql_insert_id();
+            }
+        }
+    }
+
+    // Build owner data SQL for update
+    $malekdatasql = "";
+    if ((($custummerid == $_SESSION['useridv']) || $_SESSION['seeothermasder']) || $allprevilage) {
+        $malekdatasql = ",malekbayan1 = '" . addslashes($malekbayan1 ?? '') . "',
+            malekbayan2 = '" . addslashes($malekbayan2 ?? '') . "',
+            malekbayan3 = '" . addslashes($malekbayan3 ?? '') . "',
+            malekbayan4 = '" . addslashes($malekbayan4 ?? '') . "',
+            malekbayan5 = '" . addslashes($malekbayan5 ?? '') . "',
+            malekbayan6 = '" . addslashes($malekbayan6 ?? '') . "',
+            malekbayan7 = '" . addslashes($malekbayan7 ?? '') . "',
+            malekbayan8 = '" . addslashes($malekbayan8 ?? '') . "',
+            malekbayan9 = '" . addslashes($malekbayan9 ?? '') . "',
+            malekbayan10 = '" . addslashes($malekbayan10 ?? '') . "',
+            oldmalekbayan1 = '" . addslashes($oldmalekbayan1 ?? '') . "',
+            oldmalekbayan2 = '" . addslashes($oldmalekbayan2 ?? '') . "',
+            oldmalekbayan3 = '" . addslashes($oldmalekbayan3 ?? '') . "',
+            oldmalekbayan4 = '" . addslashes($oldmalekbayan4 ?? '') . "',
+            oldmalekbayan5 = '" . addslashes($oldmalekbayan5 ?? '') . "',
+            oldmalekbayan6 = '" . addslashes($oldmalekbayan6 ?? '') . "',
+            oldmalekbayan7 = '" . addslashes($oldmalekbayan7 ?? '') . "',
+            oldmalekbayan8 = '" . addslashes($oldmalekbayan8 ?? '') . "',
+            oldmalekbayan9 = '" . addslashes($oldmalekbayan9 ?? '') . "',
+            oldmalekbayan10 = '" . addslashes($oldmalekbayan10 ?? '') . "',
+            malekid = '" . intval($malekid ?? 0) . "',
+            oldmalekid = '" . intval($oldmalekid ?? 0) . "',
+            secretinfo = '" . addslashes($secretinfo ?? '') . "'";
+
+        // Update or create broker
+        if (isset($masdername) && $masdername != "****************" && isset($masderid) && $masderid) {
+            $sql = "UPDATE masder SET
+                masdername = '" . addslashes($masdername) . "',
+                masdertel = '" . addslashes($masdertel ?? '') . "',
+                masderfax = '" . addslashes($masderfax ?? '') . "',
+                addationalinfo = '" . addslashes($addationalinfo ?? '') . "',
+                masderphone = '" . addslashes($masderphone ?? '') . "',
+                masderemail = '" . addslashes($masderemail ?? '') . "',
+                masderaddress = '" . addslashes($masderaddress ?? '') . "'
+                WHERE masderid = '" . intval($masderid) . "'";
+            mysql_query($sql, $link);
+        }
+
+        if (!isset($masderid) && isset($masdername) && $masdername && $masdername != "****************") {
+            $sql = "INSERT INTO masder SET
+                masdername = '" . addslashes($masdername) . "',
+                masdertel = '" . addslashes($masdertel ?? '') . "',
+                masderfax = '" . addslashes($masderfax ?? '') . "',
+                addationalinfo = '" . addslashes($addationalinfo ?? '') . "',
+                masderphone = '" . addslashes($masderphone ?? '') . "',
+                masderemail = '" . addslashes($masderemail ?? '') . "',
+                masderaddress = '" . addslashes($masderaddress ?? '') . "'";
+            mysql_query($sql, $link);
+            mysql_query("UPDATE arady SET masderid = '" . mysql_insert_id() . "' WHERE ardid = '" . intval($ardid) . "'", $link);
+        }
+    }
+
+    // Update or insert map
+    if (isset($polypath) && $polypath && !isset($mapid)) {
+        $sql = "INSERT INTO maps SET
+            description = '" . addslashes($note ?? '') . "',
+            polypath = '" . addslashes($polypath) . "',
+            center_x = '" . addslashes($center_x ?? '') . "',
+            center_y = '" . addslashes($center_y ?? '') . "',
+            realtytable = 'arady',
+            realtyid = '" . intval($ardid) . "',
+            ploycolor = '',
+            imagepath1 = '',
+            imagepath2 = ''";
+        mysql_query($sql, $link);
+        $mapid = mysql_insert_id();
+    }
+
+    if (isset($polypath) && $polypath && isset($mapid) && $mapid) {
+        $sql = "UPDATE maps SET
+            description = '" . addslashes($note ?? '') . "',
+            polypath = '" . addslashes($polypath) . "',
+            center_x = '" . addslashes($center_x ?? '') . "',
+            center_y = '" . addslashes($center_y ?? '') . "',
+            realtytable = 'arady',
+            realtyid = '" . intval($ardid) . "',
+            ploycolor = '',
+            imagepath1 = '',
+            imagepath2 = ''
+            WHERE mapid = '" . intval($mapid) . "'";
+        mysql_query($sql, $link);
+    }
+
+    // Sanitize numeric fields
+    $mesaha = isset($mesaha) ? str_replace(",", "", $mesaha) : '';
+    $tol = isset($tol) ? str_replace(",", "", $tol) : '';
+    $al3ard = isset($al3ard) ? str_replace(",", "", $al3ard) : '';
+    $price = isset($price) ? str_replace(",", "", $price) : '';
+    $pricesom = isset($pricesom) ? str_replace(",", "", $pricesom) : '';
+    $meterprice = isset($meterprice) ? str_replace(",", "", $meterprice) : '';
+    $meterpricehad = isset($meterpricehad) ? str_replace(",", "", $meterpricehad) : '';
+    $st_date = time();
+
+    // Update land record
+    $sqlard = "UPDATE arady SET
+        mokhatatid = '" . addslashes($mokhatatid ?? '') . "',
+        ardrakam = '" . addslashes($ardrakam ?? '') . "',
+        hedod = '" . addslashes($hedod) . "',
+        price = '" . addslashes($price) . "',
+        pricesom = '" . addslashes($pricesom) . "',
+        hay = '" . addslashes($hay ?? '') . "',
+        s1 = '" . intval($s1 ?? 0) . "', s2 = '" . intval($s2 ?? 0) . "', s3 = '" . intval($s3 ?? 0) . "',
+        s4 = '" . intval($s4 ?? 0) . "', s5 = '" . intval($s5 ?? 0) . "', s6 = '" . intval($s6 ?? 0) . "',
+        s7 = '" . intval($s7 ?? 0) . "', s8 = '" . intval($s8 ?? 0) . "', s9 = '" . intval($s9 ?? 0) . "',
+        s10 = '" . intval($s10 ?? 0) . "', s11 = '" . intval($s11 ?? 0) . "', s12 = '" . intval($s12 ?? 0) . "',
+        s13 = '" . intval($s13 ?? 0) . "', s14 = '" . intval($s14 ?? 0) . "',
+        block = '" . addslashes($block ?? '') . "',
+        mesaha = '" . addslashes($mesaha) . "',
+        tol = '" . addslashes($tol) . "',
+        al3ard = '" . addslashes($al3ard) . "',
+        note = '" . addslashes($note ?? '') . "',
+        mobasher = '" . intval($mobasher ?? 0) . "',
+        masderid = '" . intval($masderid ?? 0) . "',
+        ardtype = '" . intval($ardtype ?? 1) . "',
+        en_date = '" . addslashes($en_date ?? '') . "'
+        {$malekdatasql},
+        share3 = '" . addslashes($share3 ?? '') . "',
+        share3f = '" . addslashes($share3f ?? '') . "',
+        khazina = '" . addslashes($khazina ?? '') . "',
+        dorg = '" . addslashes($dorg ?? '') . "',
+        raf = '" . addslashes($raf ?? '') . "',
+        paperfile = '" . addslashes($paperfile ?? '') . "',
+        khdma = '" . addslashes($khdma ?? '') . "',
+        meterprice = '" . addslashes($meterprice) . "',
+        meterpricehad = '" . addslashes($meterpricehad) . "',
+        tamweelmethod = '" . addslashes($tamweelmethod ?? '') . "',
+        daf3method = '" . addslashes($daf3method ?? '') . "',
+        reversedfor = '" . addslashes($reversedfor) . "',
+        statusx = '" . intval($statusx ?? 0) . "',
+        Latitude = '" . addslashes($Latitude ?? '') . "',
+        Longitude = '" . addslashes($Longitude ?? '') . "',
+        googlexyz = '" . addslashes($googlexyz ?? '') . "',
+        enbleslideshow = '" . intval($enbleslideshow ?? 1) . "',
+        polypath = '" . addslashes($polypath ?? '') . "',
+        center_x = '" . addslashes($center_x ?? '') . "',
+        center_y = '" . addslashes($center_y ?? '') . "',
+        mapid = '" . intval($mapid ?? 0) . "',
+        formuid = '" . addslashes($_POST['formuid'] ?? '') . "'
+        WHERE ardid = '" . intval($ardid) . "'";
+    mysql_query($sqlard, $link);
+
+    $mypicid = intval($_POST['editid']);
+
+    // Handle file uploads
+    for ($r = 0; $r < 15; $r++) {
+        $rfi = "pic" . $r;
+        if (isset($_FILES[$rfi]) && $_FILES[$rfi]['name']) {
+            $exten = strtolower(strrchr($_FILES[$rfi]['name'], '.'));
+            if (!$exten) continue;
+
+            for ($j = 0; $j < 15; $j++) {
+                $target_file = upload_path('properties.images', "{$mypicid}_{$j}{$exten}");
+                if (file_exists($target_file)) continue;
+                else {
+                    move_uploaded_file($_FILES[$rfi]['tmp_name'], $target_file);
+                    break;
+                }
+            }
+        }
+    }
+
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم تحديث البيانات بنجاح',
+            'redirect_url' => "vieward.hnt?id={$mypicid}"
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    }
+
+    $errodata = (isset($errodata) ? $errodata : '') . "<div class='alert alert-success'>تم تحديث البيانات بنجاح</div>";
+}
+
+// Load edit data
+$buttondata = 'اضافة وحفظ';
+$hidforAdd = 'forcehide';
+$rowk = array();
+$custummerid = null;
+$PolygonArray = ''; // Initialize for add mode
+
+if (isset($_REQUEST['editid']) && $_REQUEST['editid']) {
+    $buttondata = 'حفظ وتحديث';
+    $hidforAdd = '';
+    $sql = "SELECT * FROM arady WHERE ardid = '" . intval($_REQUEST['editid']) . "'";
+    $result = mysql_query($sql, $link);
+    $rowk = mysql_fetch_array($result);
+    $custummerid = $rowk['custummerid'] ?? null;
+
+    if ($rowk && $rowk['center_x'] != 0) {
+        $mainlat = $rowk['center_x'];
+        $mainlng = $rowk['center_y'];
+    }
+
+    // Privacy protection - mask sensitive data for non-owners
+    if (($rowk['custummerid'] != $_SESSION['useridv']) && !$_SESSION['seeothermasder'] && !$allprevilage) {
+        $rowk['malekbayan1'] = $rowk['malekbayan2'] = $rowk['malekbayan3'] = $rowk['malekbayan4'] =
+        $rowk['malekbayan5'] = $rowk['malekbayan6'] = $rowk['malekbayan7'] = $rowk['malekbayan8'] =
+        $rowk['malekbayan9'] = $rowk['malekbayan10'] = "****************";
+        $rowk['oldmalekbayan1'] = $rowk['oldmalekbayan2'] = $rowk['oldmalekbayan3'] = $rowk['oldmalekbayan4'] =
+        $rowk['oldmalekbayan5'] = $rowk['oldmalekbayan6'] = $rowk['oldmalekbayan7'] = $rowk['oldmalekbayan8'] =
+        $rowk['oldmalekbayan9'] = $rowk['oldmalekbayan10'] = $rowk['secretinfo'] = "****************";
+    }
+
+    // Get location data
+    $sqlci = "SELECT countries.countryid, countries.country,
+            city.cityid, city.cityname, mokhatat.mokhatatname
+            FROM countries, city, mokhatat WHERE
+            countries.countryid = city.countryid
+            AND city.cityid = mokhatat.cityid
+            AND mokhatatid = '" . addslashes($rowk['mokhatatid']) . "'";
+    $resultcity = mysql_query($sqlci, $link);
+    $resultcity = mysql_fetch_array($resultcity);
+    $countryid = $resultcity['countryid'] ?? '';
+    $country = $resultcity['country'] ?? '';
+    $cityid = $resultcity['cityid'] ?? '';
+    $cityname = $resultcity['cityname'] ?? '';
+    $mokhatatname = $resultcity['mokhatatname'] ?? '';
+    $mokhatatid = $rowk['mokhatatid'] ?? '';
+    $PolygonArray = isset($rowk['polypath']) ? str_replace("(", "Array(", $rowk['polypath']) : '';
+
+    // Get broker data
+    $sql = "SELECT * FROM masder WHERE masderid = '" . intval($rowk['masderid']) . "'
+            AND (userid = 0 OR userid = '" . intval($user_data['userid']) . "')";
+    $result = mysql_query($sql, $link);
+    $rowMaser = mysql_fetch_array($result);
+}
+
+// Get custom report template
+$custsql = "SELECT custumreport.* FROM custumreport, userreport
+            WHERE custumreport.reporttype = 'aradyform'
+            AND custumreport.id = userreport.reportid
+            AND userreport.userid = '" . intval($_SESSION['useridv']) . "'";
+$custresult = mysql_query($custsql, $link);
+$custfiled = mysql_fetch_array($custresult);
+$disform = isset($custfiled['sqlfeilds']) ? unserialize($custfiled['sqlfeilds']) : array();
+
+// Fix old records with invalid timestamps
+mysql_query("UPDATE arady SET st_date = '" . time() . "' WHERE st_date < 1000");
+
+// Only render HTML if NOT AJAX request
+if (!$is_ajax_request) {
+?>
+
+<!-- Bootstrap 5.3 Toast Container -->
+<div id="toast-container" class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 9999;"></div>
+
+<style>
+.section-header {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1.5rem;
+    margin-top: 1.5rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.1rem;
+}
+
+.form-label {
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: #495057;
+    text-align: right;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.required-mark {
+    color: #dc3545;
+}
+
+.forcehide {
+    display: none !important;
+}
+
+/* Bootstrap 5.3 Toast Customization */
+.toast {
+    min-width: 350px;
+    backdrop-filter: blur(10px);
+}
+
+.toast-body {
+    font-size: 0.95rem;
+    font-weight: 500;
+}
+
+.toast-body[dir="rtl"] {
+    text-align: right;
+}
+
+.bg-success-subtle {
+    background-color: #d1e7dd !important;
+    border-left: 4px solid #198754;
+}
+
+.bg-danger-subtle {
+    background-color: #f8d7da !important;
+    border-left: 4px solid #dc3545;
+}
+
+.bg-warning-subtle {
+    background-color: #fff3cd !important;
+    border-left: 4px solid #ffc107;
+}
+
+.bg-info-subtle {
+    background-color: #cff4fc !important;
+    border-left: 4px solid #0dcaf0;
+}
+</style>
+
+<script>
+/**
+ * Bootstrap 5.3 Toast Notification System
+ */
+function showBootstrapNotification(message, type = 'success', duration = 3000) {
+    const toastId = 'toast-' + Date.now();
+
+    const iconMap = {
+        'success': 'bi-check-circle-fill text-success',
+        'error': 'bi-x-circle-fill text-danger',
+        'warning': 'bi-exclamation-triangle-fill text-warning',
+        'loading': 'bi-hourglass-split text-info'
+    };
+
+    const bgMap = {
+        'success': 'bg-success-subtle',
+        'error': 'bg-danger-subtle',
+        'warning': 'bg-warning-subtle',
+        'loading': 'bg-info-subtle'
+    };
+
+    const icon = iconMap[type] || iconMap['success'];
+    const bgClass = bgMap[type] || bgMap['success'];
+
+    const toastHtml = `
+        <div id="${toastId}" class="toast ${bgClass} border-0 shadow-lg" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="toast-body d-flex align-items-center gap-3 p-3">
+                <i class="bi ${icon} fs-4"></i>
+                <div class="flex-grow-1" dir="rtl">${message}</div>
+                ${type !== 'loading' ? '<button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>' : ''}
+            </div>
+        </div>
+    `;
+
+    const container = document.getElementById('toast-container');
+    if (!container) {
+        console.error('Toast container not found');
+        return null;
+    }
+
+    container.insertAdjacentHTML('beforeend', toastHtml);
+
+    const toastElement = document.getElementById(toastId);
+    const toast = new bootstrap.Toast(toastElement, {
+        autohide: type !== 'loading',
+        delay: duration
+    });
+
+    toast.show();
+
+    toastElement.addEventListener('hidden.bs.toast', function () {
+        toastElement.remove();
+    });
+
+    return toast;
+}
+
+// jQuery-based form submission with AJAX
+$(document).ready(function() {
+    // Initialize form values for edit mode
+    <?php if (isset($_REQUEST['editid']) && isset($rowk) && $rowk) { ?>
+        <?php if (isset($country) && $country) { ?>
+        $('#country').val('<?= htmlspecialchars($country, ENT_QUOTES, 'UTF-8') ?>');
+        <?php } ?>
+        <?php if (isset($cityname) && $cityname) { ?>
+        $('#cityname').val('<?= htmlspecialchars($cityname, ENT_QUOTES, 'UTF-8') ?>');
+        <?php } ?>
+        <?php if (isset($mokhatatname) && $mokhatatname) { ?>
+        $('#mokhatatname').val('<?= htmlspecialchars($mokhatatname, ENT_QUOTES, 'UTF-8') ?>');
+        <?php } ?>
+
+        <?php
+        // Set hedod boundaries
+        if (isset($rowk['hedod'])) {
+            $rowk['hedod'] = str_replace("'", "\'", $rowk['hedod']);
+            $rowk['hedod'] = str_replace("\n", "\\n", $rowk['hedod']);
+            $rowk['hedod'] = str_replace("\r", "", $rowk['hedod']);
+            $hedod = explode(";", $rowk['hedod']);
+        ?>
+        $('#hedod0').val('<?= $hedod[0] ?? '' ?>');
+        $('#hedod1').val('<?= $hedod[1] ?? '' ?>');
+        $('#hedod2').val('<?= $hedod[2] ?? '' ?>');
+        $('#hedod3').val('<?= $hedod[3] ?? '' ?>');
+        <?php } ?>
+
+        <?php if (isset($rowk['khdma'])) { ?>
+        $('#khdmax').val('<?= htmlspecialchars($rowk['khdma'], ENT_QUOTES, 'UTF-8') ?>').trigger('change');
+        <?php } ?>
+
+        <?php
+        // Set masder (broker) fields
+        if (isset($rowMaser) && $rowMaser) {
+            foreach ($rowMaser as $key => $value) {
+                if (is_int($key)) continue;
+                // Use json_encode for proper JavaScript escaping
+                $encoded_value = json_encode($value, JSON_UNESCAPED_UNICODE);
+        ?>
+        $('#<?= htmlspecialchars($key, ENT_QUOTES, 'UTF-8') ?>').val(<?= $encoded_value ?>).trigger('change');
+        <?php
+            }
+        }
+
+        // Set all land fields
+        foreach ($rowk as $key => $value) {
+            if (is_int($key)) continue;
+            // Use json_encode for proper JavaScript escaping
+            $encoded_value = json_encode($value, JSON_UNESCAPED_UNICODE);
+        ?>
+        $('#<?= htmlspecialchars($key, ENT_QUOTES, 'UTF-8') ?>').val(<?= $encoded_value ?>).trigger('change');
+        <?php if ($value === '0' || $value === '1') { ?>
+        $('#<?= htmlspecialchars($key, ENT_QUOTES, 'UTF-8') ?>').prop('checked', <?= $value ?>);
+        <?php } ?>
+        <?php
+        }
+        ?>
+
+        // Set custummerid for permission checks
+        $('#custummerid').val('<?= intval($custummerid ?? 0) ?>');
+        $('#mapid').val('<?= intval($rowk['mapid'] ?? 0) ?>');
+    <?php } ?>
+
+    // AJAX form submission handler
+    $('#landForm').on('submit', function(e) {
+        e.preventDefault();
+
+        var formData = new FormData(this);
+        formData.append('ajax_submit', '1');
+
+        var submitBtn = $(this).find('button[type="submit"]');
+        var originalBtnText = submitBtn.html();
+        submitBtn.prop('disabled', true)
+                 .html('<i class="bi bi-hourglass-split me-2"></i>جاري الحفظ...');
+
+        $.ajax({
+            url: 'addard.hnt',
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            dataType: 'json',
+            success: function(response) {
+                submitBtn.prop('disabled', false).html(originalBtnText);
+
+                if (response.success) {
+                    showBootstrapNotification(response.message, 'success', 2000);
+
+                    // Redirect after success
+                    setTimeout(function() {
+                        window.location.href = response.redirect_url || 'addard.hnt';
+                    }, 2000);
+                } else if (response.error) {
+                    showBootstrapNotification(response.error, 'error', 5000);
+                }
+            },
+            error: function(xhr, status, error) {
+                submitBtn.prop('disabled', false).html(originalBtnText);
+                showBootstrapNotification('حدث خطأ في الاتصال. يرجى المحاولة مرة أخرى', 'error', 5000);
+            }
+        });
+
+        return false;
+    });
+});
+
+// Legacy JavaScript functions for select option manipulation
+function addOption(theSel, theText, theValue) {
+    var newOpt = new Option(theText, theValue);
+    var selLength = theSel.length;
+    theSel.options[selLength] = newOpt;
+}
+
+function deleteOption(theSel, theIndex) {
+    var selLength = theSel.length;
+    if (selLength > 0) {
+        theSel.options[theIndex] = null;
+    }
+}
+
+function moveOptions(theSelFrom, theSelTo) {
+    var selLength = theSelFrom.length;
+    var selectedText = new Array();
+    var selectedValues = new Array();
+    var selectedCount = 0;
+    var i;
+
+    for (i = selLength - 1; i >= 0; i--) {
+        if (theSelFrom.options[i].selected) {
+            selectedText[selectedCount] = theSelFrom.options[i].text;
+            selectedValues[selectedCount] = theSelFrom.options[i].value;
+            deleteOption(theSelFrom, i);
+            selectedCount++;
+        }
+    }
+
+    for (i = selectedCount - 1; i >= 0; i--) {
+        addOption(theSelTo, selectedText[i], selectedValues[i]);
+    }
+}
+
+function warivaluetotxt(selectname, txtinput) {
+    var txtv = "";
+    var opx = "";
+    for (i = 0; i < selectname.length; i++) {
+        txtv = txtv + opx + selectname.options[i].value;
+        opx = " , ";
+    }
+    txtinput.value = txtv;
+    return false;
+}
+
+function mycompo(selectname, selectvalue) {
+    selectvalue = selectvalue.trim();
+    for (i = 0; i < selectname.options.length; i++) {
+        if (selectvalue == selectname.options[i].text.trim()) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+// Set page title
+settitle('3030', " إضافة أرض جديدة   ");
+</script>
+
+<div class="container-fluid py-3">
+    <?php if (isset($errodata) && $errodata) echo $errodata; ?>
+
+    <!-- Page Header -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-geo-alt me-2"></i>
+                <?= htmlspecialchars($sc_title, ENT_QUOTES, 'UTF-8') ?>
+            </h4>
+        </div>
+    </div>
+
+    <!-- Custom Form Template Selector -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-body p-3">
+            <div class="row g-3 align-items-end">
+                <div class="col-md-6">
+                    <label class="form-label">
+                        <i class="bi bi-file-earmark-text text-primary me-1"></i>
+                        اختر شكل النموذج
+                    </label>
+                    <select class="form-select" onchange="window.location.href='addard.hnt?chngereportid=' + this.value;">
+                        <option>اختر شكل النموذج</option>
+                        <?php
+                        $sql = "SELECT custumreport.* FROM custumreport WHERE custumreport.reporttype = 'aradyform'";
+                        $result = mysql_query($sql, $link);
+                        while ($row = mysql_fetch_array($result)) {
+                            $csel = (isset($custfiled['id']) && $custfiled['id'] == $row['id']) ? " selected " : "";
+                        ?>
+                            <option <?= $csel ?> value="<?= intval($row['id']) ?>">
+                                <?= htmlspecialchars($row['reportname'], ENT_QUOTES, 'UTF-8') ?>
+                            </option>
+                        <?php } ?>
+                    </select>
+                </div>
+                <div class="col-md-6">
+                    <button type="button" class="btn btn-success"
+                            onclick="window.location.href='../custumform.hnt?viewreport=aradyform';">
+                        <i class="bi bi-plus-circle me-2"></i>
+                        إنشاء نموذج مخصص
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Form -->
+    <div class="card shadow-sm border-0">
+        <div class="card-body p-4">
+            <form name="form" id="landForm" method="post" enctype="multipart/form-data" action="addard.hnt">
+                <input type="hidden" name="inckudeme" value="1">
+                <input type="hidden" name="mapid" id="mapid">
+                <input type="hidden" name="editid" value="<?= isset($_REQUEST['editid']) ? intval($_REQUEST['editid']) : '' ?>">
+                <input type="hidden" name="custummerid" id="custummerid">
+                <input type="hidden" name="action" value="insert">
+                <input type="hidden" name="deleteme" id="deleteme" value="">
+                <input type="hidden" name="formuid" id="formuidx"
+                       value="<?= str_replace('.', '', microtime() . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)) ?>">
+
+                <!-- Basic Information Section -->
+                <div class="section-header">
+                    <i class="bi bi-info-circle"></i>
+                    <span>البيانات الأساسية</span>
+                </div>
+
+                <div class="row g-4">
+                    <?php
+                    if(!($custfiled['id']??'')){
+                        exit();
+                    }
+                    // Build basic fields array
+                    $basicfields = array();
+
+                    // Country field
+                    $basicfields[0] = '
+                    <div class="col-md-4">
+                        <label class="form-label">
+                            <i class="bi bi-globe text-primary me-1"></i>
+                            الدولة
+                        </label>
+                        <input name="countryid" type="hidden" value="' . htmlspecialchars(isset($user_data['countryid']) ? $user_data['countryid'] : '', ENT_QUOTES, 'UTF-8') . '"
+                               onclick="country.click();" id="countryid">
+                        <input name="country" id="country" value="' . htmlspecialchars(isset($user_data['countryname']) ? $user_data['countryname'] : '', ENT_QUOTES, 'UTF-8') . '"
+                               class="form-control"
+                               onblur="ajaxmysql(\'update user set countryid=\'+document.getElementById(\'countryid\').value+\', countryname=\\\'\'+this.value+\'\\\' where userid=' . intval(isset($_SESSION['useridv']) ? $_SESSION['useridv'] : 0) . '\');"
+                               onclick="ajaxfilldiv(\'select countryid,country from countries\',\'countryid\',\'country\',\'countryid\',\'country\',1,this.id);return false">
+                    </div>';
+
+                    // City field
+                    $basicfields[1] = '
+                    <div class="col-md-4">
+                        <label class="form-label">
+                            <i class="bi bi-building text-info me-1"></i>
+                            المدينة
+                        </label>
+                        <input name="cityid" type="hidden" value="' . htmlspecialchars(isset($user_data['cityid']) ? $user_data['cityid'] : '', ENT_QUOTES, 'UTF-8') . '"
+                               onclick="cityname.click();" id="cityid">
+                        <input name="cityname" id="cityname" value="' . htmlspecialchars(isset($user_data['cityname']) ? $user_data['cityname'] : '', ENT_QUOTES, 'UTF-8') . '"
+                               class="form-control"
+                               onblur="ajaxmysql(\'update user set cityid=\'+document.getElementById(\'cityid\').value+\', cityname=\\\'\'+this.value+\'\\\' where userid=' . intval(isset($_SESSION['useridv']) ? $_SESSION['useridv'] : 0) . '\');"
+                               onclick="ajaxfilldiv(\'select cityid,cityname from city where countryid=\'+document.getElementById(\'countryid\').value,\'cityid\',\'cityname\',\'cityid\',\'cityname\',1,this.id);return false">
+                    </div>';
+
+                    // District field
+                    $basicfields[2] = '
+                    <div class="col-md-4">
+                        <label class="form-label">
+                            <i class="bi bi-map text-success me-1"></i>
+                            المخطط
+                        </label>
+                        <input name="mokhatatid" type="hidden" value="' . htmlspecialchars(isset($user_data['mokhatatid']) ? $user_data['mokhatatid'] : '', ENT_QUOTES, 'UTF-8') . '"
+                               onclick="mokhatat.click();" id="mokhatatid">
+                        <input name="mokhatatname" id="mokhatatname" value="' . htmlspecialchars(isset($user_data['mokhatatname']) ? $user_data['mokhatatname'] : '', ENT_QUOTES, 'UTF-8') . '"
+                               class="form-control"
+                               onblur="ajaxmysql(\'update user set mokhatatid=\'+document.getElementById(\'mokhatatid\').value+\', mokhatatname=\\\'\'+this.value+\'\\\' where userid=' . intval(isset($_SESSION['useridv']) ? $_SESSION['useridv'] : 0) . '\');"
+                               onclick="ajaxfilldiv(\'select mokhatatid,mokhatatname from mokhatat where cityid=\'+document.getElementById(\'cityid\').value,\'mokhatatid\',\'mokhatatname\',\'mokhatatid\',\'mokhatatname\',1,this.id);return false">
+                    </div>';
+
+                    $basicfields[3] = '
+                    <div class="col-md-4">
+                        <label class="form-label">رقم البلوك</label>
+                        <input type="text" class="form-control" name="block" id="block" title="ادخل رقم البلوك">
+                    </div>';
+
+                    $basicfields[4] = '
+                    <div class="col-md-4">
+                        <label class="form-label">رقم القطعة</label>
+                        <input type="text" class="form-control" name="ardrakam" id="ardrakam" title="ادخل رقم الأرض">
+                    </div>';
+
+                    $basicfields[5] = '
+                    <div class="col-md-4">
+                        <label class="form-label">اسم الحي</label>
+                        <input type="text" class="form-control" name="hay" id="hay" title="ادخل اسم الحي">
+                    </div>';
+
+                    $basicfields[6] = '
+                    <div class="col-md-4">
+                        <label class="form-label">رقم اللوحة</label>
+                        <input type="text" class="form-control" name="en_date" id="en_date" title="إدخل رقم اللوحة">
+                    </div>';
+
+                    $basicfields[7] = '
+                    <div class="col-md-4">
+                        <label class="form-label">الشارع الرئيسي</label>
+                        <input type="text" class="form-control" name="share3" id="share3" title="ادخل اسم الطريق أو الشارع">
+                    </div>';
+
+                    $basicfields[8] = '
+                    <div class="col-md-4">
+                        <label class="form-label">الشارع الفرعي</label>
+                        <input type="text" class="form-control" name="share3f" id="share3f" title="ادخل اسم الطريق أو الشارع">
+                    </div>';
+
+                    $basicfields[9] = '
+                    <div class="col-md-4">
+                        <label class="form-label">المساحة</label>
+                        <input type="text" class="form-control" name="mesaha" id="mesaha"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               onkeyup="ValidateNumberKeyUp(this);"
+                               onblur="ValidateAndFormatNumber(this)" title="اكتب المساحة أرقام فقط">
+                    </div>';
+
+                    $basicfields[10] = '
+                    <div class="col-md-3">
+                        <label class="form-label">الطول</label>
+                        <input type="text" class="form-control" id="tol" name="tol"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               onkeyup="ValidateNumberKeyUp(this);"
+                               onblur="ValidateAndFormatNumber(this)">
+                    </div>';
+
+                    $basicfields[11] = '
+                    <div class="col-md-3">
+                        <label class="form-label">العرض</label>
+                        <input type="text" class="form-control" name="al3ard" id="al3ard"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               onkeyup="ValidateNumberKeyUp(this);"
+                               onblur="ValidateAndFormatNumber(this)">
+                    </div>';
+
+                    $basicfields[12] = '
+                    <div class="col-md-3">
+                        <label class="form-label">إحداثي الطول</label>
+                        <input type="text" class="form-control" name="Longitude" id="Longitude"
+                               onkeypress="return ValidateNumberKeyPress(this, event);">
+                    </div>';
+
+                    $basicfields[13] = '
+                    <div class="col-md-3">
+                        <label class="form-label">إحداثي العرض</label>
+                        <input type="text" class="form-control" name="Latitude" id="Latitude"
+                               onkeypress="return ValidateNumberKeyPress(this, event);">
+                    </div>';
+
+                    $basicfields[14] = '
+                    <div class="col-md-3">
+                        <label class="form-label">السعر حد</label>
+                        <input type="text" class="form-control" name="price" id="price"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               onkeyup="ValidateNumberKeyUp(this);"
+                               onblur="ValidateAndFormatNumber(this)">
+                    </div>';
+
+                    $basicfields[15] = '
+                    <div class="col-md-3">
+                        <label class="form-label">السعر سوم</label>
+                        <input type="text" class="form-control" name="pricesom" id="pricesom"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               onkeyup="ValidateNumberKeyUp(this);"
+                               onblur="ValidateAndFormatNumber(this)">
+                    </div>';
+
+                    $basicfields[16] = '
+                    <div class="col-md-3">
+                        <label class="form-label">سعر المتر سوم</label>
+                        <input type="text" class="form-control" name="meterprice" id="meterprice"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               onkeyup="ValidateNumberKeyUp(this);"
+                               onblur="ValidateAndFormatNumber(this)">
+                    </div>';
+
+                    $basicfields[17] = '
+                    <div class="col-md-3">
+                        <label class="form-label">سعر المتر حد</label>
+                        <input type="text" class="form-control" name="meterpricehad" id="meterpricehad"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               onkeyup="ValidateNumberKeyUp(this);"
+                               onblur="ValidateAndFormatNumber(this)">
+                    </div>';
+
+                    $basicfields[18] = '
+                    <div class="col-md-4">
+                        <label class="form-label">طريقة التمويل</label>
+                        <input type="text" class="form-control" name="tamweelmethod" id="tamweelmethod"
+                               placeholder="شخصي - شركة - بنك">
+                    </div>';
+
+                    $basicfields[19] = '
+                    <div class="col-md-4">
+                        <label class="form-label">طريقة الدفع</label>
+                        <input type="text" class="form-control" name="daf3method" id="daf3method"
+                               placeholder="نقداً - تقسيط - سنوي - نصف سنوي - شهري">
+                    </div>';
+
+                    $basicfields[20] = '
+                    <div class="col-md-4">
+                        <label class="form-label">مباشر أو وسيط</label>
+                        <select class="form-select" name="mobasher" id="mobasher">
+                            <option value="1">من المالك مباشر</option>
+                            <option value="0">غير مباشر (وسيط)</option>
+                        </select>
+                    </div>';
+
+                    $basicfields[21] = '
+                    <div class="col-md-6">
+                        <label class="form-label">حد شمالي</label>
+                        <input type="text" name="hedod0" id="hedod0" class="form-control">
+                    </div>';
+
+                    $basicfields[22] = '
+                    <div class="col-md-6">
+                        <label class="form-label">حد جنوبي</label>
+                        <input type="text" name="hedod1" id="hedod1" class="form-control">
+                    </div>';
+
+                    $basicfields[23] = '
+                    <div class="col-md-6">
+                        <label class="form-label">حد شرقي</label>
+                        <input type="text" name="hedod2" id="hedod2" class="form-control">
+                    </div>';
+
+                    $basicfields[24] = '
+                    <div class="col-md-6">
+                        <label class="form-label">حد غربي</label>
+                        <input type="text" name="hedod3" id="hedod3" class="form-control">
+                    </div>';
+
+                    $basicfields[25] = '
+                    <div class="col-md-3">
+                        <label class="form-label">خزنة رقم</label>
+                        <input type="text" class="form-control" id="khazina" name="khazina">
+                    </div>';
+
+                    $basicfields[26] = '
+                    <div class="col-md-3">
+                        <label class="form-label">درج رقم</label>
+                        <input type="text" class="form-control" id="dorg" name="dorg">
+                    </div>';
+
+                    $basicfields[27] = '
+                    <div class="col-md-3">
+                        <label class="form-label">رف رقم</label>
+                        <input type="text" class="form-control" id="raf" name="raf">
+                    </div>';
+
+                    $basicfields[28] = '
+                    <div class="col-md-3">
+                        <label class="form-label">ملف ورقي رقم</label>
+                        <input class="form-control" type="text" id="paperfile" name="paperfile">
+                    </div>';
+
+                    $basicfields[29] = '
+                    <div class="col-md-6">
+                        <label class="form-label">الخدمة المطلوبة</label>
+                        <select class="form-select" name="khdmax" id="khdmax"
+                                onchange="document.getElementById(\'khdma\').value=this.options[this.options.selectedIndex].text;">
+                            <option>بيع</option>
+                            <option>شراء</option>
+                            <option>تأجير</option>
+                            <option>استئجار</option>
+                            <option>استثمار</option>
+                            <option>تسويق</option>
+                            <option>تثمين</option>
+                            <option>استشارات</option>
+                            <option>ادارة املاك</option>
+                            <option>دراسة جدوى</option>
+                            <option>اخرى</option>
+                        </select>
+                        <input type="text" class="form-control mt-2" name="khdma" id="khdma" placeholder="أخرى">
+                    </div>';
+
+                    $basicfields[30] = '
+                    <div class="col-md-6">
+                        <label class="form-label">خيارات البيع</label>
+                        <div class="d-flex flex-wrap gap-3">
+                            <div class="form-check">
+                                <input type="checkbox" name="s13" value="1" id="s13" class="form-check-input">
+                                <label for="s13" class="form-check-label">بالمتر</label>
+                            </div>
+                            <div class="form-check">
+                                <input type="checkbox" name="s14" value="1" id="s14" class="form-check-input">
+                                <label for="s14" class="form-check-label">بالقطعة</label>
+                            </div>
+                            <div class="form-check">
+                                <input type="checkbox" name="s11" value="1" id="s11" class="form-check-input">
+                                <label for="s11" class="form-check-label">علي الشور</label>
+                            </div>
+                            <div class="form-check">
+                                <input type="checkbox" name="s12" value="1" id="s12" class="form-check-input">
+                                <label for="s12" class="form-check-label">قابل للتفاوض</label>
+                            </div>
+                        </div>
+                    </div>';
+
+                    $basicfields[31] = '
+                    <div class="col-md-12">
+                        <label class="form-label">نوع الأرض</label>
+                        <select class="form-select" name="ardtype" id="ardtype">
+                            <option value="1">استثمارية</option>
+                            <option value="2">سكنية</option>
+                            <option value="3">تجارية</option>
+                            <option value="4">أرض خام</option>
+                            <option value="5">أخرى</option>
+                        </select>
+                    </div>';
+
+                    // Apply custom form template filters
+                    $basicfields = ($disform[0] ?? null) != 1 ? "" : $basicfields;
+                    $basicfields[0] = ($disform[9] ?? null) == 'none' ? "" : $basicfields[0];
+                    $basicfields[1] = ($disform[9] ?? null) == 'none' ? "" : $basicfields[1];
+                    $basicfields[2] = ($disform[10] ?? null) == 'none' ? "" : $basicfields[2];
+                    $basicfields[3] = ($disform[11] ?? null) == 'none' ? "" : $basicfields[3];
+                    $basicfields[4] = ($disform[12] ?? null) == 'none' ? "" : $basicfields[4];
+                    $basicfields[5] = ($disform[13] ?? null) == 'none' ? "" : $basicfields[5];
+                    $basicfields[6] = ($disform[14] ?? null) == 'none' ? "" : $basicfields[6];
+                    $basicfields[7] = ($disform[15] ?? null) == 'none' ? "" : $basicfields[7];
+                    $basicfields[8] = ($disform[16] ?? null) == 'none' ? "" : $basicfields[8];
+                    $basicfields[9] = ($disform[17] ?? null) == 'none' ? "" : $basicfields[9];
+                    $basicfields[10] = ($disform[59] ?? null) == 'none' ? "" : $basicfields[10];
+                    $basicfields[11] = ($disform[59] ?? null) == 'none' ? "" : $basicfields[11];
+                    $basicfields[12] = ($disform[18] ?? null) == 'none' ? "" : $basicfields[12];
+                    $basicfields[13] = ($disform[18] ?? null) == 'none' ? "" : $basicfields[13];
+                    $basicfields[14] = ($disform[19] ?? null) == 'none' ? "" : $basicfields[14];
+                    $basicfields[15] = ($disform[20] ?? null) == 'none' ? "" : $basicfields[15];
+                    $basicfields[16] = ($disform[21] ?? null) == 'none' ? "" : $basicfields[16];
+                    $basicfields[17] = ($disform[21] ?? null) == 'none' ? "" : $basicfields[17];
+                    $basicfields[18] = ($disform[22] ?? null) == 'none' ? "" : $basicfields[18];
+                    $basicfields[19] = ($disform[23] ?? null) == 'none' ? "" : $basicfields[19];
+                    $basicfields[20] = ($disform[24] ?? null) == 'none' ? "" : $basicfields[20];
+                    $basicfields[21] = ($disform[25] ?? null) == 'none' ? "" : $basicfields[21];
+                    $basicfields[22] = ($disform[25] ?? null) == 'none' ? "" : $basicfields[22];
+                    $basicfields[23] = ($disform[25] ?? null) == 'none' ? "" : $basicfields[23];
+                    $basicfields[24] = ($disform[25] ?? null) == 'none' ? "" : $basicfields[24];
+                    $basicfields[25] = ($disform[26] ?? null) == 'none' ? "" : $basicfields[25];
+                    $basicfields[26] = ($disform[26] ?? null) == 'none' ? "" : $basicfields[26];
+                    $basicfields[27] = ($disform[26] ?? null) == 'none' ? "" : $basicfields[27];
+                    $basicfields[28] = ($disform[26] ?? null) == 'none' ? "" : $basicfields[28];
+                    $basicfields[29] = ($disform[27] ?? null) == 'none' ? "" : $basicfields[29];
+                    $basicfields[30] = ($disform[28] ?? null) == 'none' ? "" : $basicfields[30];
+                    $basicfields[31] = ($disform[29] ?? null) == 'none' ? "" : $basicfields[31];
+
+                    $basicfields = array_values(array_filter($basicfields));
+
+                    // Output fields
+                    foreach ($basicfields as $field) {
+                        echo $field;
+                    }
+                    ?>
+                </div>
+
+                <!-- Land Status Section -->
+                <div class="section-header">
+                    <i class="bi bi-bookmark-check"></i>
+                    <span>حالة الأرض</span>
+                </div>
+
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <div class="form-check">
+                            <input type="radio" value="1" name="statusx" id="stx1" class="form-check-input"
+                                   <?php if (isset($rowk['statusx']) && $rowk['statusx'] == 1) echo "checked"; ?>>
+                            <label for="stx1" class="form-check-label">
+                                محجوزة لـ
+                                <input type="text" name="reversedfor1" class="form-control form-control-sm d-inline-block"
+                                       style="width: auto;"
+                                       value="<?php if (isset($rowk['statusx']) && $rowk['statusx'] == 1) echo htmlspecialchars($rowk['reversedfor'], ENT_QUOTES, 'UTF-8'); ?>">
+                            </label>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-check">
+                            <input type="radio" value="2" name="statusx" id="stx2" class="form-check-input"
+                                   <?php if (isset($rowk['statusx']) && $rowk['statusx'] == 2) echo "checked"; ?>>
+                            <label for="stx2" class="form-check-label">
+                                مباعة لـ
+                                <input type="text" name="reversedfor2" class="form-control form-control-sm d-inline-block"
+                                       style="width: auto;"
+                                       value="<?php if (isset($rowk['statusx']) && $rowk['statusx'] == 2) echo htmlspecialchars($rowk['reversedfor'], ENT_QUOTES, 'UTF-8'); ?>">
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Current Owner Section -->
+                <?php if (!isset($disform[2]) || $disform[2] != 'none') { ?>
+                <div class="section-header">
+                    <i class="bi bi-person-circle"></i>
+                    <span>بيانات المالك الحالي</span>
+                </div>
+
+                <div class="row g-3">
+                    <?php if (!isset($disform[30]) || $disform[30] != 'none') { ?>
+                    <div class="col-md-6">
+                        <button type="button" id="msgbox2position" class="btn btn-success"
+                                onclick="ajaxfilldiv('select malekid,malekbayan1,malekbayan2,malekbayan3,malekbayan4,malekbayan5,malekbayan6,malekbayan7,malekbayan8,malekbayan9,malekbayan10 from malek where userid = <?= intval($user_data['userid']) ?> and malekbayan1 <> \'\'','malekid','malekbayan1','malekid','malekbayan1',1,this.id); return false;">
+                            <i class="bi bi-person-plus me-2"></i>
+                            اختر مالك مسجل
+                        </button>
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[30]) || $disform[30] != 'none') { ?>
+                    <div class="col-md-6">
+                        <label class="form-label">اسم المالك</label>
+                        <input type="hidden" name="malekid" id="malekid" class="malek">
+                        <input name="malekbayan1" class="form-control" id="malekbayan1"
+                               onkeyup="if($('#malekid').val()>0){$('.malek').val('');}">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[31]) || $disform[31] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">الجوال</label>
+                        <input name="malekbayan2" class="form-control malek" id="malekbayan2">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[32]) || $disform[32] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">العنوان</label>
+                        <input name="malekbayan3" class="form-control malek" id="malekbayan3">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[33]) || $disform[33] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">رقم الصك</label>
+                        <input name="malekbayan4" class="form-control malek" id="malekbayan4">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[34]) || $disform[34] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">هاتف منزل</label>
+                        <input name="malekbayan5" class="form-control malek" id="malekbayan5">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[35]) || $disform[35] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">هاتف عمل</label>
+                        <input name="malekbayan6" class="form-control malek" id="malekbayan6">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[36]) || $disform[36] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">صندوق بريد</label>
+                        <input name="malekbayan7" class="form-control malek" id="malekbayan7">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[37]) || $disform[37] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">البريد الإلكتروني</label>
+                        <input name="malekbayan8" class="form-control malek" id="malekbayan8">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[28]) || $disform[28] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">جهة العمل</label>
+                        <input name="malekbayan9" class="form-control malek" id="malekbayan9">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[28]) || $disform[28] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">ملحوظات إضافية</label>
+                        <input name="malekbayan10" class="form-control malek" id="malekbayan10">
+                    </div>
+                    <?php } ?>
+                </div>
+                <?php } ?>
+
+                <!-- Previous Owner Section -->
+                <?php if (!isset($disform[3]) || $disform[3] != 'none') { ?>
+                <div class="section-header">
+                    <i class="bi bi-person"></i>
+                    <span>بيانات المالك السابق</span>
+                </div>
+
+                <div class="row g-3">
+                    <?php if (!isset($disform[40]) || $disform[40] != 'none') { ?>
+                    <div class="col-md-6">
+                        <button type="button" id="msgbox3position" class="btn btn-success"
+                                onclick="ajaxfilldiv('select malekid as oldmalekid,malekbayan1 as oldmalekbayan1,malekbayan2 as oldmalekbayan2,malekbayan3 as oldmalekbayan3,malekbayan4 as oldmalekbayan4,malekbayan5 as oldmalekbayan5,malekbayan6 as oldmalekbayan6,malekbayan7 as oldmalekbayan7,malekbayan8 as oldmalekbayan8,malekbayan9 as oldmalekbayan9,malekbayan10 as oldmalekbayan10 from malek where userid = <?= intval($user_data['userid']) ?>','oldmalekid','malekbayan1','malekid','malekbayan1',1,this.id); return false;">
+                            <i class="bi bi-person-plus me-2"></i>
+                            اختر مالك مسجل
+                        </button>
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[40]) || $disform[40] != 'none') { ?>
+                    <div class="col-md-6">
+                        <label class="form-label">اسم المالك</label>
+                        <input type="hidden" name="oldmalekid" id="oldmalekid" class="oldmalek">
+                        <input name="oldmalekbayan1" id="oldmalekbayan1" class="form-control"
+                               onkeyup="if($('#oldmalekid').val()>0){$('.oldmalek').val('');}">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[41]) || $disform[41] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">رقم الجوال</label>
+                        <input name="oldmalekbayan2" id="oldmalekbayan2" class="form-control oldmalek">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[42]) || $disform[42] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">العنوان</label>
+                        <input name="oldmalekbayan3" id="oldmalekbayan3" class="form-control oldmalek">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[43]) || $disform[43] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">رقم الصك</label>
+                        <input name="oldmalekbayan4" id="oldmalekbayan4" class="form-control oldmalek">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[44]) || $disform[44] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">هاتف منزل</label>
+                        <input name="oldmalekbayan5" id="oldmalekbayan5" class="form-control oldmalek">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[45]) || $disform[45] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">هاتف عمل</label>
+                        <input name="oldmalekbayan6" id="oldmalekbayan6" class="form-control oldmalek">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[46]) || $disform[46] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">صندوق بريد</label>
+                        <input name="oldmalekbayan7" id="oldmalekbayan7" class="form-control oldmalek">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[47]) || $disform[47] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">البريد الإلكتروني</label>
+                        <input name="oldmalekbayan8" id="oldmalekbayan8" class="form-control oldmalek">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[48]) || $disform[48] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">جهة العمل</label>
+                        <input name="oldmalekbayan9" id="oldmalekbayan9" class="form-control oldmalek">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[49]) || $disform[49] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">ملحوظات إضافية</label>
+                        <input name="oldmalekbayan10" id="oldmalekbayan10" class="form-control oldmalek">
+                    </div>
+                    <?php } ?>
+                </div>
+                <?php } ?>
+
+                <!-- Broker/Intermediary Section -->
+                <div class="section-header">
+                    <i class="bi bi-briefcase"></i>
+                    <span>بيانات الوسيط</span>
+                </div>
+
+                <div class="row g-3">
+                    <?php if (!isset($disform[50]) || $disform[50] != 'none') { ?>
+                    <div class="col-md-6">
+
+                        <input type="hidden" name="masderid" id="masderid">
+                        <button type="button" id="masderidPostion" class="btn btn-success"
+                                onclick="ajaxfilldiv('select masderid,masdername,masdertel,masderfax,masderemail,masderaddress,maktab,mtype,mtemp,addationalinfo,masderphone from masder where (userid=0 or userid = <?= intval($user_data['userid']) ?>)','masderid','masdername','masderid','masdername',1,this.id); return false;">
+                            <i class="bi bi-person-plus me-2"></i>
+                            أختر وسيط مسجل
+                        </button>
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[51]) || $disform[51] != 'none') { ?>
+                    <div class="col-md-6">
+                        <label class="form-label">اسم الوسيط</label>
+                        <input type="text" name="masdername" id="masdername" class="form-control"
+                               onkeyup="document.getElementById('masderid').value='';
+                                       document.getElementById('masdertel').value='';
+                                       document.getElementById('masderphone').value='';
+                                       document.getElementById('masderfax').value='';
+                                       document.getElementById('masderemail').value='';
+                                       document.getElementById('masderaddress').value='';
+                                       document.getElementById('addationalinfo').value='';">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[52]) || $disform[52] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">الجوال</label>
+                        <input name="masdertel" id="masdertel" class="form-control">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[52]) || $disform[52] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">هاتف</label>
+                        <input name="masderphone" id="masderphone" class="form-control">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[54]) || $disform[54] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">فاكس</label>
+                        <input type="text" name="masderfax" id="masderfax" class="form-control">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[55]) || $disform[55] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">بريد إلكتروني</label>
+                        <input type="text" name="masderemail" id="masderemail" class="form-control">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[56]) || $disform[56] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">عنوان الوسيط</label>
+                        <input type="text" name="masderaddress" id="masderaddress" class="form-control">
+                    </div>
+                    <?php } ?>
+
+                    <?php if (!isset($disform[57]) || $disform[57] != 'none') { ?>
+                    <div class="col-md-4">
+                        <label class="form-label">بيانات إضافية</label>
+                        <input type="text" name="addationalinfo" id="addationalinfo" class="form-control">
+                    </div>
+                    <?php } ?>
+                </div>
+
+                <!-- Secret Information Section -->
+                <div class="section-header">
+                    <i class="bi bi-lock"></i>
+                    <span>بيانات سرية</span>
+                </div>
+
+                <div class="row g-3">
+                    <div class="col-12">
+                        <label class="form-label">معلومات سرية</label>
+                        <textarea class="form-control" style="height:150px" name="secretinfo" id="secretinfo"></textarea>
+                        <small class="text-muted">هنا يمكنك كتابة البيانات السرية</small>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">إظهار في العرض المرئي</label>
+                        <select class="form-select" name="enbleslideshow" id="enbleslideshow">
+                            <option value="1">نعم</option>
+                            <option value="0">لا</option>
+                        </select>
+                        <small class="text-danger">سيظهر العرض فقط في شاشة العروض دون إظهار أي بيانات سرية أو بيانات المالك أو الوسيط</small>
+                    </div>
+                </div>
+
+                <!-- Description Section -->
+                <?php if (!isset($disform[58]) || $disform[58] != 'none') { ?>
+                <div class="section-header">
+                    <i class="bi bi-file-text"></i>
+                    <span>وصف تفصيلي</span>
+                </div>
+
+                <div class="row g-3">
+                    <div class="col-12">
+                        <label class="form-label">الوصف التفصيلي</label>
+                        <textarea class="form-control" style="height:150px" name="note" id="note"></textarea>
+                        <small class="text-muted">لا تكتب بيانات سرية بالوصف - هذا الوصف سيظهر في حال إرسال عرضك إلى المشتركين الآخرين</small>
+                    </div>
+
+                    <div class="col-12">
+                        <label class="form-label">المميزات</label>
+                        <div class="d-flex flex-wrap gap-3">
+                            <div class="form-check">
+                                <input type="checkbox" name="s1" id="s1" value="1" class="form-check-input">
+                                <label for="s1" class="form-check-label">مياه</label>
+                            </div>
+                            <div class="form-check">
+                                <input type="checkbox" name="s6" id="s6" value="1" class="form-check-input">
+                                <label for="s6" class="form-check-label">تطل على ساحة</label>
+                            </div>
+                            <div class="form-check">
+                                <input type="checkbox" name="s2" id="s2" value="1" class="form-check-input">
+                                <label for="s2" class="form-check-label">كهرباء</label>
+                            </div>
+                            <div class="form-check">
+                                <input type="checkbox" name="s7" id="s7" value="1" class="form-check-input">
+                                <label for="s7" class="form-check-label">جوار مسجد</label>
+                            </div>
+                            <div class="form-check">
+                                <input type="checkbox" name="s3" id="s3" value="1" class="form-check-input">
+                                <label for="s3" class="form-check-label">أسفلت</label>
+                            </div>
+                            <div class="form-check">
+                                <input type="checkbox" name="s8" id="s8" value="1" class="form-check-input">
+                                <label for="s8" class="form-check-label">جوار شركات</label>
+                            </div>
+                            <div class="form-check">
+                                <input type="checkbox" name="s4" id="s4" value="1" class="form-check-input">
+                                <label for="s4" class="form-check-label">مدارس</label>
+                            </div>
+                            <div class="form-check">
+                                <input type="checkbox" name="s9" id="s9" value="1" class="form-check-input">
+                                <label for="s9" class="form-check-label">جوار مزرعة</label>
+                            </div>
+                            <div class="form-check">
+                                <input type="checkbox" name="s5" id="s5" value="1" class="form-check-input">
+                                <label for="s5" class="form-check-label">مستشفى</label>
+                            </div>
+                            <div class="form-check">
+                                <input type="checkbox" name="s10" id="s10" value="1" class="form-check-input">
+                                <label for="s10" class="form-check-label">هاتف</label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <?php } ?>
+
+                <!-- Files and Images Section -->
+                <div class="section-header">
+                    <i class="bi bi-images"></i>
+                    <span>الصور والملفات</span>
+                </div>
+
+                <div class="row g-3">
+                    <div class="col-12">
+                        <label class="form-label">رفع الملفات</label>
+                        <input id="element_input" type="file" name="pic1" multiple class="form-control">
+                        <div id="files_list" class="mt-2"></div>
+                        <script src="multifile.hnt"></script>
+                        <small class="text-muted">يمكنك إرفاق ملفات الفيديو والفلاش والصكوك والصور وملفات الوورد والباوربوينت والإكسل</small>
+                    </div>
+
+                    <?php
+                    // Display existing files for edit mode
+                    if (isset($_REQUEST['editid']) && $_REQUEST['editid']) {
+                        $ardid = intval($_REQUEST['editid']);
+                        $extentions = explode(",", ".jpg,.gif,.png,.bmp,.pdf,.tif,.doc,.docx,.ppt,.pps,.avi,.mepg,.wmv,.swf,.xls,.xlsx,.mdi");
+
+                        echo "<div class='col-12'><div class='row g-2'>";
+                        for ($i = 0; $i < 15; $i++) {
+                            for ($j = 0; $j < count($extentions); $j++) {
+                                $fileName = upload_path('properties.images', "{$ardid}_{$i}" . $extentions[$j]);
+                                $fileUrl = upload_url('properties.images', "{$ardid}_{$i}" . $extentions[$j]);
+                                if (file_exists($fileName)) {
+                                    echo "<div class='col-md-2'>
+                                            <a href='{$fileUrl}' id='pic-{$i}-{$j}' target='_blank' class='btn btn-sm btn-outline-primary'>
+                                                <i class='bi bi-file-earmark me-1'></i>ملف {$extentions[$j]}
+                                            </a>
+                                            <button type='button' class='btn btn-sm btn-danger policy_{$sc_id}_deleetes mt-1'
+                                                    onclick=\"confirm('هل ترغب بالفعل في حذف هذا الملف؟', 'تأكيد الحذف', function(){window.location.href='mypreview.hnt?delef=1&sfile={$fileName}'; $('#pic-{$i}-{$j}').hide();});\">
+                                                <i class='bi bi-trash'></i>
+                                            </button>
+                                        </div>";
+                                }
+                            }
+                        }
+                        echo "</div></div>";
+                    }
+                    ?>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="d-flex flex-wrap gap-2 justify-content-center mt-5">
+                    <button type="submit" class="btn btn-success btn-lg px-5 <?= "policy_".$sc_id."_adds" ?>">
+                        <i class="bi bi-check-circle me-2"></i>
+                        <?= htmlspecialchars($buttondata, ENT_QUOTES, 'UTF-8') ?>
+                    </button>
+
+                    <button type="button" class="btn btn-info btn-lg px-4 <?= "policy_".$sc_id."_deleetes" ?> <?= $hidforAdd ?>"
+                            onclick="confirm('سيتم نقل العقار إلى الأرشيف ولن يظهر بالعقارات المعروضة', 'تأكيد الأرشفة', function(){$('#deleteme').val(4);$('#landForm').submit();});">
+                        <i class="bi bi-archive me-2"></i>
+                        نقل إلى الأرشيف
+                    </button>
+
+                    <button type="button" class="btn btn-danger btn-lg px-4 <?= "policy_".$sc_id."_deleetes" ?> <?= $hidforAdd ?>"
+                            onclick="confirm('هل أنت متأكد من حذف الأرض؟', 'تحذير - حذف نهائي', function(){$('#deleteme').val(3);$('#landForm').submit();});">
+                        <i class="bi bi-trash me-2"></i>
+                        حذف العقار
+                    </button>
+
+                    <button type="button" class="btn btn-secondary btn-lg px-4"
+                            onclick="window.location.href='addard.hnt';return false;">
+                        <i class="bi bi-file-earmark-plus me-2"></i>
+                        نموذج جديد
+                    </button>
+                </div>
+
+                <!-- Map Integration -->
+                <input type="hidden" name="googlexyz" value="" id="googlexyz">
+                <?php include_once "../../mapv3.html"; ?>
+                <input type="hidden" name="center_x" id="center_x">
+                <input type="hidden" name="center_y" id="center_y">
+                <input type="hidden" name="polypath" id="polypath">
+                <input type="hidden" name="sqlfeilds">
+                <input type="hidden" name="godir" value="<?= isset($dir) ? htmlspecialchars($dir, ENT_QUOTES, 'UTF-8') : '' ?>">
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Hidden iframe for legacy functionality -->
+<div style="display:none">
+    <iframe width="300" height="200" name="addard" id="addardframe"></iframe>
+</div>
+
+<?php
+require('../../foter.hnt');
+} // End of !$is_ajax_request
+?>

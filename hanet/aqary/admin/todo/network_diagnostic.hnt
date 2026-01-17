@@ -1,0 +1,214 @@
+<?php
+/**
+ * Network Diagnostic Tool
+ * Diagnoses network connectivity issues
+ */
+
+echo "<h1>Network Diagnostic Tool</h1>";
+echo "<p>This tool helps identify network configuration differences and connectivity issues.</p>";
+
+// Load mail settings
+$mailsettings = @file_get_contents('../../mailsettings.cfg');
+if (empty($mailsettings)) {
+    die("<p style='color: red;'><strong>Error:</strong> Could not load mailsettings.cfg</p>");
+}
+
+$mailsettings = base64_decode($mailsettings);
+$mailsettings = str_replace(["\r", "\n"], "", $mailsettings);
+$mailsettings = explode("#", $mailsettings);
+$mailhost = $mailsettings[3];
+
+echo "<h2>Target Server: " . htmlspecialchars($mailhost) . "</h2>";
+
+// 1. DNS Resolution Test
+echo "<h3>1. DNS Resolution Test</h3>";
+echo "<table border='1' cellpadding='5' style='border-collapse: collapse;'>";
+
+$ip = gethostbyname($mailhost);
+if ($ip == $mailhost) {
+    echo "<tr><td><strong>DNS Resolution</strong></td><td style='color: red;'>✗ FAILED - Cannot resolve hostname</td></tr>";
+    echo "<tr><td><strong>Issue</strong></td><td>DNS server is not accessible or hostname doesn't exist</td></tr>";
+} else {
+    echo "<tr><td><strong>DNS Resolution</strong></td><td style='color: green;'>✓ SUCCESS</td></tr>";
+    echo "<tr><td><strong>Resolved IP</strong></td><td><strong>" . htmlspecialchars($ip) . "</strong></td></tr>";
+
+    // Check if it's IPv4 or IPv6
+    if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+        echo "<tr><td><strong>IP Version</strong></td><td style='color: green;'>IPv4 ✓</td></tr>";
+        echo "<tr><td><strong>Status</strong></td><td>IPv4 is compatible with most networks</td></tr>";
+    } elseif (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+        echo "<tr><td><strong>IP Version</strong></td><td style='color: orange;'>IPv6 ⚠</td></tr>";
+        echo "<tr><td><strong>Issue</strong></td><td><strong>IPv6 detected!</strong> Your network may not support IPv6.<br>The app has been configured to force IPv4 connections.</td></tr>";
+
+        // Try to get IPv4 address using dns_get_record
+        $dns_records = @dns_get_record($mailhost, DNS_A);
+        if ($dns_records && isset($dns_records[0]['ip'])) {
+            echo "<tr><td><strong>IPv4 Alternative</strong></td><td>" . htmlspecialchars($dns_records[0]['ip']) . "</td></tr>";
+            echo "<tr><td><strong>Recommendation</strong></td><td>Consider using IPv4 address directly in mail settings</td></tr>";
+        }
+    }
+}
+
+// 2. System Information
+echo "<tr><td colspan='2'><strong>System Information</strong></td></tr>";
+echo "<tr><td>PHP Version</td><td>" . phpversion() . "</td></tr>";
+echo "<tr><td>Operating System</td><td>" . PHP_OS . "</td></tr>";
+echo "<tr><td>Server Software</td><td>" . ($_SERVER['SERVER_SOFTWARE'] ?? 'Unknown') . "</td></tr>";
+
+// 3. Network Configuration
+$hostname = gethostname();
+$local_ip = gethostbyname($hostname);
+echo "<tr><td>Computer Name</td><td>" . htmlspecialchars($hostname) . "</td></tr>";
+echo "<tr><td>Local IP Address</td><td>" . htmlspecialchars($local_ip) . "</td></tr>";
+
+// 4. OpenSSL Check
+$openssl = extension_loaded('openssl');
+echo "<tr><td>OpenSSL Extension</td><td style='color: " . ($openssl ? 'green' : 'red') . ";'>" . ($openssl ? '✓ Enabled' : '✗ Disabled') . "</td></tr>";
+
+if ($openssl) {
+    $openssl_version = OPENSSL_VERSION_TEXT;
+    echo "<tr><td>OpenSSL Version</td><td>" . htmlspecialchars($openssl_version) . "</td></tr>";
+}
+
+// 5. Stream Socket Support
+$socket_support = function_exists('stream_socket_client');
+echo "<tr><td>Stream Socket Support</td><td style='color: " . ($socket_support ? 'green' : 'red') . ";'>" . ($socket_support ? '✓ Available' : '✗ Not Available') . "</td></tr>";
+
+echo "</table>";
+
+// 6. Ping Equivalent (TCP Connection Test)
+echo "<h3>2. TCP Connection Test (Ping Equivalent)</h3>";
+echo "<table border='1' cellpadding='5' style='border-collapse: collapse;'>";
+echo "<tr><th>Test</th><th>Result</th><th>Time</th><th>Details</th></tr>";
+
+// Test ICMP Ping (if exec is enabled)
+$ping_result = @shell_exec("ping -n 1 -w 1000 $mailhost 2>&1");
+if ($ping_result !== null) {
+    echo "<tr><td><strong>ICMP Ping</strong></td>";
+    if (strpos($ping_result, 'TTL=') !== false || strpos($ping_result, 'time=') !== false) {
+        echo "<td style='color: green;'>✓ REACHABLE</td>";
+        preg_match('/time[<=](\d+)/', $ping_result, $matches);
+        $time = $matches[1] ?? 'N/A';
+        echo "<td>{$time}ms</td>";
+        echo "<td>Server is reachable via ICMP</td>";
+    } else {
+        echo "<td style='color: red;'>✗ UNREACHABLE</td>";
+        echo "<td>Timeout</td>";
+        echo "<td>Server not responding to ping. May be blocked by firewall.</td>";
+    }
+    echo "</tr>";
+} else {
+    echo "<tr><td><strong>ICMP Ping</strong></td><td style='color: orange;'>⚠ UNAVAILABLE</td><td>-</td><td>exec() function is disabled</td></tr>";
+}
+
+// Test Traceroute (if exec is enabled)
+$tracert_result = @shell_exec("tracert -h 10 -w 500 $mailhost 2>&1");
+if ($tracert_result !== null && strlen($tracert_result) > 0) {
+    $hops = substr_count($tracert_result, "\n");
+    echo "<tr><td><strong>Traceroute</strong></td>";
+    if (strpos($tracert_result, 'Request timed out') !== false) {
+        echo "<td style='color: red;'>✗ BLOCKED</td>";
+        echo "<td>-</td>";
+        echo "<td>Connection blocked by firewall or routing issue</td>";
+    } else {
+        echo "<td style='color: green;'>✓ SUCCESS</td>";
+        echo "<td>{$hops} hops</td>";
+        echo "<td>Route to server is available</td>";
+    }
+    echo "</tr>";
+}
+
+echo "</table>";
+
+// 7. Firewall Detection
+echo "<h3>3. Firewall Detection</h3>";
+echo "<table border='1' cellpadding='5' style='border-collapse: collapse;'>";
+
+// Check Windows Firewall status
+$firewall_status = @shell_exec("netsh advfirewall show allprofiles state 2>&1");
+if ($firewall_status !== null) {
+    echo "<tr><td><strong>Windows Firewall</strong></td>";
+    if (stripos($firewall_status, 'ON') !== false) {
+        echo "<td style='color: orange;'>⚠ ENABLED</td>";
+        echo "<td>Firewall may be blocking outbound SMTP connections</td>";
+    } else {
+        echo "<td style='color: green;'>✓ DISABLED</td>";
+        echo "<td>Firewall is not blocking connections</td>";
+    }
+    echo "</tr>";
+}
+
+// Check for common antivirus processes
+$processes = @shell_exec("tasklist /FI \"IMAGENAME eq kaspersky*\" /FI \"IMAGENAME eq avast*\" /FI \"IMAGENAME eq avg*\" /FI \"IMAGENAME eq norton*\" 2>&1");
+if ($processes !== null && stripos($processes, 'No tasks') === false && strlen(trim($processes)) > 0) {
+    echo "<tr><td><strong>Antivirus Detected</strong></td>";
+    echo "<td style='color: orange;'>⚠ RUNNING</td>";
+    echo "<td>Antivirus software may be blocking SMTP ports</td>";
+    echo "</tr>";
+}
+
+echo "</table>";
+
+// 8. Recommendations
+echo "<h2>Recommendations Based on Tests:</h2>";
+echo "<ul>";
+
+if ($ip == $mailhost) {
+    echo "<li style='color: red;'><strong>Critical:</strong> DNS resolution failed. Check DNS server settings or use IP address directly.</li>";
+}
+
+if (!$openssl) {
+    echo "<li style='color: red;'><strong>Critical:</strong> OpenSSL is disabled. SMTP with TLS/SSL will not work.</li>";
+}
+
+// IPv6 warning
+if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+    echo "<li style='color: orange;'><strong>IPv6 Issue Detected:</strong> The mail server resolved to an IPv6 address, but your network may not support IPv6.";
+    echo "<ul>";
+    echo "<li><strong>✓ Already Fixed:</strong> The email system has been configured to force IPv4 connections</li>";
+    echo "<li>If issues persist, consider using the IPv4 address directly in mail settings</li>";
+    echo "<li>Run test_smtp.hnt to verify the fix is working</li>";
+    echo "</ul></li>";
+}
+
+echo "<li><strong>Network Issue:</strong> If ping fails on this machine but works on another:";
+echo "<ul>";
+echo "<li>This machine may be on a different network/subnet</li>";
+echo "<li>A firewall is blocking traffic from this machine</li>";
+echo "<li>This machine may require a proxy to access external servers</li>";
+echo "<li><strong>IPv6 vs IPv4:</strong> The working machine may use IPv4 while this one tries IPv6</li>";
+echo "</ul></li>";
+
+echo "<li><strong>Quick Fix Options:</strong>";
+echo "<ul>";
+echo "<li><strong>Recommended:</strong> The IPv4 fix has been applied - test with test_smtp.hnt</li>";
+echo "<li>Use your working machine as an SMTP relay</li>";
+echo "<li>Configure this machine to use a different SMTP server (like Gmail)</li>";
+echo "<li>Use a VPN to bypass network restrictions</li>";
+echo "<li>Contact your network administrator to whitelist the mail server</li>";
+echo "</ul></li>";
+
+echo "</ul>";
+
+// 9. Command Line Tests
+echo "<h2>Manual Tests to Run (Command Prompt as Administrator):</h2>";
+echo "<pre style='background: #f5f5f5; padding: 15px; border: 1px solid #ddd;'>";
+echo "# Test ICMP ping\n";
+echo "ping $mailhost\n\n";
+
+echo "# Test port 587\n";
+echo "telnet $mailhost 587\n\n";
+
+echo "# Or use PowerShell\n";
+echo "Test-NetConnection -ComputerName $mailhost -Port 587\n\n";
+
+echo "# Check firewall rules\n";
+echo "netsh advfirewall firewall show rule name=all | findstr SMTP\n\n";
+
+echo "# Allow outbound SMTP (run as Administrator)\n";
+echo "netsh advfirewall firewall add rule name=\"Allow SMTP\" dir=out action=allow protocol=TCP remoteport=25,465,587,2525\n";
+echo "</pre>";
+
+echo "<hr>";
+echo "<p><a href='test_smtp.hnt'>Test SMTP Connection</a> | <a href='test_port.hnt'>Port Connectivity Test</a></p>";
+?>

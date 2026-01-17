@@ -1,0 +1,500 @@
+<?php
+
+/**
+ * Amlak Data Synchronization
+ * مزامنة بيانات العقارات مع المحاسبة
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "مزامنة بيانات العقارات";
+$sc_id = "211";
+include_once "../../nocash.hnt";
+include_once "../../connectdb.hnt";
+include_once "../../header.hnt";
+include_once "includes/accounting_class.hnt";
+include_once "includes/amlak_integration.hnt";
+
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+$amlakIntegration = new AmlakAccountingIntegration($db, $accountingManager);
+
+$syncLog = [];
+$syncStats = [
+    'tenants_synced' => 0,
+    'owners_synced' => 0,
+    'invoices_created' => 0,
+    'entries_created' => 0,
+    'errors' => 0
+];
+$toastMessage = '';
+
+// Handle sync actions
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['sync_action'])) {
+    $action = $_POST['sync_action'];
+
+    switch ($action) {
+        case 'sync_tenants':
+            // Sync all tenants as customers
+            $tenantsQuery = "SELECT mostagerid, mostagername FROM mostagereen WHERE mostagername != '' ORDER BY mostagerid";
+            $tenantsResult = $db->query($tenantsQuery);
+
+            while ($tenant = $tenantsResult->fetch_assoc()) {
+                $result = $amlakIntegration->syncMostagerAsCustomer($tenant['mostagerid']);
+                if ($result['success']) {
+                    $syncStats['tenants_synced']++;
+                    $syncLog[] = "✓ تم مزامنة المستأجر: {$tenant['mostagername']}";
+                } else {
+                    $syncStats['errors']++;
+                    $syncLog[] = "✗ فشل مزامنة المستأجر: {$tenant['mostagername']}";
+                }
+            }
+            break;
+
+        case 'sync_owners':
+            // Sync all owners as customers
+            $ownersQuery = "SELECT malekid, malekbayan1 as malekname FROM malek WHERE malekbayan1 != '' ORDER BY malekid";
+            $ownersResult = $db->query($ownersQuery);
+
+            if (!$ownersResult) {
+                $syncLog[] = "✗ خطأ في استعلام الملاك: " . $db->error;
+                $syncStats['errors']++;
+                break;
+            }
+
+            if ($ownersResult->num_rows == 0) {
+                $syncLog[] = "⚠ لا يوجد ملاك للمزامنة";
+                break;
+            }
+
+            while ($owner = $ownersResult->fetch_assoc()) {
+                $result = $amlakIntegration->syncMalekAsCustomer($owner['malekid']);
+                if ($result['success']) {
+                    $syncStats['owners_synced']++;
+                    $syncLog[] = "✓ تم مزامنة المالك: {$owner['malekname']}";
+                } else {
+                    $syncStats['errors']++;
+                    $syncLog[] = "✗ فشل مزامنة المالك: {$owner['malekname']} - " . ($result['message'] ?? 'خطأ غير معروف');
+                }
+            }
+            break;
+
+        case 'create_invoices':
+            // Create invoices from active contracts
+            $contractsQuery = "SELECT e.rakam3akdid as egarid, e.rakam3akd, m.mostagername
+                              FROM egar e
+                              LEFT JOIN mostagereen m ON e.mostagerid = m.mostagerid
+                              WHERE e.endegar >= UNIX_TIMESTAMP(CURDATE()) * 1000
+                              LIMIT 50";
+            $contractsResult = $db->query($contractsQuery);
+
+            if (!$contractsResult) {
+                $syncLog[] = "✗ خطأ في استعلام العقود: " . $db->error;
+                $syncStats['errors']++;
+                break;
+            }
+
+            if ($contractsResult->num_rows == 0) {
+                $toastMessage = "لا توجد عقود نشطة لإنشاء فواتير";
+                break;
+            }
+
+            while ($contract = $contractsResult->fetch_assoc()) {
+                $result = $amlakIntegration->createInvoiceFromEgar($contract['egarid']);
+                if ($result['success']) {
+                    $syncStats['invoices_created']++;
+                    $syncLog[] = "✓ تم إنشاء فاتورة للعقد: {$contract['rakam3akdid']} - {$contract['mostagername']}";
+                } else {
+                    $syncStats['errors']++;
+                    $syncLog[] = "✗ فشل إنشاء فاتورة للعقد: {$contract['rakam3akdid']} - " . ($result['message'] ?? 'خطأ غير معروف');
+                }
+            }
+            break;
+
+        case 'sync_payments':
+            // Create journal entries from recent payment vouchers
+            // Add column if not exists (compatible with older MySQL versions)
+            $checkColumn = $db->query("SHOW COLUMNS FROM sanad LIKE 'accounting_entry_id'");
+            if ($checkColumn->num_rows == 0) {
+                $alterResult = $db->query("ALTER TABLE sanad ADD COLUMN accounting_entry_id INT NULL");
+                if (!$alterResult) {
+                    $syncLog[] = "✗ فشل إضافة عمود accounting_entry_id: " . $db->error;
+                    $syncStats['errors']++;
+                    break;
+                }
+                // Add index for better performance
+                $db->query("ALTER TABLE sanad ADD INDEX idx_accounting_entry (accounting_entry_id)");
+                $syncLog[] = "✓ تمت إضافة عمود accounting_entry_id إلى جدول sanad";
+            }
+
+            // Only sync vouchers that haven't been synced yet
+            $vouchersQuery = "SELECT idsanad as sanadid, sanadrakam as sanadnumber, mybyan as sanaddescription
+                             FROM sanad
+                             WHERE sanaddate >= UNIX_TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY))
+                             AND (accounting_entry_id IS NULL OR accounting_entry_id = 0)
+                             ORDER BY sanaddate DESC
+                             LIMIT 50";
+            $vouchersResult = $db->query($vouchersQuery);
+
+            if (!$vouchersResult) {
+                $syncLog[] = "✗ خطأ في استعلام السندات: " . $db->error;
+                $syncStats['errors']++;
+                break;
+            }
+
+            if ($vouchersResult->num_rows == 0) {
+                $toastMessage = "لا توجد سندات جديدة للمزامنة (جميع السندات تمت مزامنتها بالفعل)";
+                break;
+            }
+
+            $syncLog[] = "⚙ بدء مزامنة {$vouchersResult->num_rows} سند قبض...";
+
+            // Ensure autocommit is enabled for updates
+            $db->autocommit(TRUE);
+
+            while ($voucher = $vouchersResult->fetch_assoc()) {
+                $result = $amlakIntegration->createEntryFromSanad($voucher['sanadid']);
+                if ($result['success']) {
+                    // Update sanad with entry reference
+                    $entryId = $result['entry_id'] ?? 0;
+                    if ($entryId > 0) {
+                        $updateQuery = "UPDATE sanad SET accounting_entry_id = ? WHERE idsanad = ?";
+                        $stmt = $db->prepare($updateQuery);
+
+                        if (!$stmt) {
+                            $syncLog[] = "⚠ تحذير: فشل تجهيز استعلام التحديث للسند {$voucher['sanadnumber']}: " . $db->error;
+                            $syncStats['errors']++;
+                        } else {
+                            $stmt->bind_param('ii', $entryId, $voucher['sanadid']);
+
+                            if (!$stmt->execute()) {
+                                $syncLog[] = "⚠ تحذير: فشل تحديث السند {$voucher['sanadnumber']} بمعرف القيد {$entryId}: " . $stmt->error;
+                                $syncStats['errors']++;
+                            } else {
+                                $affectedRows = $stmt->affected_rows;
+                                if ($affectedRows == 0) {
+                                    $syncLog[] = "⚠ تحذير: لم يتم تحديث السند {$voucher['sanadnumber']} (السند غير موجود؟)";
+                                    $syncStats['errors']++;
+                                } else {
+                                    // Explicitly commit the update
+                                    $db->commit();
+                                }
+                            }
+                            $stmt->close();
+                        }
+                    } else {
+                        $syncLog[] = "⚠ تحذير: القيد المنشأ لا يحتوي على entry_id للسند {$voucher['sanadnumber']}";
+                        $syncStats['errors']++;
+                    }
+
+                    $syncStats['entries_created']++;
+                    $syncLog[] = "✓ تم إنشاء قيد من سند: {$voucher['sanadnumber']} (القيد رقم: {$result['entry_number']}, معرف: {$entryId})";
+                } else {
+                    $syncStats['errors']++;
+                    $syncLog[] = "✗ فشل إنشاء قيد من سند: {$voucher['sanadnumber']} - " . ($result['message'] ?? 'خطأ غير معروف');
+                }
+            }
+
+            // Verification: Check how many vouchers are now marked as synced
+            $verifyQuery = "SELECT COUNT(*) as synced_count FROM sanad
+                           WHERE sanaddate >= UNIX_TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY))
+                           AND accounting_entry_id IS NOT NULL AND accounting_entry_id > 0";
+            $verifyResult = $db->query($verifyQuery);
+            if ($verifyResult) {
+                $verifyRow = $verifyResult->fetch_assoc();
+                $syncLog[] = "ℹ إجمالي السندات المزامنة (آخر 30 يوم): {$verifyRow['synced_count']}";
+            }
+            break;
+    }
+}
+
+// Get current counts with error checking
+$tenantsCount = 0;
+$result = $db->query("SELECT COUNT(*) as count FROM mostagereen");
+if ($result) $tenantsCount = $result->fetch_assoc()['count'];
+
+$ownersCount = 0;
+$result = $db->query("SELECT COUNT(*) as count FROM malek");
+if ($result) $ownersCount = $result->fetch_assoc()['count'];
+
+$contractsCount = 0;
+$result = $db->query("SELECT COUNT(*) as count FROM egar WHERE endegar >= UNIX_TIMESTAMP(CURDATE()) * 1000");
+if ($result) $contractsCount = $result->fetch_assoc()['count'];
+
+$propertiesCount = 0;
+$result = $db->query("SELECT COUNT(*) as count FROM amlak");
+if ($result) $propertiesCount = $result->fetch_assoc()['count'];
+
+$sanadCount = 0;
+$result = $db->query("SELECT COUNT(*) as count FROM sanad WHERE sanaddate >= UNIX_TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY))");
+if ($result) $sanadCount = $result->fetch_assoc()['count'];
+
+$customersCount = 0;
+$result = $db->query("SELECT COUNT(*) as count FROM acc_customers");
+if ($result) $customersCount = $result->fetch_assoc()['count'];
+
+$invoicesCount = 0;
+$result = $db->query("SELECT COUNT(*) as count FROM acc_invoices");
+if ($result) $invoicesCount = $result->fetch_assoc()['count'];
+?>
+
+<style>
+    :root {
+        --primary-color: #667eea;
+        --secondary-color: #764ba2;
+    }
+
+    .page-header {
+        background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 15px;
+        margin-bottom: 2rem;
+    }
+
+    .sync-card {
+        background: white;
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+    }
+
+    .sync-button {
+        background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+        border: none;
+        color: white;
+        padding: 1rem 2rem;
+        border-radius: 10px;
+        font-weight: 600;
+        width: 100%;
+    }
+
+    .sync-button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+    }
+
+    .log-item {
+        padding: 0.75rem;
+        margin-bottom: 0.5rem;
+        border-radius: 8px;
+        background: #f8f9fa;
+    }
+
+    .log-item.success {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .log-item.error {
+        background: #f8d7da;
+        color: #721c24;
+    }
+
+    .stats-card {
+        background: white;
+        border-radius: 12px;
+        padding: 1.5rem;
+        text-align: center;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+    }
+
+    .stats-value {
+        font-size: 2rem;
+        font-weight: 700;
+        color: var(--primary-color);
+    }
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-arrow-repeat me-2"></i>مزامنة بيانات العقارات
+                </h1>
+                <p class="mb-0 opacity-75">Amlak Data Synchronization</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Current Stats -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value text-primary"><?php echo number_format($propertiesCount); ?></div>
+                <div class="text-muted">العقارات</div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value text-info"><?php echo number_format($tenantsCount); ?></div>
+                <div class="text-muted">المستأجرين</div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value text-secondary"><?php echo number_format($ownersCount); ?></div>
+                <div class="text-muted">الملاك</div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value text-warning"><?php echo number_format($contractsCount); ?></div>
+                <div class="text-muted">العقود النشطة</div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value text-danger"><?php echo number_format($sanadCount); ?></div>
+                <div class="text-muted">سندات (30 يوم)</div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value text-success"><?php echo number_format($customersCount); ?></div>
+                <div class="text-muted">العملاء</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Accounting Stats -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-12">
+            <div class="alert alert-info">
+                <div class="row text-center">
+                    <div class="col-md-4">
+                        <h4 class="mb-0"><?php echo number_format($invoicesCount); ?></h4>
+                        <small>فواتير في المحاسبة</small>
+                    </div>
+                    <div class="col-md-4">
+                        <h4 class="mb-0"><?php echo number_format($customersCount); ?></h4>
+                        <small>عملاء في المحاسبة</small>
+                    </div>
+                    <div class="col-md-4">
+                        <h4 class="mb-0"><?php echo number_format($contractsCount - $invoicesCount); ?></h4>
+                        <small>عقود بدون فواتير</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sync Actions -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-6">
+            <div class="sync-card">
+                <h5 class="mb-3">
+                    <i class="bi bi-people me-2"></i>مزامنة المستأجرين
+                </h5>
+                <p class="text-muted">نقل جميع المستأجرين إلى قائمة العملاء في نظام المحاسبة</p>
+                <form method="POST">
+                    <input type="hidden" name="sync_action" value="sync_tenants">
+                    <button type="submit" class="sync-button">
+                        <i class="bi bi-arrow-repeat me-2"></i>مزامنة المستأجرين
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="sync-card">
+                <h5 class="mb-3">
+                    <i class="bi bi-person-badge me-2"></i>مزامنة الملاك
+                </h5>
+                <p class="text-muted">نقل جميع الملاك إلى قائمة العملاء في نظام المحاسبة</p>
+                <form method="POST">
+                    <input type="hidden" name="sync_action" value="sync_owners">
+                    <button type="submit" class="sync-button">
+                        <i class="bi bi-arrow-repeat me-2"></i>مزامنة الملاك
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="sync-card">
+                <h5 class="mb-3">
+                    <i class="bi bi-receipt me-2"></i>إنشاء فواتير من العقود
+                </h5>
+                <p class="text-muted">إنشاء فواتير محاسبية من عقود الإيجار النشطة</p>
+                <form method="POST">
+                    <input type="hidden" name="sync_action" value="create_invoices">
+                    <button type="submit" class="sync-button">
+                        <i class="bi bi-file-earmark-plus me-2"></i>إنشاء الفواتير
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="sync-card">
+                <h5 class="mb-3">
+                    <i class="bi bi-journal-text me-2"></i>مزامنة سندات القبض
+                </h5>
+                <p class="text-muted">إنشاء قيود محاسبية من سندات القبض (آخر 30 يوم)</p>
+                <form method="POST">
+                    <input type="hidden" name="sync_action" value="sync_payments">
+                    <button type="submit" class="sync-button">
+                        <i class="bi bi-arrow-repeat me-2"></i>مزامنة السندات
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sync Results -->
+    <?php if (!empty($syncLog)): ?>
+        <div class="sync-card">
+            <h5 class="mb-3">
+                <i class="bi bi-list-check me-2"></i>نتائج المزامنة
+            </h5>
+
+            <div class="row g-3 mb-3">
+                <div class="col-md-3">
+                    <div class="alert alert-success mb-0">
+                        <strong><?php echo $syncStats['tenants_synced']; ?></strong> مستأجر
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="alert alert-info mb-0">
+                        <strong><?php echo $syncStats['owners_synced']; ?></strong> مالك
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="alert alert-primary mb-0">
+                        <strong><?php echo $syncStats['invoices_created']; ?></strong> فاتورة
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="alert alert-warning mb-0">
+                        <strong><?php echo $syncStats['entries_created']; ?></strong> قيد
+                    </div>
+                </div>
+            </div>
+
+            <div style="max-height: 400px; overflow-y: auto;">
+                <?php foreach ($syncLog as $log): ?>
+                    <div class="log-item <?php echo strpos($log, '✓') !== false ? 'success' : 'error'; ?>">
+                        <?php echo $log; ?>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+    <?php endif; ?>
+</div>
+
+<?php if (!empty($toastMessage)): ?>
+<script>
+    showBootstrapNotification('<?= htmlspecialchars($toastMessage, ENT_QUOTES) ?>');
+</script>
+<?php endif; ?>
+
+<?php require("../../foter.hnt"); ?>

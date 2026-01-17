@@ -1,0 +1,281 @@
+<?php
+/**
+ * Attachment Management Class
+ * فئة إدارة المرفقات
+ *
+ * @author AI Development Assistant
+ * @version 1.0
+ */
+
+// Include storage helpers
+require_once(__DIR__ . '/../../../../lib/storage/helpers.php');
+
+class Attachment {
+    private $link;
+    private $last_error = '';
+    private $upload_dir;
+    private $allowed_types = array('pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'jpg', 'jpeg', 'png', 'gif');
+    private $max_file_size = 5242880; // 5MB in bytes
+
+    /**
+     * Constructor
+     * @param resource $db_link Database connection
+     */
+    public function __construct($db_link) {
+        $this->link = $db_link;
+
+        // Use centralized storage
+        $this->upload_dir = upload_path('communications.messaging');
+    }
+
+    /**
+     * Upload and store attachment
+     * تحميل وحفظ المرفق
+     *
+     * @param integer $message_id Message ID
+     * @param array $file File array from $_FILES
+     * @return integer|bool Attachment ID or false
+     */
+    public function uploadAttachment($message_id, $file) {
+        // Validate file
+        if (!$this->validateFile($file)) {
+            return false;
+        }
+
+        // Generate unique filename
+        $unique_name = time() . '_' . md5($file['name']) . '.' . pathinfo($file['name'], PATHINFO_EXTENSION);
+        $file_path = $this->upload_dir . $unique_name;
+
+        // Move uploaded file
+        if (!move_uploaded_file($file['tmp_name'], $file_path)) {
+            $this->last_error = 'فشل في نقل الملف المرفوع';
+            return false;
+        }
+
+        // Store in database
+        $file_size = filesize($file_path);
+        $file_type = $file['type'];
+        $original_name = $file['name'];
+
+        $sql = "INSERT INTO messaging_attachments
+                (message_id, file_name, original_name, file_path, file_size, file_type, uploaded_at)
+                VALUES (
+                    '" . intval($message_id) . "',
+                    '" . mysql_real_escape_string($unique_name) . "',
+                    '" . mysql_real_escape_string($original_name) . "',
+                    '" . mysql_real_escape_string($file_path) . "',
+                    '" . intval($file_size) . "',
+                    '" . mysql_real_escape_string($file_type) . "',
+                    NOW()
+                )";
+
+        if (mysql_query($sql, $this->link)) {
+            return mysql_insert_id($this->link);
+        } else {
+            // Remove file if database insert fails
+            @unlink($file_path);
+            $this->last_error = 'فشل في حفظ بيانات المرفق';
+            return false;
+        }
+    }
+
+    /**
+     * Validate uploaded file
+     * التحقق من صحة الملف المرفوع
+     *
+     * @param array $file File array from $_FILES
+     * @return boolean
+     */
+    private function validateFile($file) {
+        // Check if file exists
+        if (!isset($file['tmp_name']) || !file_exists($file['tmp_name'])) {
+            $this->last_error = 'الملف المرفوع غير موجود';
+            return false;
+        }
+
+        // Check file size
+        if ($file['size'] > $this->max_file_size) {
+            $this->last_error = 'حجم الملف أكبر من 5MB المسموح به';
+            return false;
+        }
+
+        // Check file extension
+        $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+        if (!in_array($ext, $this->allowed_types)) {
+            $this->last_error = 'نوع الملف غير مدعوم: ' . $ext;
+            return false;
+        }
+
+        // Check MIME type
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        $mime = finfo_file($finfo, $file['tmp_name']);
+        finfo_close($finfo);
+
+        $allowed_mimes = array(
+            'application/pdf',
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/vnd.ms-excel',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'text/plain',
+            'image/jpeg',
+            'image/png',
+            'image/gif'
+        );
+
+        if (!in_array($mime, $allowed_mimes)) {
+            $this->last_error = 'نوع MIME غير مدعوم: ' . $mime;
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Get attachments for a message
+     * الحصول على المرفقات الخاصة برسالة
+     *
+     * @param integer $message_id Message ID
+     * @return array Array of attachments
+     */
+    public function getAttachmentsByMessage($message_id) {
+        $sql = "SELECT * FROM messaging_attachments
+                WHERE message_id = '" . intval($message_id) . "'
+                AND is_deleted = 0
+                ORDER BY uploaded_at DESC";
+
+        $result = mysql_query($sql, $this->link);
+        $attachments = array();
+
+        if ($result && mysql_num_rows($result) > 0) {
+            while ($row = mysql_fetch_array($result)) {
+                $attachments[] = $row;
+            }
+        }
+
+        return $attachments;
+    }
+
+    /**
+     * Delete attachment (soft delete)
+     * حذف المرفق (حذف ناعم)
+     *
+     * @param integer $attachment_id Attachment ID
+     * @param integer $user_id User ID (for permission check)
+     * @return boolean
+     */
+    public function deleteAttachment($attachment_id, $user_id) {
+        // Get attachment details
+        $sql = "SELECT ma.*, mm.sender_id, mm.receiver_id
+                FROM messaging_attachments ma
+                JOIN messaging_messages mm ON ma.message_id = mm.message_id
+                WHERE ma.attachment_id = '" . intval($attachment_id) . "'";
+
+        $result = mysql_query($sql, $this->link);
+        if (!$result || mysql_num_rows($result) == 0) {
+            $this->last_error = 'المرفق غير موجود';
+            return false;
+        }
+
+        $attachment = mysql_fetch_array($result);
+
+        // Check permissions (only sender can delete before message is read)
+        if ($attachment['sender_id'] != $user_id && $attachment['receiver_id'] != $user_id) {
+            $this->last_error = 'غير مصرح بحذف هذا المرفق';
+            return false;
+        }
+
+        // Soft delete
+        $sql = "UPDATE messaging_attachments
+                SET is_deleted = 1
+                WHERE attachment_id = '" . intval($attachment_id) . "'";
+
+        if (mysql_query($sql, $this->link)) {
+            // Optionally delete file from disk
+            // @unlink($attachment['file_path']);
+            return true;
+        }
+
+        $this->last_error = 'فشل في حذف المرفق';
+        return false;
+    }
+
+    /**
+     * Get attachment count for message
+     * الحصول على عدد المرفقات الخاصة برسالة
+     *
+     * @param integer $message_id Message ID
+     * @return integer
+     */
+    public function getAttachmentCount($message_id) {
+        $sql = "SELECT COUNT(*) as count FROM messaging_attachments
+                WHERE message_id = '" . intval($message_id) . "'
+                AND is_deleted = 0";
+
+        $result = mysql_query($sql, $this->link);
+        if ($result && mysql_num_rows($result) > 0) {
+            $row = mysql_fetch_array($result);
+            return intval($row['count']);
+        }
+
+        return 0;
+    }
+
+    /**
+     * Get last error message
+     * الحصول على آخر رسالة خطأ
+     *
+     * @return string
+     */
+    public function getLastError() {
+        return $this->last_error;
+    }
+
+    /**
+     * Format file size
+     * تنسيق حجم الملف
+     *
+     * @param integer $bytes File size in bytes
+     * @return string Formatted file size
+     */
+    public static function formatFileSize($bytes) {
+        $units = array('B', 'KB', 'MB', 'GB');
+        $bytes = max($bytes, 0);
+        $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+        $pow = min($pow, count($units) - 1);
+        $bytes /= (1 << (10 * $pow));
+        return round($bytes, 2) . ' ' . $units[$pow];
+    }
+
+    /**
+     * Get file icon based on type
+     * الحصول على أيقونة الملف بناءً على النوع
+     *
+     * @param string $file_name File name
+     * @return string Bootstrap icon class
+     */
+    public static function getFileIcon($file_name) {
+        $ext = strtolower(pathinfo($file_name, PATHINFO_EXTENSION));
+
+        switch ($ext) {
+            case 'pdf':
+                return 'bi-file-pdf';
+            case 'doc':
+            case 'docx':
+                return 'bi-file-word';
+            case 'xls':
+            case 'xlsx':
+                return 'bi-file-spreadsheet';
+            case 'txt':
+                return 'bi-file-text';
+            case 'jpg':
+            case 'jpeg':
+            case 'png':
+            case 'gif':
+                return 'bi-file-image';
+            default:
+                return 'bi-file-earmark';
+        }
+    }
+}
+?>

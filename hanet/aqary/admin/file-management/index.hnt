@@ -1,0 +1,1795 @@
+<?php
+/**
+ * File Management System - نظام إدارة الملفات
+ * Integrated with Legacy Real Estate System
+ *
+ * @charset UTF-8
+ * @version 2.0
+ */
+
+$sc_title = "نظام إدارة الملفات";
+$sc_id = "201";
+include_once "../../nocash.hnt";
+
+$canscroll = 0;
+$showdhmltazkeer = 0;
+include_once "../../header.hnt";
+
+// Include legacy system database connection
+require_once('../../connectdb.hnt');
+
+// Include library classes
+require_once('lib/DatabaseInstaller.class.php');
+require_once('lib/SharingManager.class.php');
+require_once('lib/FileHandler.class.php');
+require_once('lib/PreviewHandler.class.php');
+
+// Get current user from session
+$currentUserId = $_SESSION['useridv'] ?? 1;
+$currentUsername = $_SESSION['usernamev'] ?? 'Admin';
+
+// Initialize database - use $link (wrapper connection) from connectdb.hnt
+$installer = new DatabaseInstaller($link);
+
+// Check if tables exist, if not show installation wizard
+if (!$installer->tablesExist()) {
+    if (isset($_POST['install_confirmed'])) {
+        // Clear any previous output
+        ob_end_clean();
+        ob_start();
+
+        header('Content-Type: application/json; charset=utf-8');
+        try {
+            $result = $installer->installTables();
+            error_log("Installation result: " . json_encode($result));
+
+            // installTables() now returns an array with success/message
+            if (is_array($result)) {
+                $response = [
+                    'success' => $result['success'],
+                    'message' => $result['message']
+                ];
+                http_response_code($result['success'] ? 200 : 500);
+            } else {
+                // Fallback for old return value
+                $response = [
+                    'success' => $result,
+                    'message' => $result ? 'تم التثبيت بنجاح' : 'فشل التثبيت'
+                ];
+            }
+
+            $json_output = json_encode($response, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            error_log("JSON output: " . $json_output);
+            echo $json_output;
+
+        } catch (Exception $e) {
+            error_log("Installation exception: " . $e->getMessage());
+            http_response_code(500);
+            echo json_encode([
+                'success' => false,
+                'message' => 'خطأ في التثبيت: ' . $e->getMessage()
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        }
+        ob_end_flush();
+        exit;
+    }
+    // Only initialize directories if not posting installation
+    $installer->createDirectories();
+    // Show installation wizard
+    if (file_exists('lib/installation-wizard.html')) {
+        include_once('lib/installation-wizard.html');
+    } else {
+        // Simple installation form if wizard doesn't exist
+        ?>
+        <!DOCTYPE html>
+        <html dir="rtl" lang="ar">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>تثبيت نظام الملفات</title>
+
+            <style>
+                body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; align-items: center; }
+                .container { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.2); max-width: 500px; }
+                h2 { color: #667eea; text-align: center; margin-bottom: 30px; }
+                p { text-align: center; color: #666; margin-bottom: 30px; }
+                .btn { width: 100%; padding: 12px; font-size: 16px; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h2>🔧 نظام إدارة الملفات</h2>
+                <p>يتطلب النظام تثبيت قاعدة البيانات</p>
+                <form method="POST">
+                    <button type="submit" name="install_confirmed" value="1" class="btn btn-primary">
+                        <i class="bi bi-gear"></i> تثبيت النظام الآن
+                    </button>
+                </form>
+                <hr>
+                <p style="font-size: 12px; color: #999; margin-top: 20px;">
+                    سيتم إنشاء جداول قاعدة البيانات اللازمة لتشغيل النظام
+                </p>
+            </div>
+        </body>
+        </html>
+        <?php
+    }
+    exit;
+}
+?>
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>نظام إدارة الملفات</title>
+
+    <style>
+        /* Scoped styles for file management module only */
+        .file-management-container {
+            background: #f5f7fa;
+            min-height: calc(100vh - 100px);
+            padding: 20px;
+        }
+
+        .file-management-container .main-container {
+            display: flex;
+            gap: 0;
+            background: #f5f7fa;
+        }
+
+        .file-management-container .sidebar {
+            width: 250px;
+            background: white;
+            border-left: 1px solid #e0e0e0;
+            overflow-y: auto;
+            padding: 20px;
+            border-radius: 10px;
+            margin-left: 20px;
+        }
+
+        .file-management-container .sidebar-section {
+            margin-bottom: 30px;
+        }
+
+        .file-management-container .sidebar-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: #333;
+            text-transform: uppercase;
+            margin-bottom: 15px;
+            padding-right: 10px;
+            border-right: 3px solid #667eea;
+        }
+
+        .file-management-container .sidebar-item {
+            padding: 10px 15px;
+            margin-bottom: 8px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            color: #666;
+        }
+
+        .file-management-container .sidebar-item:hover {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .file-management-container .sidebar-item.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .file-management-container .sidebar-item i {
+            margin-left: 10px;
+        }
+
+        .file-management-container .content-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0 20px;
+        }
+
+        .file-management-container .header-section {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }
+
+        .file-management-container .header-title {
+            font-size: 24px;
+            font-weight: 700;
+            color: #333;
+        }
+
+        .file-management-container .action-buttons {
+            display: flex;
+            gap: 10px;
+        }
+
+        .file-management-container .btn-action {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .file-management-container .btn-action:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+            color: white;
+            text-decoration: none;
+        }
+
+        .file-management-container .btn-secondary {
+            background: #e0e0e0;
+            color: #333;
+        }
+
+        .file-management-container .btn-secondary:hover {
+            background: #d0d0d0;
+            color: #333;
+        }
+
+        .file-management-container .stats-section {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .file-management-container .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+            text-align: center;
+        }
+
+        .file-management-container .stat-number {
+            font-size: 32px;
+            font-weight: 700;
+            color: #667eea;
+            margin: 10px 0;
+        }
+
+        .file-management-container .stat-label {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .file-management-container .upload-area {
+            background: white;
+            border: 2px dashed #667eea;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 30px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .file-management-container .upload-area:hover {
+            background: #f5f7fa;
+            border-color: #764ba2;
+        }
+
+        .file-management-container .upload-area.dragover {
+            background: #f0f0f0;
+            border-color: #764ba2;
+        }
+
+        .file-management-container .upload-icon {
+            font-size: 48px;
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .file-management-container .upload-text {
+            font-size: 16px;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        .file-management-container .upload-subtext {
+            font-size: 12px;
+            color: #666;
+        }
+
+        .file-management-container .file-list {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+            overflow: hidden;
+        }
+
+        .file-management-container .file-list-header {
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr 1fr 150px;
+            gap: 20px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e0e0e0;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .file-management-container .file-item {
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr 1fr 150px;
+            gap: 20px;
+            padding: 20px;
+            border-bottom: 1px solid #f0f0f0;
+            align-items: center;
+            transition: all 0.3s ease;
+        }
+
+        .file-management-container .file-item:hover {
+            background: #f8f9fa;
+        }
+
+        .file-management-container .file-name {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #333;
+        }
+
+        .file-management-container .file-icon {
+            font-size: 24px;
+            width: 30px;
+            text-align: center;
+        }
+
+        .file-management-container .file-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .file-management-container .file-action-btn {
+            background: none;
+            border: none;
+            color: #667eea;
+            cursor: pointer;
+            padding: 5px 10px;
+            border-radius: 5px;
+            transition: all 0.3s ease;
+        }
+
+        .file-management-container .file-action-btn:hover {
+            background: #f0f0f0;
+            color: #764ba2;
+        }
+
+        .file-management-container .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999;
+        }
+
+        .file-management-container .empty-state-icon {
+            font-size: 64px;
+            margin-bottom: 20px;
+            color: #ddd;
+        }
+
+        .file-management-container .empty-state-text {
+            font-size: 18px;
+            margin-bottom: 10px;
+        }
+
+        .file-management-container .empty-state-subtext {
+            font-size: 14px;
+            color: #bbb;
+        }
+
+        /* File Card Styles for Grid View */
+        .file-management-container .file-card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+            cursor: pointer;
+        }
+
+        .file-management-container .file-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.15);
+        }
+
+        .file-management-container .file-card-icon {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+
+        .file-management-container .file-card-name {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .file-management-container .file-card-info {
+            display: flex;
+            justify-content: space-around;
+            margin-bottom: 15px;
+            color: #666;
+            font-size: 12px;
+        }
+
+        .file-management-container .file-card-actions {
+            display: flex;
+            justify-content: center;
+            gap: 5px;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .file-management-container .file-card:hover .file-card-actions {
+            opacity: 1;
+        }
+
+        @media (max-width: 768px) {
+            .file-management-container .main-container {
+                flex-direction: column;
+            }
+
+            .file-management-container .sidebar {
+                width: 100%;
+                border-left: none;
+                border-bottom: 1px solid #e0e0e0;
+                margin-left: 0;
+                margin-bottom: 20px;
+            }
+
+            .file-management-container .file-list-header,
+            .file-management-container .file-item {
+                grid-template-columns: 1fr;
+            }
+
+            .file-management-container .action-buttons {
+                flex-direction: column;
+            }
+
+            .file-management-container .btn-action {
+                width: 100%;
+                justify-content: center;
+            }
+        }
+    </style>
+</head>
+
+<!-- File Management Container - Scoped Styles -->
+<div class="file-management-container">
+    <!-- Main Container -->
+    <div class="main-container">
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <div class="sidebar-section">
+                <div class="sidebar-title">الفئات</div>
+                <div class="sidebar-item active" onclick="filterByCategory('all')">
+                    <i class="bi bi-folder"></i>جميع الملفات
+                </div>
+                <div class="sidebar-item" onclick="filterByCategory('Personal')">
+                    <i class="bi bi-person"></i>شخصي
+                </div>
+                <div class="sidebar-item" onclick="filterByCategory('Work')">
+                    <i class="bi bi-briefcase"></i>العمل
+                </div>
+                <div class="sidebar-item" onclick="filterByCategory('Projects')">
+                    <i class="bi bi-diagram-2"></i>المشاريع
+                </div>
+                <div class="sidebar-item" onclick="filterByCategory('Reports')">
+                    <i class="bi bi-file-earmark-text"></i>التقارير
+                </div>
+                <div class="sidebar-item" onclick="filterByCategory('Contracts')">
+                    <i class="bi bi-file-earmark-pdf"></i>العقود
+                </div>
+                <div class="sidebar-item" onclick="filterByCategory('Invoices')">
+                    <i class="bi bi-receipt"></i>الفواتير
+                </div>
+                <div class="sidebar-item" onclick="filterByCategory('Proposals')">
+                    <i class="bi bi-star"></i>العروض
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <div class="sidebar-title">الخيارات</div>
+                <div class="sidebar-item" onclick="showSharedWithMe()">
+                    <i class="bi bi-share2"></i>مشاركة معي
+                </div>
+                <div class="sidebar-item" onclick="showRecycleBin()">
+                    <i class="bi bi-trash"></i>سلة المحذوفات
+                </div>
+            </div>
+        </div>
+
+        <!-- Content Area -->
+        <div class="content-area">
+            <!-- Header Section with Search and Filter -->
+            <div class="header-section">
+                <div style="flex: 1;">
+                    <div class="header-title" id="pageTitle">جميع الملفات</div>
+                </div>
+                <div class="action-buttons">
+                    <button class="btn-action" onclick="showUploadModal()">
+                        <i class="bi bi-cloud-arrow-up"></i>تحميل
+                    </button>
+                    <button class="btn-action btn-secondary" id="viewToggleBtn" onclick="toggleListView()">
+                        <i class="bi bi-grid-3x3-gap"></i>عرض الشبكة
+                    </button>
+                    <button class="btn-action btn-secondary" onclick="toggleSearchFilters()">
+                        <i class="bi bi-funnel"></i>البحث والتصفية
+                    </button>
+                </div>
+            </div>
+
+            <!-- Search and Filter Section -->
+            <div id="searchFilterSection" style="display: none; background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin-bottom: 20px;">
+                    <div>
+                        <label class="form-label">البحث عن الملفات:</label>
+                        <input type="text" id="searchInput" class="form-control" placeholder="اسم الملف أو الوصف" onkeyup="debounceSearch()">
+                    </div>
+                    <div>
+                        <label class="form-label">نوع الملف:</label>
+                        <select id="fileTypeFilter" class="form-control" onchange="applyFilters()">
+                            <option value="">-- جميع الأنواع --</option>
+                            <option value="pdf">PDF</option>
+                            <option value="doc,docx">Word</option>
+                            <option value="xls,xlsx">Excel</option>
+                            <option value="jpg,jpeg,png,gif">الصور</option>
+                            <option value="zip,rar">أرشيفات</option>
+                            <option value="mp4,avi,mov">الفيديو</option>
+                            <option value="mp3,wav">الصوت</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label">الترتيب حسب:</label>
+                        <select id="sortByFilter" class="form-control" onchange="applyFilters()">
+                            <option value="created_date">الأحدث أولاً</option>
+                            <option value="created_date-asc">الأقدم أولاً</option>
+                            <option value="filename">الاسم (أ-ي)</option>
+                            <option value="filename-desc">الاسم (ي-أ)</option>
+                            <option value="file_size">الحجم (الأصغر أولاً)</option>
+                            <option value="file_size-desc">الحجم (الأكبر أولاً)</option>
+                        </select>
+                    </div>
+                </div>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                    <div>
+                        <label class="form-label">من التاريخ:</label>
+                        <input type="date" id="dateFromFilter" class="form-control" onchange="applyFilters()">
+                    </div>
+                    <div>
+                        <label class="form-label">إلى التاريخ:</label>
+                        <input type="date" id="dateToFilter" class="form-control" onchange="applyFilters()">
+                    </div>
+                    <div style="display: flex; align-items: flex-end; gap: 10px;">
+                        <button class="btn btn-sm btn-primary" onclick="applyFilters()" style="flex: 1;">تطبيق</button>
+                        <button class="btn btn-sm btn-secondary" onclick="clearFilters()" style="flex: 1;">مسح</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Bulk Operations Section -->
+            <div id="bulkOperationsSection" style="display: none; background: #fff3cd; padding: 15px; border-radius: 10px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <strong>تم تحديد <span id="selectedCount">0</span> ملفات</strong>
+                </div>
+                <div class="action-buttons" style="margin: 0;">
+                    <button class="btn-action btn-secondary" onclick="selectAllFiles()">
+                        <i class="bi bi-check-square"></i>تحديد الكل
+                    </button>
+                    <button class="btn-action btn-secondary" onclick="deselectAllFiles()">
+                        <i class="bi bi-square"></i>إلغاء التحديد
+                    </button>
+                    <button class="btn-action" onclick="bulkShareFiles()">
+                        <i class="bi bi-share2"></i>مشاركة
+                    </button>
+                    <button class="btn-action" style="background: #e74c3c;" onclick="bulkDeleteFiles()">
+                        <i class="bi bi-trash"></i>حذف
+                    </button>
+                </div>
+            </div>
+
+            <!-- Stats Section -->
+            <div class="stats-section">
+                <div class="stat-card">
+                    <i class="bi bi-file-earmark" style="font-size: 32px; color: #667eea;"></i>
+                    <div class="stat-number" id="totalFiles">0</div>
+                    <div class="stat-label">إجمالي الملفات</div>
+                </div>
+                <div class="stat-card">
+                    <i class="bi bi-cloud" style="font-size: 32px; color: #667eea;"></i>
+                    <div class="stat-number" id="totalSize">0 MB</div>
+                    <div class="stat-label">المساحة المستخدمة</div>
+                </div>
+                <div class="stat-card">
+                    <i class="bi bi-share2" style="font-size: 32px; color: #667eea;"></i>
+                    <div class="stat-number" id="sharedCount">0</div>
+                    <div class="stat-label">ملفات مشاركة</div>
+                </div>
+            </div>
+
+            <!-- Upload Area -->
+            <div class="upload-area" id="uploadArea" onclick="document.getElementById('fileInput').click()">
+                <div class="upload-icon">
+                    <i class="bi bi-cloud-arrow-up"></i>
+                </div>
+                <div class="upload-text">اسحب الملفات هنا أو انقر للتحميل</div>
+                <div class="upload-subtext">يمكنك تحميل ملفات متعددة في وقت واحد</div>
+                <input type="file" id="fileInput" style="display: none;" multiple>
+            </div>
+
+            <!-- File List -->
+            <div class="file-list" id="fileListGrid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; background: transparent; box-shadow: none; padding: 0;">
+                <!-- Grid view will be populated here -->
+            </div>
+
+            <div class="file-list" id="fileListTable" style="display: none;">
+                <div class="file-list-header">
+                    <div style="width: 30px;">
+                        <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()">
+                    </div>
+                    <div>اسم الملف</div>
+                    <div>الحجم</div>
+                    <div>التاريخ</div>
+                    <div>الفئة</div>
+                    <div>الإجراءات</div>
+                </div>
+                <div id="fileListContainer">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">
+                            <i class="bi bi-inbox"></i>
+                        </div>
+                        <div class="empty-state-text">لا توجد ملفات</div>
+                        <div class="empty-state-subtext">ابدأ برفع ملفاتك الآن</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Upload Modal -->
+    <div class="modal fade" id="uploadModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">تحميل ملفات</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="uploadForm">
+                        <div class="mb-3">
+                            <label class="form-label">اختر ملفات:</label>
+                            <input type="file" class="form-control" id="modalFileInput" multiple required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">الفئة:</label>
+                            <select class="form-control" id="categorySelect" required>
+                                <option value="">-- اختر فئة --</option>
+                                <option value="Personal">شخصي</option>
+                                <option value="Work">العمل</option>
+                                <option value="Projects">المشاريع</option>
+                                <option value="Reports">التقارير</option>
+                                <option value="Contracts">العقود</option>
+                                <option value="Invoices">الفواتير</option>
+                                <option value="Proposals">العروض</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">الوصف (اختياري):</label>
+                            <textarea class="form-control" id="descriptionInput" rows="3"></textarea>
+                        </div>
+                        <div id="uploadProgress" style="display: none;">
+                            <div class="progress">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated"
+                                     id="progressBar" style="width: 0%"></div>
+                            </div>
+                            <p id="progressText" class="mt-2">جاري التحميل...</p>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                    <button type="button" class="btn btn-primary" onclick="uploadFiles()">تحميل</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Advanced Share Modal -->
+    <div class="modal fade" id="shareModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">🔗 مشاركة الملف</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="shareForm">
+                        <div class="mb-3">
+                            <label class="form-label"><strong>مشاركة مع المستخدم <span style="color: #dc3545;">*</span></strong></label>
+                            <select class="form-select" id="shareUserSelect" required>
+                                <option value="">-- اختر المستخدم --</option>
+                                <?php
+                                // Get all users except current user
+                                $users_sql = "SELECT userid, username FROM user WHERE userid != '" . intval($_SESSION['useridv']) . "' ORDER BY username ASC";
+                                $users_result = mysql_query($users_sql, $link);
+                                while ($user_row = mysql_fetch_array($users_result)) {
+                                    echo '<option value="' . intval($user_row['userid']) . '">' . htmlspecialchars($user_row['username']) . '</option>';
+                                }
+                                ?>
+                            </select>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label"><strong>الصلاحيات</strong></label>
+                            <div style="border: 1px solid #ddd; border-radius: 8px; padding: 15px;">
+                                <div class="form-check mb-3">
+                                    <input class="form-check-input" type="radio" name="permissionSelect"
+                                           id="permView" value="view" checked>
+                                    <label class="form-check-label" for="permView">
+                                        <strong>👁️ عرض فقط</strong><br>
+                                        <small style="color: #666;">يمكن عرض الملف والمعاينة فقط</small>
+                                    </label>
+                                </div>
+                                <div class="form-check mb-3">
+                                    <input class="form-check-input" type="radio" name="permissionSelect"
+                                           id="permDownload" value="download">
+                                    <label class="form-check-label" for="permDownload">
+                                        <strong>📥 تحميل</strong><br>
+                                        <small style="color: #666;">يمكن تحميل الملف</small>
+                                    </label>
+                                </div>
+                                <div class="form-check mb-3">
+                                    <input class="form-check-input" type="radio" name="permissionSelect"
+                                           id="permEdit" value="edit">
+                                    <label class="form-check-label" for="permEdit">
+                                        <strong>✏️ تعديل</strong><br>
+                                        <small style="color: #666;">يمكن تحميل وإعادة تحميل نسخ جديدة</small>
+                                    </label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="permissionSelect"
+                                           id="permShare" value="share">
+                                    <label class="form-check-label" for="permShare">
+                                        <strong>🔗 مشاركة</strong><br>
+                                        <small style="color: #666;">يمكن مشاركة الملف مع الآخرين</small>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label">تاريخ انتهاء الصلاحية (اختياري)</label>
+                            <input type="date" class="form-control" id="expiryDate">
+                            <small style="color: #666;">اترك فارغاً للوصول الدائم</small>
+                        </div>
+
+                        <div id="shareError" style="display: none;" class="alert alert-danger"></div>
+                    </form>
+
+                    <!-- Existing shares -->
+                    <div class="mt-4">
+                        <h6>المشاركات الحالية</h6>
+                        <div id="currentShares" style="max-height: 300px; overflow-y: auto;">
+                            <p style="color: #999;">جاري التحميل...</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إغلاق</button>
+                    <button type="button" class="btn btn-primary" onclick="submitShare()">مشاركة</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Delete Confirmation Modal -->
+    <div class="modal fade" id="deleteConfirmModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-danger text-white">
+                    <h5 class="modal-title">
+                        <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                        تأكيد الحذف
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body text-center py-4">
+                    <i class="bi bi-trash" style="font-size: 48px; color: #dc3545;"></i>
+                    <h5 class="mt-3">هل أنت متأكد من حذف هذا الملف؟</h5>
+                    <p class="text-muted">سيتم نقل الملف إلى سلة المحذوفات ويمكنك استعادته لاحقاً</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                        <i class="bi bi-x-circle"></i> إلغاء
+                    </button>
+                    <button type="button" class="btn btn-danger" id="confirmDeleteBtn">
+                        <i class="bi bi-trash"></i> حذف الملف
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Preview Modal -->
+    <div class="modal fade" id="previewModal" tabindex="-1" aria-labelledby="previewModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-centered">
+            <div class="modal-content" style="border-radius: 15px; overflow: hidden;">
+                <div class="modal-header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none;">
+                    <div class="d-flex align-items-center w-100">
+                        <i class="bi bi-eye-fill me-2" style="font-size: 1.5rem;"></i>
+                        <div class="flex-grow-1">
+                            <h5 class="modal-title mb-0" id="previewTitle">معاينة الملف</h5>
+                            <small id="previewFileSize" style="opacity: 0.9;">-</small>
+                        </div>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                </div>
+
+                <div class="modal-body p-0" style="background: #f8f9fa; min-height: 500px; max-height: 70vh; overflow: auto;">
+                    <!-- Image Preview -->
+                    <div id="imagePreview" class="p-4" style="display: none; text-align: center; background: white;">
+                        <img id="previewImageTag" style="max-width: 100%; max-height: 600px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);" alt="معاينة الصورة">
+                    </div>
+
+                    <!-- PDF Preview -->
+                    <div id="pdfPreview" class="p-3" style="display: none; background: white;">
+                        <div class="text-center mb-3">
+                            <canvas id="pdfCanvas" style="max-width: 100%; border: 1px solid #dee2e6; border-radius: 8px;"></canvas>
+                        </div>
+                        <div class="d-flex justify-content-center align-items-center gap-3 p-3 bg-light rounded">
+                            <button id="pdfPrevBtn" class="btn btn-outline-primary btn-sm" onclick="previousPdfPage()">
+                                <i class="bi bi-chevron-right"></i> السابق
+                            </button>
+                            <span id="pdfPageInfo" class="badge bg-primary">-</span>
+                            <button id="pdfNextBtn" class="btn btn-outline-primary btn-sm" onclick="nextPdfPage()">
+                                التالي <i class="bi bi-chevron-left"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Text/Code Preview -->
+                    <div id="textPreview" class="p-3" style="display: none; background: white;">
+                        <pre id="previewTextContent" class="p-3 bg-light rounded" style="max-height: 500px; overflow: auto; font-family: 'Courier New', monospace; font-size: 14px;"></pre>
+                    </div>
+
+                    <!-- Video Preview -->
+                    <div id="videoPreview" class="p-4" style="display: none; text-align: center; background: white;">
+                        <video id="previewVideoTag" controls style="max-width: 100%; max-height: 500px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                            متصفحك لا يدعم عناصر الفيديو
+                        </video>
+                    </div>
+
+                    <!-- Audio Preview -->
+                    <div id="audioPreview" class="p-5" style="display: none; text-align: center; background: white;">
+                        <div class="mb-4">
+                            <i class="bi bi-music-note-beamed" style="font-size: 80px; color: #667eea;"></i>
+                        </div>
+                        <audio id="previewAudioTag" controls class="w-100" style="max-width: 500px;">
+                            متصفحك لا يدعم عناصر الصوت
+                        </audio>
+                    </div>
+
+                    <!-- Office Documents Preview (Word, Excel, PowerPoint) -->
+                    <div id="officePreview" class="p-4" style="display: none; background: white;">
+                        <div class="alert alert-warning d-flex align-items-center mb-4" role="alert">
+                            <i class="bi bi-exclamation-triangle-fill me-2" style="font-size: 24px;"></i>
+                            <div>
+                                <strong>معاينة محدودة لملفات Office</strong><br>
+                                <small>للحصول على أفضل تجربة، يرجى تحميل الملف وفتحه في Microsoft Office</small>
+                            </div>
+                        </div>
+
+                        <div id="officeContent" class="p-4 bg-light rounded" style="max-height: 500px; overflow: auto; min-height: 300px;">
+                            <div class="text-center py-5">
+                                <div class="spinner-border text-primary mb-3" role="status">
+                                    <span class="visually-hidden">جاري التحميل...</span>
+                                </div>
+                                <p class="text-muted">جاري تحميل المعاينة...</p>
+                            </div>
+                        </div>
+
+                        <div class="mt-3 text-center">
+                            <button class="btn btn-primary" onclick="downloadFile(window.currentPreviewFileId)">
+                                <i class="bi bi-download"></i> تحميل الملف الكامل
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Unsupported Preview -->
+                    <div id="unsupportedPreview" class="p-5" style="display: none; text-align: center; background: white;">
+                        <div class="d-flex flex-column align-items-center justify-content-center" style="min-height: 400px;">
+                            <i class="bi bi-file-earmark-x" style="font-size: 80px; color: #999; margin-bottom: 20px;"></i>
+                            <h5 class="text-secondary mb-2">نوع الملف غير مدعوم للمعاينة</h5>
+                            <p class="text-muted mb-4">يمكنك تحميل الملف لعرضه على جهازك</p>
+                            <button class="btn btn-primary btn-lg" onclick="downloadFile(window.currentPreviewFileId)">
+                                <i class="bi bi-download"></i> تحميل الملف
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-footer" style="border-top: 1px solid #dee2e6;">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                        <i class="bi bi-x-circle"></i> إغلاق
+                    </button>
+                    <button type="button" class="btn btn-primary" onclick="downloadFile(window.currentPreviewFileId)">
+                        <i class="bi bi-download"></i> تحميل
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+
+    <script>
+        let currentFilter = 'all';
+        let uploadModal, shareModal;
+
+        // Initialize modals
+        document.addEventListener('DOMContentLoaded', function() {
+            uploadModal = new bootstrap.Modal(document.getElementById('uploadModal'));
+            shareModal = new bootstrap.Modal(document.getElementById('shareModal'));
+
+            // Load files on page load
+            loadFiles();
+
+            // Setup drag and drop
+            setupDragAndDrop();
+
+            // Setup file input
+            document.getElementById('fileInput').addEventListener('change', function(e) {
+                handleFileSelect(e);
+            });
+        });
+
+        function setupDragAndDrop() {
+            const uploadArea = document.getElementById('uploadArea');
+
+            uploadArea.addEventListener('dragover', function(e) {
+                e.preventDefault();
+                uploadArea.classList.add('dragover');
+            });
+
+            uploadArea.addEventListener('dragleave', function(e) {
+                e.preventDefault();
+                uploadArea.classList.remove('dragover');
+            });
+
+            uploadArea.addEventListener('drop', function(e) {
+                e.preventDefault();
+                uploadArea.classList.remove('dragover');
+                const files = e.dataTransfer.files;
+                document.getElementById('fileInput').files = files;
+                handleFileSelect({ target: { files: files } });
+            });
+        }
+
+        function handleFileSelect(e) {
+            // Handle file selection
+            showUploadModal();
+            const files = e.target.files;
+            document.getElementById('modalFileInput').files = files;
+        }
+
+        function showUploadModal() {
+            uploadModal.show();
+        }
+
+        function uploadFiles() {
+            const fileInput = document.getElementById('modalFileInput');
+            const category = document.getElementById('categorySelect').value;
+            const description = document.getElementById('descriptionInput').value;
+            const progressDiv = document.getElementById('uploadProgress');
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+
+            if (!fileInput.files || fileInput.files.length === 0) {
+                alert('الرجاء اختيار ملف واحد على الأقل');
+                return;
+            }
+
+            if (!category) {
+                alert('الرجاء اختيار الفئة');
+                return;
+            }
+
+            // Show progress
+            progressDiv.style.display = 'block';
+            progressBar.style.width = '0%';
+            progressText.textContent = 'جاري التحضير...';
+
+            // Upload files one by one
+            const files = Array.from(fileInput.files);
+            let uploadedCount = 0;
+            let failedCount = 0;
+
+            function uploadNextFile(index) {
+                if (index >= files.length) {
+                    // All files processed
+                    progressText.textContent = `اكتمل! تم تحميل ${uploadedCount} ملف${failedCount > 0 ? `, فشل ${failedCount}` : ''}`;
+                    setTimeout(() => {
+                        uploadModal.hide();
+                        progressDiv.style.display = 'none';
+                        loadFiles(); // Reload file list
+                        // Reset form
+                        document.getElementById('uploadForm').reset();
+                    }, 1500);
+                    return;
+                }
+
+                const file = files[index];
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('category', category);
+                formData.append('description', description);
+
+                const xhr = new XMLHttpRequest();
+
+                xhr.upload.addEventListener('progress', function(e) {
+                    if (e.lengthComputable) {
+                        const percentComplete = Math.round((e.loaded / e.total) * 100);
+                        const overallPercent = Math.round(((index + (percentComplete / 100)) / files.length) * 100);
+                        progressBar.style.width = overallPercent + '%';
+                        progressText.textContent = `جاري تحميل ${file.name} (${percentComplete}%)...`;
+                    }
+                });
+
+                xhr.addEventListener('load', function() {
+                    if (xhr.status === 200) {
+                        try {
+                            const response = JSON.parse(xhr.responseText);
+                            if (response.success) {
+                                uploadedCount++;
+                            } else {
+                                failedCount++;
+                                console.error('Upload failed:', response.message);
+                            }
+                        } catch (e) {
+                            failedCount++;
+                            console.error('Parse error:', e);
+                        }
+                    } else {
+                        failedCount++;
+                        console.error('Upload failed with status:', xhr.status);
+                    }
+                    // Upload next file
+                    uploadNextFile(index + 1);
+                });
+
+                xhr.addEventListener('error', function() {
+                    failedCount++;
+                    console.error('Upload error for file:', file.name);
+                    uploadNextFile(index + 1);
+                });
+
+                xhr.open('POST', 'api/upload.hnt', true);
+                xhr.send(formData);
+            }
+
+            // Start uploading
+            uploadNextFile(0);
+        }
+
+        function filterByCategory(category) {
+            currentFilter = category;
+            // Update active sidebar item
+            document.querySelectorAll('.sidebar-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            event.target.closest('.sidebar-item').classList.add('active');
+
+            // Update title
+            const titles = {
+                'all': 'جميع الملفات',
+                'Personal': 'ملفاتي الشخصية',
+                'Work': 'ملفات العمل',
+                'Projects': 'ملفات المشاريع',
+                'Reports': 'التقارير',
+                'Contracts': 'العقود',
+                'Invoices': 'الفواتير',
+                'Proposals': 'العروض'
+            };
+            document.getElementById('pageTitle').textContent = titles[category] || 'جميع الملفات';
+
+            loadFiles();
+        }
+
+        function showSharedWithMe() {
+            document.getElementById('pageTitle').textContent = 'الملفات المشاركة معي';
+            const gridContainer = document.getElementById('fileListGrid');
+
+            gridContainer.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 40px;"><i class="bi bi-hourglass-split" style="font-size: 48px; color: #999;"></i><p>جاري التحميل...</p></div>';
+
+            fetch('api/shared-files.hnt?view=with_me&page=1&limit=100')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.files && data.files.length > 0) {
+                        displaySharedFiles(data.files);
+                    } else {
+                        gridContainer.innerHTML = `
+                            <div style="grid-column: 1/-1;">
+                                <div class="empty-state">
+                                    <div class="empty-state-icon">
+                                        <i class="bi bi-share"></i>
+                                    </div>
+                                    <div class="empty-state-text">لا توجد ملفات مشاركة</div>
+                                    <div class="empty-state-subtext">لم يشارك أحد ملفات معك بعد</div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    gridContainer.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #dc3545;"><i class="bi bi-exclamation-triangle" style="font-size: 48px;"></i><p>حدث خطأ في تحميل الملفات المشاركة</p></div>';
+                });
+        }
+
+        function displaySharedFiles(files) {
+            const gridContainer = document.getElementById('fileListGrid');
+            let html = '';
+
+            files.forEach(file => {
+                const icon = getFileIcon(file.file_type);
+                const truncatedName = truncateFilename(file.filename, 30);
+                const sharedBy = file.shared_by_username || 'مستخدم';
+                const permission = file.permission_type || 'view';
+
+                html += `
+                    <div class="file-card">
+                        <div class="file-icon">
+                            ${icon}
+                            <span class="badge bg-info" style="position: absolute; top: 5px; right: 5px; font-size: 10px;">
+                                <i class="bi bi-share"></i>
+                            </span>
+                        </div>
+                        <div class="file-info">
+                            <div class="file-name" title="${file.filename}">${truncatedName}</div>
+                            <div class="file-meta">
+                                <span><i class="bi bi-person"></i> ${sharedBy}</span>
+                                <span><i class="bi bi-hdd"></i> ${file.file_size_formatted}</span>
+                            </div>
+                            <div class="file-category">
+                                <i class="bi bi-shield-check"></i> ${getPermissionLabel(permission)}
+                            </div>
+                            ${file.description ? `<div class="file-category" style="color: #666; font-size: 12px;"><i class="bi bi-info-circle"></i> ${file.description}</div>` : ''}
+                        </div>
+                        <div class="file-actions">
+                            <button class="btn btn-sm btn-outline-primary" onclick="previewFile(${file.file_id})" title="معاينة">
+                                <i class="bi bi-eye"></i>
+                            </button>
+                            ${permission === 'download' || permission === 'edit' ? `
+                            <button class="btn btn-sm btn-outline-success" onclick="downloadFile(${file.file_id})" title="تحميل">
+                                <i class="bi bi-download"></i>
+                            </button>
+                            ` : ''}
+                        </div>
+                    </div>
+                `;
+            });
+
+            gridContainer.innerHTML = html;
+        }
+
+        function getPermissionLabel(permission) {
+            const labels = {
+                'view': 'عرض فقط',
+                'download': 'تحميل',
+                'edit': 'تعديل',
+                'share': 'مشاركة'
+            };
+            return labels[permission] || permission;
+        }
+
+        function showRecycleBin() {
+            document.getElementById('pageTitle').textContent = 'سلة المحذوفات';
+            const gridContainer = document.getElementById('fileListGrid');
+
+            gridContainer.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 40px;"><i class="bi bi-hourglass-split" style="font-size: 48px; color: #999;"></i><p>جاري التحميل...</p></div>';
+
+            fetch('api/deleted-files.hnt?page=1&limit=100')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.files && data.files.length > 0) {
+                        displayDeletedFiles(data.files);
+                    } else {
+                        gridContainer.innerHTML = `
+                            <div style="grid-column: 1/-1;">
+                                <div class="empty-state">
+                                    <div class="empty-state-icon">
+                                        <i class="bi bi-trash"></i>
+                                    </div>
+                                    <div class="empty-state-text">سلة المحذوفات فارغة</div>
+                                    <div class="empty-state-subtext">لا توجد ملفات محذوفة</div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    gridContainer.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #dc3545;"><i class="bi bi-exclamation-triangle" style="font-size: 48px;"></i><p>حدث خطأ في تحميل سلة المحذوفات</p></div>';
+                });
+        }
+
+        function displayDeletedFiles(files) {
+            const gridContainer = document.getElementById('fileListGrid');
+            let html = '';
+
+            files.forEach(file => {
+                const icon = getFileIcon(file.file_type);
+                const truncatedName = truncateFilename(file.filename, 30);
+
+                html += `
+                    <div class="file-card" style="opacity: 0.7;">
+                        <div class="file-icon">
+                            ${icon}
+                            <span class="badge bg-danger" style="position: absolute; top: 5px; right: 5px; font-size: 10px;">
+                                <i class="bi bi-trash"></i>
+                            </span>
+                        </div>
+                        <div class="file-info">
+                            <div class="file-name" title="${file.filename}">${truncatedName}</div>
+                            <div class="file-meta">
+                                <span><i class="bi bi-hdd"></i> ${file.file_size_formatted}</span>
+                                <span><i class="bi bi-clock"></i> ${file.deleted_date_formatted}</span>
+                            </div>
+                            ${file.category ? `<div class="file-category"><i class="bi bi-tag"></i> ${file.category}</div>` : ''}
+                            ${file.description ? `<div class="file-category" style="color: #666; font-size: 12px;"><i class="bi bi-info-circle"></i> ${file.description}</div>` : ''}
+                        </div>
+                        <div class="file-actions">
+                            <button class="btn btn-sm btn-outline-success" onclick="restoreFile(${file.file_id})" title="استعادة">
+                                <i class="bi bi-arrow-counterclockwise"></i> استعادة
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger" onclick="permanentDelete(${file.file_id})" title="حذف نهائي">
+                                <i class="bi bi-x-circle"></i> حذف نهائي
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            gridContainer.innerHTML = html;
+        }
+
+        function restoreFile(fileId) {
+            if (!confirm('هل تريد استعادة هذا الملف؟')) return;
+
+            const formData = new FormData();
+            formData.append('file_id', fileId);
+
+            fetch('api/restore.hnt', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('تم استعادة الملف بنجاح');
+                    showRecycleBin(); // Reload recycle bin
+                } else {
+                    alert('فشل استعادة الملف: ' + data.message);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('حدث خطأ في استعادة الملف');
+            });
+        }
+
+        function permanentDelete(fileId) {
+            if (!confirm('تحذير: سيتم حذف الملف نهائياً ولا يمكن استعادته. هل أنت متأكد؟')) return;
+
+            // TODO: Implement permanent delete API
+            alert('ميزة الحذف النهائي قيد التطوير');
+        }
+
+        function toggleListView() {
+            // Placeholder for list/grid view toggle
+        }
+
+        function loadFiles() {
+            // Show loading state
+            const gridContainer = document.getElementById('fileListGrid');
+            const tableContainer = document.getElementById('fileListContainer');
+
+            gridContainer.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 40px;"><i class="bi bi-hourglass-split" style="font-size: 48px; color: #999;"></i><p>جاري التحميل...</p></div>';
+
+            // Fetch files from API
+            fetch(`api/list.hnt?category=${currentFilter}&page=1&limit=100`)
+                .then(response => response.json())
+                .then(data => {
+                    console.log('API Response:', data);
+                    if (data.success && data.files) {
+                        try {
+                            displayFiles(data.files);
+                            updateStats(data.statistics || {});
+                        } catch (e) {
+                            console.error('Error in displayFiles or updateStats:', e);
+                            gridContainer.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #dc3545;"><i class="bi bi-exclamation-triangle" style="font-size: 48px;"></i><p>خطأ في عرض الملفات: ' + e.message + '</p></div>';
+                        }
+                    } else {
+                        showEmptyState();
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading files:', error);
+                    gridContainer.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #dc3545;"><i class="bi bi-exclamation-triangle" style="font-size: 48px;"></i><p>حدث خطأ في تحميل الملفات: ' + error.message + '</p></div>';
+                });
+        }
+
+        function showEmptyState() {
+            const gridContainer = document.getElementById('fileListGrid');
+            gridContainer.innerHTML = `
+                <div style="grid-column: 1/-1;">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">
+                            <i class="bi bi-inbox"></i>
+                        </div>
+                        <div class="empty-state-text">لا توجد ملفات</div>
+                        <div class="empty-state-subtext">ابدأ برفع ملفاتك الآن</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function displayFiles(files) {
+            const gridContainer = document.getElementById('fileListGrid');
+
+            if (!files || files.length === 0) {
+                showEmptyState();
+                return;
+            }
+
+            let html = '';
+            files.forEach(file => {
+                const icon = getFileIcon(file.file_type);
+                const truncatedName = truncateFilename(file.filename, 30);
+
+                html += `
+                    <div class="file-card">
+                        <div class="file-icon">
+                            ${icon}
+                        </div>
+                        <div class="file-info">
+                            <div class="file-name" title="${file.filename}">${truncatedName}</div>
+                            <div class="file-meta">
+                                <span><i class="bi bi-hdd"></i> ${file.file_size_formatted}</span>
+                                <span><i class="bi bi-calendar"></i> ${file.created_date_formatted}</span>
+                            </div>
+                            ${file.category ? `<div class="file-category"><i class="bi bi-tag"></i> ${file.category}</div>` : ''}
+                            ${file.description ? `<div class="file-category" style="color: #666; font-size: 12px;"><i class="bi bi-info-circle"></i> ${file.description}</div>` : ''}
+                        </div>
+                        <div class="file-actions">
+                            <button class="btn btn-sm btn-outline-primary" onclick="previewFile(${file.file_id})" title="معاينة">
+                                <i class="bi bi-eye"></i>
+                            </button>
+                            <button class="btn btn-sm btn-outline-success" onclick="downloadFile(${file.file_id})" title="تحميل">
+                                <i class="bi bi-download"></i>
+                            </button>
+                            <button class="btn btn-sm btn-outline-info" onclick="shareFileModal(${file.file_id})" title="مشاركة">
+                                <i class="bi bi-share"></i>
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger" onclick="event.preventDefault(); event.stopPropagation(); deleteFile(${file.file_id}); return false;" title="حذف">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            gridContainer.innerHTML = html;
+        }
+
+        function updateStats(stats) {
+            // API returns 'statistics' object, not 'stats'
+            document.getElementById('totalFiles').textContent = stats.total_files || 0;
+            document.getElementById('totalSize').textContent = stats.total_size_formatted || formatFileSize(stats.total_size || 0);
+            document.getElementById('sharedCount').textContent = stats.shared_files || 0;
+        }
+
+        function getFileIcon(fileType) {
+            const icons = {
+                'pdf': '<i class="bi bi-file-pdf-fill" style="color: #dc3545;"></i>',
+                'doc': '<i class="bi bi-file-word-fill" style="color: #0d6efd;"></i>',
+                'docx': '<i class="bi bi-file-word-fill" style="color: #0d6efd;"></i>',
+                'xls': '<i class="bi bi-file-excel-fill" style="color: #198754;"></i>',
+                'xlsx': '<i class="bi bi-file-excel-fill" style="color: #198754;"></i>',
+                'jpg': '<i class="bi bi-file-image-fill" style="color: #fd7e14;"></i>',
+                'jpeg': '<i class="bi bi-file-image-fill" style="color: #fd7e14;"></i>',
+                'png': '<i class="bi bi-file-image-fill" style="color: #fd7e14;"></i>',
+                'gif': '<i class="bi bi-file-image-fill" style="color: #fd7e14;"></i>',
+                'zip': '<i class="bi bi-file-zip-fill" style="color: #6c757d;"></i>',
+                'rar': '<i class="bi bi-file-zip-fill" style="color: #6c757d;"></i>',
+                'mp4': '<i class="bi bi-file-play-fill" style="color: #6f42c1;"></i>',
+                'mp3': '<i class="bi bi-file-music-fill" style="color: #d63384;"></i>',
+                'txt': '<i class="bi bi-file-text-fill" style="color: #0dcaf0;"></i>'
+            };
+            return icons[fileType.toLowerCase()] || '<i class="bi bi-file-earmark" style="color: #6c757d;"></i>';
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        function formatDate(dateString) {
+            const date = new Date(dateString);
+            return date.toLocaleDateString('ar-SA', { year: 'numeric', month: 'short', day: 'numeric' });
+        }
+
+        function truncateFilename(filename, maxLength) {
+            if (filename.length <= maxLength) return filename;
+            const ext = filename.split('.').pop();
+            const nameWithoutExt = filename.substring(0, filename.lastIndexOf('.'));
+            const truncated = nameWithoutExt.substring(0, maxLength - ext.length - 4) + '...';
+            return truncated + '.' + ext;
+        }
+
+        function downloadFile(fileId) {
+            window.location.href = `api/download.hnt?file_id=${fileId}`;
+        }
+
+        function deleteFile(fileId) {
+            // Store file ID for confirmation
+            window.pendingDeleteFileId = fileId;
+
+            // Show Bootstrap confirmation modal
+            const modal = new bootstrap.Modal(document.getElementById('deleteConfirmModal'));
+            modal.show();
+        }
+
+        // Handle delete confirmation
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('confirmDeleteBtn').addEventListener('click', function() {
+                const fileId = window.pendingDeleteFileId;
+
+                // Hide modal
+                const modal = bootstrap.Modal.getInstance(document.getElementById('deleteConfirmModal'));
+                modal.hide();
+
+                // Perform delete
+                fetch('api/delete.hnt', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ file_id: fileId })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('تم حذف الملف بنجاح');
+                        loadFiles();
+                    } else {
+                        alert('فشل حذف الملف: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Delete error:', error);
+                    alert('حدث خطأ في حذف الملف: ' + error.message);
+                });
+            });
+        });
+
+        function previewFile(fileId) {
+            // Store file ID for download button
+            window.currentPreviewFileId = fileId;
+
+            // Fetch file info from API
+            fetch(`api/preview.hnt?file_id=${fileId}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        const modal = new bootstrap.Modal(document.getElementById('previewModal'));
+                        document.getElementById('previewTitle').textContent = data.filename;
+                        document.getElementById('previewFileSize').textContent = formatFileSize(data.file_size);
+
+                        // Hide all preview containers
+                        document.getElementById('imagePreview').style.display = 'none';
+                        document.getElementById('pdfPreview').style.display = 'none';
+                        document.getElementById('textPreview').style.display = 'none';
+                        document.getElementById('videoPreview').style.display = 'none';
+                        document.getElementById('audioPreview').style.display = 'none';
+                        document.getElementById('officePreview').style.display = 'none';
+                        document.getElementById('unsupportedPreview').style.display = 'none';
+
+                        const mimeType = (data.mime_type || '').toLowerCase();
+                        const fileName = (data.filename || '').toLowerCase();
+                        const fileExt = fileName.split('.').pop();
+                        const fileUrl = data.url;
+
+                        console.log('Preview data:', {mimeType, fileName, fileExt, fileUrl});
+
+                        // Handle different file types - check both mime type and extension
+                        if (mimeType.includes('image') || ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(fileExt)) {
+                            // Image preview
+                            document.getElementById('imagePreview').style.display = 'block';
+                            document.getElementById('previewImageTag').src = fileUrl;
+                        } else if (mimeType.includes('pdf') || fileExt === 'pdf') {
+                            // PDF preview
+                            document.getElementById('pdfPreview').style.display = 'block';
+                            loadPDF(fileUrl);
+                        } else if (mimeType.includes('text') || ['txt', 'log', 'md', 'json', 'xml', 'csv'].includes(fileExt)) {
+                            // Text file preview
+                            document.getElementById('textPreview').style.display = 'block';
+                            fetch(fileUrl)
+                                .then(r => r.text())
+                                .then(text => {
+                                    document.getElementById('previewTextContent').textContent = text;
+                                });
+                        } else if (mimeType.includes('video') || ['mp4', 'webm', 'ogg', 'mov', 'avi'].includes(fileExt)) {
+                            // Video preview
+                            document.getElementById('videoPreview').style.display = 'block';
+                            document.getElementById('previewVideoTag').src = fileUrl;
+                        } else if (mimeType.includes('audio') || ['mp3', 'wav', 'ogg', 'm4a'].includes(fileExt)) {
+                            // Audio preview
+                            document.getElementById('audioPreview').style.display = 'block';
+                            document.getElementById('previewAudioTag').src = fileUrl;
+                        } else if (['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'].includes(fileExt) ||
+                                   mimeType.includes('word') || mimeType.includes('excel') || mimeType.includes('powerpoint') ||
+                                   mimeType.includes('officedocument')) {
+                            // Office documents - show file info and download option
+                            document.getElementById('officePreview').style.display = 'block';
+
+                            // Determine file type icon and name
+                            let fileTypeInfo = {
+                                icon: 'bi-file-earmark-word',
+                                color: '#2b579a',
+                                typeName: 'مستند Word'
+                            };
+
+                            if (['xls', 'xlsx'].includes(fileExt)) {
+                                fileTypeInfo = {
+                                    icon: 'bi-file-earmark-excel',
+                                    color: '#217346',
+                                    typeName: 'جدول بيانات Excel'
+                                };
+                            } else if (['ppt', 'pptx'].includes(fileExt)) {
+                                fileTypeInfo = {
+                                    icon: 'bi-file-earmark-ppt',
+                                    color: '#d24726',
+                                    typeName: 'عرض تقديمي PowerPoint'
+                                };
+                            }
+
+                            // Display file information as simple HTML table
+                            document.getElementById('officeContent').innerHTML = `
+                                <div class="text-center py-4">
+                                    <h5 class="mb-4">${data.filename}</h5>
+                                    <div class="row justify-content-center">
+                                        <div class="col-md-8">
+                                            <table class="table table-bordered">
+                                                <tbody>
+                                                    <tr>
+                                                        <td><strong>نوع الملف</strong></td>
+                                                        <td>${fileTypeInfo.typeName}</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td><strong>الحجم</strong></td>
+                                                        <td>${formatFileSize(data.file_size)}</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td><strong>الامتداد</strong></td>
+                                                        <td>.${fileExt.toUpperCase()}</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td><strong>نوع MIME</strong></td>
+                                                        <td>${mimeType || 'application/octet-stream'}</td>
+                                                    </tr>
+                                                </tbody>
+                                            </table>
+                                            <p class="text-muted mt-3">
+                                                <strong>ملاحظة:</strong> لا يمكن معاينة ملفات Office مباشرة في المتصفح.
+                                                يرجى تحميل الملف لفتحه في Microsoft Office أو برنامج متوافق.
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        } else {
+                            // Unsupported - show download option
+                            document.getElementById('unsupportedPreview').style.display = 'block';
+                            window.currentPreviewFileId = fileId;
+                        }
+
+                        modal.show();
+                    } else {
+                        alert('فشل تحميل معاينة الملف: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('حدث خطأ في تحميل المعاينة');
+                });
+        }
+
+        function loadPDF(url) {
+            const pdfjsLib = window['pdfjs-dist/build/pdf'];
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+
+            pdfjsLib.getDocument(url).promise.then(pdf => {
+                window.currentPDF = pdf;
+                window.currentPDFPage = 1;
+                renderPDFPage(1);
+            });
+        }
+
+        function renderPDFPage(pageNum) {
+            const pdf = window.currentPDF;
+            pdf.getPage(pageNum).then(page => {
+                const canvas = document.getElementById('pdfCanvas');
+                const context = canvas.getContext('2d');
+                const viewport = page.getViewport({ scale: 1.5 });
+
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+
+                page.render({
+                    canvasContext: context,
+                    viewport: viewport
+                });
+
+                document.getElementById('pdfPageInfo').textContent = `صفحة ${pageNum} من ${pdf.numPages}`;
+                document.getElementById('pdfPrevBtn').disabled = pageNum <= 1;
+                document.getElementById('pdfNextBtn').disabled = pageNum >= pdf.numPages;
+            });
+        }
+
+        function previousPdfPage() {
+            if (window.currentPDFPage > 1) {
+                window.currentPDFPage--;
+                renderPDFPage(window.currentPDFPage);
+            }
+        }
+
+        function nextPdfPage() {
+            if (window.currentPDFPage < window.currentPDF.numPages) {
+                window.currentPDFPage++;
+                renderPDFPage(window.currentPDFPage);
+            }
+        }
+
+        function shareFileModal(fileId) {
+            window.currentShareFileId = fileId;
+            const modal = new bootstrap.Modal(document.getElementById('shareModal'));
+
+            // Reset form
+            document.getElementById('shareUserSelect').value = '';
+            document.getElementById('permView').checked = true;
+            document.getElementById('expiryDate').value = '';
+
+            modal.show();
+        }
+
+        function submitShare() {
+            const fileId = window.currentShareFileId;
+            const sharedWithUserid = document.getElementById('shareUserSelect').value;
+            const permissionType = document.querySelector('input[name="permissionSelect"]:checked').value;
+            const expiryDate = document.getElementById('expiryDate').value;
+
+            if (!sharedWithUserid) {
+                alert('الرجاء اختيار مستخدم');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('action', 'share');
+            formData.append('file_id', fileId);
+            formData.append('shared_with_userid', sharedWithUserid);
+            formData.append('permission_type', permissionType);
+            if (expiryDate) {
+                formData.append('expiry_date', expiryDate);
+            }
+
+            fetch('api/manage-sharing.hnt', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('تم مشاركة الملف بنجاح');
+                    bootstrap.Modal.getInstance(document.getElementById('shareModal')).hide();
+                } else {
+                    alert('فشل مشاركة الملف: ' + data.message);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('حدث خطأ في مشاركة الملف');
+            });
+        }
+
+        function toggleSearchFilters() {
+            const section = document.getElementById('searchFilterSection');
+            section.style.display = section.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function clearFilters() {
+            document.getElementById('searchInput').value = '';
+            document.getElementById('fileTypeFilter').value = '';
+            document.getElementById('sortByFilter').value = 'created_date';
+            document.getElementById('dateFromFilter').value = '';
+            document.getElementById('dateToFilter').value = '';
+            applyFilters();
+        }
+
+        function applyFilters() {
+            const searchQuery = document.getElementById('searchInput').value.trim();
+            const fileType = document.getElementById('fileTypeFilter').value;
+            const sortBy = document.getElementById('sortByFilter').value;
+            const dateFrom = document.getElementById('dateFromFilter').value;
+            const dateTo = document.getElementById('dateToFilter').value;
+
+            // Build query parameters
+            let params = new URLSearchParams();
+
+            if (searchQuery) params.append('q', searchQuery);
+            if (currentFilter && currentFilter !== 'all') params.append('category', currentFilter);
+            if (fileType) params.append('file_type', fileType);
+            if (sortBy) params.append('sort_by', sortBy);
+            if (dateFrom) params.append('date_from', dateFrom);
+            if (dateTo) params.append('date_to', dateTo);
+            params.append('page', '1');
+            params.append('limit', '100');
+
+            // Show loading state
+            const gridContainer = document.getElementById('fileListGrid');
+            gridContainer.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 40px;"><i class="bi bi-hourglass-split" style="font-size: 48px; color: #999;"></i><p>جاري البحث...</p></div>';
+
+            // Fetch from search API
+            fetch(`api/search.hnt?${params.toString()}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.files) {
+                        displayFiles(data.files);
+                        if (data.pagination) {
+                            console.log(`Found ${data.pagination.total} files`);
+                        }
+                    } else {
+                        showEmptyState();
+                    }
+                })
+                .catch(error => {
+                    console.error('Error searching files:', error);
+                    gridContainer.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #dc3545;"><i class="bi bi-exclamation-triangle" style="font-size: 48px;"></i><p>حدث خطأ في البحث</p></div>';
+                });
+        }
+
+        function debounceSearch() {
+            clearTimeout(window.searchTimeout);
+            window.searchTimeout = setTimeout(() => {
+                applyFilters();
+            }, 500);
+        }
+    </script>
+</div>
+<!-- End File Management Container -->
+
+<?php require("../../foter.hnt"); ?>

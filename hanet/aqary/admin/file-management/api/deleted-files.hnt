@@ -1,0 +1,149 @@
+<?php
+/**
+ * Deleted Files API Endpoint
+ * Lists files in recycle bin with pagination
+ * Integrated with legacy system
+ */
+
+// Include legacy system database connection
+require_once('../../../connectdb.hnt');
+
+// Mark as AJAX request for authentication
+$is_ajax_request = true;
+
+// Include authentication - will validate user session
+require_once('../../../reqloginajax.hnt');
+
+// Set JSON response header
+header('Content-Type: application/json; charset=utf-8');
+
+// Include library classes
+require_once('../lib/DatabaseInstaller.class.php');
+
+// Validate database initialization
+try {
+    $installer = new DatabaseInstaller($link);
+    if (!$installer->tablesExist()) {
+        http_response_code(503);
+        echo json_encode([
+            'success' => false,
+            'message' => 'نظام الملفات غير مهيأ. يرجى زيارة الصفحة الرئيسية أولاً.',
+            'redirect' => '../index.hnt'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode(['success' => false, 'message' => 'خطأ في التحقق من النظام'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+// Validate user is authenticated
+if (!isset($_SESSION['useridv']) || empty($_SESSION['useridv'])) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+try {
+    $userid = intval($_SESSION['useridv']);
+
+    // Get pagination parameters
+    $page = isset($_GET['page']) ? intval($_GET['page']) : 1;
+    $limit = isset($_GET['limit']) ? intval($_GET['limit']) : 20;
+    $offset = ($page - 1) * $limit;
+
+    // Ensure limit is reasonable
+    if ($limit > 100) $limit = 100;
+    if ($limit < 1) $limit = 20;
+    if ($page < 1) $page = 1;
+
+    // Get deleted files using prepared statement
+    $sql = "SELECT * FROM file_management
+            WHERE owner_userid = ? AND is_deleted = 1
+            ORDER BY deleted_date DESC
+            LIMIT ? OFFSET ?";
+
+    $stmt = $link->prepare($sql);
+    if (!$stmt) {
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => 'خطأ في قاعدة البيانات'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    $stmt->bind_param("iii", $userid, $limit, $offset);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    $files = [];
+
+    while ($file = $result->fetch_assoc()) {
+        $files[] = [
+            'file_id' => intval($file['file_id']),
+            'filename' => $file['original_filename'],
+            'file_size' => intval($file['file_size']),
+            'file_size_formatted' => formatFileSize($file['file_size']),
+            'category' => $file['category'],
+            'description' => $file['description'],
+            'deleted_date' => $file['deleted_date'],
+            'deleted_date_formatted' => formatDate($file['deleted_date']),
+            'file_type' => $file['file_type']
+        ];
+    }
+    $stmt->close();
+
+    // Get total count
+    $count_sql = "SELECT COUNT(*) as total FROM file_management
+                  WHERE owner_userid = ? AND is_deleted = 1";
+    $count_stmt = $link->prepare($count_sql);
+    $count_stmt->bind_param("i", $userid);
+    $count_stmt->execute();
+    $count_result = $count_stmt->get_result();
+    $count_row = $count_result->fetch_assoc();
+    $total = intval($count_row['total'] ?? 0);
+    $count_stmt->close();
+
+    http_response_code(200);
+    echo json_encode([
+        'success' => true,
+        'files' => $files,
+        'pagination' => [
+            'page' => $page,
+            'limit' => $limit,
+            'total' => $total,
+            'pages' => ceil($total / $limit)
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+} catch (Exception $e) {
+    error_log("Deleted Files API Error: " . $e->getMessage());
+    http_response_code(500);
+    echo json_encode(['success' => false, 'message' => 'خطأ في النظام'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+function formatFileSize($bytes) {
+    if ($bytes == 0) return '0 B';
+
+    $k = 1024;
+    $sizes = ['B', 'KB', 'MB', 'GB'];
+    $i = floor(log($bytes, $k));
+
+    return round($bytes / pow($k, $i), 2) . ' ' . $sizes[$i];
+}
+
+function formatDate($date) {
+    $time = strtotime($date);
+    $now = time();
+    $diff = $now - $time;
+
+    if ($diff < 3600) {
+        return 'منذ ' . intval($diff / 60) . ' دقيقة';
+    } elseif ($diff < 86400) {
+        return 'منذ ' . intval($diff / 3600) . ' ساعة';
+    } elseif ($diff < 604800) {
+        return 'منذ ' . intval($diff / 86400) . ' أيام';
+    } else {
+        return date('Y-m-d', $time);
+    }
+}
+?>

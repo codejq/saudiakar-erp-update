@@ -1,0 +1,358 @@
+<?php
+/**
+ * Contract History Viewer
+ * Shows complete audit trail for a contract
+ *
+ * @version 1.0
+ * @date 2025-12-04
+ */
+
+include_once"../../../nocash.hnt";
+include_once "../../../header.hnt";
+require_once(__DIR__ . '/CalendarManager.class.hnt');
+
+$contractId = isset($_REQUEST['rakam3akdid']) ? intval($_REQUEST['rakam3akdid']) : 0;
+
+if (!$contractId) {
+    die('معرف العقد مطلوب');
+}
+
+// Get contract details
+$sql = "SELECT e.*, m.mostagername
+        FROM egar e
+        INNER JOIN mostagereen m ON e.mostagerid = m.mostagerid
+        WHERE e.rakam3akdid='$contractId'
+        LIMIT 1";
+
+$result = mysql_query($sql, $link);
+if (!$result || mysql_num_rows($result) == 0) {
+    die('العقد غير موجود');
+}
+
+$contract = mysql_fetch_assoc($result);
+$calendar = new CalendarManager();
+
+// Get contract history
+$sql = "SELECT h.*, u.name as user_name
+        FROM egar_history h
+        LEFT JOIN users u ON h.changed_by_userid = u.userid
+        WHERE h.rakam3akdid='$contractId'
+        ORDER BY h.changed_at DESC";
+
+$historyResult = mysql_query($sql, $link);
+
+// Get contract chain
+$sql = "SELECT e.rakam3akdid, e.rakam3akd, e.startegar, e.end3aqd, e.status, e.is_renewal, e.annualprice, e.calendar_type
+        FROM egar e
+        WHERE e.rakam3akdid='$contractId'
+        OR e.renewed_from_contract_id='$contractId'
+        OR e.renewed_to_contract_id='$contractId'
+        ORDER BY e.startegar ASC";
+
+$chainResult = mysql_query($sql, $link);
+
+?>
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>سجل العقد - <?= htmlspecialchars($contract['rakam3akd']) ?></title>
+
+
+
+    <style>
+        .timeline {
+            position: relative;
+            padding: 20px 0;
+        }
+        .timeline::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            right: 50px;
+            width: 2px;
+            height: 100%;
+            background: #dee2e6;
+        }
+        .timeline-item {
+            position: relative;
+            padding: 20px 0 20px 80px;
+            margin-bottom: 20px;
+        }
+        .timeline-icon {
+            position: absolute;
+            right: 35px;
+            top: 20px;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            background: #007bff;
+            color: white;
+            text-align: center;
+            line-height: 30px;
+            z-index: 1;
+        }
+        .timeline-content {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 15px;
+        }
+        .json-diff {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 3px;
+            padding: 10px;
+            margin-top: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .contract-chain {
+            display: flex;
+            align-items: center;
+            overflow-x: auto;
+            padding: 20px 0;
+        }
+        .chain-item {
+            min-width: 200px;
+            padding: 15px;
+            border: 2px solid #dee2e6;
+            border-radius: 5px;
+            margin: 0 10px;
+            background: white;
+            position: relative;
+        }
+        .chain-item.current {
+            border-color: #007bff;
+            background: #e7f3ff;
+        }
+        .chain-arrow {
+            font-size: 24px;
+            color: #6c757d;
+            margin: 0 5px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container-fluid" style="max-width: 1400px; margin: 50px auto;">
+    <div class="row">
+        <div class="col-md-12">
+            <h2 class="mb-4">
+                <i class="fa fa-history"></i> سجل العقد
+                <small class="text-muted"><?= htmlspecialchars($contract['rakam3akd']) ?></small>
+            </h2>
+
+            <!-- Contract Info Card -->
+            <div class="card mb-4">
+                <div class="card-header bg-primary text-white">
+                    <i class="fa fa-file-text"></i> معلومات العقد
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <p><strong>رقم العقد:</strong> <?= htmlspecialchars($contract['rakam3akd']) ?></p>
+                            <p><strong>المستأجر:</strong> <?= htmlspecialchars($contract['mostagername']) ?></p>
+                            <p><strong>الحالة:</strong>
+                                <?php
+                                $statusLabels = [
+                                    'active' => '<span class="badge badge-success">نشط</span>',
+                                    'expired' => '<span class="badge badge-danger">منتهي</span>',
+                                    'renewed' => '<span class="badge badge-info">مجدد</span>',
+                                    'terminated' => '<span class="badge badge-warning">مفسوخ</span>'
+                                ];
+                                echo isset($statusLabels[$contract['status']]) ? $statusLabels[$contract['status']] : $contract['status'];
+                                ?>
+                            </p>
+                        </div>
+                        <div class="col-md-6">
+                            <p><strong>تاريخ البداية:</strong> <?= $calendar->formatDateForDisplay($contract['startegar'], intval($contract['calendar_type'])) ?></p>
+                            <p><strong>تاريخ النهاية:</strong> <?= $calendar->formatDateForDisplay($contract['end3aqd'], intval($contract['calendar_type'])) ?></p>
+                            <p><strong>القيمة السنوية:</strong> <?= number_format($contract['annualprice'], 2) ?> ريال</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Contract Chain -->
+            <?php if (mysql_num_rows($chainResult) > 1): ?>
+            <div class="card mb-4">
+                <div class="card-header bg-info text-white">
+                    <i class="fa fa-link"></i> سلسلة التجديدات
+                </div>
+                <div class="card-body">
+                    <div class="contract-chain">
+                        <?php
+                        $first = true;
+                        mysql_data_seek($chainResult, 0);
+                        while ($chainItem = mysql_fetch_assoc($chainResult)):
+                            if (!$first) {
+                                echo '<div class="chain-arrow"><i class="fa fa-arrow-left"></i></div>';
+                            }
+                            $isCurrent = ($chainItem['rakam3akdid'] == $contractId);
+                            $calType = intval($chainItem['calendar_type']);
+                        ?>
+                        <div class="chain-item <?= $isCurrent ? 'current' : '' ?>">
+                            <div class="text-center">
+                                <strong><?= htmlspecialchars($chainItem['rakam3akd']) ?></strong>
+                                <?php if ($chainItem['is_renewal']): ?>
+                                <span class="badge badge-secondary">تجديد</span>
+                                <?php endif; ?>
+                                <?php if ($isCurrent): ?>
+                                <span class="badge badge-primary">الحالي</span>
+                                <?php endif; ?>
+                            </div>
+                            <hr>
+                            <small>
+                                <?= $calendar->formatDateForDisplay($chainItem['startegar'], $calType) ?>
+                                <br>إلى<br>
+                                <?= $calendar->formatDateForDisplay($chainItem['end3aqd'], $calType) ?>
+                            </small>
+                            <hr>
+                            <strong><?= number_format($chainItem['annualprice'], 0) ?></strong> ريال
+                            <br>
+                            <small class="text-muted"><?= $chainItem['status'] ?></small>
+                            <?php if (!$isCurrent): ?>
+                            <hr>
+                            <a href="?contract_id=<?= $chainItem['rakam3akdid'] ?>" class="btn btn-sm btn-outline-primary btn-block">
+                                عرض السجل
+                            </a>
+                            <?php endif; ?>
+                        </div>
+                        <?php
+                            $first = false;
+                        endwhile;
+                        ?>
+                    </div>
+                </div>
+            </div>
+            <?php endif; ?>
+
+            <!-- History Timeline -->
+            <div class="card">
+                <div class="card-header bg-secondary text-white">
+                    <i class="fa fa-history"></i> سجل التغييرات
+                </div>
+                <div class="card-body">
+                    <?php if (mysql_num_rows($historyResult) == 0): ?>
+                        <div class="alert alert-info">
+                            لا يوجد سجل لهذا العقد بعد. السجل سيبدأ بتسجيل التغييرات من الآن فصاعداً.
+                        </div>
+                    <?php else: ?>
+                        <div class="timeline">
+                            <?php while ($historyItem = mysql_fetch_assoc($historyResult)): ?>
+                            <div class="timeline-item">
+                                <div class="timeline-icon <?= getActionIconClass($historyItem['action']) ?>">
+                                    <i class="fa <?= getActionIcon($historyItem['action']) ?>"></i>
+                                </div>
+                                <div class="timeline-content">
+                                    <div class="d-flex justify-content-between align-items-start">
+                                        <div>
+                                            <h5 class="mb-1"><?= getActionLabel($historyItem['action']) ?></h5>
+                                            <p class="text-muted mb-2">
+                                                <i class="fa fa-user"></i> <?= htmlspecialchars($historyItem['user_name']) ?>
+                                                &nbsp;&nbsp;
+                                                <i class="fa fa-clock-o"></i> <?= $calendar->formatDateForDisplay($historyItem['changed_at'], 1, true) ?>
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    <?php if ($historyItem['notes']): ?>
+                                    <p class="mb-2"><strong>ملاحظات:</strong> <?= htmlspecialchars($historyItem['notes']) ?></p>
+                                    <?php endif; ?>
+
+                                    <?php if ($historyItem['new_values']): ?>
+                                    <div class="json-diff">
+                                        <strong>التغييرات:</strong>
+                                        <?php
+                                        $newValues = json_decode($historyItem['new_values'], true);
+                                        if ($newValues) {
+                                            echo '<ul class="mb-0">';
+                                            foreach ($newValues as $key => $value) {
+                                                echo '<li><strong>' . htmlspecialchars($key) . ':</strong> ' . htmlspecialchars(formatValue($value)) . '</li>';
+                                            }
+                                            echo '</ul>';
+                                        }
+                                        ?>
+                                    </div>
+                                    <?php endif; ?>
+
+                                    <small class="text-muted">
+                                        <i class="fa fa-laptop"></i> <?= htmlspecialchars($historyItem['ip_address']) ?>
+                                    </small>
+                                </div>
+                            </div>
+                            <?php endwhile; ?>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
+
+            <div class="mt-4">
+                <button onclick="history.back()" class="btn btn-secondary">
+                    <i class="fa fa-arrow-right"></i> رجوع
+                </button>
+                <a href="show3akd.hnt?idsubaqar=<?= $contract['rakam3akdid'] ?>" class="btn btn-primary">
+                    <i class="fa fa-file-text"></i> عرض العقد
+                </a>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+
+</body>
+</html>
+
+<?php
+function getActionIcon($action) {
+    $icons = [
+        'created' => 'fa-plus-circle',
+        'created_from_renewal' => 'fa-refresh',
+        'renewed' => 'fa-refresh',
+        'terminated' => 'fa-ban',
+        'amended' => 'fa-edit',
+        'updated' => 'fa-pencil'
+    ];
+    return isset($icons[$action]) ? $icons[$action] : 'fa-circle';
+}
+
+function getActionIconClass($action) {
+    $classes = [
+        'created' => 'bg-success',
+        'created_from_renewal' => 'bg-info',
+        'renewed' => 'bg-info',
+        'terminated' => 'bg-danger',
+        'amended' => 'bg-warning',
+        'updated' => 'bg-secondary'
+    ];
+    return isset($classes[$action]) ? $classes[$action] : 'bg-secondary';
+}
+
+function getActionLabel($action) {
+    $labels = [
+        'created' => 'إنشاء العقد',
+        'created_from_renewal' => 'إنشاء من تجديد',
+        'renewed' => 'تجديد العقد',
+        'terminated' => 'إنهاء العقد',
+        'amended' => 'تعديل العقد',
+        'updated' => 'تحديث البيانات'
+    ];
+    return isset($labels[$action]) ? $labels[$action] : $action;
+}
+
+function formatValue($value) {
+    if (is_numeric($value) && $value > 1000000000) {
+        // Probably a timestamp
+        return date('Y-m-d H:i:s', $value);
+    }
+    if (is_array($value)) {
+        return json_encode($value, JSON_UNESCAPED_UNICODE);
+    }
+    return $value;
+}
+?>

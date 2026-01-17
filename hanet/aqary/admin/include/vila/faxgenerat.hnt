@@ -1,0 +1,478 @@
+<?php
+/**
+ * Vila Report Generator
+ * Generate reports for villas within a specific date range
+ */
+
+$sc_title = "تجهيز تقرير للفلل";
+$sc_id = "138";
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+    require "../arabicTools.class.hnt";
+} else {
+    // For AJAX requests, include authentication
+    include_once "../../../reqloginajax.hnt";
+    require "../arabicTools.class.hnt";
+}
+
+
+// Handle AJAX form submission
+if ($is_ajax_request && isset($_POST['faxgenerat'])) {
+    $st_date = $_POST['st_date'] ?? '';
+    $st_month = $_POST['st_month'] ?? '';
+    $st_year = $_POST['st_year'] ?? '';
+    $en_date = $_POST['en_date'] ?? '';
+    $en_month = $_POST['en_month'] ?? '';
+    $en_year = $_POST['en_year'] ?? '';
+
+    $redirect_url = 'updatvila.hnt?faxgenerat=1&st_date=' . urlencode($st_date) .
+                    '&st_month=' . urlencode($st_month) . '&st_year=' . urlencode($st_year) .
+                    '&en_date=' . urlencode($en_date) . '&en_month=' . urlencode($en_month) .
+                    '&en_year=' . urlencode($en_year);
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'جاري إعداد التقرير...',
+        'redirect_url' => $redirect_url
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
+}
+
+// Get default dates
+if ($hnt_dll) {
+    $tod = explode("-", date("d-m-Y", (time() - 86400)));
+    $tod2 = explode("-", date("d-m-Y", (time() + 2592000)));
+} else {
+    $tod = explode("-", arabicDate('hj:d-m-Y', (time() - 86400)));
+    $tod2 = explode("-", ArabicTools::arabicDate('hj:d-m-Y', (time() + 2592000)));
+}
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.report-dashboard {
+    background: #f8f9fa;
+    min-height: 100vh;
+    padding: 2rem 0;
+}
+
+.page-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.report-card {
+    background: white;
+    border: none;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    overflow: hidden;
+    transition: all 0.3s ease;
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.report-card:hover {
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.15);
+}
+
+.report-card .card-header {
+    padding: 1.5rem;
+    text-align: center;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-bottom: 3px solid #6366f1;
+}
+
+.report-card .card-header i {
+    font-size: 3.5rem;
+    margin-bottom: 0.5rem;
+    color: #6366f1;
+}
+
+.report-card .card-title {
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: #1e293b;
+    margin: 0.5rem 0 0 0;
+}
+
+.report-card .card-description {
+    font-size: 0.95rem;
+    color: #64748b;
+    margin: 0.25rem 0 0 0;
+}
+
+.report-card .card-body {
+    padding: 2rem;
+}
+
+.date-group {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.date-group h5 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #475569;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.date-inputs {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.date-inputs select {
+    flex: 1;
+    min-width: 100px;
+}
+
+@media (max-width: 768px) {
+    .report-card {
+        margin: 0 1rem;
+    }
+
+    .date-inputs {
+        flex-direction: column;
+    }
+}
+</style>
+
+<div class="report-dashboard" dir="rtl">
+    <div class="container-fluid">
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>
+                <i class="bi bi-file-earmark-bar-graph"></i>
+                <?= $sc_title ?>
+            </h1>
+            <p class="mb-0 mt-2" style="opacity: 0.95; font-size: 0.95rem;">
+                إعداد تقرير للفلل خلال فترة زمنية محددة
+            </p>
+        </div>
+
+        <!-- Report Card -->
+        <div class="report-card">
+            <div class="card-header">
+                <i class="bi bi-calendar-range"></i>
+                <h3 class="card-title">اختر نطاق التاريخ للتقرير</h3>
+                <p class="card-description">حدد تاريخ البداية والنهاية لإنشاء التقرير</p>
+            </div>
+            <div class="card-body">
+                <form method="get" action="updatvila.hnt" id="reportForm">
+                    <input type="hidden" name="faxgenerat" value="1">
+
+                    <!-- Start Date -->
+                    <div class="date-group">
+                        <h5>
+                            <i class="bi bi-calendar-check text-primary"></i>
+                            بدء من تاريخ
+                        </h5>
+                        <div class="date-inputs">
+                            <select name="st_date" class="form-select" required>
+                                <option value='<?= $tod[0] ?>' selected><?= $tod[0] ?></option>
+                                <option value=1>1</option>
+                                <option value=2>2</option>
+                                <option value=3>3</option>
+                                <option value=4>4</option>
+                                <option value=5>5</option>
+                                <option value=6>6</option>
+                                <option value=7>7</option>
+                                <option value=8>8</option>
+                                <option value=9>9</option>
+                                <option value=10>10</option>
+                                <option value=11>11</option>
+                                <option value=12>12</option>
+                                <option value=13>13</option>
+                                <option value=14>14</option>
+                                <option value=15>15</option>
+                                <option value=16>16</option>
+                                <option value=17>17</option>
+                                <option value=18>18</option>
+                                <option value=19>19</option>
+                                <option value=20>20</option>
+                                <option value=21>21</option>
+                                <option value=22>22</option>
+                                <option value=23>23</option>
+                                <option value=24>24</option>
+                                <option value=25>25</option>
+                                <option value=26>26</option>
+                                <option value=27>27</option>
+                                <option value=28>28</option>
+                                <option value=29>29</option>
+                                <option value=30>30</option>
+                                <?php if ($hnt_dll) { echo "<option value=31>31</option>"; } ?>
+                            </select>
+
+                            <select name="st_month" class="form-select" required>
+                                <option value='<?= $tod[1]; ?>' selected><?= $tod[1]; ?></option>
+                                <?php if ($hnt_dll) { ?>
+                                    <option value=1>1</option>
+                                    <option value=2>2</option>
+                                    <option value=3>3</option>
+                                    <option value=4>4</option>
+                                    <option value=5>5</option>
+                                    <option value=6>6</option>
+                                    <option value=7>7</option>
+                                    <option value=8>8</option>
+                                    <option value=9>9</option>
+                                    <option value=10>10</option>
+                                    <option value=11>11</option>
+                                    <option value=12>12</option>
+                                <?php } else { ?>
+                                    <option value=1>1</option>
+                                    <option value=2>2</option>
+                                    <option value=3>3</option>
+                                    <option value=4>4</option>
+                                    <option value=5>5</option>
+                                    <option value=6>6</option>
+                                    <option value=7>7</option>
+                                    <option value=8>8</option>
+                                    <option value=9>9</option>
+                                    <option value=10>10</option>
+                                    <option value=11>11</option>
+                                    <option value=12>12</option>
+                                <?php } ?>
+                            </select>
+
+                            <select name="st_year" class="form-select" required>
+                                <option value='<?= $tod[2]; ?>' selected><?= $tod[2]; ?></option>
+                                <?php if ($hnt_dll) { ?>
+                                    <option value=2015>2015</option>
+                                    <option value=2016>2016</option>
+                                    <option value=2017>2017</option>
+                                    <option value=2018>2018</option>
+                                    <option value=2019>2019</option>
+                                    <option value=2020>2020</option>
+                                    <option value=2021>2021</option>
+                                    <option value=2022>2022</option>
+                                    <option value=2023>2023</option>
+                                    <option value=2024>2024</option>
+                                    <option value=2025>2025</option>
+                                    <option value=2026>2026</option>
+                                <?php } else { ?>
+                                    <option value=1436>1436</option>
+                                    <option value=1437>1437</option>
+                                    <option value=1438>1438</option>
+                                    <option value=1439>1439</option>
+                                    <option value=1440>1440</option>
+                                    <option value=1441>1441</option>
+                                    <option value=1442>1442</option>
+                                    <option value=1443>1443</option>
+                                    <option value=1444>1444</option>
+                                    <option value=1445>1445</option>
+                                    <option value=1446>1446</option>
+                                    <option value=1447>1447</option>
+                                <?php } ?>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- End Date -->
+                    <div class="date-group">
+                        <h5>
+                            <i class="bi bi-calendar-x text-danger"></i>
+                            وانتهاء إلى تاريخ
+                        </h5>
+                        <div class="date-inputs">
+                            <select name="en_date" class="form-select" required>
+                                <option value='<?= $tod2[0] ?>' selected><?= $tod2[0] ?></option>
+                                <option value=1>1</option>
+                                <option value=2>2</option>
+                                <option value=3>3</option>
+                                <option value=4>4</option>
+                                <option value=5>5</option>
+                                <option value=6>6</option>
+                                <option value=7>7</option>
+                                <option value=8>8</option>
+                                <option value=9>9</option>
+                                <option value=10>10</option>
+                                <option value=11>11</option>
+                                <option value=12>12</option>
+                                <option value=13>13</option>
+                                <option value=14>14</option>
+                                <option value=15>15</option>
+                                <option value=16>16</option>
+                                <option value=17>17</option>
+                                <option value=18>18</option>
+                                <option value=19>19</option>
+                                <option value=20>20</option>
+                                <option value=21>21</option>
+                                <option value=22>22</option>
+                                <option value=23>23</option>
+                                <option value=24>24</option>
+                                <option value=25>25</option>
+                                <option value=26>26</option>
+                                <option value=27>27</option>
+                                <option value=28>28</option>
+                                <option value=29>29</option>
+                                <option value=30>30</option>
+                                <?php if ($hnt_dll) { echo "<option value=31>31</option>"; } ?>
+                            </select>
+
+                            <select name="en_month" class="form-select" required>
+                                <option value='<?= $tod2[1]; ?>' selected><?= $tod2[1]; ?></option>
+                                <?php if ($hnt_dll) { ?>
+                                    <option value=1>1</option>
+                                    <option value=2>2</option>
+                                    <option value=3>3</option>
+                                    <option value=4>4</option>
+                                    <option value=5>5</option>
+                                    <option value=6>6</option>
+                                    <option value=7>7</option>
+                                    <option value=8>8</option>
+                                    <option value=9>9</option>
+                                    <option value=10>10</option>
+                                    <option value=11>11</option>
+                                    <option value=12>12</option>
+                                <?php } else { ?>
+                                    <option value=1>1</option>
+                                    <option value=2>2</option>
+                                    <option value=3>3</option>
+                                    <option value=4>4</option>
+                                    <option value=5>5</option>
+                                    <option value=6>6</option>
+                                    <option value=7>7</option>
+                                    <option value=8>8</option>
+                                    <option value=9>9</option>
+                                    <option value=10>10</option>
+                                    <option value=11>11</option>
+                                    <option value=12>12</option>
+                                <?php } ?>
+                            </select>
+
+                            <select name="en_year" class="form-select" required>
+                                <option value='<?= $tod2[2]; ?>' selected><?= $tod2[2]; ?></option>
+                                <?php if ($hnt_dll) { ?>
+                                    <option value=2015>2015</option>
+                                    <option value=2016>2016</option>
+                                    <option value=2017>2017</option>
+                                    <option value=2018>2018</option>
+                                    <option value=2019>2019</option>
+                                    <option value=2020>2020</option>
+                                    <option value=2021>2021</option>
+                                    <option value=2022>2022</option>
+                                    <option value=2023>2023</option>
+                                    <option value=2024>2024</option>
+                                    <option value=2025>2025</option>
+                                    <option value=2026>2026</option>
+                                <?php } else { ?>
+                                    <option value=1436>1436</option>
+                                    <option value=1437>1437</option>
+                                    <option value=1438>1438</option>
+                                    <option value=1439>1439</option>
+                                    <option value=1440>1440</option>
+                                    <option value=1441>1441</option>
+                                    <option value=1442>1442</option>
+                                    <option value=1443>1443</option>
+                                    <option value=1444>1444</option>
+                                    <option value=1445>1445</option>
+                                    <option value=1446>1446</option>
+                                    <option value=1447>1447</option>
+                                <?php } ?>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="d-grid gap-2 mt-4">
+                        <button type="submit" class="btn btn-primary btn-lg" id="generateBtn">
+                            <i class="bi bi-file-earmark-arrow-down me-2"></i>
+                            نعم قم بإعداد التقرير
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script>
+/**
+ * Vila Report Generator - Modern JavaScript
+ */
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Vila Report Generator initialized');
+
+    // Setup AJAX for report form
+    const reportForm = document.getElementById('reportForm');
+    if (reportForm) {
+        reportForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            // Get form data
+            const formData = new FormData(this);
+            formData.append('ajax_submit', '1');
+
+            // Show loading state
+            const generateBtn = document.getElementById('generateBtn');
+            const originalBtnText = generateBtn.innerHTML;
+            generateBtn.disabled = true;
+            generateBtn.innerHTML = '<i class="bi bi-hourglass-split me-2"></i> جاري الإعداد...';
+
+            // Submit via AJAX
+            $.ajax({
+                url: window.location.pathname.split('/').pop(),
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                dataType: 'json',
+                success: function(response) {
+                    if (response.success && response.redirect_url) {
+                        window.location.href = response.redirect_url;
+                    } else {
+                        alert(response.error || 'حدث خطأ أثناء إعداد التقرير');
+                        generateBtn.disabled = false;
+                        generateBtn.innerHTML = originalBtnText;
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error('AJAX Error:', error);
+                    alert('حدث خطأ أثناء إعداد التقرير. الرجاء المحاولة مرة أخرى.');
+                    generateBtn.disabled = false;
+                    generateBtn.innerHTML = originalBtnText;
+                }
+            });
+
+            return false;
+        });
+    }
+});
+</script>
+
+<?php
+} // Close if (!$is_ajax_request)
+require('../../../foter.hnt');
+?>

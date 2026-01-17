@@ -1,0 +1,551 @@
+<?php
+/**
+ * Building Search by Date Range
+ * Search for buildings by entry date (recent or old entries)
+ */
+
+$sc_title = "عرض العمائر التي مر عليها مدة معينة";
+$sc_id = "17";
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+} else {
+    // For AJAX requests, include authentication
+    include_once "../../../reqloginajax.hnt";
+}
+
+
+// Handle AJAX form submission
+if ($is_ajax_request) {
+    $search_type = isset($_POST['search_type']) ? $_POST['search_type'] : '';
+    $days = isset($_POST['days']) ? intval($_POST['days']) : 0;
+
+    if ($days <= 0) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => false,
+            'error' => 'الرجاء إدخال عدد أيام صحيح'
+        ], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+
+    // Build redirect URL based on search type
+    if ($search_type === 'recent') {
+        $redirect_url = 'updatemara.hnt?serchdate=' . $days;
+    } elseif ($search_type === 'old') {
+        $redirect_url = 'updatemara.hnt?serchdatex=' . $days;
+    } else {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => false,
+            'error' => 'نوع البحث غير صحيح'
+        ], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'جاري تحميل النتائج...',
+        'redirect_url' => $redirect_url
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
+}
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.search-dashboard {
+    background: #f8f9fa;
+    min-height: 100vh;
+    padding: 2rem 0;
+}
+
+.page-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.search-card {
+    background: white;
+    border: none;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    overflow: hidden;
+    transition: all 0.3s ease;
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.search-card:hover {
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.15);
+}
+
+.search-card .card-header {
+    padding: 1.5rem;
+    text-align: center;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-bottom: 3px solid #f59e0b;
+}
+
+.search-card .card-header i {
+    font-size: 3.5rem;
+    margin-bottom: 0.5rem;
+    color: #f59e0b;
+}
+
+.search-card .card-title {
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: #1e293b;
+    margin: 0.5rem 0 0 0;
+}
+
+.search-card .card-description {
+    font-size: 0.95rem;
+    color: #64748b;
+    margin: 0.25rem 0 0 0;
+}
+
+.search-card .card-body {
+    padding: 2rem;
+}
+
+.search-options {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+
+.option-button {
+    background: white;
+    border: 2px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 1.5rem;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    position: relative;
+}
+
+.option-button:hover {
+    border-color: #f59e0b;
+    background: #fffbeb;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(245, 158, 11, 0.15);
+}
+
+.option-button.active {
+    border-color: #f59e0b;
+    background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+    box-shadow: 0 4px 12px rgba(245, 158, 11, 0.2);
+}
+
+.option-button input[type="radio"] {
+    display: none;
+}
+
+.option-button i {
+    font-size: 2.5rem;
+    color: #f59e0b;
+    margin-bottom: 0.75rem;
+    display: block;
+}
+
+.option-button .option-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #1e293b;
+    margin-bottom: 0.25rem;
+}
+
+.option-button .option-desc {
+    font-size: 0.875rem;
+    color: #64748b;
+}
+
+.search-form-container {
+    display: none;
+    animation: slideDown 0.3s ease;
+}
+
+.search-form-container.active {
+    display: block;
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.form-label {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    color: #495057;
+    text-align: right;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.info-box {
+    background: #fef3c7;
+    border-left: 4px solid #f59e0b;
+    padding: 1rem;
+    border-radius: 6px;
+    margin-top: 2rem;
+}
+
+.info-box h5 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #b45309;
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.info-box ul {
+    margin: 0;
+    padding-right: 1.5rem;
+    color: #92400e;
+}
+
+.info-box li {
+    margin-bottom: 0.25rem;
+}
+
+@media (max-width: 768px) {
+    .search-options {
+        grid-template-columns: 1fr;
+    }
+
+    .search-card {
+        margin: 0 1rem;
+    }
+
+    .search-card .card-body {
+        padding: 1.5rem;
+    }
+}
+</style>
+
+<div class="search-dashboard" dir="rtl">
+    <div class="container-fluid">
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>
+                <i class="bi bi-building"></i>
+                <?= $sc_title ?>
+            </h1>
+            <p class="mb-0 mt-2" style="opacity: 0.95; font-size: 0.95rem;">
+                البحث عن العمائر حسب تاريخ الإدخال
+            </p>
+        </div>
+
+        <!-- Search Card -->
+        <div class="search-card">
+            <div class="card-header">
+                <i class="bi bi-calendar-range"></i>
+                <h3 class="card-title">بحث حسب تاريخ الإدخال</h3>
+                <p class="card-description">ابحث عن العمائر حسب المدخلات الحديثة أو القديمة</p>
+            </div>
+            <div class="card-body">
+
+                <!-- Search Type Options -->
+                <div class="search-options">
+                    <label class="option-button" data-search-type="recent">
+                        <input type="radio" name="search_type" value="recent">
+                        <i class="bi bi-clock-history"></i>
+                        <div class="option-title">المدخلات الحديثة</div>
+                        <div class="option-desc">البحث عن المدخلات خلال الأيام الأخيرة</div>
+                    </label>
+
+                    <label class="option-button" data-search-type="old">
+                        <input type="radio" name="search_type" value="old">
+                        <i class="bi bi-archive"></i>
+                        <div class="option-title">المدخلات القديمة</div>
+                        <div class="option-desc">البحث عن المدخلات القديمة (قبل مدة معينة)</div>
+                    </label>
+                </div>
+
+                <!-- Recent Entries Search Form -->
+                <div id="recentForm" class="search-form-container">
+                    <form id="recentSearchForm">
+                        <input type="hidden" name="search_type" value="recent">
+
+                        <div class="mb-4">
+                            <label class="form-label">
+                                <i class="bi bi-calendar-plus text-warning"></i>
+                                المدخلات خلال الأيام الأخيرة
+                            </label>
+                            <div class="input-group input-group-lg">
+                                <input type="number"
+                                       class="form-control"
+                                       name="days"
+                                       id="recentDays"
+                                       placeholder="أدخل عدد الأيام"
+                                       value="60"
+                                       min="1"
+                                       required>
+                                <span class="input-group-text">يوم</span>
+                            </div>
+                            <small class="text-muted d-block mt-2">
+                                <i class="bi bi-info-circle me-1"></i>
+                                مثال: إدخال 30 يعني البحث عن العمائر المدخلة خلال آخر 30 يوم
+                            </small>
+                        </div>
+
+                        <div class="d-grid gap-2">
+                            <button type="submit" class="btn btn-warning btn-lg text-white" id="recentSearchBtn">
+                                <i class="bi bi-search me-2"></i>
+                                ابحــث
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Old Entries Search Form -->
+                <div id="oldForm" class="search-form-container">
+                    <form id="oldSearchForm">
+                        <input type="hidden" name="search_type" value="old">
+
+                        <div class="mb-4">
+                            <label class="form-label">
+                                <i class="bi bi-calendar-x text-warning"></i>
+                                المدخلات قبل عدد معين من الأيام
+                            </label>
+                            <div class="input-group input-group-lg">
+                                <input type="number"
+                                       class="form-control"
+                                       name="days"
+                                       id="oldDays"
+                                       placeholder="أدخل عدد الأيام"
+                                       value="60"
+                                       min="1"
+                                       required>
+                                <span class="input-group-text">يوم</span>
+                            </div>
+                            <small class="text-muted d-block mt-2">
+                                <i class="bi bi-info-circle me-1"></i>
+                                مثال: إدخال 60 يعني البحث عن العمائر المدخلة قبل أكثر من 60 يوم
+                            </small>
+                        </div>
+
+                        <div class="d-grid gap-2">
+                            <button type="submit" class="btn btn-warning btn-lg text-white" id="oldSearchBtn">
+                                <i class="bi bi-search me-2"></i>
+                                ابحــث
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+            </div>
+        </div>
+
+        <!-- Information Box -->
+        <div class="info-box" style="max-width: 900px; margin: 2rem auto 0;">
+            <h5>
+                <i class="bi bi-lightbulb"></i>
+                نصائح للبحث
+            </h5>
+            <ul>
+                <li><strong>المدخلات الحديثة:</strong> يعرض العمائر التي تم إدخالها خلال عدد معين من الأيام الأخيرة</li>
+                <li><strong>المدخلات القديمة:</strong> يعرض العمائر التي تم إدخالها قبل أكثر من عدد معين من الأيام</li>
+                <li>يمكنك تغيير عدد الأيام حسب احتياجاتك</li>
+                <li>سيتم حفظ نوع البحث المفضل لديك تلقائياً</li>
+            </ul>
+        </div>
+
+    </div>
+</div>
+
+<script>
+/**
+ * Building Search by Date Range - Modern JavaScript
+ */
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Building Search by Date initialized');
+
+    // Get elements
+    const optionButtons = document.querySelectorAll('.option-button');
+    const recentForm = document.getElementById('recentForm');
+    const oldForm = document.getElementById('oldForm');
+    const recentSearchForm = document.getElementById('recentSearchForm');
+    const oldSearchForm = document.getElementById('oldSearchForm');
+    const recentSearchBtn = document.getElementById('recentSearchBtn');
+    const oldSearchBtn = document.getElementById('oldSearchBtn');
+
+    // Cookie functions
+    function createCookie(name, value, days) {
+        let expires = "";
+        if (days) {
+            const date = new Date();
+            date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
+            expires = "; expires=" + date.toUTCString();
+        }
+        document.cookie = name + "=" + value + expires + "; path=/";
+    }
+
+    function readCookie(name) {
+        const nameEQ = name + "=";
+        const ca = document.cookie.split(';');
+        for (let i = 0; i < ca.length; i++) {
+            let c = ca[i];
+            while (c.charAt(0) == ' ') c = c.substring(1, c.length);
+            if (c.indexOf(nameEQ) == 0) return c.substring(nameEQ.length, c.length);
+        }
+        return null;
+    }
+
+    // Display search form based on type
+    function displaySearch(searchType) {
+        // Hide all forms
+        recentForm.classList.remove('active');
+        oldForm.classList.remove('active');
+
+        // Remove active class from all buttons
+        optionButtons.forEach(btn => btn.classList.remove('active'));
+
+        // Show selected form and activate button
+        if (searchType === 'recent') {
+            recentForm.classList.add('active');
+            document.querySelector('[data-search-type="recent"]').classList.add('active');
+            document.querySelector('[data-search-type="recent"] input[type="radio"]').checked = true;
+        } else if (searchType === 'old') {
+            oldForm.classList.add('active');
+            document.querySelector('[data-search-type="old"]').classList.add('active');
+            document.querySelector('[data-search-type="old"] input[type="radio"]').checked = true;
+        }
+
+        // Save preference to cookie
+        createCookie('emaradat', searchType, 20);
+    }
+
+    // Option button click handlers
+    optionButtons.forEach(button => {
+        button.addEventListener('click', function() {
+            const searchType = this.getAttribute('data-search-type');
+            displaySearch(searchType);
+        });
+    });
+
+    // Handle AJAX form submission
+    function handleFormSubmit(e, searchType, button) {
+        e.preventDefault();
+
+        const form = e.target;
+        const formData = new FormData(form);
+        formData.append('ajax_submit', '1');
+
+        const days = formData.get('days');
+
+        // Validation
+        if (!days || parseInt(days) <= 0) {
+            alert('الرجاء إدخال عدد أيام صحيح');
+            return false;
+        }
+
+        // Show loading state
+        button.disabled = true;
+        button.innerHTML = '<i class="bi bi-hourglass-split me-2"></i> جاري البحث...';
+
+        // Submit via AJAX
+        $.ajax({
+            url: window.location.pathname.split('/').pop(),
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            dataType: 'json',
+            success: function(response) {
+                if (response.success && response.redirect_url) {
+                    window.location.href = response.redirect_url;
+                } else {
+                    alert(response.error || 'حدث خطأ أثناء البحث');
+                    button.disabled = false;
+                    button.innerHTML = '<i class="bi bi-search me-2"></i> ابحــث';
+                }
+            },
+            error: function(xhr, status, error) {
+                console.error('AJAX Error:', error);
+                alert('حدث خطأ أثناء البحث. الرجاء المحاولة مرة أخرى.');
+                button.disabled = false;
+                button.innerHTML = '<i class="bi bi-search me-2"></i> ابحــث';
+            }
+        });
+
+        return false;
+    }
+
+    // Attach form submission handlers
+    recentSearchForm.addEventListener('submit', function(e) {
+        handleFormSubmit(e, 'recent', recentSearchBtn);
+    });
+
+    oldSearchForm.addEventListener('submit', function(e) {
+        handleFormSubmit(e, 'old', oldSearchBtn);
+    });
+
+    // Restore saved search type from cookie
+    const savedSearchType = readCookie('emaradat');
+    if (savedSearchType && (savedSearchType === 'recent' || savedSearchType === 'old')) {
+        displaySearch(savedSearchType);
+    } else {
+        // Default to recent search
+        displaySearch('recent');
+    }
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        // Alt+1 for recent entries
+        if (e.altKey && e.key === '1') {
+            e.preventDefault();
+            displaySearch('recent');
+            document.getElementById('recentDays').focus();
+        }
+        // Alt+2 for old entries
+        if (e.altKey && e.key === '2') {
+            e.preventDefault();
+            displaySearch('old');
+            document.getElementById('oldDays').focus();
+        }
+    });
+});
+</script>
+
+<?php
+} // Close if (!$is_ajax_request)
+require('../../../foter.hnt');
+?>

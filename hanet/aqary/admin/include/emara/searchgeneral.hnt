@@ -1,0 +1,650 @@
+<?php
+/**
+ * Building General Search
+ * Multiple search criteria for buildings
+ */
+
+$sc_title = "بحث عام في العمائر";
+$sc_id = "23";
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+} else {
+    // For AJAX requests, include authentication
+    include_once "../../../reqloginajax.hnt";
+}
+
+
+// Handle AJAX form submission
+if ($is_ajax_request) {
+    $redirect_url = 'updatemara.hnt?';
+
+    // Search by plate number
+    if (isset($_POST['searchbyloha'])) {
+        $en_date = $_POST['en_date'];
+        $redirect_url .= 'searchbyloha=1&en_date=' . urlencode($en_date);
+    }
+    // General search
+    elseif (isset($_POST['searchgeneral'])) {
+        $search = $_POST['search'];
+        $redirect_url .= 'searchgeneral=1&search=' . urlencode($search);
+    }
+    // Search by ID
+    elseif (isset($_POST['searchbyid'])) {
+        $id = $_POST['id'];
+        $redirect_url .= 'searchbyid=1&id=' . urlencode($id);
+    }
+    // Generic field search (paper file, deed number)
+    elseif (isset($_POST['genericvalue']) && isset($_POST['genericfield'])) {
+        $genericvalue = $_POST['genericvalue'];
+        $genericfield = $_POST['genericfield'];
+        $genericsearch = $_POST['genericsearch'] ?? '1';
+        $genericoperation = $_POST['genericoperation'] ?? '=';
+        $redirect_url .= 'genericvalue=' . urlencode($genericvalue) .
+                        '&genericfield=' . urlencode($genericfield) .
+                        '&genericsearch=' . urlencode($genericsearch) .
+                        '&genericoperation=' . urlencode($genericoperation);
+    }
+    // Storage location search
+    elseif (isset($_POST['genericsql'])) {
+        $genericsql = $_POST['genericsql'];
+        $redirect_url .= 'genericsql=' . urlencode($genericsql);
+    }
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'جاري تحميل النتائج...',
+        'redirect_url' => $redirect_url
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
+}
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.search-dashboard {
+    background: #f8f9fa;
+    min-height: 100vh;
+    padding: 2rem 0;
+}
+
+.page-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.search-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin-bottom: 2rem;
+    padding: 1.5rem;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.search-option-btn {
+    flex: 1;
+    min-width: 200px;
+    padding: 1rem;
+    border: 2px solid #e9ecef;
+    border-radius: 8px;
+    background: white;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.95rem;
+    font-weight: 500;
+}
+
+.search-option-btn:hover {
+    border-color: #f59e0b;
+    background: #fef3c7;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(245, 158, 11, 0.2);
+}
+
+.search-option-btn.active {
+    border-color: #f59e0b;
+    background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+    color: #92400e;
+}
+
+.search-option-btn i {
+    font-size: 1.5rem;
+    color: #f59e0b;
+}
+
+.search-card {
+    background: white;
+    border: none;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    overflow: hidden;
+    transition: all 0.3s ease;
+    max-width: 800px;
+    margin: 0 auto;
+    display: none;
+}
+
+.search-card.active {
+    display: block;
+    animation: slideDown 0.3s ease;
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.search-card .card-header {
+    padding: 1.5rem;
+    text-align: center;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-bottom: 3px solid #f59e0b;
+}
+
+.search-card .card-header i {
+    font-size: 3rem;
+    margin-bottom: 0.5rem;
+    color: #f59e0b;
+}
+
+.search-card .card-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #1e293b;
+    margin: 0.5rem 0 0 0;
+}
+
+.search-card .card-body {
+    padding: 2rem;
+}
+
+.form-group {
+    margin-bottom: 1.5rem;
+}
+
+.form-group label {
+    display: block;
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: #495057;
+}
+
+.form-group input[type="text"],
+.form-group select {
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid #ced4da;
+    border-radius: 6px;
+    font-size: 1rem;
+    transition: all 0.2s;
+}
+
+.form-group input[type="text"]:focus,
+.form-group select:focus {
+    border-color: #f59e0b;
+    outline: none;
+    box-shadow: 0 0 0 0.2rem rgba(245, 158, 11, 0.25);
+}
+
+.storage-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+}
+
+.info-box {
+    background: #fef3c7;
+    border-left: 4px solid #f59e0b;
+    padding: 1rem;
+    border-radius: 6px;
+    margin-top: 1.5rem;
+    font-size: 0.9rem;
+    color: #92400e;
+}
+
+@media (max-width: 768px) {
+    .search-options {
+        flex-direction: column;
+    }
+
+    .search-option-btn {
+        min-width: 100%;
+    }
+
+    .search-card {
+        margin: 0 1rem;
+    }
+
+    .storage-fields {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+
+<div class="search-dashboard" dir="rtl">
+    <div class="container-fluid">
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>
+                <i class="bi bi-search"></i>
+                <?= $sc_title ?>
+            </h1>
+            <p class="mb-0 mt-2" style="opacity: 0.95; font-size: 0.95rem;">
+                بحث شامل في بيانات العمائر بطرق متعددة
+            </p>
+        </div>
+
+        <!-- Search Options -->
+        <div class="search-options">
+            <button type="button" class="search-option-btn" onclick="showSearch('srch0')" id="btn0">
+                <i class="bi bi-sign-stop"></i>
+                بحث برقم اللوحة
+            </button>
+            <button type="button" class="search-option-btn" onclick="showSearch('srch1')" id="btn1">
+                <i class="bi bi-search"></i>
+                بحث بأي كلمة
+            </button>
+            <button type="button" class="search-option-btn" onclick="showSearch('srch2')" id="btn2">
+                <i class="bi bi-hash"></i>
+                بحث بالترقيم في البرنامج
+            </button>
+            <button type="button" class="search-option-btn" onclick="showSearch('srch3')" id="btn3">
+                <i class="bi bi-folder2"></i>
+                بحث برقم الملف الورقي
+            </button>
+            <button type="button" class="search-option-btn" onclick="showSearch('srch4')" id="btn4">
+                <i class="bi bi-archive"></i>
+                بحث بمكان الحفظ
+            </button>
+            <button type="button" class="search-option-btn" onclick="showSearch('srch5')" id="btn5">
+                <i class="bi bi-file-earmark-text"></i>
+                بحث برقم الصك
+            </button>
+            <button type="button" class="search-option-btn" onclick="showSearch('srch6')" id="btn6">
+                <i class="bi bi-gear"></i>
+                بحث بنوع الخدمة
+            </button>
+        </div>
+
+        <!-- Search Card 0: Plate Number -->
+        <div class="search-card" id="srch0">
+            <div class="card-header">
+                <i class="bi bi-sign-stop"></i>
+                <h3 class="card-title">البحث برقم اللوحة</h3>
+            </div>
+            <div class="card-body">
+                <form id="form0" method="get" action="updatemara.hnt">
+                    <input type="hidden" name="searchbyloha" value="1">
+
+                    <div class="form-group">
+                        <label>اكتب رقم اللوحة</label>
+                        <input type="text" name="en_date" class="form-control" required placeholder="أدخل رقم اللوحة...">
+                    </div>
+
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-warning btn-lg text-white">
+                            <i class="bi bi-search me-2"></i>
+                            ابحــث
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Search Card 1: General Search -->
+        <div class="search-card" id="srch1">
+            <div class="card-header">
+                <i class="bi bi-search"></i>
+                <h3 class="card-title">البحث العام</h3>
+            </div>
+            <div class="card-body">
+                <form id="form1" method="get" action="updatemara.hnt">
+                    <input type="hidden" name="searchgeneral" value="1">
+
+                    <div class="form-group">
+                        <label>اكتب أي كلمة ترد في حدود أو اسم أو بيانات العمارة أو سعرها</label>
+                        <input type="text" name="search" class="form-control" required placeholder="أدخل كلمة البحث...">
+                    </div>
+
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-warning btn-lg text-white">
+                            <i class="bi bi-search me-2"></i>
+                            ابحــث
+                        </button>
+                    </div>
+
+                    <div class="info-box">
+                        <i class="bi bi-info-circle me-1"></i>
+                        سيتم البحث في جميع حقول البيانات المتاحة
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Search Card 2: Program ID -->
+        <div class="search-card" id="srch2">
+            <div class="card-header">
+                <i class="bi bi-hash"></i>
+                <h3 class="card-title">البحث بالرقم في البرنامج</h3>
+            </div>
+            <div class="card-body">
+                <form id="form2" method="get" action="updatemara.hnt">
+                    <input type="hidden" name="searchbyid" value="1">
+
+                    <div class="form-group">
+                        <label>اكتب الرقم</label>
+                        <input type="text" name="id" class="form-control" required placeholder="أدخل رقم العمارة في البرنامج...">
+                    </div>
+
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-warning btn-lg text-white">
+                            <i class="bi bi-search me-2"></i>
+                            ابحــث
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Search Card 3: Paper File Number -->
+        <div class="search-card" id="srch3">
+            <div class="card-header">
+                <i class="bi bi-folder2"></i>
+                <h3 class="card-title">رقم الملف الورقي</h3>
+            </div>
+            <div class="card-body">
+                <form id="form3" method="get" action="updatemara.hnt">
+                    <input type="hidden" name="genericfield" value="paperfile">
+                    <input type="hidden" name="genericsearch" value="1">
+                    <input type="hidden" name="genericoperation" value="=">
+
+                    <div class="form-group">
+                        <label>رقم الملف</label>
+                        <input type="text" name="genericvalue" class="form-control" required placeholder="أدخل رقم الملف الورقي...">
+                    </div>
+
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-warning btn-lg text-white">
+                            <i class="bi bi-search me-2"></i>
+                            ابحــث
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Search Card 4: Storage Location -->
+        <div class="search-card" id="srch4">
+            <div class="card-header">
+                <i class="bi bi-archive"></i>
+                <h3 class="card-title">مكان الحفظ</h3>
+            </div>
+            <div class="card-body">
+                <form id="form4" method="get" action="updatemara.hnt">
+                    <input type="hidden" name="genericsql" id="genericsql4">
+
+                    <div class="storage-fields">
+                        <div class="form-group">
+                            <label>خزينة رقم</label>
+                            <input type="text" name="khazina" id="khazina" class="form-control" placeholder="رقم الخزينة">
+                        </div>
+                        <div class="form-group">
+                            <label>دُرج</label>
+                            <input type="text" name="dorg" id="dorg" class="form-control" placeholder="رقم الدُرج">
+                        </div>
+                        <div class="form-group">
+                            <label>رف</label>
+                            <input type="text" name="raf" id="raf" class="form-control" placeholder="رقم الرف">
+                        </div>
+                    </div>
+
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-warning btn-lg text-white">
+                            <i class="bi bi-search me-2"></i>
+                            ابحــث
+                        </button>
+                    </div>
+
+                    <div class="info-box">
+                        <i class="bi bi-info-circle me-1"></i>
+                        يمكنك ترك بعض الحقول فارغة للبحث الجزئي
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Search Card 5: Deed Number -->
+        <div class="search-card" id="srch5">
+            <div class="card-header">
+                <i class="bi bi-file-earmark-text"></i>
+                <h3 class="card-title">رقم الصك</h3>
+            </div>
+            <div class="card-body">
+                <form id="form5" method="get" action="updatemara.hnt">
+                    <input type="hidden" name="genericfield" value="malekbayan4">
+                    <input type="hidden" name="genericsearch" value="1">
+                    <input type="hidden" name="genericoperation" value="=">
+
+                    <div class="form-group">
+                        <label>رقم الصك</label>
+                        <input type="text" name="genericvalue" class="form-control" required placeholder="أدخل رقم الصك...">
+                    </div>
+
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-warning btn-lg text-white">
+                            <i class="bi bi-search me-2"></i>
+                            ابحــث
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Search Card 6: Service Type -->
+        <div class="search-card" id="srch6">
+            <div class="card-header">
+                <i class="bi bi-gear"></i>
+                <h3 class="card-title">بحث بنوع الخدمة</h3>
+            </div>
+            <div class="card-body">
+                <form id="form6" method="get" action="updatemara.hnt">
+                    <input type="hidden" name="genericfield" value="khdma">
+                    <input type="hidden" name="genericsearch" value="1">
+                    <input type="hidden" name="genericoperation" value="like">
+
+                    <div class="form-group">
+                        <label>الخدمة المطلوبة</label>
+                        <select name="genericvalue" class="form-control" required>
+                            <option value="">اختر الخدمة</option>
+                            <option value="بيع">بيع</option>
+                            <option value="شراء">شراء</option>
+                            <option value="تأجير">تأجير</option>
+                            <option value="استئجار">استئجار</option>
+                            <option value="استثمار">استثمار</option>
+                            <option value="تسويق">تسويق</option>
+                            <option value="تثمين">تثمين</option>
+                            <option value="استشارات">استشارات</option>
+                            <option value="ادارة املاك">ادارة املاك</option>
+                            <option value="دراسة جدوى">دراسة جدوى</option>
+                            <option value="اخرى">اخرى</option>
+                        </select>
+                    </div>
+
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-warning btn-lg text-white">
+                            <i class="bi bi-search me-2"></i>
+                            ابحــث
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script>
+/**
+ * Building General Search - Modern JavaScript
+ */
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Building General Search initialized');
+
+    // Setup AJAX submission for all forms
+    for (let i = 0; i <= 6; i++) {
+        const form = document.getElementById('form' + i);
+        if (form) {
+            setupFormSubmission(form);
+        }
+    }
+
+    // Special handler for storage location form
+    const form4 = document.getElementById('form4');
+    if (form4) {
+        form4.addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            const khazina = document.getElementById('khazina').value.trim();
+            const dorg = document.getElementById('dorg').value.trim();
+            const raf = document.getElementById('raf').value.trim();
+
+            // Build SQL where clause
+            let sql = ' where 1 ';
+            if (khazina) sql += `and khazina='${khazina}' `;
+            if (dorg) sql += `and dorg='${dorg}' `;
+            if (raf) sql += `and raf='${raf}' `;
+
+            if (sql === ' where 1 ') {
+                alert('الرجاء إدخال حقل واحد على الأقل');
+                return false;
+            }
+
+            document.getElementById('genericsql4').value = sql;
+
+            // Submit via AJAX
+            submitFormAjax(this);
+        });
+    }
+
+    // Load saved search type from cookie
+    const savedSearch = readCookie('emaragen');
+    if (savedSearch) {
+        showSearch(savedSearch);
+    }
+});
+
+/**
+ * Setup AJAX submission for a form
+ */
+function setupFormSubmission(form) {
+    form.addEventListener('submit', function(e) {
+        e.preventDefault();
+        submitFormAjax(this);
+    });
+}
+
+/**
+ * Submit form via AJAX
+ */
+function submitFormAjax(form) {
+    const formData = new FormData(form);
+    formData.append('ajax_submit', '1');
+
+    const submitBtn = form.querySelector('button[type="submit"]');
+    const originalText = submitBtn.innerHTML;
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<i class="bi bi-hourglass-split me-2"></i> جاري البحث...';
+
+    $.ajax({
+        url: window.location.pathname.split('/').pop(),
+        type: 'POST',
+        data: formData,
+        processData: false,
+        contentType: false,
+        dataType: 'json',
+        success: function(response) {
+            if (response.success && response.redirect_url) {
+                window.location.href = response.redirect_url;
+            } else {
+                alert(response.error || 'حدث خطأ أثناء البحث');
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = originalText;
+            }
+        },
+        error: function(xhr, status, error) {
+            console.error('AJAX Error:', error);
+            alert('حدث خطأ أثناء البحث. الرجاء المحاولة مرة أخرى.');
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = originalText;
+        }
+    });
+}
+
+/**
+ * Show specific search form
+ */
+function showSearch(searchId) {
+    // Hide all search cards
+    for (let i = 0; i <= 6; i++) {
+        const card = document.getElementById('srch' + i);
+        const btn = document.getElementById('btn' + i);
+        if (card) card.classList.remove('active');
+        if (btn) btn.classList.remove('active');
+    }
+
+    // Show selected search card
+    const selectedCard = document.getElementById(searchId);
+    const selectedBtn = document.getElementById('btn' + searchId.replace('srch', ''));
+    if (selectedCard) selectedCard.classList.add('active');
+    if (selectedBtn) selectedBtn.classList.add('active');
+
+    // Save to cookie
+    createCookie('emaragen', searchId, 20);
+
+    // Focus first input
+    setTimeout(() => {
+        const firstInput = selectedCard.querySelector('input[type="text"], select');
+        if (firstInput) firstInput.focus();
+    }, 300);
+}
+</script>
+
+<?php
+} // Close if (!$is_ajax_request)
+require('../../../foter.hnt');
+?>

@@ -1,0 +1,1007 @@
+<?php
+/**
+ * Money Settlement Details & Payment Voucher Creation
+ *
+ * This page displays the settlement breakdown for a received payment (erad)
+ * and allows creating a disbursement voucher (sanadsarf) to pay the property owner
+ * after deducting expenses (masrofat)
+ */
+
+// Set page variables
+$sc_title = "بيان التصفية";
+$sc_id = "138";
+
+// Include database connection and authentication
+include_once "../../../reqloginajax.hnt";
+
+// Initialize user data from session
+$user_data = [
+    'username' => isset($_SESSION['useridv']) ? $_SESSION['useridv'] : '',
+    'name' => isset($_SESSION['namev']) ? $_SESSION['namev'] : ''
+];
+
+// Extract request variables
+extract($_REQUEST);
+
+// Initialize variables
+$iderad = isset($iderad) ? intval($iderad) : 0;
+
+// Check if this is an AJAX request
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    $canscroll = 1;
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+}
+
+// Include required classes
+require '../arabicTools.class.hnt';
+include_once "amlakfunctions.hnt";
+require '../uCal.class.hnt';
+$dcal = new uCal;
+
+// Check for duplicate payment attempt
+if (isset($_REQUEST['formuid']) && !empty($_REQUEST['formuid'])) {
+    $sql = "SELECT COUNT(sanadid) as dd FROM sanadsarf WHERE formuid = '" . addslashes($_REQUEST['formuid']) . "'";
+    $row_check = mysql_fetch_array(mysql_query($sql, $link));
+    if ($row_check['dd'] > 0) {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'error' => 'خطأ: محاولة تكرار الدفع'
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        echo "<div class='alert alert-danger text-center'><h5>حدث خطأ: محاولة تكرار الدفع</h5></div>";
+        require('../../../foter.hnt');
+        exit;
+    }
+}
+
+// Process payment voucher creation
+if (isset($_POST['makepayemtsanad']) && $_POST['makepayemtsanad'] == '1') {
+    $tasfia = time();
+
+    // Insert disbursement voucher
+    $sql = "INSERT INTO sanadsarf SET
+        sanadate = '" . time() . "',
+        aqarid = '" . intval($_POST['aqarid']) . "',
+        amount = '" . floatval($_POST['amount']) . "',
+        bayan = '" . addslashes($_POST['bayan']) . "',
+        note = '" . addslashes($_POST['sanadnote']) . "',
+        mostafeed = '" . addslashes($_POST['mostafeed']) . "',
+        qayedtype = '3',
+        mowazaf = '" . addslashes($user_data['username'] . "-" . $user_data['name']) . "',
+        extradata = '" . addslashes($_POST['cashtext']) . "',
+        checkrakam = '" . addslashes($_POST['checkrakam']) . "',
+        checkdate = '" . addslashes($_POST['checkdate']) . "',
+        checkbank = '" . addslashes($_POST['checkbank']) . "',
+        tasfia = '" . $tasfia . "',
+        idsubaqar = '" . intval($_POST['idsubaqar']) . "',
+        iderad = '" . intval($_POST['iderad']) . "',
+        masrofatarray = '" . addslashes($_POST['idmasrofarray']) . "',
+        formuid = '" . addslashes($_POST['formuid']) . "'";
+
+    mysql_query($sql, $link);
+    $insert_id = mysql_insert_id();
+
+    if ($insert_id < 1) {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'error' => 'حدث خطأ: لم أستطع إدراج سند الصرف',
+                'mysql_error' => mysql_error()
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        echo "<div class='alert alert-danger text-center'><h5>حدث خطأ: لم أستطع إدراج سند الصرف<br>" . mysql_error() . "</h5></div>";
+        require('../../../foter.hnt');
+        exit;
+    }
+
+    // Update eradat (received payment) as settled
+    mysql_query("UPDATE eradat SET tasfia = '" . $tasfia . "', formuid = '" . addslashes($_POST['formuid']) . "'
+        WHERE iderad = '" . intval($_POST['iderad']) . "'", $link);
+
+    // Update masrofat (expenses) as settled
+    if (!empty($_POST['idmasrofarray'])) {
+        $idmasrofarray = explode(",", $_POST['idmasrofarray']);
+        $sql = "UPDATE masrofat SET tasfia = '" . $tasfia . "', formuid = '" . addslashes($_POST['formuid']) . "'
+            WHERE idmasrof IN (" . implode(',', array_map('intval', $idmasrofarray)) . ")";
+        mysql_query($sql, $link);
+    }
+
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم صرف المبلغ بنجاح',
+            'sanad_id' => $insert_id
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    echo "<div class='alert alert-success text-center'><h5>تم صرف المبلغ بنجاح</h5></div>";
+}
+
+// Check if payment already settled (by this erad)
+if ($iderad) {
+    $sql = "SELECT sanadate, sanadid, extradata, mostafeed, bayan, note, notes
+            FROM sanadsarf WHERE iderad = '" . intval($iderad) . "'";
+    $row_paid = mysql_fetch_array(mysql_query($sql, $link));
+
+    if (isset($row_paid['sanadid']) && $row_paid['sanadid']) {
+        // Format date based on calendar type
+        if ($hnt_dll || $hnt_supper_dll == 5) {
+            $sanadate = date("d/m/Y", $row_paid['sanadate']);
+        } else {
+            $dateo = $dcal->g2u(date("d", $row_paid['sanadate']), date("m", $row_paid['sanadate']), date("Y", $row_paid['sanadate']));
+            $sanadate = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'];
+        }
+
+        if (!$is_ajax_request) {
+?>
+<div class="container-fluid py-3">
+    <div class="alert alert-warning border-0 shadow-sm">
+        <div class="text-center">
+            <i class="bi bi-exclamation-triangle" style="font-size: 3rem; color: #ff9800;"></i>
+            <h4 class="mt-3">تم صرف هذا الإيراد مسبقاً</h4>
+            <div class="mt-4" style="text-align: right;">
+                <p><strong>رقم السند:</strong> <span class="text-danger"><?= htmlspecialchars($row_paid['sanadid']) ?></span></p>
+                <p><strong>المستفيد:</strong> <?= htmlspecialchars($row_paid['mostafeed']) ?></p>
+                <p><strong>التاريخ:</strong> <?= $sanadate ?></p>
+                <p><strong>البيان:</strong> <?= htmlspecialchars($row_paid['bayan']) ?></p>
+                <p><strong>ملاحظات:</strong> <?= htmlspecialchars($row_paid['note']) ?></p>
+                <p><?= htmlspecialchars($row_paid['notes']) ?></p>
+            </div>
+            <div class="mt-3">
+                <?= stripslashes($row_paid['extradata']) ?>
+            </div>
+            <div class="text-center mt-4">
+                <a href="sendmony-select-aqar.hnt" class="btn btn-primary btn-lg">
+                    <i class="bi bi-arrow-right me-2"></i>
+                    عودة لشاشة تسليم المبالغ
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+<?php
+            require('../../../foter.hnt');
+            exit;
+        }
+    }
+}
+
+// Verify iderad is provided
+if (!$iderad) {
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => false,
+            'error' => 'رقم الإيراد مطلوب'
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+?>
+<div class="container-fluid py-3">
+    <div class="text-center">
+        <div class="alert alert-danger">رقم الإيراد مطلوب</div>
+        <a href="sendmony-select-aqar.hnt" class="btn btn-primary">
+            <i class="bi bi-arrow-right me-2"></i>
+            عودة لشاشة تسليم المبالغ
+        </a>
+    </div>
+</div>
+<?php
+    require('../../../foter.hnt');
+    exit;
+}
+
+// Fetch payment details
+$sql = "SELECT eradat.*,
+               amlakdetails.rakam,
+               amlakdetails.hnt_dll_type,
+               aqarsubtype.aqarsubtypename,
+               mostagereen.mostagername,
+               sanad.period
+        FROM eradat
+        LEFT JOIN sanad ON eradat.sanadrakam = sanad.idsanad
+        LEFT JOIN amlakdetails ON amlakdetails.idsubaqar = sanad.idsubaqar
+        LEFT JOIN aqarsubtype ON aqarsubtype.aqarsubtype = amlakdetails.aqarsubtype
+        LEFT JOIN mostagereen ON eradat.mostagerid = mostagereen.mostagerid
+        WHERE eradat.iderad = '" . intval($iderad) . "'";
+
+$result = mysql_query($sql, $link);
+$error = mysql_error();
+
+if ($error) {
+    echo "<div class='alert alert-danger'>خطأ في قاعدة البيانات: " . htmlspecialchars($error) . "</div>";
+    require('../../../foter.hnt');
+    exit;
+}
+
+$row = mysql_fetch_array($result);
+
+if (!$row) {
+    echo "<div class='alert alert-danger'>لم يتم العثور على الإيراد المطلوب</div>";
+    require('../../../foter.hnt');
+    exit;
+}
+
+// Determine calendar type and format date
+$local_hnt_dll_type = $row['hnt_dll_type'];
+if ($row['hnt_dll_type']) {
+    $paymentdate = date("d/m/Y", $row['paymentdate']);
+} else {
+    $dateo = $dcal->g2u(date("d", $row['paymentdate']), date("m", $row['paymentdate']), date("Y", $row['paymentdate']));
+    $paymentdate = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'];
+}
+
+$idsubaqar = $row['idsubaqar'];
+$idaqar = $row['idaqar'];
+
+// Get property details
+$sql = "SELECT * FROM amlak WHERE idaqar = '" . intval($idaqar) . "'";
+$row2 = mysql_fetch_array(mysql_query($sql, $link));
+
+// Normalize percentage
+if ($row2['persentage'] > 100) {
+    $row2['persentage'] = $row2['persentage'] / 100;
+}
+
+// Calculate insurance allocation
+if ($row2['addtameento'] == "malek") {
+    $addtameento = "إضافة التأمين للمالك حسب الإعدادات";
+    $tamen = $row['tamen'];
+    $tamen_netincome = $row['tamen'];
+} else {
+    $addtameento = "إضافة التأمين للمكتب حسب الإعدادات";
+    $tamen = -$row['tamen'];
+    $tamen_netincome = 0;
+}
+
+// Calculate water allocation
+if ($row2['addwaterto'] == "malek") {
+    $addwaterto = "إضافة المياه للمالك حسب الإعدادات";
+    $mywater = $row['mywater'];
+    $mywater_netincome = $row['mywater'];
+} else {
+    $addwaterto = "إضافة المياه للمكتب حسب الإعدادات";
+    $mywater = -$row['mywater'];
+    $mywater_netincome = 0;
+}
+
+// Calculate net income before expenses
+$netincome = ($mywater_netincome + $tamen_netincome) +
+             ($row['amount'] - $row['mysa3ee'] - $row['services'] - $row['mywater'] - $row['tamen']) +
+             (-($row2['persentage'] / 100) * ($row['amount'] - $row['services'] - $row['mysa3ee'] - $row['mywater'] - $row['tamen']));
+
+// Check if already paid via bulk settlement
+if (isset($row['tasfia']) && $row['tasfia']) {
+    $sql = "SELECT sanadid, extradata FROM sanadsarf WHERE tasfia = '" . addslashes($row['tasfia']) . "'";
+    $rowsanad = mysql_fetch_array(mysql_query($sql, $link));
+
+    if (isset($rowsanad['sanadid']) && $rowsanad['sanadid']) {
+        if (!$is_ajax_request) {
+?>
+<div class="container-fluid py-3">
+    <div class="alert alert-info border-0 shadow-sm text-center">
+        <i class="bi bi-info-circle" style="font-size: 3rem; color: #0891b2;"></i>
+        <h5 class="mt-3">تم صرف هذا الإيراد عن طريق التسليم الإجمالي</h5>
+        <p>بتاريخ <?= date("d/m/Y", $row['tasfia']) ?></p>
+        <p>سند صرف رقم: <a href="allsarfsanad.hnt?sanadid=<?= $rowsanad['sanadid'] ?>" target="_blank" class="text-primary"><?= $rowsanad['sanadid'] ?></a></p>
+        <div class="mt-3">
+            <?= stripslashes($rowsanad['extradata']) ?>
+        </div>
+        <div class="text-center mt-4">
+            <a href="sendmony-select-aqar.hnt" class="btn btn-primary btn-lg">
+                <i class="bi bi-arrow-right me-2"></i>
+                عودة لشاشة تسليم المبالغ
+            </a>
+        </div>
+    </div>
+</div>
+<?php
+            require('../../../foter.hnt');
+            exit;
+        }
+    }
+}
+
+// Get selected expenses if posted
+$idmasrofcheck = array();
+if (isset($_POST['idmasrofcheck']) && is_array($_POST['idmasrofcheck'])) {
+    $idmasrofcheck = $_POST['idmasrofcheck'];
+}
+
+// Calculate total expenses
+$totalmsrofat = 0;
+$expenses_data = array();
+
+if (!empty($idmasrofcheck)) {
+    $sql = "SELECT * FROM masrofat WHERE idmasrof IN (" . implode(',', array_map('intval', $idmasrofcheck)) . ")";
+    $result_expenses = mysql_query($sql, $link);
+
+    while ($row3 = mysql_fetch_array($result_expenses)) {
+        if ($local_hnt_dll_type) {
+            $expense_date = date("d/m/Y", $row3['payeddate']);
+        } else {
+            $dateo = $dcal->g2u(date("d", $row3['payeddate']), date("m", $row3['payeddate']), date("Y", $row3['payeddate']));
+            $expense_date = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'];
+        }
+
+        $row3['formatted_date'] = $expense_date;
+        $expenses_data[] = $row3;
+        $totalmsrofat += $row3['amount'];
+    }
+}
+
+// Calculate final amount due to owner
+$final_amount = $netincome - $totalmsrofat;
+
+// Get current date for form
+if ($local_hnt_dll_type) {
+    $current_date = date("d/m/Y", time());
+} else {
+    $dateo = $dcal->g2u(date("d", time()), date("m", time()), date("Y", time()));
+    $current_date = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'];
+}
+
+// Only render HTML if NOT AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.settlement-card {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    margin-bottom: 1.5rem;
+}
+
+.payment-detail-table {
+    width: 100%;
+    margin-bottom: 0;
+}
+
+.payment-detail-table thead {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+}
+
+.payment-detail-table thead th {
+    padding: 0.875rem;
+    text-align: center;
+    font-weight: 600;
+    border: none;
+}
+
+.payment-detail-table tbody td {
+    padding: 0.75rem;
+    text-align: center;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.calc-table {
+    width: 100%;
+    background: white;
+}
+
+.calc-table tr:hover {
+    background-color: #f8f9fa;
+}
+
+.calc-table td {
+    padding: 0.75rem;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.calc-table td:first-child {
+    font-weight: 500;
+    color: #495057;
+}
+
+.calc-table td:last-child {
+    font-weight: 600;
+    color: #0a7047;
+    text-align: left;
+}
+
+.calc-table tr.expense-row td {
+    color: #dc3545;
+}
+
+.calc-table tr.total-row {
+    background: linear-gradient(135deg, #29a0f0ff 0%, #146594ff 100%);
+    color: white;
+    font-weight: 700;
+}
+
+.calc-table tr.total-row td {
+    border: none;
+    font-size: 1.1rem;
+}
+
+.expense-table {
+    width: 100%;
+    font-size: 0.9rem;
+}
+
+.expense-table thead {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+}
+
+.expense-table thead th {
+    padding: 0.75rem 0.5rem;
+    text-align: center;
+    font-weight: 600;
+}
+
+.expense-table tbody td {
+    padding: 0.625rem 0.5rem;
+    text-align: center;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.expense-table tbody tr:hover {
+    background-color: #f8f9fa;
+}
+
+.form-section {
+    background: #f8f9fa;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+}
+
+.form-group-custom {
+    margin-bottom: 1.25rem;
+}
+
+.form-group-custom label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+    color: #495057;
+}
+
+.form-group-custom input[type="text"] {
+    width: 100%;
+    padding: 0.625rem;
+    border: 1px solid #ced4da;
+    border-radius: 6px;
+    font-size: 0.95rem;
+}
+
+.form-group-custom input[type="text"]:focus {
+    outline: none;
+    border-color: #0891b2;
+    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
+}
+
+.action-buttons {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-top: 1.5rem;
+}
+
+.btn-submit-payment {
+    background: linear-gradient(135deg, #0a7047 0%, #0d9488 100%);
+    color: white;
+    border: none;
+    padding: 0.875rem 2rem;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.btn-submit-payment:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(10, 112, 71, 0.4);
+}
+
+.btn-cancel {
+    background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+    color: white;
+    border: none;
+    padding: 0.875rem 2rem;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.btn-cancel:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(220, 53, 69, 0.4);
+}
+
+.btn-select-expenses {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    width: 100%;
+    margin-bottom: 0.75rem;
+    transition: all 0.3s ease;
+}
+
+.btn-select-expenses:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(24, 156, 42, 0.4);
+}
+
+.btn-clear-expenses {
+    background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    width: 100%;
+    margin-bottom: 1rem;
+    transition: all 0.3s ease;
+}
+
+.btn-clear-expenses:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(220, 53, 69, 0.4);
+}
+
+.section-header-custom {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1rem;
+    border-radius: 6px;
+    margin-bottom: 1.5rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.back-btn-custom {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    padding: 0.75rem 2rem;
+    border-radius: 6px;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 600;
+    margin-bottom: 1.5rem;
+    transition: all 0.3s ease;
+}
+
+.back-btn-custom:hover {
+    color: white;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(8, 145, 178, 0.4);
+    text-decoration: none;
+}
+
+.info-badge-custom {
+    background: linear-gradient(135deg, #29a0f0ff 0%, #146594ff 100%);
+    color: white;
+    padding: 0.75rem 1.25rem;
+    border-radius: 6px;
+    display: inline-block;
+    margin: 0.25rem;
+}
+
+.negative-amount {
+    color: #dc3545;
+    font-weight: 600;
+}
+
+.positive-amount {
+    color: #0a7047;
+    font-weight: 600;
+}
+
+.checkbox-custom {
+    width: 20px;
+    height: 20px;
+    cursor: pointer;
+}
+
+@media (max-width: 768px) {
+    .action-buttons {
+        flex-direction: column;
+    }
+
+    .btn-submit-payment,
+    .btn-cancel {
+        width: 100%;
+    }
+}
+</style>
+
+<div class="container-fluid py-3">
+    <!-- Back Button -->
+    <a href="sendmony.hnt?idaqar=<?= $idaqar ?>" class="back-btn-custom">
+        <i class="bi bi-arrow-right"></i>
+        العودة لقائمة المبالغ المستلمة
+    </a>
+
+    <!-- Page Header -->
+    <div class="section-header-custom">
+        <i class="bi bi-receipt" style="font-size: 1.5rem;"></i>
+        <h4 class="mb-0"><?= $sc_title ?></h4>
+    </div>
+
+    <!-- Payment Details Table -->
+    <div class="settlement-card">
+        <div class="table-responsive">
+            <table class="payment-detail-table">
+                <thead>
+                    <tr>
+                        <th><i class="bi bi-hash me-1"></i>رقم</th>
+                        <th><i class="bi bi-building me-1"></i>الوحدة</th>
+                        <th><i class="bi bi-person me-1"></i>المستأجر</th>
+                        <th><i class="bi bi-calendar-range me-1"></i>الفترة</th>
+                        <th><i class="bi bi-calendar-date me-1"></i>التاريخ</th>
+                        <th><i class="bi bi-file-text me-1"></i>سند</th>
+                        <th><i class="bi bi-info-circle me-1"></i>الوصف</th>
+                        <th><i class="bi bi-cash me-1"></i>المبلغ</th>
+                        <th><i class="bi bi-percent me-1"></i>العمولة</th>
+                        <th><i class="bi bi-droplet me-1"></i>المياه</th>
+                        <th><i class="bi bi-tools me-1"></i>خدمات</th>
+                        <th><i class="bi bi-shield-check me-1"></i>التأمين</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong><?= htmlspecialchars($row['iderad']) ?></strong></td>
+                        <td><?= htmlspecialchars($row['aqarsubtypename']) ?> <?= htmlspecialchars($row['rakam']) ?></td>
+                        <td><?= htmlspecialchars($row['mostagername']) ?></td>
+                        <td><?= htmlspecialchars($row['period']) ?></td>
+                        <td style="direction: ltr;"><?= $paymentdate ?></td>
+                        <td>
+                            <a href="allsanad.hnt?idsanad=<?= intval($row['sanadrakam']) ?>" target="_blank" class="text-primary">
+                                <strong><?= htmlspecialchars($row['sanadrakam']) ?></strong>
+                            </a>
+                        </td>
+                        <td><?= htmlspecialchars($row['pymentdesription']) ?></td>
+                        <td><strong><?= number_format(floatval($row['amount']), 2) ?></strong></td>
+                        <td><?= number_format(floatval($row['mysa3ee']), 2) ?></td>
+                        <td><?= number_format(floatval($row['mywater']), 2) ?></td>
+                        <td><?= number_format(floatval($row['services']), 2) ?></td>
+                        <td><?= number_format(floatval($row['tamen']), 2) ?></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="row">
+        <!-- Left Column: Calculation Breakdown -->
+        <div class="col-lg-8">
+            <div class="settlement-card">
+                <h5 class="p-3 mb-0" style="background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%); color: white; border-radius: 8px 8px 0 0;">
+                    <i class="bi bi-calculator me-2"></i>
+                    بيان التصفية التفصيلي
+                </h5>
+                <div id="userdatatable" class="p-3">
+                    <table class="calc-table">
+                        <tr>
+                            <td><i class="bi bi-cash-stack me-2 text-primary"></i>المبلغ المحصل:</td>
+                            <td><span class="egarcalc" id="holeincome"><?= number_format(floatval($row['amount']), 2) ?></span></td>
+                        </tr>
+                        <tr>
+                            <td><i class="bi bi-cash me-2 text-primary"></i>المبلغ المحصل للإيجار:</td>
+                            <td><span class="egarcalc" id="income"><?= number_format(floatval($row['amount'] - $row['mysa3ee'] - $row['mywater'] - $row['services'] - $row['tamen']), 2) ?></span></td>
+                        </tr>
+                        <tr>
+                            <td><i class="bi bi-percent me-2 text-danger"></i>العمولة:</td>
+                            <td><span class="egarcalc negative-amount" id="commession"><?= number_format(floatval($row['mysa3ee'] * -1), 2) ?></span></td>
+                        </tr>
+                        <tr>
+                            <td><i class="bi bi-droplet me-2 text-info"></i>المياه: <small>(<?= $addwaterto ?>)</small></td>
+                            <td><span class="egarcalc <?= $mywater < 0 ? 'negative-amount' : 'positive-amount' ?>" id="water"><?= number_format(floatval($mywater), 2) ?></span></td>
+                        </tr>
+                        <tr>
+                            <td><i class="bi bi-tools me-2 text-danger"></i>خدمات:</td>
+                            <td><span class="egarcalc negative-amount" id="services"><?= number_format(floatval($row['services'] * -1), 2) ?></span></td>
+                        </tr>
+                        <tr>
+                            <td><i class="bi bi-shield-check me-2 text-warning"></i>التأمين: <small>(<?= $addtameento ?>)</small></td>
+                            <td><span class="egarcalc <?= $tamen < 0 ? 'negative-amount' : 'positive-amount' ?>" id="tameen"><?= number_format(floatval($tamen), 2) ?></span></td>
+                        </tr>
+                        <tr>
+                            <td><i class="bi bi-graph-down me-2 text-danger"></i>النسبة المستحقة: <?= $row2['persentage'] / 100 ?> × <?= number_format(floatval($row['amount'] - $row['mysa3ee'] - $row['mywater'] - $row['services'] - $row['tamen']), 2) ?></td>
+                            <td><span class="egarcalc negative-amount" id="persentage"><?= number_format(floatval(-($row2['persentage'] / 100) * ($row['amount'] - $row['mysa3ee'] - $row['services'] - $row['mywater'] - $row['tamen'])), 2) ?></span></td>
+                        </tr>
+                        <tr style="background: #e3f2fd;">
+                            <td><strong><i class="bi bi-cash-coin me-2"></i>المبلغ المستحق للمالك قبل خصم المصروفات:</strong></td>
+                            <td><strong><span class="egarcalc positive-amount" id="netincome"><?= number_format(floatval($netincome), 2) ?></span></strong></td>
+                        </tr>
+                        <?php foreach ($expenses_data as $row3) { ?>
+                        <tr class="expense-row">
+                            <td><i class="bi bi-dash-circle me-2"></i><span class="text-danger"><?= htmlspecialchars($row3['idmasrof']) ?> # <?= htmlspecialchars($row3['payeddue']) ?> <?= $row3['formatted_date'] ?></span></td>
+                            <td><span class="egarcalc negative-amount" id="spends<?= $row3['idmasrof'] ?>"><?= number_format(floatval($row3['amount'] * -1), 2) ?></span></td>
+                        </tr>
+                        <?php } ?>
+                        <?php if (!empty($expenses_data)) { ?>
+                        <tr style="background: #fff3cd;">
+                            <td><strong><i class="bi bi-wallet2 me-2"></i>إجمالي المصروفات المخصومة:</strong></td>
+                            <td><strong><span class="egarcalc negative-amount" id="totalspends"><?= number_format(floatval($totalmsrofat), 2) ?></span></strong></td>
+                        </tr>
+                        <?php } ?>
+                        <tr class="total-row">
+                            <td><i class="bi bi-check-circle me-2"></i>إجمالي المستحق للمالك: <?= number_format(floatval($netincome), 2) ?> - <?= number_format(floatval($totalmsrofat), 2) ?></td>
+                            <td><span id="finalamount"><?= number_format(floatval($final_amount), 2) ?></span></td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <?php if ($final_amount < 1) { ?>
+            <div class="alert alert-danger mt-3">
+                <i class="bi bi-exclamation-triangle me-2"></i>
+                <strong>تحذير:</strong> مبلغ المصروفات المخصوم أكبر من الإيراد الموجود. لا يمكن صرف مبلغ بالسالب.
+            </div>
+            <?php } else { ?>
+            <!-- Payment Form -->
+            <div class="settlement-card mt-3">
+                <div class="p-3">
+                    <h5 class="mb-3">
+                        <i class="bi bi-file-earmark-text me-2"></i>
+                        إصدار سند التسليم
+                    </h5>
+                    <form id="paymentForm" method="post" action="sendmony-sanad.hnt">
+                        <input type="hidden" name="amount" value="<?= $final_amount ?>">
+                        <input type="hidden" name="makepayemtsanad" value="1">
+                        <input type="hidden" name="formuid" id="formuid" value="<?= str_replace('.', '', microtime() . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)) ?>">
+                        <input type="hidden" name="iderad" value="<?= $iderad ?>">
+                        <input type="hidden" name="aqarid" value="<?= $idaqar ?>">
+                        <input type="hidden" name="idsubaqar" value="<?= $idsubaqar ?>">
+                        <input type="hidden" name="idmasrofarray" value="<?= implode(',', array_map('intval', $idmasrofcheck)) ?>">
+                        <input type="hidden" name="cashtext" id="cashtext" value="">
+
+                        <div id="userdata" class="mb-3">
+                            <div class="info-badge-custom">
+                                <i class="bi bi-person-badge me-2"></i>
+                                <strong>المحرر:</strong> <?= htmlspecialchars($user_data['username']) ?> - <?= htmlspecialchars($user_data['name']) ?>
+                            </div>
+                            <div class="info-badge-custom">
+                                <i class="bi bi-cash-stack me-2"></i>
+                                <strong>المبلغ المستحق:</strong> <?= number_format(floatval($final_amount), 2) ?>
+                            </div>
+                        </div>
+
+                        <div class="form-section">
+                            <div class="form-group-custom">
+                                <label>
+                                    <i class="bi bi-person-check text-primary me-1"></i>
+                                    اسم المستلم
+                                </label>
+                                <input type="text" name="mostafeed" value="<?= htmlspecialchars($row2['ownername']) ?>" required>
+                            </div>
+
+                            <div class="form-group-custom">
+                                <label>
+                                    <i class="bi bi-file-text text-primary me-1"></i>
+                                    بيان السند
+                                </label>
+                                <input type="text" name="bayan" value="تصفية <?= htmlspecialchars($row['pymentdesription']) ?>" required>
+                            </div>
+
+                            <div class="form-group-custom">
+                                <label>
+                                    <i class="bi bi-sticky text-primary me-1"></i>
+                                    ملاحظات
+                                </label>
+                                <input type="text" name="sanadnote" value="">
+                            </div>
+
+                            <div class="form-group-custom">
+                                <label>
+                                    <i class="bi bi-calendar-event text-primary me-1"></i>
+                                    تاريخ الصرف الفعلي
+                                </label>
+                                <input type="text" name="sanadrealdate" value="<?= $current_date ?>" readonly>
+                            </div>
+
+                            <div class="row">
+                                <div class="col-md-4">
+                                    <div class="form-group-custom">
+                                        <label>
+                                            <i class="bi bi-credit-card text-primary me-1"></i>
+                                            رقم الشيك
+                                        </label>
+                                        <input type="text" name="checkrakam" value="">
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="form-group-custom">
+                                        <label>
+                                            <i class="bi bi-calendar-check text-primary me-1"></i>
+                                            تاريخ الشيك
+                                        </label>
+                                        <input type="text" name="checkdate" value="">
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="form-group-custom">
+                                        <label>
+                                            <i class="bi bi-bank text-primary me-1"></i>
+                                            البنك المسحوب عليه
+                                        </label>
+                                        <input type="text" name="checkbank" value="">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="action-buttons">
+                            <button type="submit" class="btn-submit-payment">
+                                <i class="bi bi-check-circle me-2"></i>
+                                صرف المبلغ المستحق
+                            </button>
+                            <button type="button" class="btn-cancel" onclick="window.location.href='sendmony.hnt?idaqar=<?= $idaqar ?>';">
+                                <i class="bi bi-x-circle me-2"></i>
+                                إلغاء والعودة
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            <?php } ?>
+        </div>
+
+        <!-- Right Column: Expenses Selection -->
+        <div class="col-lg-4">
+            <div class="settlement-card">
+                <h5 class="p-3 mb-0" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%); color: white; border-radius: 8px 8px 0 0;">
+                    <i class="bi bi-list-check me-2"></i>
+                    اختيار المصروفات
+                </h5>
+                <div class="p-3">
+                    <form id="expensesForm" method="post" action="sendmony-sanad.hnt">
+                        <input type="hidden" name="iderad" value="<?= $iderad ?>">
+
+                        <button type="submit" class="btn-select-expenses">
+                            <i class="bi bi-check-all me-2"></i>
+                            خصم المصروفات المحددة
+                        </button>
+
+                        <button type="submit" class="btn-clear-expenses" onclick="$('.chkmasrofat').prop('checked', false); return true;">
+                            <i class="bi bi-x-circle me-2"></i>
+                            عدم خصم أي مصروفات
+                        </button>
+
+                        <div class="table-responsive">
+                            <table class="expense-table">
+                                <thead>
+                                    <tr>
+                                        <th>المبلغ</th>
+                                        <th>البيان</th>
+                                        <th>التاريخ</th>
+                                        <th>خصم</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php
+                                    $sql = "SELECT * FROM masrofat WHERE tasfia = '' AND idaqar = '" . intval($idaqar) . "' ORDER BY payeddate DESC";
+                                    $result_all_expenses = mysql_query($sql, $link);
+
+                                    while ($row_exp = mysql_fetch_array($result_all_expenses)) {
+                                        $checkedselected = in_array($row_exp['idmasrof'], $idmasrofcheck) ? ' checked' : '';
+
+                                        if ($local_hnt_dll_type) {
+                                            $exp_date = date("d/m/Y", $row_exp['payeddate']);
+                                        } else {
+                                            $dateo = $dcal->g2u(date("d", $row_exp['payeddate']), date("m", $row_exp['payeddate']), date("Y", $row_exp['payeddate']));
+                                            $exp_date = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'];
+                                        }
+                                    ?>
+                                    <tr>
+                                        <td><strong><?= number_format(floatval($row_exp['amount']), 2) ?></strong></td>
+                                        <td><small><?= htmlspecialchars($row_exp['payeddue']) ?></small></td>
+                                        <td style="direction: ltr;"><small><?= $exp_date ?></small></td>
+                                        <td>
+                                            <input type="checkbox" class="chkmasrofat checkbox-custom"
+                                                   name="idmasrofcheck[]"
+                                                   value="<?= $row_exp['idmasrof'] ?>"
+                                                   id="idmasrofcheck<?= $row_exp['idmasrof'] ?>"
+                                                   <?= $checkedselected ?>>
+                                        </td>
+                                    </tr>
+                                    <?php } ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+$(document).ready(function() {
+    // Capture calculation breakdown for record keeping
+    function updateCashText() {
+        const tableHtml = $("#userdatatable").html();
+        const userHtml = $("#userdata").html();
+        $("#cashtext").val(tableHtml + userHtml);
+    }
+
+    updateCashText();
+
+    // AJAX form submission for payment
+    $('#paymentForm').on('submit', function(e) {
+        e.preventDefault();
+
+        // Update cashtext before submission
+        updateCashText();
+
+        const formData = new FormData(this);
+        formData.append('ajax_submit', '1');
+
+        const submitBtn = $(this).find('button[type="submit"]');
+        const originalBtnText = submitBtn.html();
+        submitBtn.prop('disabled', true)
+                 .html('<i class="bi bi-hourglass-split me-2"></i>جاري الصرف...');
+
+        $.ajax({
+            url: 'sendmony-sanad.hnt',
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            dataType: 'json',
+            success: function(response) {
+                submitBtn.prop('disabled', false).html(originalBtnText);
+
+                if (response.success) {
+                    alert(response.message);
+                    // Redirect back to property settlements
+                    window.location.href = 'sendmony.hnt?idaqar=<?= $idaqar ?>';
+                } else {
+                    alert('خطأ: ' + (response.error || 'حدث خطأ غير متوقع'));
+                }
+            },
+            error: function(xhr, status, error) {
+                submitBtn.prop('disabled', false).html(originalBtnText);
+                console.error('AJAX Error:', error);
+                alert('حدث خطأ في الاتصال بالخادم');
+            }
+        });
+    });
+
+    // Auto-submit expenses form when checkboxes change
+    $('.chkmasrofat').on('change', function() {
+        // Optional: Auto-submit on change
+        // $('#expensesForm').submit();
+    });
+
+    // Keyboard shortcuts
+    $(document).on('keydown', function(e) {
+        // Ctrl+S to submit payment
+        if (e.ctrlKey && e.keyCode == 83) {
+            e.preventDefault();
+            $('#paymentForm').submit();
+        }
+    });
+});
+</script>
+
+<?php
+    require('../../../foter.hnt');
+}
+?>

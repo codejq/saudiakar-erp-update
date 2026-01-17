@@ -1,0 +1,537 @@
+<?php
+$pageTitle = 'رسالة';
+$sc_title =  'رسالة';
+$sc_id = "81";
+include_once "../../nocash.hnt";
+
+$canscroll = 0;
+if (isset($edit3kod) && $edit3kod) {
+    $canscroll = 0;
+}
+$showdhmltazkeer = 0;
+include_once "../../header.hnt";
+
+require_once('../include/whatsapp_init.hnt');
+
+$message = '';
+$messageType = '';
+function log_message($message) {
+    $send_log_file = WA_LOG_DIR . '/send.log';
+    $timestamp = date('Y-m-d H:i:s');
+    $log_entry = "[$timestamp] $message\n";
+    file_put_contents($send_log_file, $log_entry, FILE_APPEND);
+    echo "<div style='padding:5px;border-bottom:1px solid #ddd;'>$log_entry</div>";
+    flush();
+}
+
+// Handle form submission
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    $recipient = isset($_POST['recipient']) ? trim($_POST['recipient']) : '';
+    $recipientName = isset($_POST['recipient_name']) ? trim($_POST['recipient_name']) : '';
+    $messageText = isset($_POST['message_text']) ? trim($_POST['message_text']) : '';
+    $scheduledDate = isset($_POST['scheduled_date']) ? $_POST['scheduled_date'] : '';
+    $scheduledTime = isset($_POST['scheduled_time']) ? $_POST['scheduled_time'] : '';
+    $sendNow = isset($_POST['send_now']) ? true : false;
+    $priority = isset($_POST['priority']) ? intval($_POST['priority']) : 5;
+    $templateVariables = isset($_POST['template_variables']) ? $_POST['template_variables'] : '';
+
+    // DEBUG: Log what we received
+    error_log("POST template_variables: " . $templateVariables);
+    error_log("POST message_text: " . $messageText);
+
+    // Validate phone
+    if (!wa_validate_phone($recipient)) {
+        $message = 'رقم الهاتف غير صحيح';
+        $messageType = 'danger';
+    } else {
+        // Handle file upload
+        $attachmentPath = null;
+        $attachmentType = null;
+        $attachmentSize = null;
+
+        if (isset($_FILES['attachment']) && $_FILES['attachment']['error'] == 0) {
+            $file = $_FILES['attachment'];
+            $fileName = basename($file['name']);
+            $fileSize = $file['size'];
+            $fileExt = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
+
+            // Check file size
+            if ($fileSize > WA_MAX_FILE_SIZE) {
+                $message = 'حجم الملف يتجاوز الحد المسموح (' . wa_format_file_size(WA_MAX_FILE_SIZE) . ')';
+                $messageType = 'danger';
+            } else {
+                // Determine attachment type
+                $imageExts = array('jpg', 'jpeg', 'png', 'gif', 'webp');
+                $videoExts = array('mp4', 'avi', 'mov', 'mkv');
+                $audioExts = array('mp3', 'wav', 'ogg', 'm4a');
+
+                if (in_array($fileExt, $imageExts)) {
+                    $attachmentType = 'image';
+                } elseif (in_array($fileExt, $videoExts)) {
+                    $attachmentType = 'video';
+                } elseif (in_array($fileExt, $audioExts)) {
+                    $attachmentType = 'audio';
+                } else {
+                    $attachmentType = 'document';
+                }
+
+                // Save file
+                $newFileName = time() . '_' . wa_generate_random_string(8) . '.' . $fileExt;
+                $attachmentPath = WA_UPLOAD_DIR . $newFileName;
+
+                if (move_uploaded_file($file['tmp_name'], $attachmentPath)) {
+                    $attachmentSize = $fileSize;
+                } else {
+                    $message = 'فشل رفع الملف';
+                    $messageType = 'danger';
+                }
+            }
+        }
+
+        if ($messageType != 'danger') {
+            // Prepare scheduled time
+            $finalScheduledTime = null;
+            if (!$sendNow && $scheduledDate && $scheduledTime) {
+                // Build full datetime from date and time inputs
+                $finalScheduledTime = $scheduledDate . ' ' . $scheduledTime . ':00';
+            }
+
+            // Prepare metadata with template variables
+            $metadata = array();
+            if (!empty($templateVariables)) {
+                $vars = json_decode($templateVariables, true);
+                if (is_array($vars) && !empty($vars)) {
+                    $metadata['variables'] = $vars;
+                }
+            }
+
+            // Add to queue
+            $queueData = array(
+                'recipient' => $recipient,
+                'recipient_name' => $recipientName,
+                'message_text' => $messageText,
+                'attachment_path' => $attachmentPath,
+                'attachment_type' => $attachmentType,
+                'attachment_size' => $attachmentSize,
+                'scheduled_time' => $finalScheduledTime,
+                'priority' => $priority,
+                'metadata' => !empty($metadata) ? $metadata : null,
+                'status' => 'pending'
+            );
+
+            $queueId = wa_add_to_queue($queueData);
+
+            if ($queueId) {
+                // All messages go to queue and are processed by queue_processor_ws.php
+                // This ensures proper rate limiting (5 seconds between messages)
+                if ($sendNow) {
+                    $message = 'تمت إضافة الرسالة للإرسال الفوري عبر قائمة الانتظار';
+                    $messageType = 'success';
+                    wa_log_activity('send', 'إضافة رسالة للإرسال الفوري إلى: ' . $recipient);
+
+                    // Trigger queue processor in background (non-blocking)
+                    // Use full path to avoid issues
+                    $processorPath = __DIR__ . '/queue_processor_ws.php';
+                    $phpPath = 'php';
+
+
+                    if (function_exists('exec')) {
+                        try {
+                            // Run in background using exec (best method)
+                            if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                                if (!file_exists($phpPath)) {
+                                    $phpPath = $_SERVER['DOCUMENT_ROOT'] . '/../aso/Apache24/php-8.5.0-Win32-vs17-x64/php.exe';
+                                }
+                                if (file_exists($phpPath)) {
+                                    // Windows
+                                    pclose(popen('start /B ' . $phpPath . ' "' . $processorPath . '"', 'r'));
+                                }
+                                else{
+                                    $message = 'php not found';
+                                    log_message('error', $e->getMessage());
+                                    $messageType = 'danger';
+                                }
+
+
+                            } else {
+                                // Linux/Unix
+                                exec($phpPath . ' "' . $processorPath . '" > /dev/null 2>&1 &');
+                            }
+                        } catch (Exception $e) {
+                            $message = 'php not found';
+                            log_message('error', $e->getMessage());
+                            $messageType = 'danger';
+                        }
+                    }
+                } else {
+                    $message = 'تمت إضافة الرسالة لقائمة الانتظار بنجاح';
+                    $messageType = 'success';
+                    wa_log_activity('send', 'جدولة رسالة إلى: ' . $recipient);
+                }
+            } else {
+                $message = 'فشل إضافة الرسالة';
+                $messageType = 'danger';
+            }
+        }
+    }
+}
+
+// Get templates
+$templates = wa_get_templates();
+
+// Get contacts
+$contacts = array();
+$result = $db->query("SELECT * FROM whatsapp_contacts WHERE is_active = 1 ORDER BY name");
+while ($row = $result->fetch_assoc()) {
+    $contacts[] = $row;
+}
+
+$pageTitle = 'إرسال رسالة';
+?>
+
+    <div class="container-fluid mt-4">
+        <div class="row mb-4">
+            <div class="col">
+                <h2><i class="bi bi-send-fill"></i> <?php echo $pageTitle; ?></h2>
+                <nav aria-label="breadcrumb">
+                    <ol class="breadcrumb">
+                        <li class="breadcrumb-item"><a href="index.hnt">الرئيسية</a></li>
+                        <li class="breadcrumb-item active"><?php echo $pageTitle; ?></li>
+                    </ol>
+                </nav>
+            </div>
+        </div>
+
+        <?php if ($message): ?>
+            <div class="alert alert-<?php echo $messageType; ?> alert-dismissible fade show" role="alert">
+                <?php echo $message; ?>
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+        <?php endif; ?>
+
+        <div class="row">
+            <div class="col-md-8">
+                <div class="card">
+                    <div class="card-header bg-success text-white">
+                        <i class="bi bi-chat-left-text"></i> نموذج إرسال الرسالة
+                    </div>
+                    <div class="card-body">
+                        <form method="post" enctype="multipart/form-data" id="sendForm">
+                            <!-- Hidden fields for template variables -->
+                            <input type="hidden" name="template_variables" id="templateVariablesInput">
+                            <input type="hidden" name="original_template" id="originalTemplateInput">
+
+                            <!-- Recipient -->
+                            <div class="mb-3">
+                                <label class="form-label">المستلم <span class="text-danger">*</span></label>
+                                <div class="input-group">
+                                    <input type="text" name="recipient" id="recipient" class="form-control"
+                                        placeholder="05xxxxxxxx" required>
+                                    <button type="button" class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#contactsModal">
+                                        <i class="bi bi-person-lines-fill"></i> جهات الاتصال
+                                    </button>
+                                </div>
+                                <small class="text-muted">أدخل رقم الهاتف بصيغة 05xxxxxxxx</small>
+                            </div>
+
+                            <!-- Recipient Name -->
+                            <div class="mb-3">
+                                <label class="form-label">اسم المستلم (اختياري)</label>
+                                <input type="text" name="recipient_name" id="recipientName" class="form-control"
+                                    placeholder="اسم المستلم">
+                            </div>
+
+                            <!-- Message Text -->
+                            <div class="mb-3">
+                                <label class="form-label">نص الرسالة <span class="text-danger">*</span></label>
+                                <textarea name="message_text" id="messageText" class="form-control" rows="5"
+                                    required placeholder="اكتب رسالتك هنا..."></textarea>
+                                <small class="text-muted">عدد الأحرف: <span id="charCount">0</span></small>
+                            </div>
+
+                            <!-- Template Selection -->
+                            <?php if (!empty($templates)): ?>
+                                <div class="mb-3">
+                                    <label class="form-label">استخدام قالب</label>
+                                    <select id="templateSelect" class="form-select">
+                                        <option value="">-- اختر قالب --</option>
+                                        <?php foreach ($templates as $template): ?>
+                                            <option value="<?php echo htmlspecialchars($template['template_content']); ?>"
+                                                    data-variables='<?php echo htmlspecialchars($template['variables']); ?>'>
+                                                <?php echo $template['template_name']; ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+
+                                <!-- Template Variables (dynamically populated) -->
+                                <div id="templateVariables" class="mb-3" style="display: none;">
+                                    <label class="form-label">متغيرات القالب</label>
+                                    <div id="variablesContainer" class="border rounded p-3 bg-light"></div>
+                                    <small class="text-muted">املأ القيم لاستبدال المتغيرات في الرسالة</small>
+                                </div>
+                            <?php endif; ?>
+
+                            <!-- Attachment -->
+                            <div class="mb-3">
+                                <label class="form-label">مرفق (اختياري)</label>
+                                <input type="file" name="attachment" class="form-control" id="attachment">
+                                <small class="text-muted">
+                                    الحد الأقصى: <?php echo wa_format_file_size(WA_MAX_FILE_SIZE); ?> -
+                                    المسموح: صور، فيديو، مستندات، صوت
+                                </small>
+                            </div>
+
+                            <!-- Priority -->
+                            <div class="mb-3">
+                                <label class="form-label">الأولوية</label>
+                                <select name="priority" class="form-select">
+                                    <option value="1">عاجل جداً</option>
+                                    <option value="3">عاجل</option>
+                                    <option value="5" selected>عادي</option>
+                                    <option value="7">منخفض</option>
+                                    <option value="10">منخفض جداً</option>
+                                </select>
+                            </div>
+
+                            <!-- Scheduling -->
+                            <div class="card mb-3">
+                                <div class="card-header">
+                                    <i class="bi bi-clock"></i> الجدولة
+                                </div>
+                                <div class="card-body">
+                                    <div class="form-check form-switch mb-3">
+                                        <input class="form-check-input" type="checkbox" id="sendNowCheck" name="send_now" checked>
+                                        <label class="form-check-label" for="sendNowCheck">
+                                            إرسال فوري
+                                        </label>
+                                    </div>
+
+                                    <div id="schedulingFields" style="display: none;">
+                                        <div class="row">
+                                            <div class="col-md-6 mb-3">
+                                                <label class="form-label">التاريخ</label>
+                                                <input type="date" name="scheduled_date" class="form-control"
+                                                    min="<?php echo date('Y-m-d'); ?>">
+                                            </div>
+                                            <div class="col-md-6 mb-3">
+                                                <label class="form-label">الوقت</label>
+                                                <input type="time" name="scheduled_time" class="form-control">
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Submit Buttons -->
+                            <div class="d-grid gap-2">
+                                <button type="submit" class="btn btn-success btn-lg">
+                                    <i class="bi bi-send-fill"></i> إرسال الرسالة
+                                </button>
+                                <a href="index.hnt" class="btn btn-secondary">
+                                    <i class="bi bi-x"></i> إلغاء
+                                </a>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Preview -->
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-header bg-info text-white">
+                        <i class="bi bi-eye"></i> معاينة الرسالة
+                    </div>
+                    <div class="card-body">
+                        <div class="whatsapp-preview" style="background: #e5ddd5; padding: 15px; border-radius: 10px; min-height: 200px;">
+                            <div class="message-bubble" style="background: #dcf8c6; padding: 10px; border-radius: 7px; max-width: 100%; word-wrap: break-word;">
+                                <p id="previewText" style="margin: 0;">اكتب رسالتك لمعاينتها هنا...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card mt-3">
+                    <div class="card-header">
+                        <i class="bi bi-info-circle"></i> نصائح
+                    </div>
+                    <div class="card-body">
+                        <ul class="small mb-0">
+                            <li>تأكد من صحة رقم الهاتف</li>
+                            <li>يمكنك جدولة الإرسال لوقت لاحق</li>
+                            <li>استخدم القوالب لتوفير الوقت</li>
+                            <li>الحد الأقصى للمرفقات 25 ميجابايت</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Contacts Modal -->
+    <div class="modal fade" id="contactsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="bi bi-person-lines-fill"></i> اختيار جهة اتصال</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <?php if (empty($contacts)): ?>
+                        <p class="text-center text-muted">لا توجد جهات اتصال</p>
+                    <?php else: ?>
+                        <div class="list-group">
+                            <?php foreach ($contacts as $contact): ?>
+                                <a href="#" class="list-group-item list-group-item-action contact-item"
+                                    data-phone="<?php echo $contact['phone']; ?>"
+                                    data-name="<?php echo $contact['name']; ?>">
+                                    <i class="bi bi-person-circle"></i>
+                                    <strong><?php echo $contact['name']; ?></strong>
+                                    <br>
+                                    <small class="text-muted"><?php echo wa_format_phone_display($contact['phone']); ?></small>
+                                </a>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+        // Form submission - collect template variables
+        document.getElementById('sendForm').addEventListener('submit', function(e) {
+            const variables = {};
+            let hasVariables = false;
+
+            document.querySelectorAll('.template-variable').forEach(function(input) {
+                const varName = input.getAttribute('data-var');
+                const varValue = input.value;
+                if (varName && varValue) {
+                    variables[varName] = varValue;
+                    hasVariables = true;
+                }
+            });
+
+            // Store variables as JSON in hidden field
+            if (hasVariables) {
+                const varsJson = JSON.stringify(variables);
+                document.getElementById('templateVariablesInput').value = varsJson;
+
+                console.log('Template variables collected:', varsJson);
+
+                // Store original template (with placeholders) in hidden field
+                const originalTemplate = document.getElementById('originalTemplateInput').value;
+                if (originalTemplate) {
+                    document.getElementById('messageText').value = originalTemplate;
+                    console.log('Message text set to original template:', originalTemplate);
+                }
+            } else {
+                console.log('No template variables found');
+            }
+        });
+
+        // Character count
+        document.getElementById('messageText').addEventListener('input', function() {
+            document.getElementById('charCount').textContent = this.value.length;
+            document.getElementById('previewText').textContent = this.value || 'اكتب رسالتك لمعاينتها هنا...';
+        });
+
+        // Template selection
+        <?php if (!empty($templates)): ?>
+            document.getElementById('templateSelect').addEventListener('change', function() {
+                const templateContent = this.value;
+                const variablesJson = this.options[this.selectedIndex].getAttribute('data-variables');
+
+                if (templateContent) {
+                    // Store original template with placeholders
+                    document.getElementById('originalTemplateInput').value = templateContent;
+                    document.getElementById('messageText').value = templateContent;
+                    document.getElementById('messageText').dispatchEvent(new Event('input'));
+
+                    // Show variable inputs if template has variables
+                    if (variablesJson && variablesJson !== 'null' && variablesJson !== '') {
+                        try {
+                            const variables = JSON.parse(variablesJson);
+                            if (Array.isArray(variables) && variables.length > 0) {
+                                showVariableInputs(variables, templateContent);
+                            } else {
+                                hideVariableInputs();
+                            }
+                        } catch(e) {
+                            hideVariableInputs();
+                        }
+                    } else {
+                        hideVariableInputs();
+                    }
+                } else {
+                    hideVariableInputs();
+                    document.getElementById('originalTemplateInput').value = '';
+                }
+            });
+
+            function showVariableInputs(variables, templateContent) {
+                const container = document.getElementById('variablesContainer');
+                container.innerHTML = '';
+
+                variables.forEach(function(varName) {
+                    const div = document.createElement('div');
+                    div.className = 'mb-2';
+                    div.innerHTML = `
+                        <label class="form-label small">{${varName}}</label>
+                        <input type="text" class="form-control form-control-sm template-variable"
+                               data-var="${varName}" placeholder="أدخل قيمة ${varName}">
+                    `;
+                    container.appendChild(div);
+                });
+
+                document.getElementById('templateVariables').style.display = 'block';
+
+                // Add event listeners to update preview only (not the actual message field)
+                document.querySelectorAll('.template-variable').forEach(function(input) {
+                    input.addEventListener('input', function() {
+                        updatePreviewWithVariables(templateContent);
+                    });
+                });
+            }
+
+            function hideVariableInputs() {
+                document.getElementById('templateVariables').style.display = 'none';
+            }
+
+            function updatePreviewWithVariables(templateContent) {
+                let preview = templateContent;
+
+                document.querySelectorAll('.template-variable').forEach(function(input) {
+                    const varName = input.getAttribute('data-var');
+                    const varValue = input.value;
+                    if (varValue) {
+                        preview = preview.replace(new RegExp('{' + varName + '}', 'g'), varValue);
+                    }
+                });
+
+                // Update preview only
+                document.getElementById('previewText').textContent = preview || 'اكتب رسالتك لمعاينتها هنا...';
+            }
+        <?php endif; ?>
+
+        // Scheduling toggle
+        document.getElementById('sendNowCheck').addEventListener('change', function() {
+            document.getElementById('schedulingFields').style.display = this.checked ? 'none' : 'block';
+        });
+
+        // Contact selection
+        document.querySelectorAll('.contact-item').forEach(function(item) {
+            item.addEventListener('click', function(e) {
+                e.preventDefault();
+                document.getElementById('recipient').value = this.dataset.phone;
+                document.getElementById('recipientName').value = this.dataset.name;
+                bootstrap.Modal.getInstance(document.getElementById('contactsModal')).hide();
+            });
+        });
+</script>
+
+<?php
+include_once "../../footer.hnt";
+?>

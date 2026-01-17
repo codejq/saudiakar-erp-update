@@ -1,0 +1,452 @@
+<?php
+/**
+ * TODO Module Helper Functions
+ * ====================================
+ * Note: Charset is set in main header.hnt file
+ */
+
+// Priority labels (Arabic)
+$TODO_PRIORITIES = array(
+    'low' => 'منخفضة',
+    'medium' => 'متوسطة',
+    'high' => 'عالية',
+);
+
+// Priority colors
+$TODO_PRIORITY_COLORS = array(
+    'low' => '#28a745',      // Green
+    'medium' => '#ffc107',    // Yellow/Orange
+    'high' => '#dc3545',      // Red
+);
+
+// Priority icons
+$TODO_PRIORITY_ICONS = array(
+    'low' => 'fas fa-arrow-down',
+    'medium' => 'fas fa-minus',
+    'high' => 'fas fa-arrow-up',
+);
+
+// Status labels
+$TODO_STATUS_LABELS = array(
+    0 => 'قيد التنفيذ',
+    1 => 'مكتملة',
+);
+
+/**
+ * Get priority label
+ */
+function todo_get_priority_label($priority) {
+    global $TODO_PRIORITIES;
+    return isset($TODO_PRIORITIES[$priority]) ? $TODO_PRIORITIES[$priority] : $priority;
+}
+
+/**
+ * Get priority color
+ */
+function todo_get_priority_color($priority) {
+    global $TODO_PRIORITY_COLORS;
+    return isset($TODO_PRIORITY_COLORS[$priority]) ? $TODO_PRIORITY_COLORS[$priority] : '#6c757d';
+}
+
+/**
+ * Get priority icon
+ */
+function todo_get_priority_icon($priority) {
+    global $TODO_PRIORITY_ICONS;
+    return isset($TODO_PRIORITY_ICONS[$priority]) ? $TODO_PRIORITY_ICONS[$priority] : 'fas fa-circle';
+}
+
+/**
+ * Get status label
+ */
+function todo_get_status_label($isCompleted) {
+    global $TODO_STATUS_LABELS;
+    $key = $isCompleted ? 1 : 0;
+    return isset($TODO_STATUS_LABELS[$key]) ? $TODO_STATUS_LABELS[$key] : 'غير معروف';
+}
+
+/**
+ * Format date for display
+ */
+function todo_format_date($date) {
+    if (empty($date) || $date == '0000-00-00') {
+        return '—';
+    }
+
+    try {
+        $timestamp = strtotime($date);
+        return date('d/m/Y', $timestamp);
+    } catch (Exception $e) {
+        return $date;
+    }
+}
+
+/**
+ * Format datetime for display
+ */
+function todo_format_datetime($datetime) {
+    if (empty($datetime)) {
+        return '—';
+    }
+
+    try {
+        return date('d/m/Y H:i', strtotime($datetime));
+    } catch (Exception $e) {
+        return $datetime;
+    }
+}
+
+/**
+ * Get relative time (e.g., "منذ ساعتين")
+ */
+function todo_relative_time($datetime) {
+    if (empty($datetime)) {
+        return '';
+    }
+
+    $timestamp = strtotime($datetime);
+    $diff = time() - $timestamp;
+
+    if ($diff < 60) {
+        return 'الآن';
+    } elseif ($diff < 3600) {
+        $mins = floor($diff / 60);
+        return 'منذ ' . $mins . ' دقيقة';
+    } elseif ($diff < 86400) {
+        $hours = floor($diff / 3600);
+        return 'منذ ' . $hours . ' ساعة';
+    } elseif ($diff < 604800) {
+        $days = floor($diff / 86400);
+        return 'منذ ' . $days . ' يوم';
+    } else {
+        return todo_format_date($datetime);
+    }
+}
+
+/**
+ * Check if date is overdue
+ */
+function todo_is_overdue($dueDate, $isCompleted) {
+    if ($isCompleted || empty($dueDate) || $dueDate == '0000-00-00') {
+        return false;
+    }
+
+    return strtotime($dueDate) < strtotime(date('Y-m-d'));
+}
+
+/**
+ * Check if date is due today
+ */
+function todo_is_due_today($dueDate, $isCompleted) {
+    if ($isCompleted || empty($dueDate) || $dueDate == '0000-00-00') {
+        return false;
+    }
+
+    return date('Y-m-d', strtotime($dueDate)) == date('Y-m-d');
+}
+
+/**
+ * Get completion percentage
+ */
+function todo_completion_percentage($completed, $total) {
+    if ($total == 0) {
+        return 0;
+    }
+
+    return round(($completed / $total) * 100);
+}
+
+/**
+ * Sanitize input
+ */
+function todo_sanitize_input($input) {
+    if (is_array($input)) {
+        return array_map('todo_sanitize_input', $input);
+    }
+
+    return htmlspecialchars(trim($input), ENT_QUOTES, 'UTF-8');
+}
+
+/**
+ * Validate email
+ */
+function todo_validate_email($email) {
+    return filter_var($email, FILTER_VALIDATE_EMAIL);
+}
+
+/**
+ * Get user name by ID (placeholder - integrate with your user system)
+ */
+function todo_get_user_name($userId) {
+    global $db;
+
+    // TODO: Adjust query to match your users table structure
+    $stmt = $db->prepare("SELECT username FROM users WHERE id = ?");
+
+    if ($stmt === false) {
+        return 'مستخدم #' . $userId;
+    }
+
+    $stmt->bind_param("i", $userId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    if ($row = $result->fetch_assoc()) {
+        return $row['username'];
+    }
+
+    return 'مستخدم #' . $userId;
+}
+
+/**
+ * Get user email by ID (placeholder - integrate with your user system)
+ */
+function todo_get_user_email($userId) {
+    global $db;
+
+    // TODO: Adjust query to match your users table structure
+    $stmt = $db->prepare("SELECT email FROM users WHERE id = ?");
+
+    if ($stmt === false) {
+        return '';
+    }
+
+    $stmt->bind_param("i", $userId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    if ($row = $result->fetch_assoc()) {
+        return $row['email'];
+    }
+
+    return '';
+}
+
+/**
+ * Generate notification email body
+ */
+function todo_generate_email_body($item, $list) {
+    $html = '<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>تذكير بمهمة</title>
+</head>
+<body style="font-family: Arial, sans-serif; direction: rtl; text-align: right;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f8f9fa;">
+        <div style="background: linear-gradient(135deg, #17a2b8, #138496); color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+            <h2 style="margin: 0;">📋 تذكير بمهمة</h2>
+        </div>
+
+        <div style="background-color: white; padding: 20px; border-radius: 0 0 8px 8px;">
+            <h3 style="color: #17a2b8;">' . htmlspecialchars($item['title']) . '</h3>
+
+            <p><strong>القائمة:</strong> ' . htmlspecialchars($list['title']) . '</p>
+
+            <p><strong>الأولوية:</strong> <span style="color: ' . todo_get_priority_color($item['priority']) . ';">' . todo_get_priority_label($item['priority']) . '</span></p>
+
+            <p><strong>تاريخ الاستحقاق:</strong> ' . todo_format_date($item['due_date']) . '</p>';
+
+    if (!empty($item['description'])) {
+        $html .= '<p><strong>الوصف:</strong><br>' . nl2br(htmlspecialchars($item['description'])) . '</p>';
+    }
+
+    $html .= '
+            <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #dee2e6;">
+                <p style="color: #6c757d; font-size: 12px; margin: 0;">
+                    هذه رسالة تلقائية من نظام إدارة المهام. الرجاء عدم الرد على هذا البريد.
+                </p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>';
+
+    return $html;
+}
+
+/**
+ * Check user permission (placeholder)
+ */
+function todo_check_permission($permission) {
+    // For now, allow all
+    // TODO: Integrate with your permission system
+    return true;
+}
+
+/**
+ * Log activity (placeholder)
+ */
+function todo_log_activity($action, $details = '') {
+    // TODO: Implement activity logging
+    return true;
+}
+
+/**
+ * Parse tags from comma-separated string
+ */
+function todo_parse_tags($tagsString) {
+    if (empty($tagsString)) {
+        return array();
+    }
+
+    $tags = explode(',', $tagsString);
+    return array_map('trim', $tags);
+}
+
+/**
+ * Format tags for display
+ */
+function todo_format_tags($tagsString) {
+    $tags = todo_parse_tags($tagsString);
+
+    if (empty($tags)) {
+        return '';
+    }
+
+    $html = '';
+    foreach ($tags as $tag) {
+        if (!empty($tag)) {
+            $html .= '<span class="badge bg-secondary me-1">' . htmlspecialchars($tag) . '</span>';
+        }
+    }
+
+    return $html;
+}
+
+/**
+ * Get list color or default
+ */
+function todo_get_list_color($color) {
+    if (empty($color)) {
+        return '#17a2b8'; // Default: info color
+    }
+
+    return $color;
+}
+
+/**
+ * Generate email body for entire todo list
+ */
+function todo_generate_list_email($list, $items) {
+    // Check if list is valid
+    if (!$list || !is_array($list)) {
+        return '<p>خطأ: القائمة غير موجودة</p>';
+    }
+
+    // Set default values for missing keys
+    $listColor = $list['color'] ?? '#17a2b8';
+    $listTitle = $list['title'] ?? 'قائمة مهام';
+    $listDescription = $list['description'] ?? '';
+    $totalItems = $list['total_items'] ?? 0;
+    $completedItems = $list['completed_items'] ?? 0;
+    $pendingItems = $list['pending_items'] ?? 0;
+
+    $html = '<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>قائمة المهام</title>
+</head>
+<body style="font-family: Arial, sans-serif; direction: rtl; text-align: right; background-color: #f8f9fa; padding: 20px;">
+    <div style="max-width: 800px; margin: 0 auto; background-color: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+        <div style="background: linear-gradient(135deg, ' . todo_get_list_color($listColor) . ', ' . todo_get_list_color($listColor) . 'dd); color: white; padding: 30px;">
+            <h1 style="margin: 0 0 10px 0; font-size: 28px;">📋 ' . htmlspecialchars($listTitle) . '</h1>';
+
+    if (!empty($listDescription)) {
+        $html .= '<p style="margin: 0; opacity: 0.9; font-size: 16px;">' . htmlspecialchars($listDescription) . '</p>';
+    }
+
+    $html .= '
+            <div style="margin-top: 20px; display: flex; gap: 15px;">
+                <div style="background: rgba(255,255,255,0.2); padding: 10px 15px; border-radius: 8px;">
+                    <div style="font-size: 12px; opacity: 0.9;">إجمالي المهام</div>
+                    <div style="font-size: 24px; font-weight: bold; margin-top: 5px;">' . $totalItems . '</div>
+                </div>
+                <div style="background: rgba(255,255,255,0.2); padding: 10px 15px; border-radius: 8px;">
+                    <div style="font-size: 12px; opacity: 0.9;">مكتملة</div>
+                    <div style="font-size: 24px; font-weight: bold; margin-top: 5px;">' . $completedItems . '</div>
+                </div>
+                <div style="background: rgba(255,255,255,0.2); padding: 10px 15px; border-radius: 8px;">
+                    <div style="font-size: 12px; opacity: 0.9;">قيد التنفيذ</div>
+                    <div style="font-size: 24px; font-weight: bold; margin-top: 5px;">' . $pendingItems . '</div>
+                </div>
+            </div>
+        </div>
+
+        <div style="padding: 30px;">';
+
+    if (empty($items)) {
+        $html .= '<p style="text-align: center; color: #6c757d; padding: 40px 0;">لا توجد مهام في هذه القائمة</p>';
+    } else {
+        foreach ($items as $item) {
+            $isCompleted = $item['is_completed'] == 1;
+            $priorityColor = todo_get_priority_color($item['priority']);
+            $priorityLabel = todo_get_priority_label($item['priority']);
+
+            $html .= '
+            <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; margin-bottom: 15px; background: ' . ($isCompleted ? '#f8f9fa' : 'white') . ';">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                    <span style="font-size: 20px;">' . ($isCompleted ? '✅' : '⬜') . '</span>
+                    <h3 style="margin: 0; font-size: 18px; color: #333; ' . ($isCompleted ? 'text-decoration: line-through; opacity: 0.6;' : '') . '">' . htmlspecialchars($item['title']) . '</h3>
+                </div>';
+
+            if (!empty($item['description'])) {
+                $html .= '<p style="margin: 10px 0; color: #666; font-size: 14px;">' . nl2br(htmlspecialchars($item['description'])) . '</p>';
+            }
+
+            $html .= '
+                <div style="display: flex; gap: 15px; margin-top: 10px; font-size: 13px;">
+                    <span style="background: ' . $priorityColor . '20; color: ' . $priorityColor . '; padding: 5px 12px; border-radius: 15px; border: 1px solid ' . $priorityColor . ';">
+                        الأولوية: ' . $priorityLabel . '
+                    </span>';
+
+            if (!empty($item['due_date']) && $item['due_date'] != '0000-00-00') {
+                $html .= '<span style="color: #6c757d;">📅 ' . todo_format_date($item['due_date']) . '</span>';
+            }
+
+            if (!empty($item['tags'])) {
+                $html .= '<span style="color: #6c757d;">🏷️ ' . htmlspecialchars($item['tags']) . '</span>';
+            }
+
+            $html .= '
+                </div>
+            </div>';
+        }
+    }
+
+    $html .= '
+        </div>
+
+        <div style="background: #f8f9fa; padding: 20px; text-align: center; border-top: 1px solid #dee2e6;">
+            <p style="color: #6c757d; font-size: 12px; margin: 0;">
+                هذه رسالة تلقائية من نظام إدارة المهام. الرجاء عدم الرد على هذا البريد.
+            </p>
+        </div>
+    </div>
+</body>
+</html>';
+
+    return $html;
+}
+
+/**
+ * Get all users for sharing (integrate with your user system)
+ */
+function todo_get_all_users() {
+    global $db;
+
+    $users = array();
+    $result = $db->query("SELECT userid as id, username, name FROM user WHERE userid > 0 ORDER BY username");
+
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $users[] = $row;
+        }
+    }
+
+    return $users;
+}
+?>

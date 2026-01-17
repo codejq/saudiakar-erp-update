@@ -1,0 +1,503 @@
+<?php
+
+/**
+ * TV Display Player - Full Screen Mode
+ * Auto-rotating slideshow for TV screens
+ */
+
+// No headers needed for full screen display
+include_once "../connectdb.hnt";
+include_once "../data.hnt";
+
+// Define application base path for URL generation
+if (!defined('APP_BASE_PATH')) {
+    define('APP_BASE_PATH', '/aqary');
+}
+
+$display_id = isset($_GET['id']) ? intval($_GET['id']) : 0;
+
+if (!$display_id) {
+    die("خطأ: لم يتم تحديد شاشة العرض");
+}
+
+// Get display settings
+$display_query = mysql_query("SELECT * FROM tv_displays WHERE display_id = '$display_id' AND is_active = 1", $link);
+
+if (!$display_query) {
+    die("خطأ في قاعدة البيانات: " . mysql_error($link) . "<br>تأكد من تشغيل install_tvdisplay.hnt أولاً");
+}
+
+$display = mysql_fetch_array($display_query);
+
+if (!$display) {
+    die("خطأ: شاشة العرض غير موجودة أو غير نشطة (ID: $display_id)");
+}
+
+// Get all slides with property details
+$slides_query = mysql_query("SELECT DISTINCT s.slide_id,
+       s.display_id,
+       s.slide_title,
+       s.slide_content,
+       s.slide_type,
+       s.media_url,
+       s.property_id,
+       s.slide_duration,
+       s.slide_order,
+       s.created_at,
+       s.updated_at,
+       a.aqarname,
+       a.aqaraddress,
+       (SELECT price FROM amlakdetails WHERE idaqar = s.property_id LIMIT 1) as property_price
+FROM tv_slides s
+LEFT JOIN amlak a ON s.property_id = a.idaqar
+WHERE s.display_id = '$display_id'
+ORDER BY s.slide_order", $link);
+
+if (!$slides_query) {
+    die("خطأ في استعلام الشرائح: " . mysql_error($link));
+}
+
+$slides = [];
+while ($row = mysql_fetch_array($slides_query)) {
+    // Set display title based on slide type
+    if ($row['slide_type'] == 'property' && $row['aqarname']) {
+        $row['display_title'] = $row['aqarname'];
+        // property_price is already set from the query
+        $row['property_address'] = $row['aqaraddress'];
+    } else {
+        $row['display_title'] = $row['slide_title'];
+        $row['property_price'] = null;
+        $row['property_address'] = null;
+    }
+    $slides[] = $row;
+}
+
+if (count($slides) == 0) {
+    die("لا توجد شرائح لعرضها");
+}
+
+// Get company info (optional - fallback to defaults if table doesn't exist)
+$company_query = mysql_query("SELECT * FROM company LIMIT 1", $link);
+if ($company_query) {
+    $company = mysql_fetch_array($company_query);
+} else {
+    // Fallback if company table doesn't exist
+    $company = array('companyname' => 'شركة العقارات');
+}
+?>
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><?= $display['display_name'] ?> - عرض تلفزيوني</title>
+
+    <link rel="stylesheet" href="<?= $urlh ?>/css/bootstrap-5.3.8-dist/css/bootstrap.rtl.min.css">
+    <link rel="stylesheet" href="<?= $urlh ?>/css/bootstrap-icons-1.13.1/bootstrap-icons.min.css">
+    <!-- Bootstrap 5 Compatibility -->
+    <script src="<?= $urlh ?>/css/bootstrap-5.3.8-dist/js/bootstrap.bundle.min.js"></script>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Cairo', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #000;
+            color: white;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        .slide-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        }
+
+        .slide {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            transition: opacity 1s ease-in-out;
+            display: flex;
+            flex-direction: column;
+            padding: 3rem;
+        }
+
+        .slide.active {
+            opacity: 1;
+            z-index: 1;
+        }
+
+        .slide-background {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-size: cover;
+            background-position: center;
+            filter: blur(8px) brightness(0.4);
+            z-index: 0;
+        }
+
+        .slide-content {
+            position: relative;
+            z-index: 1;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+        }
+
+        .slide-title {
+            font-size: 4rem;
+            font-weight: 700;
+            margin-bottom: 1.5rem;
+            text-shadow: 2px 2px 8px rgba(0, 0, 0, 0.8);
+            animation: fadeInUp 0.8s ease-out;
+        }
+
+        .slide-description {
+            font-size: 2rem;
+            line-height: 1.6;
+            max-width: 80%;
+            margin-bottom: 2rem;
+            text-shadow: 1px 1px 4px rgba(0, 0, 0, 0.8);
+            animation: fadeInUp 0.8s ease-out 0.2s both;
+        }
+
+        .property-details {
+            display: flex;
+            gap: 3rem;
+            margin-top: 2rem;
+            animation: fadeInUp 0.8s ease-out 0.4s both;
+        }
+
+        .property-detail-item {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 1.5rem 3rem;
+            border-radius: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .property-detail-label {
+            font-size: 1.2rem;
+            opacity: 0.8;
+            margin-bottom: 0.5rem;
+        }
+
+        .property-detail-value {
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: #10b981;
+        }
+
+        /* Header Bar */
+        .header-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 80px;
+            background: linear-gradient(180deg, rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0) 100%);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 3rem;
+            z-index: 1000;
+        }
+
+        .company-logo {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #10b981;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+
+        .header-info {
+            display: flex;
+            gap: 3rem;
+            align-items: center;
+        }
+
+        .clock {
+            font-size: 2.5rem;
+            font-weight: 600;
+            font-family: 'Courier New', monospace;
+        }
+
+        .date {
+            font-size: 1.3rem;
+            opacity: 0.9;
+        }
+
+        /* Footer Bar */
+        .footer-bar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 60px;
+            background: linear-gradient(0deg, rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0) 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .slide-indicator {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .indicator-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.3);
+            transition: all 0.3s;
+        }
+
+        .indicator-dot.active {
+            background: #10b981;
+            transform: scale(1.3);
+        }
+
+        /* Animations */
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        /* Media for property slides */
+        .property-image {
+            max-width: 60%;
+            max-height: 50vh;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            margin-bottom: 2rem;
+            animation: fadeInUp 0.8s ease-out;
+        }
+
+        .gradient-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg,
+                    rgba(24, 156, 42, 0.3) 0%,
+                    rgba(6, 109, 150, 0.3) 100%);
+            z-index: 0;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Header -->
+    <?php if ($display['show_clock']) { ?>
+        <div class="header-bar">
+            <div class="company-logo">
+                <i class="bi bi-building"></i>
+                <?= $bayanmaktabname ?? 'شركة العقارات' ?>
+            </div>
+            <div class="header-info">
+                <div class="date" id="currentDate"></div>
+                <div class="clock" id="currentTime"></div>
+            </div>
+        </div>
+    <?php } ?>
+
+    <!-- Slides Container -->
+    <div class="slide-container">
+        <?php foreach ($slides as $index => $slide) { ?>
+            <div class="slide <?= $index === 0 ? 'active' : '' ?>" data-duration="<?= $slide['slide_duration'] ?? $display['transition_duration'] ?>">
+                <?php if ($slide['media_url']) {
+                    $media_url = upload_url('media.tvdisplay', $slide['media_url']);
+                ?>
+                    <div class="slide-background" style="background-image: url('<?= $media_url ?>');"></div>
+                <?php } ?>
+                <div class="gradient-overlay"></div>
+
+                <div class="slide-content">
+                    <?php if ($slide['slide_type'] == 'property') { ?>
+                        <!-- Property Slide -->
+                        <?php if ($slide['media_url']) {
+                            $property_media_url = upload_url('media.tvdisplay', $slide['media_url']);
+                        ?>
+                            <img src="<?= $property_media_url ?>" class="property-image" alt="<?= $slide['display_title'] ?>">
+                        <?php } ?>
+
+                        <h1 class="slide-title">
+                            <i class="bi bi-building-fill me-3"></i>
+                            <?= $slide['display_title'] ?>
+                        </h1>
+
+                        <?php if ($slide['slide_content']) { ?>
+                            <p class="slide-description"><?= $slide['slide_content'] ?></p>
+                        <?php } ?>
+
+                        <div class="property-details">
+                            <?php if ($slide['property_price']) { ?>
+                                <div class="property-detail-item">
+                                    <div class="property-detail-label">السعر</div>
+                                    <div class="property-detail-value"><?= number_format($slide['property_price']) ?> ريال</div>
+                                </div>
+                            <?php } ?>
+
+                            <?php if ($slide['property_address']) { ?>
+                                <div class="property-detail-item">
+                                    <div class="property-detail-label">
+                                        <i class="bi bi-geo-alt-fill"></i>
+                                        الموقع
+                                    </div>
+                                    <div class="property-detail-value" style="font-size: 1.8rem;"><?= $slide['property_address'] ?></div>
+                                </div>
+                            <?php } ?>
+                        </div>
+
+                    <?php } else { ?>
+                        <!-- Regular Slide -->
+                        <h1 class="slide-title"><?= $slide['display_title'] ?></h1>
+                        <?php if ($slide['slide_content']) { ?>
+                            <p class="slide-description"><?= nl2br($slide['slide_content']) ?></p>
+                        <?php } ?>
+                    <?php } ?>
+                </div>
+            </div>
+        <?php } ?>
+    </div>
+
+    <!-- Footer with indicators -->
+    <div class="footer-bar">
+        <div class="slide-indicator">
+            <?php foreach ($slides as $index => $slide) { ?>
+                <div class="indicator-dot <?= $index === 0 ? 'active' : '' ?>"></div>
+            <?php } ?>
+        </div>
+    </div>
+
+    <script>
+        // Clock and Date
+        function updateDateTime() {
+            const now = new Date();
+
+            // Time
+            const timeEl = document.getElementById('currentTime');
+            if (timeEl) {
+                const hours = String(now.getHours()).padStart(2, '0');
+                const minutes = String(now.getMinutes()).padStart(2, '0');
+                const seconds = String(now.getSeconds()).padStart(2, '0');
+                timeEl.textContent = `${hours}:${minutes}:${seconds}`;
+            }
+
+            // Date
+            const dateEl = document.getElementById('currentDate');
+            if (dateEl) {
+                const options = {
+                    weekday: 'long',
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric'
+                };
+                dateEl.textContent = now.toLocaleDateString('ar-SA', options);
+            }
+        }
+
+        // Slideshow
+        let currentSlide = 0;
+        const slides = document.querySelectorAll('.slide');
+        const indicators = document.querySelectorAll('.indicator-dot');
+        const totalSlides = slides.length;
+
+        function showSlide(index) {
+            // Hide all slides
+            slides.forEach(slide => slide.classList.remove('active'));
+            indicators.forEach(dot => dot.classList.remove('active'));
+
+            // Show current slide
+            slides[index].classList.add('active');
+            indicators[index].classList.add('active');
+        }
+
+        function nextSlide() {
+            currentSlide = (currentSlide + 1) % totalSlides;
+            showSlide(currentSlide);
+
+            // Get custom duration for this slide or use default
+            const duration = parseInt(slides[currentSlide].dataset.duration) * 1000;
+            setTimeout(nextSlide, duration);
+        }
+
+        // Initialize
+        updateDateTime();
+        setInterval(updateDateTime, 1000);
+
+        // Start slideshow
+        if (totalSlides > 1) {
+            const firstDuration = parseInt(slides[0].dataset.duration) * 1000;
+            setTimeout(nextSlide, firstDuration);
+        }
+
+        // Prevent screen from sleeping
+        let wakeLock = null;
+        async function requestWakeLock() {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                }
+            } catch (err) {
+                console.log('Wake Lock error:', err);
+            }
+        }
+        requestWakeLock();
+
+        // Fullscreen on F11 or double-click
+        document.addEventListener('dblclick', function() {
+            if (document.fullscreenElement) {
+                document.exitFullscreen();
+            } else {
+                document.documentElement.requestFullscreen();
+            }
+        });
+
+        // Reload page every 6 hours to get fresh data
+        setTimeout(function() {
+            location.reload();
+        }, 6 * 60 * 60 * 1000);
+    </script>
+</body>
+
+</html>

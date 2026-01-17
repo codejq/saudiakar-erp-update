@@ -1,0 +1,452 @@
+<?php
+/**
+ * Unit Evacuation/Emptying Page
+ * Allows users to vacate a rental unit and optionally remove tenant data
+ */
+
+// Set page variables
+$sc_title = "إخلاء الوحدة";
+$sc_id = "95";
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+if ($is_ajax_request) {
+    // Include database connection and authentication for AJAX requests
+    include_once "../../../reqloginajax.hnt";
+} else {
+    // Include normal headers and database connection for regular requests
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+}
+
+
+// Extract request variables
+extract($_REQUEST);
+
+// Initialize variables to prevent undefined warnings
+$rakam3akdid = $_REQUEST['rakam3akdid'] ?? '';
+$idsubaqar = $_REQUEST['idsubaqar'] ?? '';
+$freewehda = $_REQUEST['freewehda'] ?? 0;
+$deletemostagerdata = $_REQUEST['deletemostagerdata'] ?? '';
+$mostagerid = $_REQUEST['mostagerid'] ?? 0;
+
+
+// Load required utilities
+require '../arabicTools.class.hnt';
+require '../uCal.class.hnt';
+$dcal = new uCal;
+include_once "amlakfunctions.hnt";
+
+// Convert rakam3akdid to idsubaqar if needed
+if ($rakam3akdid && !$idsubaqar) {
+    $sql = "SELECT idsubaqar FROM amlakdetails WHERE rakam3akdid='" . addslashes($rakam3akdid) . "'";
+    $result = mysql_fetch_array(mysql_query($sql, $link));
+    $idsubaqar = $result['idsubaqar'] ?? '';
+}
+
+// Process evacuation request
+if ($freewehda == 1 && $idsubaqar) {
+    // Get contract ID
+    $sql = "SELECT rakam3akdid FROM amlakdetails WHERE idsubaqar='" . intval($idsubaqar) . "'";
+    $result = mysql_fetch_array(mysql_query($sql, $link));
+    $rakam3akdid = $result['rakam3akdid'] ?? '';
+
+    // Archive the contract
+    $deleted3adkd = @file_get_contents("HTTP://" . $_SERVER['SERVER_ADDR'] . ":" . $_SERVER['SERVER_PORT'] . "/aqary/admin/include/amlak/show3akd.hnt?rakam3akdid=$rakam3akdid&username={$_SESSION['usernamev']}&password={$_SESSION['passwordv']}");
+
+    // Update contract status
+    $sql = "UPDATE egar SET mostagerid='0', txt3akd='" . addslashes($deleted3adkd) . "' WHERE rakam3akdid='" . addslashes($rakam3akdid) . "'";
+    mysql_query($sql, $link);
+
+    // Clear unit assignment
+    $sql = "UPDATE amlakdetails SET mostagerid='0', rakam3akdid=0 WHERE idsubaqar='" . intval($idsubaqar) . "'";
+    mysql_query($sql, $link);
+
+    // Mark all installments as complete
+    $sql = "UPDATE aksat SET iscomplete=1 WHERE idsubaqar='" . intval($idsubaqar) . "'";
+    mysql_query($sql, $link);
+
+    // Delete tenant data if requested
+    if ($deletemostagerdata && $mostagerid) {
+        $sql = "DELETE FROM mostagereen WHERE mostagerid='" . intval($mostagerid) . "'";
+        mysql_query($sql, $link);
+    }
+
+    // Handle AJAX response
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم إخلاء الوحدة بنجاح',
+            'redirect' => 'egarstatus.hnt'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    // Non-AJAX fallback
+    echo "<script>
+        if (parent.parent.document.getElementById('flat{$idsubaqar}')) {
+            parent.parent.document.getElementById('flat{$idsubaqar}').innerHTML=\"<input type='button' class='btn btn-success' value='تـأجيــر' onclick='window.location.href=\"egar.hnt?idsubaqar={$idsubaqar}\"'>\";
+        }
+        if (parent.parent.document.getElementById('flag{$idsubaqar}')) {
+            parent.parent.document.getElementById('flag{$idsubaqar}').remove();
+        }
+    </script>";
+    exit();
+}
+
+// Fetch unit and tenant details
+$sql = "SELECT * FROM amlakdetails WHERE idsubaqar=" . intval($idsubaqar) . "";
+
+$row = mysql_fetch_array(mysql_query($sql, $link));
+
+// Check if unit exists and is actually rented
+if (!$row) {
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => false,
+            'error' => 'حدث خطأ: الوحدة غير موجودة'
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    echo "<div class='alert alert-danger'>حدث خطأ: الوحدة غير موجودة</div>";
+    exit();
+}
+
+// Check if unit is actually rented (has an active contract)
+if (empty($row['rakam3akdid']) || $row['rakam3akdid'] <= 0) {
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => false,
+            'error' => 'حدث خطأ: هذا العقار غير مؤجر'
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    echo "<div class='alert alert-danger'>حدث خطأ: هذا العقار غير مؤجر</div>";
+    exit();
+}
+
+// Fetch tenant details
+$sql = "SELECT * FROM mostagereen WHERE mostagerid='{$row['mostagerid']}'";
+$rowm = mysql_fetch_array(mysql_query($sql, $link));
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request):
+?>
+
+<style>
+    .info-card {
+        background: white;
+        border-radius: 8px;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    .info-row {
+        display: flex;
+        align-items: center;
+        padding: 0.75rem 0;
+        border-bottom: 1px solid #f0f0f0;
+    }
+
+    .info-row:last-child {
+        border-bottom: none;
+    }
+
+    .info-label {
+        font-weight: 600;
+        color: #495057;
+        min-width: 150px;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .info-value {
+        color: #212529;
+        flex: 1;
+    }
+
+    .radio-option {
+        padding: 1rem;
+        border: 2px solid #dee2e6;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+        cursor: pointer;
+        transition: all 0.2s;
+        background: white;
+    }
+
+    .radio-option:hover {
+        border-color: #0891b2;
+        background: #f8f9fa;
+    }
+
+    .radio-option input[type="radio"]:checked + label {
+        font-weight: 600;
+        color: #0891b2;
+    }
+
+    .warning-box {
+        background: linear-gradient(135deg, #fff3cd 0%, #ffe69c 100%);
+        border-left: 4px solid #ffc107;
+        padding: 1rem;
+        border-radius: 6px;
+        margin-bottom: 1.5rem;
+    }
+
+    .section-header {
+        background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+        color: white;
+        padding: 0.75rem 1rem;
+        border-radius: 6px;
+        margin-bottom: 1.5rem;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 1.1rem;
+    }
+</style>
+
+<div class="container-fluid py-3">
+    <!-- Page Header -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-door-open me-2"></i>
+                <?= $sc_title ?>
+            </h4>
+        </div>
+    </div>
+
+    <!-- Warning Message -->
+    <div class="warning-box">
+        <div class="d-flex align-items-start gap-2">
+            <i class="bi bi-exclamation-triangle-fill text-warning" style="font-size: 1.5rem;"></i>
+            <div>
+                <strong>تنبيه مهم:</strong>
+                <p class="mb-0">سيتم إخلاء الوحدة وإنهاء العقد الحالي. يرجى التأكد من صحة البيانات قبل المتابعة.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Property and Tenant Information -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-body p-4">
+            <div class="section-header">
+                <i class="fas fa-info-circle"></i>
+                <span>معلومات العقار والمستأجر</span>
+            </div>
+
+            <div class="info-card">
+                <div class="info-row">
+                    <div class="info-label">
+                        <i class="bi bi-building text-primary"></i>
+                        العقار:
+                    </div>
+                    <div class="info-value">
+                        <strong><?= displayaqarname($row['idaqar'] ?? 0) ?></strong>
+                    </div>
+                </div>
+
+                <div class="info-row">
+                    <div class="info-label">
+                        <i class="bi bi-house-door text-info"></i>
+                        الوحدة:
+                    </div>
+                    <div class="info-value">
+                        <strong><?= displaysubtype($row['aqarsubtype'] ?? 0) . " رقم " . ($row['rakam'] ?? 'غير محدد') ?></strong>
+                    </div>
+                </div>
+
+                <div class="info-row">
+                    <div class="info-label">
+                        <i class="bi bi-person-badge text-success"></i>
+                        اسم المستأجر:
+                    </div>
+                    <div class="info-value">
+                        <strong><?= htmlspecialchars($rowm['mostagername'] ?? '', ENT_QUOTES, 'UTF-8') ?></strong>
+                    </div>
+                </div>
+
+                <div class="info-row">
+                    <div class="info-label">
+                        <i class="bi bi-phone text-warning"></i>
+                        الجوال:
+                    </div>
+                    <div class="info-value">
+                        <strong style="direction: ltr; display: inline-block;"><?= htmlspecialchars($rowm['mostagertel'] ?? '', ENT_QUOTES, 'UTF-8') ?></strong>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Evacuation Form -->
+    <div class="card shadow-sm border-0">
+        <div class="card-body p-4">
+            <div class="section-header">
+                <i class="fas fa-cog"></i>
+                <span>خيارات الإخلاء</span>
+            </div>
+
+            <form method="post" id="evacuationForm">
+                <input type='hidden' name='formuid' id="formuid" value="<?= str_replace('.', '', microtime() . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+                <input type='hidden' name='idsubaqar' value="<?= intval($idsubaqar) ?>">
+                <input type='hidden' name='mostagerid' value="<?= intval($rowm['mostagerid'] ?? 0) ?>">
+                <input type='hidden' name='freewehda' value="1">
+
+                <!-- Tenant Data Options -->
+                <div class="mb-4">
+                    <label class="form-label">
+                        <i class="bi bi-database text-primary me-1"></i>
+                        ماذا تريد أن تفعل ببيانات المستأجر؟
+                        <span class="text-danger">*</span>
+                    </label>
+
+                    <div class="radio-option">
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="deletemostagerdata" id="keepData" value="" checked>
+                            <label class="form-check-label" for="keepData">
+                                <i class="bi bi-save text-success me-2"></i>
+                                <strong>الاحتفاظ ببيانات واسم المستأجر</strong>
+                                <br>
+                                <small class="text-muted">سيتم الاحتفاظ بمعلومات المستأجر في النظام للرجوع إليها مستقبلاً</small>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="radio-option">
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="deletemostagerdata" id="deleteData" value="1">
+                            <label class="form-check-label" for="deleteData">
+                                <i class="bi bi-trash text-danger me-2"></i>
+                                <strong>حذف بيانات واسم المستأجر</strong>
+                                <br>
+                                <small class="text-muted">سيتم حذف جميع معلومات المستأجر نهائياً من النظام (لا يمكن التراجع)</small>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="d-flex flex-wrap gap-3 justify-content-center mt-4">
+                    <button type="button" id="evacuation_submitButton"  class="btn btn-danger btn-lg px-5 <?= "policy_" . $sc_id . "_deleetes" ?>">
+                        <i class="bi bi-door-open me-2"></i>
+                        إخلاء الوحدة
+                    </button>
+                    <a href="amlak.hnt" class="btn btn-outline-secondary btn-lg px-4">
+                        <i class="bi bi-x-circle me-2"></i>
+                        إلغاء
+                    </a>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+/**
+ * AJAX Form Submission for Unit Evacuation
+ */
+(function() {
+    // Ensure jQuery is loaded
+    if (typeof jQuery === 'undefined') {
+        console.error('jQuery is not loaded. Form will submit normally.');
+        return;
+    }
+
+    jQuery(document).ready(function($) {
+        console.log('Attaching AJAX handler to evacuation button');
+
+
+        $('#evacuation_submitButton').on('click', function(e) {
+            e.preventDefault();
+            console.log('Button click intercepted by AJAX handler');
+
+          confirm('هل أنت متأكد من رغبتك في إخلاء هذه الوحدة؟\n\nسيتم:\n• إنهاء العقد الحالي\n• إلغاء تعيين المستأجر\n• تحديد جميع الأقساط كمكتملة','إخلاء الوحدة' ,()=>evacuate(e));
+        });
+
+
+        function evacuate (e) {
+
+
+            // Get form data from the form
+            const formData = new FormData(document.getElementById('evacuationForm'));
+            formData.append('ajax_submit', '1');
+
+            // Show loading state
+            const submitBtn = $('#evacuation_submitButton');
+            const originalBtnText = submitBtn.html();
+            submitBtn.prop('disabled', true)
+                   .html('<i class="bi bi-hourglass-split me-2"></i>جاري الإخلاء...');
+
+            // Submit via AJAX
+            $.ajax({
+                url: 'emptyaqar.hnt',
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                dataType: 'json',
+                success: function(response) {
+                    submitBtn.prop('disabled', false).html(originalBtnText);
+
+                    if (response.success) {
+                        // Show success message
+                        alert(response.message || 'تم إخلاء الوحدة بنجاح');
+
+                        // Redirect
+                        if (response.redirect) {
+                            setTimeout(() => {
+                                window.location.href = response.redirect;
+                            }, 2000);
+
+                        } else {
+                            setTimeout(() => {
+                                 window.location.href = 'egarstatus.hnt';
+                            }, 2000);
+
+                        }
+                    } else {
+                        alert(response.error || 'حدث خطأ أثناء إخلاء الوحدة');
+                    }
+                },
+                error: function(xhr, status, error) {
+                    submitBtn.prop('disabled', false).html(originalBtnText);
+                    console.error('AJAX Error:', error);
+                    console.error('Response:', xhr.responseText);
+                    alert('حدث خطأ في الاتصال. الرجاء المحاولة مرة أخرى');
+                }
+            });
+
+            return false;
+        }
+
+        // Add visual feedback for radio options
+        $('input[type="radio"]').on('change', function() {
+            $('.radio-option').removeClass('border-primary').css('border-width', '2px');
+            $(this).closest('.radio-option').addClass('border-primary').css('border-width', '3px');
+        });
+
+        // Trigger initial state
+        $('input[type="radio"]:checked').trigger('change');
+    });
+})();
+</script>
+
+<?php
+endif; // End of HTML rendering for non-AJAX requests
+?>
+
+<?php
+if (!$is_ajax_request) {
+    require('../../../foter.hnt');
+}
+?>

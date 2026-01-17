@@ -1,0 +1,647 @@
+<?php
+/**
+ * Location-Based Land Search
+ * Search by city, plan, neighborhood, street, or coordinates
+ */
+
+$sc_title = "بحث بالموقع";
+$sc_id = "13";
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../nocash.hnt";
+    include_once "../../header.hnt";
+} else {
+    // For AJAX requests, include authentication
+    include_once "../../reqloginajax.hnt";
+}
+
+
+// Handle AJAX form submissions
+if ($is_ajax_request) {
+    $redirect_url = '';
+
+    // Search by city
+    if (isset($_POST['cityid_search'])) {
+        $genericsql = $_POST['genericsql'];
+        $redirect_url = 'updateard.hnt?genericsql=' . urlencode($genericsql);
+    }
+    // Search by plan
+    elseif (isset($_POST['mokhatatid'])) {
+        $mokhatatid = $_POST['mokhatatid'];
+        $redirect_url = 'updateard.hnt?mokhatatid=' . urlencode($mokhatatid);
+    }
+    // Generic searches (neighborhood, streets)
+    elseif (isset($_POST['genericvalue']) && isset($_POST['genericfield'])) {
+        $redirect_url = 'updateard.hnt?genericvalue=' . urlencode($_POST['genericvalue']) .
+                       '&genericfield=' . urlencode($_POST['genericfield']) .
+                       '&genericsearch=1' .
+                       '&genericoperation=' . urlencode($_POST['genericoperation']);
+    }
+    // Coordinates search
+    elseif (isset($_POST['genericsql'])) {
+        $genericsql = $_POST['genericsql'];
+        $redirect_url = 'updateard.hnt?genericsql=' . urlencode($genericsql);
+    }
+
+    if ($redirect_url) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'message' => 'جاري تحميل النتائج...',
+            'redirect_url' => $redirect_url
+        ], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+}
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.search-dashboard {
+    background: #f8f9fa;
+    min-height: 100vh;
+    padding: 2rem 0;
+}
+
+.page-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.search-options {
+    background: white;
+    border-radius: 8px;
+    padding: 1.5rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    margin-bottom: 2rem;
+}
+
+.option-button {
+    padding: 1rem;
+    border: 2px solid #e5e7eb;
+    border-radius: 8px;
+    background: white;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.option-button:hover {
+    border-color: #10b981;
+    background: #d1fae5;
+}
+
+.option-button input[type="radio"] {
+    width: 20px;
+    height: 20px;
+}
+
+.option-button.active {
+    border-color: #10b981;
+    background: #d1fae5;
+}
+
+.option-button i {
+    font-size: 1.5rem;
+    color: #10b981;
+}
+
+.search-form {
+    display: none;
+    background: white;
+    border-radius: 8px;
+    padding: 2rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.search-form.active {
+    display: block;
+}
+
+.form-group {
+    margin-bottom: 1.5rem;
+}
+
+.form-label {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    color: #495057;
+    display: block;
+}
+
+.coordinate-field {
+    margin-bottom: 1rem;
+}
+
+.coordinate-field label {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #64748b;
+    margin-bottom: 0.5rem;
+    display: block;
+}
+
+.info-box {
+    background: #d1fae5;
+    border-left: 4px solid #10b981;
+    padding: 1rem;
+    border-radius: 6px;
+    margin-top: 2rem;
+}
+
+.info-box h5 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #065f46;
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.info-box ul {
+    margin: 0;
+    padding-right: 1.5rem;
+    color: #047857;
+}
+
+@media (max-width: 768px) {
+    .option-button {
+        padding: 0.75rem;
+    }
+}
+</style>
+
+<div class="search-dashboard" dir="rtl">
+    <div class="container-fluid">
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>
+                <i class="bi bi-geo-alt"></i>
+                <?= $sc_title ?>
+            </h1>
+            <p class="mb-0 mt-2" style="opacity: 0.95; font-size: 0.95rem;">
+                البحث عن الأراضي حسب الموقع الجغرافي
+            </p>
+        </div>
+
+        <!-- Search Options -->
+        <div class="search-options">
+            <div class="row g-3">
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-0">
+                        <input type="radio" name="search-type" value="0">
+                        <div>
+                            <i class="bi bi-building"></i>
+                            <strong>بحث بالمدينة</strong>
+                        </div>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-1">
+                        <input type="radio" name="search-type" value="1">
+                        <div>
+                            <i class="bi bi-diagram-3"></i>
+                            <strong>بحث بالمخطط</strong>
+                        </div>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-2">
+                        <input type="radio" name="search-type" value="2">
+                        <div>
+                            <i class="bi bi-houses"></i>
+                            <strong>بحث بالحي</strong>
+                        </div>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-3">
+                        <input type="radio" name="search-type" value="3">
+                        <div>
+                            <i class="bi bi-signpost"></i>
+                            <strong>بحث بالشارع الرئيسي</strong>
+                        </div>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-4">
+                        <input type="radio" name="search-type" value="4">
+                        <div>
+                            <i class="bi bi-signpost-2"></i>
+                            <strong>بحث بالشارع الفرعي</strong>
+                        </div>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-5">
+                        <input type="radio" name="search-type" value="5">
+                        <div>
+                            <i class="bi bi-geo"></i>
+                            <strong>بحث بالإحداثيات الرقمية</strong>
+                        </div>
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Form 0: City Search -->
+        <div id="form-0" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-building text-success me-2"></i>
+                بحث بالمدينة
+            </h4>
+            <form id="citySearchForm">
+                <div class="form-group">
+                    <label class="form-label">اسم المدينة</label>
+                    <select class="form-select form-select-lg" name="cityid" required>
+                        <option value="">اختر اسم المدينة</option>
+                        <?php
+                        $sql = "select * from city order by binary cityname";
+                        $result = mysql_query($sql, $link);
+                        while ($row = mysql_fetch_array($result)) {
+                            echo "<option value='$row[0]'>$row[1]</option>";
+                        }
+                        ?>
+                    </select>
+                    <input type="hidden" name="cityid_search" value="1">
+                    <input type="hidden" name="genericsql" value="">
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-success btn-lg" id="searchBtn0">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 1: Plan Search -->
+        <div id="form-1" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-diagram-3 text-success me-2"></i>
+                بحث بالمخطط
+            </h4>
+            <form id="planSearchForm">
+                <div class="form-group">
+                    <label class="form-label">اسم المدينة</label>
+                    <select class="form-select form-select-lg" name="cityid_plan" id="cityid_plan" required>
+                        <option value="">اختر اسم المدينة</option>
+                        <?php
+                        @mysql_data_seek($result, 0);
+                        while ($row = mysql_fetch_array($result)) {
+                            echo "<option value='$row[0]'>$row[1]</option>";
+                        }
+                        ?>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">اسم المخطط</label>
+                    <select class="form-select form-select-lg" name="mokhatatid" id="mokhatatid" required>
+                        <option value="">اختر المدينة أولاً</option>
+                    </select>
+                    <small class="text-muted d-block mt-2">
+                        <i class="bi bi-info-circle me-1"></i>
+                        اختر المدينة أولاً لعرض المخططات المتاحة
+                    </small>
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-success btn-lg" id="searchBtn1">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 2: Neighborhood Search -->
+        <div id="form-2" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-houses text-success me-2"></i>
+                بحث بالحي
+            </h4>
+            <form id="neighborhoodForm">
+                <div class="form-group">
+                    <label class="form-label">اسم الحي</label>
+                    <input type="text" class="form-control form-control-lg" name="searchv" placeholder="أدخل اسم الحي" required>
+                    <input type="hidden" name="genericvalue" value="">
+                    <input type="hidden" name="genericfield" value="hay">
+                    <input type="hidden" name="genericsearch" value="1">
+                    <input type="hidden" name="genericoperation" value="like">
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-success btn-lg" id="searchBtn2">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 3: Main Street Search -->
+        <div id="form-3" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-signpost text-success me-2"></i>
+                بحث بالشارع الرئيسي
+            </h4>
+            <form id="mainStreetForm">
+                <div class="form-group">
+                    <label class="form-label">اسم الشارع الرئيسي</label>
+                    <input type="text" class="form-control form-control-lg" name="searchv" placeholder="أدخل اسم الشارع الرئيسي" required>
+                    <input type="hidden" name="genericvalue" value="">
+                    <input type="hidden" name="genericfield" value="share3">
+                    <input type="hidden" name="genericsearch" value="1">
+                    <input type="hidden" name="genericoperation" value="like">
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-success btn-lg" id="searchBtn3">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 4: Sub Street Search -->
+        <div id="form-4" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-signpost-2 text-success me-2"></i>
+                بحث بالشارع الفرعي
+            </h4>
+            <form id="subStreetForm">
+                <div class="form-group">
+                    <label class="form-label">اسم الشارع الفرعي</label>
+                    <input type="text" class="form-control form-control-lg" name="searchv" placeholder="أدخل اسم الشارع الفرعي" required>
+                    <input type="hidden" name="genericvalue" value="">
+                    <input type="hidden" name="genericfield" value="share3f">
+                    <input type="hidden" name="genericsearch" value="1">
+                    <input type="hidden" name="genericoperation" value="like">
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-success btn-lg" id="searchBtn4">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 5: Coordinates Search -->
+        <div id="form-5" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-geo text-success me-2"></i>
+                بحث بالإحداثيات الرقمية
+            </h4>
+            <form id="coordinatesForm">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <div class="coordinate-field">
+                            <label>خط الطول (Longitude)</label>
+                            <input type="text" class="form-control form-control-lg" name="Longitude" placeholder="أدخل خط الطول" required
+                                   onkeypress="return ValidateNumberKeyPress(this, event);">
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="coordinate-field">
+                            <label>خط العرض (Latitude)</label>
+                            <input type="text" class="form-control form-control-lg" name="Latitude" placeholder="أدخل خط العرض" required
+                                   onkeypress="return ValidateNumberKeyPress(this, event);">
+                        </div>
+                    </div>
+                </div>
+                <input type="hidden" name="genericsql" value="">
+                <div class="d-grid mt-3">
+                    <button type="submit" class="btn btn-success btn-lg" id="searchBtn5">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Information Box -->
+        <div class="info-box" style="max-width: 900px; margin: 2rem auto 0;">
+            <h5>
+                <i class="bi bi-lightbulb"></i>
+                نصائح للبحث
+            </h5>
+            <ul>
+                <li>اختر نوع البحث المناسب حسب المعلومات المتوفرة لديك</li>
+                <li>البحث بالمدينة يعرض جميع الأراضي في المدينة المحددة</li>
+                <li>البحث بالمخطط يتطلب اختيار المدينة أولاً</li>
+                <li>البحث بالحي أو الشارع يدعم البحث الجزئي</li>
+                <li>البحث بالإحداثيات يتطلب إدخال خط الطول والعرض معاً</li>
+            </ul>
+        </div>
+
+    </div>
+</div>
+
+<script>
+/**
+ * Location-Based Land Search - Modern JavaScript
+ */
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Location-Based Land Search initialized');
+
+    // Get all option buttons
+    const options = document.querySelectorAll('.option-button');
+
+    // Load saved search type from cookie
+    const savedType = getCookie('ardsmok');
+    if (savedType) {
+        const savedOption = savedType.replace('srch', '');
+        showForm(savedOption);
+    }
+
+    // Option selection handlers
+    options.forEach((option, index) => {
+        option.addEventListener('click', function() {
+            showForm(index.toString());
+            setCookie('ardsmok', 'srch' + index, 20);
+        });
+    });
+
+    // Show form based on index
+    function showForm(index) {
+        // Reset all
+        options.forEach(opt => opt.classList.remove('active'));
+        document.querySelectorAll('.search-form').forEach(form => form.classList.remove('active'));
+
+        // Activate selected
+        const selectedOption = document.getElementById('option-' + index);
+        const selectedForm = document.getElementById('form-' + index);
+
+        if (selectedOption && selectedForm) {
+            selectedOption.classList.add('active');
+            selectedOption.querySelector('input[type="radio"]').checked = true;
+            selectedForm.classList.add('active');
+        }
+    }
+
+    // City search form with SQL generation
+    setupFormAjax('citySearchForm', 'searchBtn0', (form) => {
+        const cityid = form.querySelector('[name="cityid"]').value;
+        const sql = ` ,mokhatat WHERE  mokhatat.cityid =${cityid}  and arady.mokhatatid=mokhatat.mokhatatid `;
+        form.querySelector('[name="genericsql"]').value = sql;
+    });
+
+    // Plan search form - load plans when city changes
+    const cityPlanSelect = document.getElementById('cityid_plan');
+    const mokhatatSelect = document.getElementById('mokhatatid');
+
+    cityPlanSelect.addEventListener('change', function() {
+        const cityid = this.value;
+        if (!cityid) {
+            mokhatatSelect.innerHTML = '<option value="">اختر المدينة أولاً</option>';
+            return;
+        }
+
+        // Load plans for selected city
+        mokhatatSelect.innerHTML = '<option value="">جاري التحميل...</option>';
+
+        fetch(`get_mokhatat.php?cityid=${cityid}`)
+            .then(response => response.json())
+            .then(data => {
+                mokhatatSelect.innerHTML = '<option value="">اختر اسم المخطط</option>';
+                data.forEach(plan => {
+                    const option = document.createElement('option');
+                    option.value = plan.mokhatatid;
+                    option.textContent = plan.mokhatatname;
+                    mokhatatSelect.appendChild(option);
+                });
+            })
+            .catch(error => {
+                console.error('Error loading plans:', error);
+                mokhatatSelect.innerHTML = '<option value="">خطأ في التحميل</option>';
+            });
+    });
+
+    setupFormAjax('planSearchForm', 'searchBtn1');
+
+    // Neighborhood form
+    setupFormAjax('neighborhoodForm', 'searchBtn2', (form) => {
+        const searchv = form.querySelector('[name="searchv"]').value;
+        form.querySelector('[name="genericvalue"]').value = '%' + searchv + '%';
+    });
+
+    // Main street form
+    setupFormAjax('mainStreetForm', 'searchBtn3', (form) => {
+        const searchv = form.querySelector('[name="searchv"]').value;
+        form.querySelector('[name="genericvalue"]').value = '%' + searchv + '%';
+    });
+
+    // Sub street form
+    setupFormAjax('subStreetForm', 'searchBtn4', (form) => {
+        const searchv = form.querySelector('[name="searchv"]').value;
+        form.querySelector('[name="genericvalue"]').value = '%' + searchv + '%';
+    });
+
+    // Coordinates form with SQL generation
+    setupFormAjax('coordinatesForm', 'searchBtn5', (form) => {
+        const longitude = form.querySelector('[name="Longitude"]').value;
+        const latitude = form.querySelector('[name="Latitude"]').value;
+        const sql = ` where Longitude ='${longitude}' and Latitude='${latitude}'`;
+        form.querySelector('[name="genericsql"]').value = sql;
+    });
+
+    /**
+     * Setup AJAX form submission
+     */
+    function setupFormAjax(formId, buttonId, beforeSubmit = null) {
+        const form = document.getElementById(formId);
+        const button = document.getElementById(buttonId);
+
+        if (!form || !button) return;
+
+        form.addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            // Run beforeSubmit callback if provided
+            if (beforeSubmit) {
+                beforeSubmit(this);
+            }
+
+            const formData = new FormData(this);
+            formData.append('ajax_submit', '1');
+
+            // Show loading state
+            button.disabled = true;
+            button.innerHTML = '<i class="bi bi-hourglass-split me-2"></i> جاري البحث...';
+
+            // Submit via AJAX
+            $.ajax({
+                url: window.location.pathname.split('/').pop(),
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                dataType: 'json',
+                success: function(response) {
+                    if (response.success && response.redirect_url) {
+                        window.location.href = response.redirect_url;
+                    } else {
+                        alert(response.error || 'حدث خطأ أثناء البحث');
+                        button.disabled = false;
+                        button.innerHTML = '<i class="bi bi-search me-2"></i> ابحـث';
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error('AJAX Error:', error);
+                    alert('حدث خطأ أثناء البحث. الرجاء المحاولة مرة أخرى.');
+                    button.disabled = false;
+                    button.innerHTML = '<i class="bi bi-search me-2"></i> ابحـث';
+                }
+            });
+
+            return false;
+        });
+    }
+
+    // Cookie functions
+    function setCookie(name, value, days) {
+        const expires = new Date();
+        expires.setTime(expires.getTime() + days * 24 * 60 * 60 * 1000);
+        document.cookie = name + '=' + value + ';expires=' + expires.toUTCString() + ';path=/';
+    }
+
+    function getCookie(name) {
+        const nameEQ = name + '=';
+        const ca = document.cookie.split(';');
+        for (let i = 0; i < ca.length; i++) {
+            let c = ca[i];
+            while (c.charAt(0) === ' ') c = c.substring(1, c.length);
+            if (c.indexOf(nameEQ) === 0) return c.substring(nameEQ.length, c.length);
+        }
+        return null;
+    }
+});
+</script>
+
+<?php
+} // Close if (!$is_ajax_request)
+?>

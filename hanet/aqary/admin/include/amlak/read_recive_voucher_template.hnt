@@ -1,0 +1,380 @@
+<?php
+include_once "../../../nocash.hnt";
+include_once "../../../report_header.hnt";
+
+// Define application base path for URL generation
+if (!defined('APP_BASE_PATH')) {
+    define('APP_BASE_PATH', '/aqary');
+}
+
+require_once '../arabicTools.class.hnt';
+include_once "arabic_num.class.hnt";
+require '../uCal.class.hnt';
+require "../../../hjerymelady.ip";
+$dcal = new uCal;
+mysql_query("ALTER TABLE amlakowner ADD owner_vat_number varchar(50) NOT NULL ", $link);
+mysql_query("ALTER TABLE amlak ADD owner_vat_number varchar(50) NOT NULL ", $link);
+
+// Initialize variables
+$sanadid = isset($_REQUEST['sanadid']) ? intval($_REQUEST['sanadid']) : 0;
+$idsanad = isset($_REQUEST['idsanad']) ? intval($_REQUEST['idsanad']) : 0;
+$tempalte_name = isset($_REQUEST['tempalte_name']) ? $_REQUEST['tempalte_name'] : '';
+$payments = array();
+$rentValue = 0;
+$rowegar = array('vat_type' => 0);
+$rowk = array('water' => 0, 'sa3ee' => 0, 'services' => 0, 'kastvalue' => 0, 'dof3at' => 0);
+$commesion_vat = 0;
+$depositeamount_vat = 0;
+
+$sql = "select * from sanad where idsanad='" . intval($idsanad) . "' ";
+if ($sanadid) {
+    $sql = "select * from sanadsarf where sanadid='" . intval($sanadid) . "' ";
+}
+if ($voucer_type == "free") {
+    if ($paymentvou) {
+        $img = "payment.jpg";
+        $table = "payment_voucher";
+    } else {
+        $img = "recive.jpg";
+        $table = "recive_voucher";
+    }
+
+    $sql = "select * from $table where id='" . $idsanad . "' limit 1 ";
+}
+
+$row = mysql_fetch_array(mysql_query($sql, $link));
+//print_r($row);
+if ($sanadid) {
+    $paymentvou = 1;
+    $row['idsanad'] = $row['sanadid'];
+    $row['mostagername'] = $row['mostafeed'];
+    $row['depositeamount'] = $row['amount'];
+    $row['recivername'] = $row['mowazaf'];
+    $row['mybyan'] = $row['bayan'];
+    $row['sanadrakam'] = $row['sanadid'];
+    $row['idaqar'] = $row['aqarid'];
+    $row['sanaddate'] = $row['sanadate'];
+    $row['cheqnumber'] = $row['checkrakam'];
+    $row['cheqon'] = $row['checkbank'];
+
+}
+
+if (isset($row['kastid']) && $row['kastid']) {
+	if($tempalte_name=='_vat_invoice' || $tempalte_name=='_simple_vat_invoice'){
+		$sql = "SELECT idaqar
+				FROM amlakdetails
+				WHERE idsubaqar = (
+				SELECT idsubaqar
+				FROM aksat
+				WHERE kastid = '".$row['kastid']."' )";
+		$idaqar =  mysql_query($sql, $link);
+		$idaqar = mysql_fetch_array($idaqar);
+		$idaqar = $idaqar['idaqar'];
+		$sql = "select * from amlak where idaqar ='".$idaqar."' ";
+		$rsaqar = mysql_query($sql, $link);
+		$rowaqar =  mysql_fetch_array($rsaqar);
+		$sql = "select * from sanad where kastid='{$row['kastid']}' order by  idsanad  ";
+		$rs = mysql_query($sql, $link);
+		$payments = array();
+		$j=0;
+		while($rw = mysql_fetch_array($rs)){
+			$payments[$j]['id'] = $rw['idsanad'];
+			$payments[$j]['amount'] = $rw['depositeamount'];
+			$payments[$j]['bayan'] = $rw['mybyan'];
+			$j++;
+		}
+	}
+}
+
+
+if ($hnt_dll || $hnt_supper_dll == 5) {
+    $sanaddate = date("Y-m-d", isset($row['sanaddate']) ? intval($row['sanaddate']) : 0);
+} else {
+    $dateo = $dcal->g2u(date("d", $row['sanaddate']), date("m", $row['sanaddate']), date("Y", $row['sanaddate']));
+    $sanaddate = $dateo['year'] . "-" . $dateo['month'] . "-" . $dateo['day'];
+}
+
+if ($voucer_type == "free") {
+
+    $row['idsanad'] = $row['id'];
+    $row['depositeamount'] = floatval($row['ryial'] + $row['vat']);
+    $row['mybyan'] = $row['dueto'];
+    $row['sanadrakam'] = $row['id'];
+    $row['idaqar'] = 0;
+    $sanaddate = $row['sanaddate'];
+    $row['cheqnumber'] = $row['checknumber'];
+    $row['cheqon'] = $row['bankname'];
+    $row['recivername'] = $row['accountant'];
+    $row['mostagername'] = $row['receivedfrom'];
+    $row['payment_type'] = $row['chekorcash'];
+}
+
+if ($voucer_type == "free2" && !$row['kastid']) {
+    $mostagervatnumber = $row['mostagervatnumber'];
+    $row['vat'] = "";
+    $row['commesion_vat'] = "";
+    $sanaddate = $row['period'];
+	$rowaqar['ownername'] = $row['suppliername'];
+	$rowaqar['owner_vat_number'] = $row['suppliervatnumber'];
+}
+
+$cheqdate1 = isset($row['cheqdate1']) ? $row['cheqdate1'] : '';
+
+if ($paymentvou) {
+    $table = "payment_voucher";
+} else {
+    $table = "recive_voucher";
+}
+
+$result = mysql_query("select * from global ", $link);
+while ($gl = mysql_fetch_array($result)) {
+    $GLOBALS[$gl['variblename']]=$gl['valuribalevalue'];
+}
+$row['mybyan'] = rtl_date($row['mybyan']);
+
+$byan_arr = explode("\n", wordwrap($row['mybyan'], 100));
+for ($i=0; $i <10;$i++) {
+	$repl["{_بيان_السند_$i}"] = '';
+	$repl["{كود_القسط_".($i+1)."}"] = '';
+	$repl["{_المبلغ_$i}"] ='';
+	$repl["{_المبلغ_{$i}_}"] ='';
+}
+
+if (isset($row['kastid']) && $row['kastid']) {
+	if($tempalte_name=='_vat_invoice'  || $tempalte_name=='_simple_vat_invoice'){
+		$i=0;
+		for($j=0;$j<count($payments);$j++){
+			($j==0)?$row['depositeamount']=0:'';
+			$byan_arr = explode("\n", wordwrap($payments[$j]['bayan'], 100));
+			$newCount = $i;
+			$repl["{_المبلغ_$i}"] = $payments[$j]['amount'];
+			$repl["{_المبلغ_{$i}_}"] = $payments[$j]['amount'];
+			$repl["{كود_القسط_$i}"] = $payments[$j]['id'];
+			for (; $i <count($byan_arr) + $newCount ; $i++) {
+				$repl["{_بيان_السند_$i}"] = $byan_arr[$i-$newCount];
+				$repl["{كود_القسط_".($i+1)."}"] = '';
+			}
+			$row['depositeamount'] += $payments[$j]['amount'];
+			$row['idsanad'] = $repl["{كود_القسط_0}"];
+		}
+	}
+
+
+
+}
+else{
+	for ($i = 0; $i < count($byan_arr); $i++) {
+		$repl["{_بيان_السند_$i}"] = $byan_arr[$i];
+		$repl["{كود_القسط_$i}"] = '';
+	}
+	$repl["{كود_القسط_0}"] = $row['idsanad'];
+    $row['commesion_vat'] = (isset($row['commesion_vat']) ? floatval($row['commesion_vat']) : 0);
+    $row['depositeamount_vat'] = (isset($row['depositeamount_vat']) ? floatval($row['depositeamount_vat']) : 0);
+	$repl["{_المبلغ_0}"] =   number_format(floatval(floatval($row['depositeamount']) - floatval($row['vat']) - floatval($row['commesion_vat']) - floatval($row['depositeamount_vat'])), 2);
+	$repl["{_المبلغ_0_}"] =   number_format(floatval(floatval($row['depositeamount']) ), 2);
+}
+
+
+
+if (isset($row['mostagerid']) && $row['mostagerid']) {
+    $rsmostager = mysql_query("select * from mostagereen where mostagerid ='" . $row['mostagerid'] . "'", $link);
+    $rowmostager = mysql_fetch_array($rsmostager);
+    $mostagervatnumber = $rowmostager['mostagervatnumber'];
+}
+
+
+
+// Initialize payment type variables
+$iscash = "";
+$ischecked = "";
+$isotherway = "";
+
+if (!$row['cheqnumber']) {
+    $iscash = " <span style='color:red'>&#x221A;</span> ";
+}
+if ($row['cheqnumber']) {
+    $ischecked = " <span style='color:red'>&#x221A;</span> ";
+}
+
+if ($row['payment_type'] == 3) {
+    $iscash = "";
+    $ischecked = "";
+    $isotherway = " <span style='color:red'>&#x221A;</span> ";
+}
+
+// Initialize variables
+$rowaqar = array('ownername' => '', 'owner_vat_number' => '', 'owneraddress' => '');
+$rowmostager = array('mostageraddress' => '');
+
+if (isset($row['kastid']) && $row['kastid']) {
+
+		$kastid = $row['kastid'];
+		$sql = "select * from amlakdetails where idsubaqar={$row['idsubaqar']} ";
+		$result = mysql_query($sql, $link);
+		$rowx = mysql_fetch_array($result);
+		$sql = "select * from egar where rakam3akdid='" . $rowx['rakam3akdid'] . "' ";
+		$result = mysql_query($sql, $link);
+		$rowegar = mysql_fetch_array($result);
+
+		// Get property owner details
+		if (isset($rowx['idaqar'])) {
+			$sql = "select * from amlak where idaqar ='" . intval($rowx['idaqar']) . "' ";
+			$rsaqar = mysql_query($sql, $link);
+			$rowaqar_temp = mysql_fetch_array($rsaqar);
+			if ($rowaqar_temp) {
+				$rowaqar = $rowaqar_temp;
+			}
+		}
+		$sql = "select *  from aksat where kastid='" . $kastid . "' ";
+		$rowk = mysql_fetch_array(mysql_query($sql, $link));
+		$rentValue = $rowk['kastvalue'] - $rowk['water']- $rowk['sa3ee']- $rowk['services'];
+		$commesion_vat = 0;
+		$depositeamount_vat = 0;
+		if ($rowegar["vat_type"] == 1) {
+			$commesion_vat = number_format(($rowk['sa3ee'] * 0.15), 2, '.', '');
+		}
+		if ($rowegar["vat_type"] == 2 ) {
+			$commesion_vat = number_format(($rowk['sa3ee'] * 0.15), 2, '.', '');
+			$depositeamount_vat = number_format(($rentValue * 0.15), 2, '.', '');
+		}
+		$stalemtDataTable = 'table';
+
+		if(intval($row['sanaddate']) < intval(file_get_contents('update_2022'))){
+			$stalemtDataTable = 'none';
+		}
+
+
+}else{
+	$stalemtDataTable = 'none';
+}
+
+$row['period'] = isset($row['period']) ? $row['period'] : 0;
+$row['mostagerid'] = isset($row['mostagerid']) ? $row['mostagerid'] : 0;
+$mostagervatnumber = isset($mostagervatnumber) ? $mostagervatnumber : '';
+$est7kak = explode("-", " " . rtl_date($row['period']));
+$repl['{العنوان}'] = $bayanaddress;
+$repl['{تاريخ_الإستحقاق}'] = rtl_date($est7kak[0]);
+$repl['{حساب_العميل}'] = $row['mostagerid'];
+$repl['{رقم_العميل_الضريبي}'] = $mostagervatnumber;
+$repl['{كود_القسط}'] = $row['idsanad'];
+$repl['{_الرقم_الضريبي_}'] = $vat_number;
+$repl['{_اجمالي_المبلغ_}'] = number_format(floatval($row['depositeamount']), 2);
+$repl['{_ضريبة_القيمة_المضافة_}'] = number_format((isset($row['vat']) ? floatval($row['vat']) : 0) + (isset($row['commesion_vat']) ? floatval($row['commesion_vat']) : 0) + (isset($row['depositeamount_vat']) ? floatval($row['depositeamount_vat']) : 0), 2);
+$repl['{_العملة_}'] = " " . $myomla . " ";
+$repl['{_المبلغ_}'] = number_format(floatval($row['depositeamount']), 2);
+if($tempalte_name=='_vat_invoice'  || $tempalte_name=='_simple_vat_invoice'){
+	$vat_amount = (isset($row['vat']) ? floatval($row['vat']) : 0);
+	$commesion_vat_amount = (isset($row['commesion_vat']) ? floatval($row['commesion_vat']) : 0);
+	$depositeamount_vat_amount = (isset($row['depositeamount_vat']) ? floatval($row['depositeamount_vat']) : 0);
+	$repl['{_المبلغ_}'] = number_format(floatval($row['depositeamount']) - $vat_amount - $commesion_vat_amount - $depositeamount_vat_amount, 2);
+
+}
+
+if($tempalte_name=='_simple_vat_invoice'){
+	$repl["{_المبلغ_0}"] =  number_format(floatval($repl["{_المبلغ_0}"]) -  (float) str_replace(',', '', $repl["{_ضريبة_القيمة_المضافة_}"]));
+	if(count($payments) > 1){
+		echo"
+		<script>
+		window.location.replace(window.location.href.replace('_simple_vat','_vat'));
+		</script>
+		";
+	}
+}
+
+
+$repl['{_اجمالي_الفاتورة_}'] = number_format(floatval(floatval($row['depositeamount']) ), 2);
+$repl['{_رقم_السند_}'] = $row['idsanad'];
+$repl['{_التاريخ_}'] = $sanaddate;
+$repl['{اسم_المستلم}'] = $row['mostagername'];
+$arabic_num = new Arabic_num();
+$repl['{المبلغ_حروف}'] = $arabic_num->numtostr($row['depositeamount']);
+$repl['{_هل_المبلغ_نقدا_}'] = $iscash;
+$repl['{_هل_شيك_}'] = $ischecked;
+$repl['{_رقم_الشيك_}'] = $row['cheqnumber'];
+$repl['{_اسم_البنك_}'] = $row['cheqon'];
+$repl['{_تاريخ_الشيك_}'] = $cheqdate1;
+$repl['{_بيان_السند_}'] = $row['mybyan'];
+$repl['{_الحسابات_}'] = $row['recivername'];//$row['accountant'];
+$repl['{_ختم_الباركود_}'] = "";
+$repl['اسم_المحاسب'] = $row['recivername'];
+$repl['{_ملحوظات_}'] = $row['notes'];
+$repl['{_هل_طريقة_اخرى_}'] = $isotherway;
+$repl['{اسم_البائع}'] = $rowaqar['ownername'];
+$repl['{الرقم_الضريبي_للبائع}'] =  $rowaqar['owner_vat_number'];
+$repl['{عنوان_البائع}'] = $rowaqar['owneraddress'];
+$repl['{عنوان_العميل}'] = $rowmostager['mostageraddress'];
+$repl['{rentValue}'] =  number_format($rentValue, 2, '.', '');
+$repl['{rentVat}'] = ($rowegar["vat_type"] == 2)?number_format($rentValue * 0.15, 2, '.', ''):'0.00';
+$repl['{water}'] = number_format($rowk['water'], 2, '.', '');
+$repl['{comision}'] = number_format($rowk['sa3ee'], 2, '.', '');
+$repl['{comisionVat}'] = ($rowegar["vat_type"] > 0)?number_format($rowk['sa3ee'] * 0.15, 2, '.', ''):'0.00';
+$repl['{services}'] = number_format($rowk['services'], 2, '.', '');
+$repl['{requiredamound}'] = number_format(($rowk['kastvalue']+ $commesion_vat + $depositeamount_vat ), 2, '.', '');
+$repl['{paid}'] = number_format($rowk['dof3at'], 2, '.', '');
+$repl['{remaining}'] = number_format(($rowk['kastvalue']+ $commesion_vat + $depositeamount_vat - $rowk['dof3at']), 2, '.', '');;
+
+if(isset($_REQUEST['invoiceonly']) && $_REQUEST['invoiceonly']==1){
+$repl['{remaining}']=$repl['{paid}'];
+$repl['{paid}'] =0;
+}
+
+$repl['{stalemtDataTable}'] = $stalemtDataTable;
+if ((isset($_REQUEST['sanadid']) && $_REQUEST['sanadid']) || $paymentvou) {
+    $html = file_get_contents("../../word/paymentvoucher.tpl");
+} else {
+    $html = file_get_contents("../../word/recivevoucher{$tempalte_name}.tpl");
+}
+$isbarcode = strpos($html, '{_ختم_الباركود_}');
+
+$html = str_replace(array_keys($repl), array_values($repl), $html);
+echo $html;
+
+$forceprintfooter = 1;
+require("../../../reportfooter.hnt");
+
+if (isset($_REQUEST['idsanad']) && $_REQUEST['idsanad'] && $isbarcode) {
+    $qr_url = qr_code_url('vouchers.receive', "$idsanad.png");
+    echo "<img src='$qr_url?rnad=" . rand() . rand() . time() . "' onerror=\"this.style.display='none';\" class='qbarcodepng'>";
+}
+
+if (isset($_REQUEST['sanadid']) && $_REQUEST['sanadid'] && $isbarcode) {
+    $qr_url = qr_code_url('vouchers.payment', "$sanadid.png");
+    echo "<img src='$qr_url?rnad=" . rand() . rand() . time() . "'  onerror=\"this.style.display='none';\"  class='qbarcodepng'>";
+}
+
+$invoice_vat_number = $repl['{الرقم_الضريبي_للبائع}'];
+if(strlen($invoice_vat_number) < 5){
+    $invoice_vat_number = $repl['{_الرقم_الضريبي_}'];
+}
+?>
+
+<div id="qrcode"></div>
+<script src="/aqary/js/qrcode.min.js"></script>
+<script src="/aqary/js/sauditax.js?id=123"></script>
+
+<script>
+
+const saudiCode = GenerateSaudiTaxCode(
+"<?=$repl['{اسم_البائع}'];?>"
+,
+"<?=$invoice_vat_number;?>"
+,
+"<?=str_replace(array('&rlm;','&lrm;'),'',$repl['{_التاريخ_}']);?>:<?=date('h:i:s',$row['sanaddate'])?>"
+,
+"<?=$repl['{_اجمالي_المبلغ_}']?>"
+,
+"<?=$repl['{_ضريبة_القيمة_المضافة_}'];?>"
+)
+
+var qrcode = new QRCode("qrcode", {
+    text: saudiCode,
+    width: 90,
+    height: 90,
+    colorDark : "#10286e",
+    colorLight : "#ffffff",
+    correctLevel : QRCode.CorrectLevel.L
+});
+</script>
+
+
+

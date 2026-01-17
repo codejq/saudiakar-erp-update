@@ -1,0 +1,111 @@
+<?php
+/**
+ * Test SMTP with Alternative Ports
+ * Tries different port/encryption combinations
+ */
+
+require_once('../../PHPMailer-7.0.1/src/PHPMailer.php');
+require_once('../../PHPMailer-7.0.1/src/SMTP.php');
+require_once('../../PHPMailer-7.0.1/src/Exception.php');
+
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\SMTP;
+
+// Load mail settings
+$mailsettings = @file_get_contents('../../mailsettings.cfg');
+
+if (empty($mailsettings)) {
+    die("<p style='color: red;'><strong>Error:</strong> Could not load mailsettings.cfg</p>");
+}
+
+$mailsettings = base64_decode($mailsettings);
+$mailsettings = str_replace(["\r", "\n"], "", $mailsettings);
+$mailsettings = explode("#", $mailsettings);
+
+$mailhost = $mailsettings[3];
+$mailusername = $mailsettings[1];
+$mailpassword = $mailsettings[2];
+
+echo "<h1>Testing Alternative SMTP Configurations</h1>";
+echo "<p>Server: <strong>" . htmlspecialchars($mailhost) . "</strong></p>";
+
+// Test configurations
+$configs = [
+    ['port' => 587, 'encryption' => PHPMailer::ENCRYPTION_STARTTLS, 'name' => 'Port 587 with STARTTLS'],
+    ['port' => 465, 'encryption' => PHPMailer::ENCRYPTION_SMTPS, 'name' => 'Port 465 with SSL'],
+    ['port' => 2525, 'encryption' => PHPMailer::ENCRYPTION_STARTTLS, 'name' => 'Port 2525 with STARTTLS'],
+    ['port' => 25, 'encryption' => '', 'name' => 'Port 25 (no encryption)'],
+];
+
+echo "<table border='1' cellpadding='10' style='border-collapse: collapse; width: 100%;'>";
+echo "<tr><th>Configuration</th><th>Status</th><th>Details</th></tr>";
+
+foreach ($configs as $config) {
+    echo "<tr>";
+    echo "<td><strong>" . htmlspecialchars($config['name']) . "</strong></td>";
+
+    try {
+        $mail = new PHPMailer(false); // Don't throw exceptions immediately
+        $mail->isSMTP();
+        $mail->SMTPDebug = 0; // No debug output
+        $mail->Host = $mailhost;
+        $mail->Port = $config['port'];
+        $mail->SMTPAuth = true;
+        $mail->Username = $mailusername;
+        $mail->Password = $mailpassword;
+        $mail->Timeout = 10;
+
+        if (!empty($config['encryption'])) {
+            $mail->SMTPSecure = $config['encryption'];
+        }
+
+        $mail->SMTPOptions = array(
+            'ssl' => array(
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+                'allow_self_signed' => true
+            ),
+            'tls' => array(
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+                'allow_self_signed' => true
+            ),
+            'socket' => array(
+                'bindto' => '0.0.0.0:0' // Force IPv4 connection (fixes IPv6 network issues)
+            )
+        );
+
+        $start = microtime(true);
+        $result = $mail->smtpConnect();
+        $time = round((microtime(true) - $start) * 1000, 2);
+
+        if ($result) {
+            $mail->smtpClose();
+            echo "<td style='color: green; background: #e8f5e9;'><strong>✓ SUCCESS</strong></td>";
+            echo "<td>Connected in {$time}ms<br><small>This configuration works!</small></td>";
+        } else {
+            echo "<td style='color: orange; background: #fff3e0;'><strong>⚠ PARTIAL</strong></td>";
+            echo "<td>Connected but authentication may have issues<br>Time: {$time}ms</td>";
+        }
+
+    } catch (Exception $e) {
+        echo "<td style='color: red; background: #ffebee;'><strong>✗ FAILED</strong></td>";
+        echo "<td><small>" . htmlspecialchars($e->getMessage()) . "</small></td>";
+    }
+
+    echo "</tr>";
+}
+
+echo "</table>";
+
+echo "<h2>What to do next:</h2>";
+echo "<ul>";
+echo "<li>If <strong>Port 465 (SSL) works</strong>: Update your mailsettings.cfg to use port 465 with SSL encryption</li>";
+echo "<li>If <strong>Port 2525 works</strong>: Update your mailsettings.cfg to use port 2525</li>";
+echo "<li>If <strong>ALL fail</strong>: This is a firewall/network issue blocking ALL SMTP ports</li>";
+echo "<li>If <strong>Port 587 works here but not in test_smtp.hnt</strong>: The issue is with authentication credentials</li>";
+echo "</ul>";
+
+echo "<hr>";
+echo "<p><a href='test_smtp.hnt'>Back to SMTP Test</a> | <a href='test_port.hnt'>Port Connectivity Test</a></p>";
+?>

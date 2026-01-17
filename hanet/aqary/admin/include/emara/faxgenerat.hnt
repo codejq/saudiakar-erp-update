@@ -1,0 +1,501 @@
+<?php
+/**
+ * Building Monthly Report Generation
+ * Generate reports for buildings within a date range
+ */
+
+$sc_title = "تجهيز تقرير شهري";
+$sc_id = "22";
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+    require "../arabicTools.class.hnt";
+} else {
+    // For AJAX requests, include authentication
+    include_once "../../../reqloginajax.hnt";
+    require "../arabicTools.class.hnt";
+}
+
+
+// Handle AJAX form submission
+if ($is_ajax_request && isset($_POST['st_date'])) {
+    $st_date = $_POST['st_date'];
+    $st_month = $_POST['st_month'];
+    $st_year = $_POST['st_year'];
+    $en_date = $_POST['en_date'];
+    $en_month = $_POST['en_month'];
+    $en_year = $_POST['en_year'];
+
+    $redirect_url = 'updatemara.hnt?faxgenerat=1' .
+                   '&st_date=' . urlencode($st_date) .
+                   '&st_month=' . urlencode($st_month) .
+                   '&st_year=' . urlencode($st_year) .
+                   '&en_date=' . urlencode($en_date) .
+                   '&en_month=' . urlencode($en_month) .
+                   '&en_year=' . urlencode($en_year);
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'جاري إعداد التقرير...',
+        'redirect_url' => $redirect_url
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
+}
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request) {
+    // Get today and add one month to it for default dates
+    if ($hnt_dll || $hnt_supper_dll == 5) {
+        $tod = explode("-", date("d-m-Y", (time() - 86400)));
+        $tod2 = explode("-", date("d-m-Y", (time() + 2592000)));
+    } else {
+        $tod = explode("-", arabicDate('hj:d-m-Y', (time() - 86400)));
+        $tod2 = explode("-", ArabicTools::arabicDate('hj:d-m-Y', (time() + 2592000)));
+    }
+?>
+
+<style>
+.search-dashboard {
+    background: #f8f9fa;
+    min-height: 100vh;
+    padding: 2rem 0;
+}
+
+.page-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.report-card {
+    background: white;
+    border: none;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    overflow: hidden;
+    transition: all 0.3s ease;
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.report-card:hover {
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.15);
+}
+
+.report-card .card-header {
+    padding: 1.5rem;
+    text-align: center;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-bottom: 3px solid #f59e0b;
+}
+
+.report-card .card-header i {
+    font-size: 3.5rem;
+    margin-bottom: 0.5rem;
+    color: #f59e0b;
+}
+
+.report-card .card-title {
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: #1e293b;
+    margin: 0.5rem 0 0 0;
+}
+
+.report-card .card-description {
+    font-size: 0.95rem;
+    color: #64748b;
+    margin: 0.25rem 0 0 0;
+}
+
+.report-card .card-body {
+    padding: 2rem;
+}
+
+.date-section {
+    background: #f8f9fa;
+    border: 2px solid #e9ecef;
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.date-section h4 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #495057;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.date-section.start-date h4 {
+    color: #10b981;
+}
+
+.date-section.end-date h4 {
+    color: #f59e0b;
+}
+
+.date-inputs {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.date-input-group {
+    flex: 1;
+    min-width: 150px;
+}
+
+.date-input-group label {
+    display: block;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #6c757d;
+    margin-bottom: 0.5rem;
+}
+
+.date-input-group select {
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid #ced4da;
+    border-radius: 6px;
+    font-size: 1rem;
+    transition: all 0.2s;
+    background: white;
+}
+
+.date-input-group select:focus {
+    border-color: #f59e0b;
+    outline: none;
+    box-shadow: 0 0 0 0.2rem rgba(245, 158, 11, 0.25);
+}
+
+.info-box {
+    background: #fef3c7;
+    border-left: 4px solid #f59e0b;
+    padding: 1rem;
+    border-radius: 6px;
+    margin-top: 2rem;
+}
+
+.info-box h5 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #b45309;
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.info-box ul {
+    margin: 0;
+    padding-right: 1.5rem;
+    color: #92400e;
+}
+
+.info-box li {
+    margin-bottom: 0.25rem;
+}
+
+@media (max-width: 768px) {
+    .report-card {
+        margin: 0 1rem;
+    }
+
+    .report-card .card-body {
+        padding: 1.5rem;
+    }
+
+    .date-inputs {
+        flex-direction: column;
+    }
+
+    .date-input-group {
+        min-width: 100%;
+    }
+}
+</style>
+
+<div class="search-dashboard" dir="rtl">
+    <div class="container-fluid">
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>
+                <i class="bi bi-file-earmark-text"></i>
+                <?= $sc_title ?>
+            </h1>
+            <p class="mb-0 mt-2" style="opacity: 0.95; font-size: 0.95rem;">
+                إعداد تقارير العمائر خلال فترة زمنية محددة
+            </p>
+        </div>
+
+        <!-- Report Card -->
+        <div class="report-card">
+            <div class="card-header">
+                <i class="bi bi-calendar-range"></i>
+                <h3 class="card-title">تحديد الفترة الزمنية</h3>
+                <p class="card-description">اختر التاريخ من وإلى لإعداد التقرير</p>
+            </div>
+            <div class="card-body">
+                <form id="reportForm" method="get" action="updatemara.hnt">
+                    <input type="hidden" name="faxgenerat" value="1">
+
+                    <!-- Start Date Section -->
+                    <div class="date-section start-date">
+                        <h4>
+                            <i class="bi bi-calendar-check"></i>
+                            بدء من تاريخ
+                        </h4>
+                        <div class="date-inputs">
+                            <div class="date-input-group">
+                                <label>اليوم</label>
+                                <select name="st_date" id="st_date" required>
+                                    <option value="<?= $tod[0] ?>"><?= $tod[0] ?></option>
+                                    <?php for ($i = 1; $i <= 30; $i++): ?>
+                                        <option value="<?= $i ?>"><?= $i ?></option>
+                                    <?php endfor; ?>
+                                    <?php if ($hnt_dll || $hnt_supper_dll == 5): ?>
+                                        <option value="31">31</option>
+                                    <?php endif; ?>
+                                </select>
+                            </div>
+                            <div class="date-input-group">
+                                <label>الشهر</label>
+                                <select name="st_month" id="st_month" required>
+                                    <option value="<?= $tod[1] ?>"><?= $tod[1] ?></option>
+                                    <?php for ($i = 1; $i <= 12; $i++): ?>
+                                        <option value="<?= $i ?>"><?= $i ?></option>
+                                    <?php endfor; ?>
+                                </select>
+                            </div>
+                            <div class="date-input-group">
+                                <label>السنة</label>
+                                <select name="st_year" id="st_year" required>
+                                    <option value="<?= $tod[2] ?>"><?= $tod[2] ?></option>
+                                    <?php if ($hnt_dll || $hnt_supper_dll == 5): ?>
+                                        <?php for ($y = 2004; $y <= 2030; $y++): ?>
+                                            <option value="<?= $y ?>"><?= $y ?></option>
+                                        <?php endfor; ?>
+                                    <?php else: ?>
+                                        <?php for ($y = 1420; $y <= 1450; $y++): ?>
+                                            <option value="<?= $y ?>"><?= $y ?></option>
+                                        <?php endfor; ?>
+                                    <?php endif; ?>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- End Date Section -->
+                    <div class="date-section end-date">
+                        <h4>
+                            <i class="bi bi-calendar-x"></i>
+                            وانتهاء إلى تاريخ
+                        </h4>
+                        <div class="date-inputs">
+                            <div class="date-input-group">
+                                <label>اليوم</label>
+                                <select name="en_date" id="en_date" required>
+                                    <option value="<?= $tod2[0] ?>"><?= $tod2[0] ?></option>
+                                    <?php for ($i = 1; $i <= 30; $i++): ?>
+                                        <option value="<?= $i ?>"><?= $i ?></option>
+                                    <?php endfor; ?>
+                                    <?php if ($hnt_dll || $hnt_supper_dll == 5): ?>
+                                        <option value="31">31</option>
+                                    <?php endif; ?>
+                                </select>
+                            </div>
+                            <div class="date-input-group">
+                                <label>الشهر</label>
+                                <select name="en_month" id="en_month" required>
+                                    <option value="<?= $tod2[1] ?>"><?= $tod2[1] ?></option>
+                                    <?php for ($i = 1; $i <= 12; $i++): ?>
+                                        <option value="<?= $i ?>"><?= $i ?></option>
+                                    <?php endfor; ?>
+                                </select>
+                            </div>
+                            <div class="date-input-group">
+                                <label>السنة</label>
+                                <select name="en_year" id="en_year" required>
+                                    <option value="<?= $tod2[2] ?>"><?= $tod2[2] ?></option>
+                                    <?php if ($hnt_dll || $hnt_supper_dll == 5): ?>
+                                        <?php for ($y = 2004; $y <= 2030; $y++): ?>
+                                            <option value="<?= $y ?>"><?= $y ?></option>
+                                        <?php endfor; ?>
+                                    <?php else: ?>
+                                        <?php for ($y = 1420; $y <= 1450; $y++): ?>
+                                            <option value="<?= $y ?>"><?= $y ?></option>
+                                        <?php endfor; ?>
+                                    <?php endif; ?>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Submit Buttons -->
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-warning btn-lg text-white" id="generateButton">
+                            <i class="bi bi-file-earmark-check me-2"></i>
+                            نعم قم بإعداد التقرير
+                        </button>
+                        <button type="button" class="btn btn-outline-secondary" onclick="resetForm()">
+                            <i class="bi bi-arrow-counterclockwise me-2"></i>
+                            إعادة تعيين
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Information Box -->
+        <div class="info-box" style="max-width: 900px; margin: 2rem auto 0;">
+            <h5>
+                <i class="bi bi-lightbulb"></i>
+                معلومات التقرير
+            </h5>
+            <ul>
+                <li>حدد تاريخ البداية والنهاية للفترة المطلوبة</li>
+                <li>سيتم عرض جميع العمائر المسجلة خلال هذه الفترة</li>
+                <li>يمكنك طباعة التقرير أو تصديره حسب الحاجة</li>
+                <li>التقرير يشمل كافة التفاصيل والمعلومات المسجلة</li>
+                <li><?php echo ($hnt_dll || $hnt_supper_dll == 5) ? 'التواريخ بالتقويم الميلادي' : 'التواريخ بالتقويم الهجري'; ?></li>
+            </ul>
+        </div>
+
+    </div>
+</div>
+
+<script>
+/**
+ * Building Monthly Report Generation - Modern JavaScript
+ */
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Building Report Generation initialized');
+
+    // Get form elements
+    const form = document.getElementById('reportForm');
+    const generateButton = document.getElementById('generateButton');
+
+    // Form validation and AJAX submission
+    form.addEventListener('submit', function(e) {
+        e.preventDefault();
+
+        // Get date values
+        const startDay = document.getElementById('st_date').value;
+        const startMonth = document.getElementById('st_month').value;
+        const startYear = document.getElementById('st_year').value;
+        const endDay = document.getElementById('en_date').value;
+        const endMonth = document.getElementById('en_month').value;
+        const endYear = document.getElementById('en_year').value;
+
+        // Validation
+        if (!startDay || !startMonth || !startYear || !endDay || !endMonth || !endYear) {
+            alert('الرجاء تحديد جميع حقول التاريخ');
+            return false;
+        }
+
+        // Basic date validation - check if end date is after start date
+        const startDate = new Date(startYear, startMonth - 1, startDay);
+        const endDate = new Date(endYear, endMonth - 1, endDay);
+
+        if (endDate < startDate) {
+            alert('تاريخ النهاية يجب أن يكون بعد تاريخ البداية');
+            return false;
+        }
+
+        // Get form data
+        const formData = new FormData(this);
+        formData.append('ajax_submit', '1');
+
+        // Show loading state
+        generateButton.disabled = true;
+        generateButton.innerHTML = '<i class="bi bi-hourglass-split me-2"></i> جاري إعداد التقرير...';
+
+        // Submit via AJAX
+        $.ajax({
+            url: window.location.pathname.split('/').pop(),
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            dataType: 'json',
+            success: function(response) {
+                if (response.success && response.redirect_url) {
+                    window.location.href = response.redirect_url;
+                } else {
+                    alert(response.error || 'حدث خطأ أثناء إعداد التقرير');
+                    generateButton.disabled = false;
+                    generateButton.innerHTML = '<i class="bi bi-file-earmark-check me-2"></i> نعم قم بإعداد التقرير';
+                }
+            },
+            error: function(xhr, status, error) {
+                console.error('AJAX Error:', error);
+                alert('حدث خطأ أثناء إعداد التقرير. الرجاء المحاولة مرة أخرى.');
+                generateButton.disabled = false;
+                generateButton.innerHTML = '<i class="bi bi-file-earmark-check me-2"></i> نعم قم بإعداد التقرير';
+            }
+        });
+
+        return false;
+    });
+
+    // Date select highlighting
+    const dateSelects = document.querySelectorAll('select');
+    dateSelects.forEach(select => {
+        select.addEventListener('change', function() {
+            this.style.borderColor = '#f59e0b';
+            setTimeout(() => {
+                this.style.borderColor = '#ced4da';
+            }, 500);
+        });
+    });
+
+    // Keyboard shortcut: Alt+G to generate report
+    document.addEventListener('keydown', function(e) {
+        if (e.altKey && e.key === 'g') {
+            e.preventDefault();
+            form.dispatchEvent(new Event('submit'));
+        }
+    });
+});
+
+/**
+ * Reset form to initial state
+ */
+function resetForm() {
+    const form = document.getElementById('reportForm');
+    const generateButton = document.getElementById('generateButton');
+
+    form.reset();
+    generateButton.disabled = false;
+    generateButton.innerHTML = '<i class="bi bi-file-earmark-check me-2"></i> نعم قم بإعداد التقرير';
+}
+</script>
+
+<?php
+} // Close if (!$is_ajax_request)
+require('../../../foter.hnt');
+?>

@@ -1,0 +1,557 @@
+<?php
+/**
+ * Land Search by Condition
+ * Search for lands by various condition criteria
+ */
+
+$sc_title = "عرض الاراضي حسب شروط معينة";
+$sc_id = "10";
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../nocash.hnt";
+    include_once "../../header.hnt";
+} else {
+    // For AJAX requests, include authentication
+    include_once "../../reqloginajax.hnt";
+}
+
+
+
+// Handle AJAX form submissions
+if ($is_ajax_request) {
+    $redirect_url = '';
+
+    // Different forms have different submission patterns
+    if (isset($_POST['genericsql'])) {
+        $redirect_url = 'updateard.hnt?genericsql=' . urlencode($_POST['genericsql']);
+    } elseif (isset($_POST['statusx'])) {
+        $redirect_url = 'updateard.hnt?statusx=' . urlencode($_POST['statusx']);
+    } elseif (isset($_POST['genericvalue']) && isset($_POST['genericfield'])) {
+        $redirect_url = 'updateard.hnt?genericvalue=' . urlencode($_POST['genericvalue']) .
+                       '&genericfield=' . urlencode($_POST['genericfield']) .
+                       '&genericsearch=1&genericoperation=' . urlencode($_POST['genericoperation']);
+    }
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'جاري تحميل النتائج...',
+        'redirect_url' => $redirect_url
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
+}
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.search-dashboard {
+    background: #f8f9fa;
+    min-height: 100vh;
+    padding: 2rem 0;
+}
+
+.page-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.search-options {
+    background: white;
+    border-radius: 8px;
+    padding: 1.5rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    margin-bottom: 2rem;
+}
+
+.option-button {
+    padding: 0.75rem 1rem;
+    border: 2px solid #e5e7eb;
+    border-radius: 8px;
+    background: white;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.option-button:hover {
+    border-color: #f59e0b;
+    background: #fef3c7;
+}
+
+.option-button input[type="radio"] {
+    width: 18px;
+    height: 18px;
+}
+
+.option-button.active {
+    border-color: #f59e0b;
+    background: #fef3c7;
+}
+
+.search-form {
+    display: none;
+    background: white;
+    border-radius: 8px;
+    padding: 2rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.search-form.active {
+    display: block;
+}
+
+@media (max-width: 768px) {
+    .option-button {
+        padding: 0.5rem 0.75rem;
+        font-size: 0.9rem;
+    }
+}
+</style>
+
+<div class="search-dashboard" dir="rtl">
+    <div class="container-fluid">
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>
+                <i class="bi bi-sliders"></i>
+                <?= $sc_title ?>
+            </h1>
+            <p class="mb-0 mt-2" style="opacity: 0.95; font-size: 0.95rem;">
+                البحث عن الأراضي حسب شروط وحالات مختلفة
+            </p>
+        </div>
+
+        <!-- Search Options -->
+        <div class="search-options">
+            <h5 class="mb-3">
+                <i class="bi bi-filter-circle text-warning me-2"></i>
+                اختر نوع البحث
+            </h5>
+            <div class="row g-2">
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-0">
+                        <input type="radio" name="search-type" value="0">
+                        <span>موقع ومساحة وسعر</span>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-1">
+                        <input type="radio" name="search-type" value="1">
+                        <span>بحث بالنوع</span>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-2">
+                        <input type="radio" name="search-type" value="2">
+                        <span>بحث بالمباع</span>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-3">
+                        <input type="radio" name="search-type" value="3">
+                        <span>بحث بالمحجوز</span>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-4">
+                        <input type="radio" name="search-type" value="4">
+                        <span>بحث بالمحذوفات</span>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-5">
+                        <input type="radio" name="search-type" value="5">
+                        <span>بحث بالوصف</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Form 0: Location, Area & Price -->
+        <div id="form-0" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-geo-alt text-warning me-2"></i>
+                بحث موقع ومساحة وسعر
+            </h4>
+            <form id="locationAreaPriceForm" action="updateard.hnt">
+                <input type="hidden" name="genericsql">
+
+                <!-- City Selection -->
+                <div class="mb-3">
+                    <label class="form-label">اسم المدينة:</label>
+                    <select class="form-select form-select-lg" name="site" onchange="window.location.href='searchbycondition.hnt?cityid='+this.options[this.selectedIndex].value.split('cityid=')[1].split('&')[0]+'&cityname='+this.options[this.selectedIndex].text">
+                        <option value='searchbycondition.hnt'>اختر اسم المدينة</option>
+                        <?php
+                        if($cityname) {
+                            echo "<option selected>$cityname</option>";
+                        }
+                        $sql = "select * from city order by binary cityname";
+                        $result = mysql_query($sql, $link);
+                        while($row = mysql_fetch_array($result)) {
+                            echo "<option value='searchbycondition.hnt?cityid=$row[0]&cityname=$row[1]'>$row[1]</option>";
+                        }
+                        ?>
+                    </select>
+                </div>
+
+                <!-- Plan Selection -->
+                <div class="mb-3">
+                    <label class="form-label">اسم المخطط:</label>
+                    <select class="form-select form-select-lg" name="mokhatatid">
+                        <option value=''>اختر اسم المخطط</option>
+                        <?php
+                        $sqlm = "select mokhatatid,mokhatatname from mokhatat where cityid='$cityid' order by binary mokhatatname";
+                        $resultm = mysql_query($sqlm, $link);
+                        while($row = mysql_fetch_array($resultm)) {
+                            echo "<option value=$row[0]>$row[1]</option>";
+                        }
+                        ?>
+                    </select>
+                </div>
+
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">الحي:</label>
+                        <input type="text" class="form-control form-control-lg" name="hay">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">الشارع:</label>
+                        <input type="text" class="form-control form-control-lg" name="share3">
+                    </div>
+                </div>
+
+                <div class="row g-3 mt-2">
+                    <div class="col-md-6">
+                        <label class="form-label">مساحة:</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" name="serchvms" onkeypress="return ValidateNumberKeyPress(this, event);" onkeyup="ValidateNumberKeyUp(this);" onblur="ValidateAndFormatNumber(this)">
+                            <span class="input-group-text">± %</span>
+                            <input type="text" class="form-control" name="nesbams" value="20" style="max-width: 70px;">
+                        </div>
+                        <small class="text-muted"><?= $lenghtunit ?>²</small>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">سعر:</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" name="serchvpr" onkeypress="return ValidateNumberKeyPress(this, event);" onkeyup="ValidateNumberKeyUp(this);" onblur="ValidateAndFormatNumber(this)">
+                            <span class="input-group-text">± %</span>
+                            <input type="text" class="form-control" name="nesbapr" value="20" style="max-width: 70px;">
+                        </div>
+                        <small class="text-muted"><?= $myomla ?></small>
+                    </div>
+                </div>
+
+                <div class="d-grid gap-2 mt-4">
+                    <button type="submit" class="btn btn-warning btn-lg" id="searchBtn0">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 1: By Type -->
+        <div id="form-1" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-tags text-warning me-2"></i>
+                بحث بالنوع
+            </h4>
+            <form id="typeForm">
+                <input type="hidden" name="genericfield" value="ardtype">
+                <input type="hidden" name="genericsearch" value="1">
+                <input type="hidden" name="genericoperation" value=" = ">
+                <input type="hidden" name="genericvalue" id="genericvalue1">
+
+                <div class="row g-2">
+                    <div class="col-md-6">
+                        <label class="option-button">
+                            <input type="radio" name="ardtype" value="2">
+                            <span>سكنية</span>
+                        </label>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="option-button">
+                            <input type="radio" name="ardtype" value="1">
+                            <span>استثمارية</span>
+                        </label>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="option-button">
+                            <input type="radio" name="ardtype" value="4">
+                            <span>خــام</span>
+                        </label>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="option-button">
+                            <input type="radio" name="ardtype" value="3">
+                            <span>تجارية</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="d-grid gap-2 mt-4">
+                    <button type="submit" class="btn btn-warning btn-lg" id="searchBtn1">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 2: Sold -->
+        <div id="form-2" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-check-circle text-success me-2"></i>
+                بحث المباع
+            </h4>
+            <form id="soldForm">
+                <input type="hidden" name="statusx" value="2">
+                <p class="alert alert-info">سيتم عرض جميع الأراضي المباعة</p>
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-success btn-lg" id="searchBtn2">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 3: Reserved -->
+        <div id="form-3" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-bookmark text-primary me-2"></i>
+                بحث المحجوز
+            </h4>
+            <form id="reservedForm">
+                <input type="hidden" name="statusx" value="1">
+                <p class="alert alert-info">سيتم عرض جميع الأراضي المحجوزة</p>
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-primary btn-lg" id="searchBtn3">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 4: Deleted -->
+        <div id="form-4" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-trash text-danger me-2"></i>
+                بحث المحذوف
+            </h4>
+            <form id="deletedForm">
+                <input type="hidden" name="statusx" value="3">
+                <p class="alert alert-warning">سيتم عرض جميع الأراضي المحذوفة</p>
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-danger btn-lg" id="searchBtn4">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 5: By Description -->
+        <div id="form-5" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-file-text text-warning me-2"></i>
+                بحث بالوصف
+            </h4>
+            <form id="descForm">
+                <input type="hidden" name="genericvalue" id="genericvalue5">
+                <input type="hidden" name="genericfield" value="note">
+                <input type="hidden" name="genericsearch" value="1">
+                <input type="hidden" name="genericoperation" value="like">
+
+                <div class="mb-3">
+                    <label class="form-label">الوصف:</label>
+                    <input type="text" class="form-control form-control-lg" name="searchv" placeholder="ابحث في وصف الأرض..." required>
+                    <small class="text-muted">سيتم البحث في جميع الأوصاف التي تحتوي على النص المدخل</small>
+                </div>
+
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-warning btn-lg" id="searchBtn5">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Land Search by Condition initialized');
+
+    const options = document.querySelectorAll('.option-button[id^="option-"]');
+    const forms = document.querySelectorAll('.search-form');
+
+    // Load saved search type
+    const savedType = getCookie('ardcond');
+    if (savedType) {
+        const optionId = savedType.replace('srch', '');
+        showForm(optionId);
+        const optionElement = document.getElementById(`option-${optionId}`);
+        if (optionElement) optionElement.querySelector('input').checked = true;
+    }
+
+    // Option selection
+    options.forEach(option => {
+        option.addEventListener('click', function() {
+            const value = this.querySelector('input[type="radio"]').value;
+            showForm(value);
+            setCookie('ardcond', `srch${value}`, 20);
+        });
+    });
+
+    function showForm(type) {
+        options.forEach(opt => opt.classList.remove('active'));
+        forms.forEach(form => form.classList.remove('active'));
+        const selectedOption = document.getElementById(`option-${type}`);
+        const selectedForm = document.getElementById(`form-${type}`);
+        if (selectedOption) selectedOption.classList.add('active');
+        if (selectedForm) selectedForm.classList.add('active');
+    }
+
+    // Form 0: Location Area Price
+    setupFormAjax('locationAreaPriceForm', 'searchBtn0', (form) => {
+        let sql = ' where 1 ';
+
+        // Area
+        const area = form.serchvms.value;
+        if (area) {
+            const areaVal = parseInt(area.replace(/,/gi, ''));
+            const areaPct = parseFloat(form.nesbams.value);
+            const areaMin = areaVal - (areaVal * areaPct / 100);
+            const areaMax = areaVal + (areaVal * areaPct / 100);
+            sql += ` and (mesaha >= ${areaMin} and mesaha <= ${areaMax})`;
+        }
+
+        // Price
+        const price = form.serchvpr.value;
+        if (price) {
+            const priceVal = parseInt(price.replace(/,/gi, ''));
+            const pricePct = parseFloat(form.nesbapr.value);
+            const priceMin = priceVal - (priceVal * pricePct / 100);
+            const priceMax = priceVal + (priceVal * pricePct / 100);
+            sql += ` and ((price >= ${priceMin} and price <= ${priceMax}) or (pricesom >= ${priceMin} and pricesom <= ${priceMax}))`;
+        }
+
+        // Location
+        if (form.share3.value) sql += ` and (share3 like '%${form.share3.value}%')`;
+        if (form.hay.value) sql += ` and (hay like '%${form.hay.value}%')`;
+        const mokId = form.mokhatatid.value;
+        if (mokId > 0) sql += ` and (mokhatatid = ${mokId})`;
+
+        form.genericsql.value = sql;
+    });
+
+    // Form 1: Type
+    setupFormAjax('typeForm', 'searchBtn1', (form) => {
+        const selected = form.querySelector('input[name="ardtype"]:checked');
+        if (!selected) {
+            alert('الرجاء اختيار النوع');
+            return false;
+        }
+        form.querySelector('#genericvalue1').value = selected.value;
+    });
+
+    // Form 2-4: Status forms (sold, reserved, deleted)
+    setupFormAjax('soldForm', 'searchBtn2');
+    setupFormAjax('reservedForm', 'searchBtn3');
+    setupFormAjax('deletedForm', 'searchBtn4');
+
+    // Form 5: Description
+    setupFormAjax('descForm', 'searchBtn5', (form) => {
+        form.querySelector('#genericvalue5').value = '%' + form.searchv.value + '%';
+    });
+
+    function setupFormAjax(formId, buttonId, beforeSubmit) {
+        const form = document.getElementById(formId);
+        const button = document.getElementById(buttonId);
+        if (!form || !button) return;
+
+        form.addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            if (beforeSubmit && beforeSubmit(this) === false) return;
+
+            const formData = new FormData(this);
+            formData.append('ajax_submit', '1');
+
+            button.disabled = true;
+            button.innerHTML = '<i class="bi bi-hourglass-split me-2"></i> جاري البحث...';
+
+            $.ajax({
+                url: window.location.pathname.split('/').pop(),
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                dataType: 'json',
+                success: function(response) {
+                    if (response.success && response.redirect_url) {
+                        window.location.href = response.redirect_url;
+                    } else {
+                        alert(response.error || 'حدث خطأ أثناء البحث');
+                        button.disabled = false;
+                        button.innerHTML = '<i class="bi bi-search me-2"></i> ابحـث';
+                    }
+                },
+                error: function() {
+                    alert('حدث خطأ أثناء البحث');
+                    button.disabled = false;
+                    button.innerHTML = '<i class="bi bi-search me-2"></i> ابحـث';
+                }
+            });
+        });
+    }
+
+    function setCookie(name, value, days) {
+        const expires = new Date();
+        expires.setTime(expires.getTime() + days * 24 * 60 * 60 * 1000);
+        document.cookie = name + '=' + value + ';expires=' + expires.toUTCString() + ';path=/';
+    }
+
+    function getCookie(name) {
+        const nameEQ = name + '=';
+        const ca = document.cookie.split(';');
+        for (let i = 0; i < ca.length; i++) {
+            let c = ca[i];
+            while (c.charAt(0) === ' ') c = c.substring(1, c.length);
+            if (c.indexOf(nameEQ) === 0) return c.substring(nameEQ.length, c.length);
+        }
+        return null;
+    }
+});
+</script>
+
+<?php
+} // Close if (!$is_ajax_request)
+require('../../foter.hnt');
+?>

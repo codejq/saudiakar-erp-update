@@ -1,0 +1,520 @@
+<?php
+/**
+ * Weekly Financial Report - Email Sending Logic
+ * Handles lock file management, email generation, and queue insertion
+ */
+
+require_once('../../connectdb.hnt');
+require_once('../../data.hnt');
+
+// Handle AJAX request
+if (isset($_POST['action']) && $_POST['action'] == 'send_report') {
+	$is_ajax_request = true;
+	require_once('../../reqloginajax.hnt');
+	header('Content-Type: application/json; charset=utf-8');
+
+	try {
+		$override_lock = isset($_POST['override_lock']) && $_POST['override_lock'] == '1';
+
+		// Check lock file unless override is requested
+		if (!$override_lock && !checkLockFile()) {
+			echo json_encode([
+				'success' => false,
+				'message' => 'تم إرسال التقرير خلال آخر 7 أيام. استخدم خيار "تجاوز القفل" للإرسال مرة أخرى.'
+			], JSON_UNESCAPED_UNICODE);
+			exit;
+		}
+
+		// Get recipients
+		$recipients = getRecipientEmails();
+
+		if (empty($recipients)) {
+			echo json_encode([
+				'success' => false,
+				'message' => 'لا توجد عناوين بريد إلكتروني للمستلمين. يرجى تحديث إعدادات البريد الإلكتروني.'
+			], JSON_UNESCAPED_UNICODE);
+			exit;
+		}
+
+		// Generate report data
+		$rentData = getRentData();
+		$voucherData = getVoucherData();
+
+		// Generate HTML email
+		$htmlBody = generateReportHTML($rentData, $voucherData);
+
+		// Queue email
+		$subject = 'تقرير الإيجارات والمدفوعات الأسبوعي';
+		queueReportEmail($recipients, $subject, $htmlBody);
+
+		// Update lock file
+		updateLockFile($recipients);
+
+		echo json_encode([
+			'success' => true,
+			'message' => 'تم إضافة التقرير إلى قائمة الانتظار للإرسال بنجاح',
+			'recipients_count' => count($recipients),
+			'recipients' => implode(', ', $recipients)
+		], JSON_UNESCAPED_UNICODE);
+
+	} catch (Exception $e) {
+		error_log('Weekly Report Error: ' . $e->getMessage());
+		echo json_encode([
+			'success' => false,
+			'message' => 'حدث خطأ: ' . $e->getMessage()
+		], JSON_UNESCAPED_UNICODE);
+	}
+	exit;
+}
+
+/**
+ * Check if lock file allows sending (more than 7 days since last send)
+ */
+function checkLockFile() {
+	$lockFile = dirname(__DIR__, 2) . '/storage/app/weekly_report_lock.json';
+
+	if (!file_exists($lockFile)) {
+		return true; // No lock file, can send
+	}
+
+	$data = json_decode(file_get_contents($lockFile), true);
+	if (!$data || !isset($data['last_sent'])) {
+		return true; // Invalid lock file, can send
+	}
+
+	$lastSent = $data['last_sent'];
+	$sevenDaysAgo = time() - (7 * 24 * 60 * 60);
+
+	return $lastSent < $sevenDaysAgo; // Can send if more than 7 days
+}
+
+/**
+ * Update lock file with new send timestamp
+ */
+function updateLockFile($recipients) {
+	$lockFile = dirname(__DIR__, 2) . '/storage/app/weekly_report_lock.json';
+
+	$data = [
+		'last_sent' => time(),
+		'last_sent_formatted' => date('Y-m-d H:i:s'),
+		'next_send_after' => time() + (7 * 24 * 60 * 60),
+		'next_send_formatted' => date('Y-m-d H:i:s', time() + (7 * 24 * 60 * 60)),
+		'recipients' => $recipients
+	];
+
+	file_put_contents($lockFile, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+}
+
+/**
+ * Get lock file data for display
+ */
+function getLockFileData() {
+	$lockFile = dirname(__DIR__, 2) . '/storage/app/weekly_report_lock.json';
+
+	if (!file_exists($lockFile)) {
+		return null;
+	}
+
+	$data = json_decode(file_get_contents($lockFile), true);
+	return $data;
+}
+
+/**
+ * Get recipient email addresses
+ */
+function getRecipientEmails() {
+	global $link, $bayanemail, $email_to_recive_notifications;
+
+	// Load global config
+	$result = mysql_query("SELECT * FROM global", $link);
+	while ($gl = mysql_fetch_array($result)) {
+		$GLOBALS[$gl['variblename']] = $gl['valuribalevalue'];
+	}
+
+	$recipients = [];
+
+	// Add bayanemail if not empty
+	if (!empty($bayanemail) && trim($bayanemail) != '') {
+		$emails = preg_split('/[,\n\r]+/', $bayanemail);
+		$recipients = array_merge($recipients, $emails);
+	}
+
+	// Add email_to_recive_notifications if not empty
+	if (!empty($email_to_recive_notifications) && trim($email_to_recive_notifications) != '') {
+		$emails = preg_split('/[,\n\r]+/', $email_to_recive_notifications);
+		$recipients = array_merge($recipients, $emails);
+	}
+
+	// Clean and validate emails
+	$validRecipients = [];
+	foreach ($recipients as $email) {
+		$email = trim($email);
+		if (!empty($email) && filter_var($email, FILTER_VALIDATE_EMAIL)) {
+			$validRecipients[] = $email;
+		}
+	}
+
+	// Remove duplicates
+	$validRecipients = array_unique($validRecipients);
+
+	return $validRecipients;
+}
+
+/**
+ * Get rent data (first 100 upcoming rents)
+ */
+function getRentData() {
+	global $link;
+
+	$currentTime = time();
+
+	$sql = "SELECT
+		aksat.kastid,
+		aksat.idsubaqar,
+		aksat.kastname,
+		aksat.kastvalue,
+		aksat.water,
+		aksat.sa3ee,
+		aksat.services,
+		aksat.kastdate,
+		aksat.amount_remaining,
+		egar.vat_type,
+		mostagereen.mostagername,
+		mostagereen.mostagertel,
+		mostagereen.mostageremail,
+		amlakdetails.rakam AS unit_number,
+		amlak.aqarname AS property_name
+	FROM aksat
+	LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
+	INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
+	INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
+	INNER JOIN amlak ON amlakdetails.idaqar = amlak.idaqar
+	WHERE aksat.iscomplete = 0
+		AND aksat.kastdate > $currentTime
+		AND aksat.kastid = (
+			SELECT MIN(kastid)
+			FROM aksat AS a2
+			WHERE a2.idsubaqar = aksat.idsubaqar
+			AND a2.iscomplete = 0
+		)
+	ORDER BY aksat.kastdate ASC
+	LIMIT 100";
+
+	$result = mysql_query($sql, $link);
+	$data = [];
+
+	while ($row = mysql_fetch_assoc($result)) {
+		$data[] = $row;
+	}
+
+	mysql_free_result($result);
+	return $data;
+}
+
+/**
+ * Get voucher data (last 7 days)
+ */
+function getVoucherData() {
+	global $link;
+
+	$sevenDaysAgo = time() - (7 * 24 * 60 * 60);
+
+	$sql = "SELECT
+		s.idsanad,
+		s.sanadrakam,
+		s.sanaddate,
+		s.mostagername,
+		s.depositeamount,
+		s.depositeamount_vat,
+		s.payment_type,
+		s.period,
+		s.mybyan,
+		s.cheqnumber,
+		s.cheqon,
+		a.aqarname
+	FROM sanad s
+	LEFT JOIN amlak a ON s.idaqar = a.idaqar
+	WHERE s.sanaddate > $sevenDaysAgo
+	ORDER BY s.sanaddate DESC";
+
+	$result = mysql_query($sql, $link);
+	$data = [];
+
+	while ($row = mysql_fetch_assoc($result)) {
+		$data[] = $row;
+	}
+
+	mysql_free_result($result);
+	return $data;
+}
+
+/**
+ * Generate HTML email body
+ */
+function generateReportHTML($rentData, $voucherData) {
+	global $bayanmaktabname;
+
+	$systemName = !empty($bayanmaktabname) ? $bayanmaktabname : 'سعودي عقار الشركات المزود بالذكاء الاصطناعي';
+	$currentDate = date('Y-m-d H:i:s');
+
+	// Calculate summary statistics
+	$rentCount = count($rentData);
+	$rentTotal = 0;
+	foreach ($rentData as $rent) {
+		$rentTotal += $rent['amount_remaining'] ?? $rent['kastvalue'];
+	}
+
+	$voucherCount = count($voucherData);
+	$voucherTotal = 0;
+	foreach ($voucherData as $voucher) {
+		$voucherTotal += $voucher['depositeamount'];
+	}
+
+	// Generate rent rows
+	$rentRows = '';
+	$index = 1;
+	foreach ($rentData as $rent) {
+		$dueDate = date('Y-m-d', $rent['kastdate']);
+		$amount = number_format($rent['amount_remaining'] ?? $rent['kastvalue'], 2);
+		$rentRows .= "<tr>
+			<td>{$index}</td>
+			<td>{$rent['mostagername']}</td>
+			<td>{$rent['property_name']}</td>
+			<td>{$rent['unit_number']}</td>
+			<td class=\"amount\">{$amount} ريال</td>
+			<td>{$dueDate}</td>
+			<td>{$rent['mostagertel']}</td>
+		</tr>";
+		$index++;
+	}
+
+	if (empty($rentRows)) {
+		$rentRows = '<tr><td colspan="7" style="text-align: center; color: #999;">لا توجد إيجارات مستحقة قادمة</td></tr>';
+	}
+
+	// Generate voucher rows
+	$voucherRows = '';
+	$index = 1;
+	$paymentTypes = [
+		1 => 'نقداً',
+		2 => 'شيك',
+		3 => 'طريقة أخرى',
+		4 => 'تحويل',
+		5 => 'شبكة'
+	];
+
+	foreach ($voucherData as $voucher) {
+		$voucherDate = date('Y-m-d', $voucher['sanaddate']);
+		$amount = number_format($voucher['depositeamount'], 2);
+		$paymentType = $paymentTypes[$voucher['payment_type']] ?? 'غير محدد';
+
+		$voucherRows .= "<tr>
+			<td>{$index}</td>
+			<td>{$voucher['mostagername']}</td>
+			<td>{$voucher['aqarname']}</td>
+			<td class=\"amount\">{$amount} ريال</td>
+			<td>{$paymentType}</td>
+			<td>{$voucherDate}</td>
+			<td>{$voucher['mybyan']}</td>
+		</tr>";
+		$index++;
+	}
+
+	if (empty($voucherRows)) {
+		$voucherRows = '<tr><td colspan="7" style="text-align: center; color: #999;">لا توجد مدفوعات خلال آخر 7 أيام</td></tr>';
+	}
+
+	// Format totals
+	$rentTotalFormatted = number_format($rentTotal, 2);
+	$voucherTotalFormatted = number_format($voucherTotal, 2);
+
+	// Generate full HTML
+	$html = '<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<style>
+		body {
+			font-family: \'Segoe UI\', Tahoma, Arial, sans-serif;
+			margin: 0;
+			padding: 0;
+			background-color: #f5f5f5;
+			direction: rtl;
+		}
+		.container {
+			max-width: 900px;
+			margin: 0 auto;
+			background-color: white;
+		}
+		.header {
+			background: linear-gradient(135deg, #0891b2 0%, #06b6d4 100%);
+			color: white;
+			padding: 30px 20px;
+			text-align: center;
+		}
+		.header h1 {
+			margin: 0 0 10px 0;
+			font-size: 24px;
+		}
+		.header h2 {
+			margin: 0 0 10px 0;
+			font-size: 20px;
+			font-weight: normal;
+		}
+		.header p {
+			margin: 0;
+			opacity: 0.9;
+			font-size: 14px;
+		}
+		.section {
+			margin: 20px;
+		}
+		.section h3 {
+			color: #0891b2;
+			border-right: 4px solid #0891b2;
+			padding-right: 10px;
+			font-size: 18px;
+		}
+		.summary-card {
+			background: #f0f9ff;
+			border-right: 4px solid #0891b2;
+			padding: 15px;
+			margin: 10px 0;
+			border-radius: 4px;
+		}
+		.summary-card p {
+			margin: 8px 0;
+			font-size: 15px;
+		}
+		table {
+			width: 100%;
+			border-collapse: collapse;
+			margin-top: 10px;
+		}
+		th {
+			background: #e0f2fe;
+			padding: 12px 10px;
+			text-align: right;
+			font-weight: 600;
+			border-bottom: 2px solid #0891b2;
+			font-size: 14px;
+		}
+		td {
+			padding: 10px;
+			border-bottom: 1px solid #e5e7eb;
+			font-size: 14px;
+		}
+		tr:hover {
+			background-color: #f9fafb;
+		}
+		.amount {
+			font-weight: bold;
+			color: #047857;
+		}
+		.footer {
+			text-align: center;
+			margin: 30px 20px;
+			padding-top: 20px;
+			border-top: 1px solid #e5e7eb;
+			color: #6b7280;
+			font-size: 13px;
+		}
+		.footer p {
+			margin: 5px 0;
+		}
+	</style>
+</head>
+<body>
+	<div class="container">
+		<div class="header">
+			<h1>' . htmlspecialchars($systemName) . '</h1>
+			<h2>تقرير الإيجارات والمدفوعات الأسبوعي</h2>
+			<p>التاريخ: ' . $currentDate . '</p>
+		</div>
+
+		<div class="section">
+			<h3>📊 ملخص عام</h3>
+			<div class="summary-card">
+				<p><strong>عدد الإيجارات المستحقة القادمة:</strong> ' . $rentCount . '</p>
+				<p><strong>إجمالي المبالغ المطلوبة:</strong> ' . $rentTotalFormatted . ' ريال</p>
+				<p><strong>عدد المدفوعات المستلمة (آخر 7 أيام):</strong> ' . $voucherCount . '</p>
+				<p><strong>إجمالي المدفوعات:</strong> ' . $voucherTotalFormatted . ' ريال</p>
+			</div>
+		</div>
+
+		<div class="section">
+			<h3>📋 الإيجارات المستحقة القادمة (أول 100)</h3>
+			<table>
+				<tr>
+					<th>#</th>
+					<th>اسم المستأجر</th>
+					<th>العقار</th>
+					<th>رقم الوحدة</th>
+					<th>المبلغ المطلوب</th>
+					<th>تاريخ الاستحقاق</th>
+					<th>رقم الجوال</th>
+				</tr>
+				' . $rentRows . '
+			</table>
+		</div>
+
+		<div class="section">
+			<h3>💰 المدفوعات المستلمة (آخر 7 أيام)</h3>
+			<table>
+				<tr>
+					<th>#</th>
+					<th>اسم الدافع</th>
+					<th>العقار</th>
+					<th>المبلغ</th>
+					<th>طريقة الدفع</th>
+					<th>التاريخ</th>
+					<th>البيان</th>
+				</tr>
+				' . $voucherRows . '
+			</table>
+		</div>
+
+		<div class="footer">
+			<p>هذا التقرير تم إنشاؤه تلقائياً من نظام سعودي عقار</p>
+			<p>للاستفسار يرجى التواصل مع الإدارة</p>
+		</div>
+	</div>
+</body>
+</html>';
+
+	return $html;
+}
+
+/**
+ * Queue email to todo_mail_queue
+ */
+function queueReportEmail($recipients, $subject, $htmlBody) {
+	global $link, $db;
+
+	// Ensure $db connection exists (mysqli)
+	if (!isset($db)) {
+		$db = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
+		if ($db->connect_error) {
+			throw new Exception('Database connection failed: ' . $db->connect_error);
+		}
+		$db->set_charset('utf8mb4');
+	}
+
+	foreach ($recipients as $email) {
+		$email = trim($email);
+		if (filter_var($email, FILTER_VALIDATE_EMAIL)) {
+			$stmt = $db->prepare("INSERT INTO todo_mail_queue
+				(todo_item_id, user_id, email_to, subject, body, is_sent)
+				VALUES (?, ?, ?, ?, ?, 0)");
+
+			$todoItemId = 0; // No associated todo item
+			$userId = isset($_SESSION['useridv']) ? intval($_SESSION['useridv']) : 1;
+
+			$stmt->bind_param("iisss", $todoItemId, $userId, $email, $subject, $htmlBody);
+			$stmt->execute();
+			$stmt->close();
+		}
+	}
+}
+?>

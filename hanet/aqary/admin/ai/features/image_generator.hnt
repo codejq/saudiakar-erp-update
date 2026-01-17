@@ -1,0 +1,740 @@
+<?php
+/**
+ * AI Image Generator API
+ * Generates images using DALL-E or Stable Diffusion
+ */
+
+// Include legacy system database connection
+require_once('../../../connectdb.hnt');
+
+// Include storage helpers
+require_once(__DIR__ . '/../../../lib/storage/helpers.php');
+
+// Define application base path for URL generation
+if (!defined('APP_BASE_PATH')) {
+    define('APP_BASE_PATH', '/aqary');
+}
+
+// Mark as AJAX request for authentication
+$is_ajax_request = true;
+
+// Include authentication
+require_once('../../../reqloginajax.hnt');
+
+// Increase execution time for image generation
+set_time_limit(180); // 3 minutes
+
+// Set JSON response header
+header('Content-Type: application/json; charset=utf-8');
+
+// Check if user is authenticated
+if (!isset($_SESSION['useridv'])) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+try {
+    $action = $_POST['action'] ?? 'generate';
+
+    if ($action === 'save') {
+        // Save image to gallery
+        $image_url = $_POST['image_url'] ?? '';
+        $prompt = $_POST['prompt'] ?? '';
+        $user_id = $_SESSION['useridv'];
+
+        if (empty($image_url)) {
+            throw new Exception('رابط الصورة مطلوب');
+        }
+
+        // Save image to file system and get local path
+        $local_path = saveImageToStorage($image_url, $user_id);
+
+        // Save to database (using correct schema)
+        $sql = "INSERT INTO ai_generated_content (entity_type, entity_id, content_type, generated_text, model, userid, created_date)
+                VALUES (?, ?, ?, ?, ?, ?, NOW())";
+
+        $stmt = mysqli_prepare($link, $sql);
+        if (!$stmt) {
+            throw new Exception('فشل في حفظ الصورة: ' . mysqli_error($link));
+        }
+
+        $entity_type = 'image_generated';
+        $entity_id = 0; // Generic, not tied to specific property
+        $content_type = 'generated_image';
+        $model = 'image_generator';
+
+        mysqli_stmt_bind_param($stmt, 'sisssi', $entity_type, $entity_id, $content_type, $local_path, $model, $user_id);
+        $success = mysqli_stmt_execute($stmt);
+        mysqli_stmt_close($stmt);
+
+        if ($success) {
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم حفظ الصورة بنجاح',
+                'file_path' => $local_path
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        } else {
+            throw new Exception('فشل في حفظ الصورة');
+        }
+
+        exit;
+    }
+
+    if ($action === 'gallery') {
+        // Get gallery images for current user
+        $user_id = $_SESSION['useridv'];
+
+        $sql = "SELECT content_id, generated_text as image_url, created_date
+                FROM ai_generated_content
+                WHERE userid = ? AND entity_type = 'image_generated'
+                ORDER BY created_date DESC
+                LIMIT 20";
+
+        $stmt = mysqli_prepare($link, $sql);
+        if (!$stmt) {
+            throw new Exception('فشل في تحميل المعرض: ' . mysqli_error($link));
+        }
+
+        mysqli_stmt_bind_param($stmt, 'i', $user_id);
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
+
+        $images = [];
+        while ($row = mysqli_fetch_assoc($result)) {
+            $images[] = [
+                'id' => $row['content_id'],
+                'image_url' => $row['image_url'],
+                'created_date' => $row['created_date']
+            ];
+        }
+
+        mysqli_stmt_close($stmt);
+
+        echo json_encode([
+            'success' => true,
+            'images' => $images
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+        exit;
+    }
+
+    if ($action === 'delete') {
+        // Delete image from gallery
+        $content_id = $_POST['content_id'] ?? 0;
+        $user_id = $_SESSION['useridv'];
+
+        if (empty($content_id)) {
+            throw new Exception('معرف الصورة مطلوب');
+        }
+
+        // Get image path before deleting from database
+        $sql = "SELECT generated_text FROM ai_generated_content
+                WHERE content_id = ? AND userid = ? AND entity_type = 'image_generated'";
+
+        $stmt = mysqli_prepare($link, $sql);
+        if (!$stmt) {
+            throw new Exception('فشل في جلب بيانات الصورة: ' . mysqli_error($link));
+        }
+
+        mysqli_stmt_bind_param($stmt, 'ii', $content_id, $user_id);
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
+        $row = mysqli_fetch_assoc($result);
+        mysqli_stmt_close($stmt);
+
+        if (!$row) {
+            throw new Exception('الصورة غير موجودة أو ليس لديك صلاحية حذفها');
+        }
+
+        $image_path = $row['generated_text'];
+
+        // Delete from database
+        $delete_sql = "DELETE FROM ai_generated_content
+                       WHERE content_id = ? AND userid = ?";
+
+        $stmt = mysqli_prepare($link, $delete_sql);
+        if (!$stmt) {
+            throw new Exception('فشل في حذف الصورة: ' . mysqli_error($link));
+        }
+
+        mysqli_stmt_bind_param($stmt, 'ii', $content_id, $user_id);
+        $success = mysqli_stmt_execute($stmt);
+        mysqli_stmt_close($stmt);
+
+        if ($success) {
+            // Delete physical file if it exists
+            // Extract filename from the image_path
+            $filename = basename($image_path);
+            $file_path = upload_path('ai.images', $filename);
+            if (file_exists($file_path)) {
+                @unlink($file_path);
+            }
+
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم حذف الصورة بنجاح'
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        } else {
+            throw new Exception('فشل في حذف الصورة');
+        }
+
+        exit;
+    }
+
+    // Generate image
+    $prompt = $_POST['prompt'] ?? '';
+    $size = $_POST['size'] ?? '1024x1024';
+    $quality = $_POST['quality'] ?? 'standard';
+    $style = $_POST['style'] ?? 'vivid';
+
+    if (empty($prompt)) {
+        throw new Exception('يجب إدخال وصف للصورة');
+    }
+
+    // Translate Arabic to English if needed
+    $english_prompt = translateToEnglish($link, $prompt);
+
+    // Load API configuration
+    $config_data = require('../config/api_config.hnt');
+    $ai_config = $config_data['config'];
+
+    if (empty($ai_config['api_key'])) {
+        throw new Exception('مفتاح API غير متوفر. يرجى إعداد API Key في الإعدادات.');
+    }
+
+    // Get user's preferred image model
+    $user_id = $_SESSION['useridv'];
+    $image_model = getUserPreferredImageModel($link, $user_id);
+    $model_used = $image_model; // Set early for error reporting
+
+    $start_time = microtime(true);
+
+    // Determine which provider to use
+    $image_provider = $ai_config['image_provider'] ?? 'together';
+    $together_key = $ai_config['together_api_key'] ?? null;
+    $hf_token = $ai_config['huggingface_api_token'] ?? null;
+    $openai_key = $ai_config['openai_api_key'] ?? null;
+
+    // Auto mode: try Together first, then Hugging Face, then fallback to OpenAI/OpenRouter
+    if ($image_provider === 'auto') {
+        if (!empty($together_key)) {
+            $image_provider = 'together';
+        } elseif (!empty($hf_token)) {
+            $image_provider = 'huggingface';
+        } elseif (!empty($openai_key)) {
+            $image_provider = 'openai';
+        } else {
+            $image_provider = 'openrouter';
+        }
+    }
+
+    // Generate image based on provider
+    $provider_name = '';
+    $cost = 0;
+
+    if ($image_provider === 'together' && !empty($together_key)) {
+        // Together AI - FREE for 3 months, then $0.032/image
+        $image_url = generateImageWithTogether($together_key, $english_prompt, $size);
+        $provider_name = 'Together AI (FLUX.1)';
+        $cost = 0; // FREE during trial, adjust after 3 months
+        $model_used = 'together/flux-1-schnell';
+    } elseif ($image_provider === 'huggingface' && !empty($hf_token)) {
+        // Hugging Face - FREE forever (rate limited)
+        $image_url = generateImageWithHuggingFace($hf_token, $english_prompt, $size);
+        $provider_name = 'Hugging Face (SDXL)';
+        $cost = 0; // Always FREE
+        $model_used = 'stabilityai/stable-diffusion-xl-base-1.0';
+    } elseif (($image_provider === 'openai' || strpos($image_model, 'openai/dall-e') !== false) && !empty($openai_key)) {
+        // OpenAI DALL-E - Premium
+        $image_url = generateImageWithDALLE($openai_key, $english_prompt, $size, $quality, $style);
+        $provider_name = 'OpenAI (DALL-E 3)';
+        $cost = calculateImageCost($size, $quality);
+        $model_used = 'openai/dall-e-3';
+    } else {
+        // Fallback to OpenRouter if configured
+        if (!empty($ai_config['api_key'])) {
+            $image_url = generateImageWithOpenRouter($link, $english_prompt, $image_model);
+            $provider_name = 'OpenRouter (' . $image_model . ')';
+            $cost = 0.05; // Estimate
+            $model_used = $image_model;
+        } else {
+            throw new Exception(
+                'لم يتم تكوين أي مفتاح API لإنشاء الصور. ' .
+                'للحصول على خدمة مجانية، احصل على مفتاح Together AI من: https://api.together.xyz أو ' .
+                'مفتاح Hugging Face من: https://huggingface.co/settings/tokens'
+            );
+        }
+    }
+
+    $end_time = microtime(true);
+    $execution_time = round(($end_time - $start_time) * 1000);
+
+    // Log usage
+    logImageGeneration($link, $user_id, $prompt, $image_url, $cost, $execution_time);
+
+    // Return success response
+    echo json_encode([
+        'success' => true,
+        'image_url' => $image_url,
+        'prompt_used' => $english_prompt,
+        'stats' => [
+            'provider' => $provider_name,
+            'cost' => number_format($cost, 4),
+            'execution_time_ms' => $execution_time,
+            'model' => $model_used,
+            'size' => $size,
+            'quality' => $quality
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+} catch (Exception $e) {
+    http_response_code(500);
+
+    // Include model information in error for debugging
+    $error_response = [
+        'success' => false,
+        'message' => $e->getMessage(),
+        'error_details' => [
+            'file' => basename($e->getFile()),
+            'line' => $e->getLine(),
+            'model_attempted' => isset($model_used) ? $model_used : 'unknown'
+        ]
+    ];
+
+    // Add model name if available
+    if (isset($model_used)) {
+        $error_response['model'] = $model_used;
+    }
+
+    echo json_encode($error_response, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+/**
+ * Translate Arabic prompt to English using AI
+ */
+function translateToEnglish($link, $prompt) {
+    // Check if prompt contains Arabic characters
+    if (!preg_match('/[\x{0600}-\x{06FF}]/u', $prompt)) {
+        return $prompt; // Already in English
+    }
+
+    // Use AI to translate
+    require_once('../lib/OpenRouterAPI.class.php');
+
+    $ai = new OpenRouterAPI($link);
+    $translation_prompt = "Translate this to English for image generation AI (keep it descriptive and detailed):\n\n$prompt\n\nEnglish translation:";
+
+    $options = [
+        'max_tokens' => 300,
+        'temperature' => 0.3,
+        'cache' => true
+    ];
+
+    $translated = $ai->complete($translation_prompt, $options);
+
+    return $translated ?: $prompt;
+}
+
+/**
+ * Generate image using Together AI FLUX.1 API (FREE for 3 months!)
+ */
+function generateImageWithTogether($api_key, $prompt, $size) {
+    $api_url = 'https://api.together.xyz/v1/images/generations';
+
+    // Convert size format (1024x1024 -> 1024x1024)
+    $dimensions = explode('x', $size);
+    $width = (int)($dimensions[0] ?? 1024);
+    $height = (int)($dimensions[1] ?? 1024);
+
+    $data = [
+        'model' => 'black-forest-labs/FLUX.1-schnell-Free',
+        'prompt' => $prompt,
+        'width' => $width,
+        'height' => $height,
+        'steps' => 4, // FLUX.1 [schnell] works best with 1-4 steps
+        'n' => 1
+    ];
+
+    $ch = curl_init($api_url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => json_encode($data),
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $api_key
+        ],
+        CURLOPT_TIMEOUT => 120,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => 0
+    ]);
+
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    if (curl_errno($ch)) {
+        $error = curl_error($ch);
+        //curl_close($ch);
+        throw new Exception("فشل الاتصال بـ Together AI API: $error");
+    }
+
+    //curl_close($ch);
+
+    if ($http_code !== 200) {
+        $error_data = json_decode($response, true);
+        $error_message = $error_data['error']['message'] ?? 'خطأ غير معروف';
+        throw new Exception("خطأ من Together AI API (HTTP: $http_code): $error_message");
+    }
+
+    $result = json_decode($response, true);
+
+    if (!isset($result['data'][0]['url'])) {
+        // Try b64_json format
+        if (isset($result['data'][0]['b64_json'])) {
+            return 'data:image/png;base64,' . $result['data'][0]['b64_json'];
+        }
+        throw new Exception("لم يتم إرجاع رابط الصورة من Together AI");
+    }
+
+    return $result['data'][0]['url'];
+}
+
+/**
+ * Generate image using Hugging Face Inference API (FREE forever!)
+ * Uses new router.huggingface.co/hf-inference endpoint (updated Nov 2025)
+ */
+function generateImageWithHuggingFace($api_token, $prompt, $size) {
+    // New router endpoint (api-inference deprecated as of Nov 2025)
+    $api_url = 'https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0';
+
+    // Convert size to dimensions
+    $dimensions = explode('x', $size);
+    $width = (int)($dimensions[0] ?? 1024);
+    $height = (int)($dimensions[1] ?? 1024);
+
+    $data = [
+        'inputs' => $prompt,
+        'parameters' => [
+            'width' => $width,
+            'height' => $height,
+            'num_inference_steps' => 30
+        ]
+    ];
+
+    $ch = curl_init($api_url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => json_encode($data),
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $api_token
+        ],
+        CURLOPT_TIMEOUT => 180, // Hugging Face can be slower
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => 0
+    ]);
+
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    if (curl_errno($ch)) {
+        $error = curl_error($ch);
+        //curl_close($ch);
+        throw new Exception("فشل الاتصال بـ Hugging Face API: $error");
+    }
+
+    //curl_close($ch);
+
+    if ($http_code !== 200) {
+        $error_data = json_decode($response, true);
+        $error_message = $error_data['error'] ?? 'خطأ غير معروف';
+        throw new Exception("خطأ من Hugging Face API (HTTP: $http_code): $error_message");
+    }
+
+    // Hugging Face returns raw image bytes, convert to base64
+    $base64_image = base64_encode($response);
+    return 'data:image/png;base64,' . $base64_image;
+}
+
+/**
+ * Generate image using OpenAI DALL-E API
+ */
+function generateImageWithDALLE($api_key, $prompt, $size, $quality, $style) {
+    // Note: This function uses OpenAI's API directly for DALL-E
+    // If you have an OpenRouter API key, you may need to adjust this
+
+    $api_url = 'https://api.openai.com/v1/images/generations';
+
+    $data = [
+        'model' => 'dall-e-3',
+        'prompt' => $prompt,
+        'n' => 1,
+        'size' => $size,
+        'quality' => $quality,
+        'style' => $style
+    ];
+
+    $ch = curl_init($api_url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $api_key
+    ]);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 120); // 2 minutes timeout
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // For development
+
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    if (curl_errno($ch)) {
+        $error = curl_error($ch);
+        //curl_close($ch);
+        throw new Exception("فشل الاتصال بـ DALL-E API (Model: dall-e-3): $error");
+    }
+
+    //curl_close($ch);
+
+    if ($http_code !== 200) {
+        $error_data = json_decode($response, true);
+        $error_message = $error_data['error']['message'] ?? 'خطأ غير معروف';
+        $error_code = $error_data['error']['code'] ?? 'unknown';
+        throw new Exception("خطأ من DALL-E API (Model: dall-e-3, Code: $error_code): $error_message");
+    }
+
+    $result = json_decode($response, true);
+
+    if (!isset($result['data'][0]['url'])) {
+        $response_preview = mb_substr($response, 0, 200);
+        throw new Exception("لم يتم إرجاع رابط الصورة من API (Model: dall-e-3). Response: $response_preview");
+    }
+
+    return $result['data'][0]['url'];
+}
+
+/**
+ * Calculate image generation cost
+ */
+function calculateImageCost($size, $quality) {
+    // DALL-E 3 pricing (as of 2024)
+    $pricing = [
+        '1024x1024' => [
+            'standard' => 0.040,
+            'hd' => 0.080
+        ],
+        '1024x1792' => [
+            'standard' => 0.080,
+            'hd' => 0.120
+        ],
+        '1792x1024' => [
+            'standard' => 0.080,
+            'hd' => 0.120
+        ]
+    ];
+
+    return $pricing[$size][$quality] ?? 0.040;
+}
+
+/**
+ * Get user's preferred image model
+ */
+function getUserPreferredImageModel($link, $user_id) {
+    $sql = "SELECT preferred_image_model FROM ai_user_preferences WHERE userid = ?";
+    $stmt = mysqli_prepare($link, $sql);
+
+    if ($stmt) {
+        mysqli_stmt_bind_param($stmt, 'i', $user_id);
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
+        $row = mysqli_fetch_assoc($result);
+        mysqli_stmt_close($stmt);
+
+        if ($row && !empty($row['preferred_image_model'])) {
+            return $row['preferred_image_model'];
+        }
+    }
+
+    // Default to DALL-E 3
+    return 'openai/dall-e-3';
+}
+
+/**
+ * Generate image using OpenRouter API (for non-DALL-E models)
+ */
+function generateImageWithOpenRouter($link, $prompt, $model) {
+    // Load API configuration
+    $config_data = require('../config/api_config.hnt');
+    $ai_config = $config_data['config'];
+
+    if (empty($ai_config['api_key'])) {
+        throw new Exception('مفتاح API غير متوفر | API key not available');
+    }
+
+    // OpenRouter API endpoint
+    $api_url = $ai_config['base_url'] . '/chat/completions';
+
+    // Build request with modalities for image generation
+    $data = [
+        'model' => $model,
+        'messages' => [
+            [
+                'role' => 'user',
+                'content' => $prompt
+            ]
+        ],
+        'modalities' => ['image', 'text'],  // Key parameter for image generation
+        'max_tokens' => 1000,  // Limit tokens to reduce cost and work with low credit accounts
+        'stream' => false
+    ];
+
+    // Make API call
+    $ch = curl_init($api_url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $ai_config['api_key'],
+        'HTTP-Referer: ' . ($ai_config['site_url'] ?? ''),
+        'X-Title: ' . ($ai_config['site_name'] ?? 'AI Integration')
+    ]);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 180); // 3 minutes timeout for image generation
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    if (curl_errno($ch)) {
+        $error = curl_error($ch);
+        //curl_close($ch);
+        throw new Exception("فشل الاتصال بـ OpenRouter API (Model: $model): $error | Connection failed: $error");
+    }
+
+    //curl_close($ch);
+
+    if ($http_code !== 200) {
+        $error_data = json_decode($response, true);
+        $error_message = $error_data['error']['message'] ?? 'خطأ غير معروف | Unknown error';
+        throw new Exception("خطأ من OpenRouter API (Model: $model, HTTP: $http_code): $error_message");
+    }
+
+    // Parse JSON response
+    $result = json_decode($response, true);
+
+    if (!$result) {
+        throw new Exception("استجابة غير صالحة من API (Model: $model) | Invalid JSON response from API");
+    }
+
+    // Extract image from structured response
+    // OpenRouter returns images in: choices[0].message.images[0].image_url.url
+    if (isset($result['choices'][0]['message']['images'][0]['image_url']['url'])) {
+        $image_url = $result['choices'][0]['message']['images'][0]['image_url']['url'];
+        return $image_url;
+    }
+
+    // Alternative path: some models might return images differently
+    if (isset($result['choices'][0]['message']['content'])) {
+        $content = $result['choices'][0]['message']['content'];
+        // Try to extract image URL from content if it's a URL
+        if (preg_match('/https?:\/\/[^\s]+\.(jpg|jpeg|png|gif|webp)/i', $content, $matches)) {
+            return $matches[0];
+        }
+        // Check if content is a base64 data URL
+        if (preg_match('/^data:image\/(png|jpg|jpeg|gif|webp);base64,/i', $content)) {
+            return $content;
+        }
+    }
+
+    // If no image found, provide detailed error with response structure
+    $response_preview = json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $response_preview = mb_substr($response_preview, 0, 500) . (mb_strlen($response_preview) > 500 ? '...' : '');
+
+    throw new Exception(
+        "لم يتم إرجاع صورة من النموذج | No image returned from model '$model'. " .
+        "Response structure: $response_preview"
+    );
+}
+
+/**
+ * Log image generation to database
+ */
+function logImageGeneration($link, $user_id, $prompt, $image_url, $cost, $execution_time) {
+    $sql = "INSERT INTO ai_usage_log (userid, feature, model, prompt_tokens, completion_tokens, total_tokens, cost, response_time, created_date)
+            VALUES (?, 'image_generator', 'image_gen', 0, 0, 0, ?, ?, NOW())";
+
+    $stmt = mysqli_prepare($link, $sql);
+    if ($stmt) {
+        mysqli_stmt_bind_param($stmt, 'idi', $user_id, $cost, $execution_time);
+        mysqli_stmt_execute($stmt);
+        mysqli_stmt_close($stmt);
+    }
+}
+
+/**
+ * Save image to local storage (handles both base64 and URLs)
+ * Returns the relative path to the saved image
+ */
+function saveImageToStorage($image_url, $user_id) {
+    // Generate unique filename
+    $filename = 'ai_img_' . $user_id . '_' . time() . '_' . bin2hex(random_bytes(4)) . '.png';
+
+    // Use centralized storage
+    $file_path = upload_path('ai.images', $filename);
+    $relative_path = upload_url('ai.images', $filename);
+
+    // Handle base64 data URLs
+    if (strpos($image_url, 'data:image') === 0) {
+        // Extract base64 data
+        if (preg_match('/^data:image\/(\w+);base64,(.+)$/', $image_url, $matches)) {
+            $image_data = base64_decode($matches[2]);
+            if ($image_data === false) {
+                throw new Exception('فشل في فك تشفير الصورة');
+            }
+
+            // Save to file
+            if (file_put_contents($file_path, $image_data) === false) {
+                throw new Exception('فشل في حفظ الصورة إلى الملف');
+            }
+
+            return $relative_path;
+        }
+        throw new Exception('صيغة base64 غير صالحة');
+    }
+
+    // Handle external URLs (download the image)
+    if (filter_var($image_url, FILTER_VALIDATE_URL)) {
+        $ch = curl_init($image_url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+
+        $image_data = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+        if (curl_errno($ch)) {
+            $error = curl_error($ch);
+            //curl_close($ch);
+            throw new Exception("فشل في تحميل الصورة: $error");
+        }
+
+        //curl_close($ch);
+
+        if ($http_code !== 200) {
+            throw new Exception("فشل في تحميل الصورة (HTTP: $http_code)");
+        }
+
+        // Save to file
+        if (file_put_contents($file_path, $image_data) === false) {
+            throw new Exception('فشل في حفظ الصورة إلى الملف');
+        }
+
+        return $relative_path;
+    }
+
+    throw new Exception('نوع الصورة غير مدعوم');
+}
+?>

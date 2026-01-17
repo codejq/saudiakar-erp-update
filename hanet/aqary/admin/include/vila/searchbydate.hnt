@@ -1,0 +1,502 @@
+<?php
+/**
+ * Vila Search by Date
+ * Search for villas by entry date range (recent or old entries)
+ */
+
+$sc_title = "عرض الفلل التي مر عليها مدة معينة";
+$sc_id = "28";
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+} else {
+    // For AJAX requests, include authentication
+    include_once "../../../reqloginajax.hnt";
+}
+
+
+
+// Handle AJAX form submission
+if ($is_ajax_request && isset($_POST['search_type']) && isset($_POST['days'])) {
+    $search_type = $_POST['search_type']; // 'recent' or 'old'
+    $days = intval($_POST['days']);
+
+    if ($days <= 0) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => false,
+            'error' => 'الرجاء إدخال عدد أيام صحيح'
+        ], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+
+    // Build redirect URL based on search type
+    if ($search_type === 'recent') {
+        $redirect_url = 'updatvila.hnt?serchdatex=' . $days;
+    } else {
+        $redirect_url = 'updatvila.hnt?serchdate=' . $days;
+    }
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'جاري تحميل النتائج...',
+        'redirect_url' => $redirect_url
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
+}
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.search-dashboard {
+    background: #f8f9fa;
+    min-height: 100vh;
+    padding: 2rem 0;
+}
+
+.page-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.search-options-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+}
+
+.search-option-card {
+    background: white;
+    border: none;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    overflow: hidden;
+    transition: all 0.3s ease;
+}
+
+.search-option-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.15);
+}
+
+.search-option-card .card-header {
+    padding: 1.25rem;
+    text-align: center;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-bottom: 3px solid;
+}
+
+.search-option-card.option-recent .card-header {
+    border-color: #10b981;
+}
+
+.search-option-card.option-old .card-header {
+    border-color: #f59e0b;
+}
+
+.search-option-card .card-header i {
+    font-size: 3rem;
+    margin-bottom: 0.5rem;
+}
+
+.search-option-card.option-recent .card-header i {
+    color: #10b981;
+}
+
+.search-option-card.option-old .card-header i {
+    color: #f59e0b;
+}
+
+.search-option-card .card-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #1e293b;
+    margin: 0.5rem 0 0 0;
+}
+
+.search-option-card .card-description {
+    font-size: 0.875rem;
+    color: #64748b;
+    margin: 0.25rem 0 0 0;
+}
+
+.search-option-card .card-body {
+    padding: 1.5rem;
+}
+
+.form-label {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: #495057;
+    text-align: right;
+}
+
+.input-group .form-control {
+    text-align: center;
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.input-group-text {
+    font-weight: 600;
+}
+
+.info-box {
+    background: #e0f2fe;
+    border-left: 4px solid #0891b2;
+    padding: 1rem;
+    border-radius: 6px;
+    margin-top: 2rem;
+}
+
+.info-box h5 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #0e7490;
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.info-box ul {
+    margin: 0;
+    padding-right: 1.5rem;
+    color: #164e63;
+}
+
+.info-box li {
+    margin-bottom: 0.25rem;
+}
+
+@media (max-width: 768px) {
+    .search-options-grid {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+
+<div class="search-dashboard" dir="rtl">
+    <div class="container-fluid">
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>
+                <i class="bi bi-calendar-range"></i>
+                <?= $sc_title ?>
+            </h1>
+            <p class="mb-0 mt-2" style="opacity: 0.95; font-size: 0.95rem;">
+                البحث عن الفلل حسب تاريخ الإدخال للنظام
+            </p>
+        </div>
+
+        <!-- Search Options Grid -->
+        <div class="search-options-grid">
+
+            <!-- Recent Entries Search -->
+            <div class="search-option-card option-recent">
+                <div class="card-header">
+                    <i class="bi bi-calendar-check"></i>
+                    <h3 class="card-title">بحث المدخلات الحديثة</h3>
+                    <p class="card-description">البحث عن الفلل التي تم إدخالها مؤخراً</p>
+                </div>
+                <div class="card-body">
+                    <form id="recentSearchForm" method="get" action="updatvila.hnt">
+                        <input type="hidden" name="ajax_submit" value="0">
+
+                        <div class="mb-3">
+                            <label class="form-label">
+                                <i class="bi bi-clock-history text-success me-1"></i>
+                                المدخلات قبل كم يوم؟
+                            </label>
+                            <div class="input-group">
+                                <input type="number"
+                                       name="serchdatex"
+                                       id="recentDays"
+                                       class="form-control"
+                                       value="60"
+                                       min="1"
+                                       max="3650"
+                                       required>
+                                <span class="input-group-text">يوم</span>
+                            </div>
+                            <small class="text-muted">مثال: 60 يوم = آخر شهرين</small>
+                        </div>
+
+                        <div class="d-grid gap-2">
+                            <button type="submit" class="btn btn-success btn-lg">
+                                <i class="bi bi-search me-2"></i>
+                                ابحث عن المدخلات الحديثة
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Old Entries Search -->
+            <div class="search-option-card option-old">
+                <div class="card-header">
+                    <i class="bi bi-calendar-x"></i>
+                    <h3 class="card-title">بحث المدخلات القديمة</h3>
+                    <p class="card-description">البحث عن الفلل التي تم إدخالها منذ فترة</p>
+                </div>
+                <div class="card-body">
+                    <form id="oldSearchForm" method="get" action="updatvila.hnt">
+                        <input type="hidden" name="ajax_submit" value="0">
+
+                        <div class="mb-3">
+                            <label class="form-label">
+                                <i class="bi bi-calendar-event text-warning me-1"></i>
+                                المدخلات خلال كم يوم؟
+                            </label>
+                            <div class="input-group">
+                                <input type="number"
+                                       name="serchdate"
+                                       id="oldDays"
+                                       class="form-control"
+                                       value="60"
+                                       min="1"
+                                       max="3650"
+                                       required>
+                                <span class="input-group-text">يوم</span>
+                            </div>
+                            <small class="text-muted">مثال: 365 يوم = السنة الماضية</small>
+                        </div>
+
+                        <div class="d-grid gap-2">
+                            <button type="submit" class="btn btn-warning btn-lg">
+                                <i class="bi bi-search me-2"></i>
+                                ابحث عن المدخلات القديمة
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Information Box -->
+        <div class="info-box">
+            <h5>
+                <i class="bi bi-info-circle"></i>
+                كيفية استخدام البحث
+            </h5>
+            <ul>
+                <li><strong>المدخلات الحديثة:</strong> يعرض الفلل التي تم إدخالها في آخر X يوم (من اليوم وحتى X يوم مضى)</li>
+                <li><strong>المدخلات القديمة:</strong> يعرض الفلل التي تم إدخالها خلال فترة محددة (من X يوم مضى وحتى الآن)</li>
+                <li>يمكنك تعديل عدد الأيام حسب الحاجة (من يوم واحد إلى 3650 يوم - حوالي 10 سنوات)</li>
+                <li>النتائج تظهر في صفحة إدارة الفلل مع الإمكانيات الكاملة للتعديل والحذف</li>
+            </ul>
+        </div>
+
+    </div>
+</div>
+
+<script>
+/**
+ * Vila Search by Date - Modern JavaScript
+ * ES6+ with form validation and user experience enhancements
+ */
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Vila Search by Date initialized');
+
+    // Get form elements
+    const recentForm = document.getElementById('recentSearchForm');
+    const oldForm = document.getElementById('oldSearchForm');
+    const recentDaysInput = document.getElementById('recentDays');
+    const oldDaysInput = document.getElementById('oldDays');
+
+    // Validate number inputs
+    const validateNumberInput = (input) => {
+        input.addEventListener('input', function() {
+            // Remove non-numeric characters
+            this.value = this.value.replace(/[^0-9]/g, '');
+
+            // Enforce min/max
+            const value = parseInt(this.value);
+            const min = parseInt(this.getAttribute('min'));
+            const max = parseInt(this.getAttribute('max'));
+
+            if (value < min && this.value !== '') {
+                this.value = min;
+            }
+            if (value > max) {
+                this.value = max;
+            }
+        });
+
+        input.addEventListener('blur', function() {
+            // Set default if empty
+            if (this.value === '' || parseInt(this.value) < 1) {
+                this.value = '60';
+            }
+        });
+    };
+
+    // Apply validation to both inputs
+    if (recentDaysInput) validateNumberInput(recentDaysInput);
+    if (oldDaysInput) validateNumberInput(oldDaysInput);
+
+    // Form submit validation
+    const validateForm = (form, daysInput) => {
+        form.addEventListener('submit', function(e) {
+            const days = parseInt(daysInput.value);
+
+            if (!days || days < 1) {
+                e.preventDefault();
+                alert('الرجاء إدخال عدد أيام صحيح (أكبر من 0)');
+                daysInput.focus();
+                return false;
+            }
+
+            if (days > 3650) {
+                e.preventDefault();
+                alert('عدد الأيام كبير جداً. الحد الأقصى هو 3650 يوم (10 سنوات)');
+                daysInput.focus();
+                return false;
+            }
+
+            // Show loading state
+            const submitBtn = form.querySelector('button[type="submit"]');
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<i class="bi bi-hourglass-split me-2"></i>جاري البحث...';
+            }
+
+            return true;
+        });
+    };
+
+    // Apply form validation
+    if (recentForm && recentDaysInput) {
+        validateForm(recentForm, recentDaysInput);
+    }
+    if (oldForm && oldDaysInput) {
+        validateForm(oldForm, oldDaysInput);
+    }
+
+    // Store last search preference in localStorage (modern replacement for cookies)
+    const storeSearchPreference = (searchType) => {
+        try {
+            localStorage.setItem('vilaSearchPreference', searchType);
+        } catch (e) {
+            console.warn('localStorage not available:', e);
+        }
+    };
+
+    // Load and apply last search preference
+    const loadSearchPreference = () => {
+        try {
+            const preference = localStorage.getItem('vilaSearchPreference');
+            if (preference) {
+                console.log('Loaded search preference:', preference);
+                // Could be used to highlight last used search option
+            }
+        } catch (e) {
+            console.warn('localStorage not available:', e);
+        }
+    };
+
+    // Track which form is being used
+    if (recentForm) {
+        recentForm.addEventListener('submit', () => storeSearchPreference('recent'));
+    }
+    if (oldForm) {
+        oldForm.addEventListener('submit', () => storeSearchPreference('old'));
+    }
+
+    // Load preference on page load
+    loadSearchPreference();
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        // Alt+R for Recent search focus
+        if (e.altKey && e.key === 'r') {
+            e.preventDefault();
+            if (recentDaysInput) {
+                recentDaysInput.focus();
+                recentDaysInput.select();
+            }
+        }
+
+        // Alt+O for Old search focus
+        if (e.altKey && e.key === 'o') {
+            e.preventDefault();
+            if (oldDaysInput) {
+                oldDaysInput.focus();
+                oldDaysInput.select();
+            }
+        }
+    });
+
+    // Add helpful tooltips on hover (optional enhancement)
+    const addTooltips = () => {
+        const cards = document.querySelectorAll('.search-option-card');
+        cards.forEach(card => {
+            card.addEventListener('mouseenter', function() {
+                this.style.cursor = 'default';
+            });
+        });
+    };
+
+    addTooltips();
+});
+
+/**
+ * Helper function to format number with commas
+ * @param {number} num - Number to format
+ * @returns {string} Formatted number
+ */
+function formatNumber(num) {
+    return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/**
+ * Calculate date range display
+ * @param {number} days - Number of days
+ * @returns {string} Human-readable date range
+ */
+function getDateRangeText(days) {
+    if (days === 1) return 'يوم واحد';
+    if (days === 7) return 'أسبوع واحد';
+    if (days === 30) return 'شهر واحد';
+    if (days === 60) return 'شهرين';
+    if (days === 90) return 'ثلاثة أشهر';
+    if (days === 180) return 'ستة أشهر';
+    if (days === 365) return 'سنة واحدة';
+
+    if (days < 7) return days + ' أيام';
+    if (days < 30) return Math.floor(days / 7) + ' أسابيع';
+    if (days < 365) return Math.floor(days / 30) + ' أشهر';
+
+    return Math.floor(days / 365) + ' سنة';
+}
+</script>
+
+<?php
+require('../../../foter.hnt');
+}
+?>

@@ -1,0 +1,734 @@
+<?php
+/**
+ * Vila Search by Conditions
+ * Search for villas by various conditions including location, type, status, and description
+ */
+
+$sc_title = "عرض الفلل حسب شروط معينة";
+$sc_id = "32";
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+} else {
+    // For AJAX requests, include authentication
+    include_once "../../../reqloginajax.hnt";
+}
+
+
+
+// Handle AJAX form submission
+if ($is_ajax_request && isset($_POST['search_type'])) {
+    $search_type = $_POST['search_type'];
+
+    switch ($search_type) {
+        case 'location':
+            $genericsql = $_POST['genericsql'] ?? '';
+            $redirect_url = 'updatvila.hnt?genericsql=' . urlencode($genericsql);
+            break;
+
+        case 'type':
+            $genericvalue = $_POST['genericvalue'] ?? '';
+            $redirect_url = 'updatvila.hnt?genericvalue=' . urlencode($genericvalue) . '&genericfield=vilatype&genericsearch=1&genericoperation=like';
+            break;
+
+        case 'sold':
+            $redirect_url = 'updatvila.hnt?statusx=2';
+            break;
+
+        case 'reserved':
+            $redirect_url = 'updatvila.hnt?statusx=1';
+            break;
+
+        case 'deleted':
+            $redirect_url = 'updatvila.hnt?statusx=3';
+            break;
+
+        case 'description':
+            $genericvalue = $_POST['genericvalue'] ?? '';
+            $redirect_url = 'updatvila.hnt?genericvalue=' . urlencode($genericvalue) . '&genericfield=note&genericsearch=1&genericoperation=like';
+            break;
+
+        default:
+            $redirect_url = 'updatvila.hnt';
+    }
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'جاري تحميل النتائج...',
+        'redirect_url' => $redirect_url
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
+}
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.search-dashboard {
+    background: #f8f9fa;
+    min-height: 100vh;
+    padding: 2rem 0;
+}
+
+.page-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.search-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+}
+
+.search-option-card {
+    background: white;
+    border: 2px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 1.25rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.search-option-card:hover {
+    border-color: #ef4444;
+    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.15);
+    transform: translateY(-2px);
+}
+
+.search-option-card.active {
+    border-color: #ef4444;
+    background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.2);
+}
+
+.search-option-card input[type="radio"] {
+    width: 20px;
+    height: 20px;
+    accent-color: #ef4444;
+}
+
+.search-option-card .option-icon {
+    font-size: 2rem;
+    color: #ef4444;
+    flex-shrink: 0;
+}
+
+.search-option-card .option-label {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #1e293b;
+    margin: 0;
+}
+
+.search-form-container {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    padding: 2rem;
+    display: none;
+}
+
+.search-form-container.active {
+    display: block;
+    animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.form-header {
+    border-bottom: 3px solid #ef4444;
+    padding-bottom: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.form-header h3 {
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: #1e293b;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+}
+
+@media (max-width: 768px) {
+    .search-options {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+
+<div class="search-dashboard" dir="rtl">
+    <div class="container-fluid">
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>
+                <i class="bi bi-funnel"></i>
+                <?= $sc_title ?>
+            </h1>
+            <p class="mb-0 mt-2" style="opacity: 0.95; font-size: 0.95rem;">
+                البحث عن الفلل بشروط مخصصة
+            </p>
+        </div>
+
+        <!-- Search Options -->
+        <div class="search-options">
+            <div class="search-option-card" onclick="displaySearch('srch0', this)" data-option="srch0">
+                <input type="radio" name="searchType" id="opt0">
+                <div class="option-icon">
+                    <i class="bi bi-geo-alt"></i>
+                </div>
+                <label for="opt0" class="option-label">
+                    موقع ومساحة وسعر
+                </label>
+            </div>
+
+            <div class="search-option-card" onclick="displaySearch('srch1', this)" data-option="srch1">
+                <input type="radio" name="searchType" id="opt1">
+                <div class="option-icon">
+                    <i class="bi bi-building"></i>
+                </div>
+                <label for="opt1" class="option-label">
+                    بحث بالنوع
+                </label>
+            </div>
+
+            <div class="search-option-card" onclick="displaySearch('srch5', this)" data-option="srch5">
+                <input type="radio" name="searchType" id="opt5">
+                <div class="option-icon">
+                    <i class="bi bi-file-text"></i>
+                </div>
+                <label for="opt5" class="option-label">
+                    بحث بالوصف
+                </label>
+            </div>
+
+            <div class="search-option-card" onclick="displaySearch('srch2', this)" data-option="srch2">
+                <input type="radio" name="searchType" id="opt2">
+                <div class="option-icon">
+                    <i class="bi bi-check-circle"></i>
+                </div>
+                <label for="opt2" class="option-label">
+                    بحث بالمباع
+                </label>
+            </div>
+
+            <div class="search-option-card" onclick="displaySearch('srch3', this)" data-option="srch3">
+                <input type="radio" name="searchType" id="opt3">
+                <div class="option-icon">
+                    <i class="bi bi-clock-history"></i>
+                </div>
+                <label for="opt3" class="option-label">
+                    بحث بالمحجوز
+                </label>
+            </div>
+
+            <div class="search-option-card" onclick="displaySearch('srch4', this)" data-option="srch4">
+                <input type="radio" name="searchType" id="opt4">
+                <div class="option-icon">
+                    <i class="bi bi-trash"></i>
+                </div>
+                <label for="opt4" class="option-label">
+                    بحث بالمحذوفات
+                </label>
+            </div>
+        </div>
+
+        <!-- Search Form 0: Location + Area + Price -->
+        <div id="srch0" class="search-form-container">
+            <div class="form-header">
+                <h3>
+                    <i class="bi bi-geo-alt text-danger"></i>
+                    بحث موقع ومساحة وسعر
+                </h3>
+            </div>
+            <form name="form" method="get" action="updatvila.hnt" onsubmit="return handleLocationSearch(this)">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">
+                            <i class="bi bi-pin-map text-danger"></i>
+                            اختر اسم المدينة
+                        </label>
+                        <select name="site" class="form-select" onchange="formHandler(this.form)">
+                            <option value='searchbycondition.hnt'>اختر اسم المدينة</option>
+                            <?php
+                            if ($cityname) {
+                                echo "<option selected>$cityname</option>";
+                            }
+                            $sql = "select * from city order by binary cityname";
+                            $result = mysql_query($sql, $link);
+                            while ($row = mysql_fetch_array($result)) {
+                                echo "<option value='searchbycondition.hnt?cityid=$row[0]&cityname=$row[1]'>$row[1]</option>";
+                            }
+                            ?>
+                        </select>
+                    </div>
+
+                    <div class="col-md-6">
+                        <label class="form-label">
+                            <i class="bi bi-map text-danger"></i>
+                            اسم المخطط
+                        </label>
+                        <select name="mokhatatid" class="form-select">
+                            <option value=''>اختر اسم المخطط</option>
+                            <?php
+                            $sqlm = "select mokhatatid,mokhatatname from mokhatat where cityid='$cityid' order by binary mokhatatname";
+                            $resultm = mysql_query($sqlm, $link);
+                            while ($row = mysql_fetch_array($resultm)) {
+                                echo "<option value=$row[0]>$row[1]</option>";
+                            }
+                            ?>
+                        </select>
+                    </div>
+
+                    <div class="col-md-6">
+                        <label class="form-label">
+                            <i class="bi bi-signpost text-danger"></i>
+                            الحي
+                        </label>
+                        <input type="text" name="hay" class="form-control">
+                    </div>
+
+                    <div class="col-md-6">
+                        <label class="form-label">
+                            <i class="bi bi-compass text-danger"></i>
+                            الشارع
+                        </label>
+                        <input type="text" name="block" class="form-control">
+                    </div>
+
+                    <div class="col-md-6">
+                        <label class="form-label">
+                            <i class="bi bi-rulers text-danger"></i>
+                            المساحة ± نسبة
+                        </label>
+                        <div class="input-group">
+                            <input type="text"
+                                   class="form-control"
+                                   name="serchvms"
+                                   onkeypress="return ValidateNumberKeyPress(this, event);"
+                                   onkeyup="ValidateNumberKeyUp(this);"
+                                   onblur="ValidateAndFormatNumber(this)"
+                                   placeholder="المساحة">
+                            <span class="input-group-text"><?= $lenghtunit; ?>²</span>
+                            <input type="text"
+                                   class="form-control"
+                                   name="nesbams"
+                                   value="20"
+                                   style="max-width: 80px;"
+                                   onkeypress="return ValidateNumberKeyPress(this, event);">
+                            <span class="input-group-text">%</span>
+                        </div>
+                    </div>
+
+                    <div class="col-md-6">
+                        <label class="form-label">
+                            <i class="bi bi-cash text-danger"></i>
+                            السعر ± نسبة
+                        </label>
+                        <div class="input-group">
+                            <input type="text"
+                                   class="form-control"
+                                   name="serchvpr"
+                                   onkeypress="return ValidateNumberKeyPress(this, event);"
+                                   onkeyup="ValidateNumberKeyUp(this);"
+                                   onblur="ValidateAndFormatNumber(this)"
+                                   placeholder="السعر">
+                            <span class="input-group-text"><?= $myomla; ?></span>
+                            <input type="text"
+                                   class="form-control"
+                                   name="nesbapr"
+                                   value="20"
+                                   style="max-width: 80px;"
+                                   onkeypress="return ValidateNumberKeyPress(this, event);">
+                            <span class="input-group-text">%</span>
+                        </div>
+                    </div>
+                </div>
+                <input type="hidden" name="genericsql" value="">
+                <div class="d-grid gap-2 mt-4">
+                    <button type="submit" class="btn btn-danger btn-lg">
+                        <i class="bi bi-search me-2"></i>
+                        ابحث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Search Form 1: By Type -->
+        <div id="srch1" class="search-form-container">
+            <div class="form-header">
+                <h3>
+                    <i class="bi bi-building text-danger"></i>
+                    بحث بالنوع
+                </h3>
+            </div>
+            <form name="form1" method="get" action="updatvila.hnt">
+                <div class="mb-3">
+                    <label class="form-label">
+                        <i class="bi bi-house text-danger"></i>
+                        نوع الفيلا
+                    </label>
+                    <div class="row g-2">
+                        <div class="col-md-8">
+                            <input type="text" class="form-control" name="genericvalue" id='vilatype' required>
+                        </div>
+                        <div class="col-md-4">
+                            <select class="form-select" onchange="document.getElementById('vilatype').value=this.options[selectedIndex].text;">
+                                <option value="">اختر النوع</option>
+                                <option>درج صالة</option>
+                                <option>درج صالة مع شقق مسروقة</option>
+                                <option>دورين مفصوله</option>
+                                <option>دور+ 3 شقق</option>
+                                <option>دبلكس ملاصق</option>
+                                <option>فيلا</option>
+                                <option>دبلكس</option>
+                                <option>تجارية</option>
+                                <option>عوائل</option>
+                                <option>سكن عمال</option>
+                                <option>عزوبي</option>
+                                <option>قصر</option>
+                                <option>استراحة</option>
+                                <option>نوع آخر</option>
+                            </select>
+                        </div>
+                    </div>
+                    <small class="text-muted">اكتب النوع مباشرة أو اختره من القائمة</small>
+                </div>
+                <input type="hidden" name="genericfield" value="vilatype">
+                <input type="hidden" name="genericsearch" value="1">
+                <input type="hidden" name="genericoperation" value="like">
+                <div class="d-grid gap-2 mt-4">
+                    <button type="submit" class="btn btn-danger btn-lg">
+                        <i class="bi bi-search me-2"></i>
+                        ابحث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Search Form 2: Sold -->
+        <div id="srch2" class="search-form-container">
+            <div class="form-header">
+                <h3>
+                    <i class="bi bi-check-circle text-danger"></i>
+                    بحث المباع
+                </h3>
+            </div>
+            <form name="form2" method="get" action="updatvila.hnt">
+                <div class="alert alert-info">
+                    <i class="bi bi-info-circle me-2"></i>
+                    البحث عن جميع الفلل المباعة
+                </div>
+                <input type="hidden" name="statusx" value="2">
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-danger btn-lg">
+                        <i class="bi bi-search me-2"></i>
+                        ابحث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Search Form 3: Reserved -->
+        <div id="srch3" class="search-form-container">
+            <div class="form-header">
+                <h3>
+                    <i class="bi bi-clock-history text-danger"></i>
+                    بحث المحجوز
+                </h3>
+            </div>
+            <form name="form3" method="get" action="updatvila.hnt">
+                <div class="alert alert-info">
+                    <i class="bi bi-info-circle me-2"></i>
+                    البحث عن جميع الفلل المحجوزة
+                </div>
+                <input type="hidden" name="statusx" value="1">
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-danger btn-lg">
+                        <i class="bi bi-search me-2"></i>
+                        ابحث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Search Form 4: Deleted -->
+        <div id="srch4" class="search-form-container">
+            <div class="form-header">
+                <h3>
+                    <i class="bi bi-trash text-danger"></i>
+                    بحث المحذوف
+                </h3>
+            </div>
+            <form name="form4" method="get" action="updatvila.hnt">
+                <div class="alert alert-warning">
+                    <i class="bi bi-exclamation-triangle me-2"></i>
+                    البحث عن جميع الفلل المحذوفة
+                </div>
+                <input type="hidden" name="statusx" value="3">
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-danger btn-lg">
+                        <i class="bi bi-search me-2"></i>
+                        ابحث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Search Form 5: By Description -->
+        <div id="srch5" class="search-form-container">
+            <div class="form-header">
+                <h3>
+                    <i class="bi bi-file-text text-danger"></i>
+                    بحث بالوصف
+                </h3>
+            </div>
+            <form name="form5" method="get" action="updatvila.hnt" onsubmit="return handleDescriptionSearch(this)">
+                <div class="mb-3">
+                    <label class="form-label">
+                        <i class="bi bi-chat-left-text text-danger"></i>
+                        الوصف
+                    </label>
+                    <input type="text"
+                           class="form-control"
+                           name="searchv"
+                           onkeyup="document.form5.genericvalue.value='%'+this.value+'%';"
+                           placeholder="ابحث في الوصف..."
+                           required>
+                    <small class="text-muted">سيتم البحث في وصف الفيلا</small>
+                </div>
+                <input type="hidden" name="genericvalue" value="">
+                <input type="hidden" name="genericfield" value="note">
+                <input type="hidden" name="genericsearch" value="1">
+                <input type="hidden" name="genericoperation" value="like">
+                <div class="d-grid gap-2 mt-4">
+                    <button type="submit" class="btn btn-danger btn-lg">
+                        <i class="bi bi-search me-2"></i>
+                        ابحث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+    </div>
+</div>
+
+<script>
+/**
+ * Vila Search by Conditions - Modern JavaScript
+ * Complex search with multiple conditions
+ */
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Vila Search by Conditions initialized');
+
+    // Restore last selected search type from cookie
+    const savedSearch = readCookie('vilacond');
+    if (savedSearch) {
+        const card = document.querySelector(`[data-option="${savedSearch}"]`);
+        if (card) {
+            displaySearch(savedSearch, card);
+        }
+    }
+
+    // Setup AJAX for all forms
+    setupFormAjax('form', 'location');
+    setupFormAjax('form1', 'type');
+    setupFormAjax('form2', 'sold');
+    setupFormAjax('form3', 'reserved');
+    setupFormAjax('form4', 'deleted');
+    setupFormAjax('form5', 'description');
+});
+
+/**
+ * Setup AJAX submission for a form
+ */
+function setupFormAjax(formName, searchType) {
+    const form = document.forms[formName];
+    if (!form) return;
+
+    form.addEventListener('submit', function(e) {
+        e.preventDefault();
+
+        // Get form data
+        const formData = new FormData(this);
+        formData.append('ajax_submit', '1');
+        formData.append('search_type', searchType);
+
+        // Show loading state
+        const submitBtn = this.querySelector('button[type="submit"]');
+        const originalBtnText = submitBtn.innerHTML;
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<i class="bi bi-hourglass-split me-2"></i>جاري البحث...';
+
+        // Submit via AJAX
+        $.ajax({
+            url: window.location.pathname.split('/').pop(),
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            dataType: 'json',
+            success: function(response) {
+                if (response.success && response.redirect_url) {
+                    window.location.href = response.redirect_url;
+                } else {
+                    alert(response.error || 'حدث خطأ أثناء البحث');
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = originalBtnText;
+                }
+            },
+            error: function(xhr, status, error) {
+                console.error('AJAX Error:', error);
+                alert('حدث خطأ أثناء البحث. الرجاء المحاولة مرة أخرى.');
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = originalBtnText;
+            }
+        });
+
+        return false;
+    });
+}
+
+/**
+ * Display selected search form
+ */
+function displaySearch(formId, cardElement) {
+    // Hide all forms
+    const allForms = document.querySelectorAll('.search-form-container');
+    allForms.forEach(form => form.classList.remove('active'));
+
+    // Remove active class from all cards
+    const allCards = document.querySelectorAll('.search-option-card');
+    allCards.forEach(card => card.classList.remove('active'));
+
+    // Show selected form
+    const selectedForm = document.getElementById(formId);
+    if (selectedForm) {
+        selectedForm.classList.add('active');
+    }
+
+    // Add active class to selected card
+    if (cardElement) {
+        cardElement.classList.add('active');
+        const radio = cardElement.querySelector('input[type="radio"]');
+        if (radio) {
+            radio.checked = true;
+        }
+    }
+
+    // Save to cookie
+    createCookie('vilacond', formId, 20);
+
+    // Scroll to form
+    setTimeout(() => {
+        selectedForm.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 100);
+}
+
+/**
+ * Form handler for city selection
+ */
+function formHandler(form) {
+    const url = form.site.options[form.site.selectedIndex].value;
+    window.location.href = url;
+}
+
+/**
+ * Handle location search with complex SQL generation
+ */
+function handleLocationSearch(form) {
+    let genericsql0 = '', genericsql1 = '', genericsql2 = '', genericsql3 = '', genericsql4 = '', genericsql5 = '';
+
+    // Area search
+    const serchvms = form.serchvms.value;
+    if (serchvms) {
+        const areaValue = parseInt(serchvms.replace(/,/gi, ''));
+        const areaPercentage = parseFloat(form.nesbams.value);
+        const area1 = areaValue - (areaValue * areaPercentage / 100);
+        const area2 = areaValue + (areaValue * areaPercentage / 100);
+        genericsql0 = `and (mesaha >='${area1}' and mesaha <= '${area2}')`;
+    }
+
+    // Price search
+    const serchvpr = form.serchvpr.value;
+    if (serchvpr) {
+        const priceValue = parseInt(serchvpr.replace(/,/gi, ''));
+        const pricePercentage = parseFloat(form.nesbapr.value);
+        const price1 = priceValue - (priceValue * pricePercentage / 100);
+        const price2 = priceValue + (priceValue * pricePercentage / 100);
+        genericsql1 = ` and ((price >='${price1}' and price <= '${price2}') or (pricesom >='${price1}' and pricesom <= '${price2}'))`;
+    }
+
+    // Block search
+    const block = form.block.value;
+    if (block) {
+        genericsql2 = ` and (block like '%${block}%')`;
+    }
+
+    // Hay (district) search
+    const hay = form.hay.value;
+    if (hay) {
+        genericsql3 = ` and (hay like '%${hay}%')`;
+    }
+
+    // Mokhatat (plan) search
+    const mokhatatid = form.mokhatatid.options[form.mokhatatid.selectedIndex].value;
+    if (mokhatatid > 0) {
+        genericsql4 = ` and (mokhatatid = '${mokhatatid}')`;
+    }
+
+    const genericsqlall = ' where 1 ' + genericsql0 + genericsql1 + genericsql2 + genericsql3 + genericsql4 + genericsql5;
+    form.genericsql.value = genericsqlall;
+
+    return true;
+}
+
+/**
+ * Handle description search
+ */
+function handleDescriptionSearch(form) {
+    form.genericvalue.value = '%' + form.searchv.value + '%';
+    return true;
+}
+</script>
+
+<?php
+} // Close if (!$is_ajax_request)
+require('../../../foter.hnt');
+?>

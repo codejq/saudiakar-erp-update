@@ -1,0 +1,1092 @@
+<?php
+/**
+ * Installment Management - Modernized Version
+ *
+ * Features:
+ * - Status-based management (no deletions)
+ * - Partial payment support
+ * - Payment history tracking
+ * - Late fee calculations
+ * - CalendarManager integration
+ * - Audit trail logging
+ * - Modern Bootstrap 5 UI
+ * - AJAX operations
+ *
+ * @version 2.0
+ * @date 2025-12-04
+ */
+
+// Page setup
+$sc_title = "إدارة الأقساط المتقدمة";
+$sc_id = "134";
+
+include_once "../../../nocash.hnt";
+include_once "../../../header.hnt";
+
+// Include required classes
+require_once '../arabicTools.class.hnt';
+require_once '../uCal.class.hnt';
+require_once 'CalendarManager.class.hnt';
+require_once 'contract_status_indicator.hnt';
+require_once 'amlakfunctions.hnt';
+
+// Initialize
+$dcal = new uCal();
+$calendar = new CalendarManager();
+
+// Get parameters
+$idsubaqar = isset($_REQUEST['idsubaqar']) ? intval($_REQUEST['idsubaqar']) : 0;
+$mostagerid = isset($_REQUEST['mostagerid']) ? intval($_REQUEST['mostagerid']) : 0;
+
+// Get property and contract data
+$sql = "SELECT ad.*, a.*, e.*, m.mostagername
+        FROM amlakdetails ad
+        LEFT JOIN amlak a ON ad.idaqar = a.idaqar
+        LEFT JOIN egar e ON ad.rakam3akdid = e.rakam3akdid
+        LEFT JOIN mostagereen m ON e.mostagerid = m.mostagerid
+        WHERE ad.idsubaqar = '$idsubaqar'";
+$result = mysql_query($sql, $link);
+$property = mysql_fetch_assoc($result);
+
+if (!$property) {
+    echo "<div class='alert alert-danger'>لم يتم العثور على العقار</div>";
+    exit;
+}
+
+$contractId = $property['rakam3akdid'];
+$calendarType = isset($property['calendar_type']) ? intval($property['calendar_type']) : 0;
+
+?>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+
+<style>
+    .installment-card {
+        border-left: 4px solid #dee2e6;
+        transition: all 0.3s;
+    }
+
+    .installment-card:hover {
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+
+    .installment-card.status-paid {
+        border-left-color: #28a745;
+        background-color: #f8fff9;
+    }
+
+    .installment-card.status-partial {
+        border-left-color: #ffc107;
+        background-color: #fffef8;
+    }
+
+    .installment-card.status-overdue {
+        border-left-color: #dc3545;
+        background-color: #fff8f8;
+    }
+
+    .installment-card.status-due {
+        border-left-color: #17a2b8;
+        background-color: #f8fcfd;
+    }
+
+    .payment-history-item {
+        border-left: 2px solid #007bff;
+        padding-left: 15px;
+        margin-bottom: 10px;
+    }
+
+    .status-badge-lg {
+        font-size: 0.9rem;
+        padding: 0.5rem 1rem;
+    }
+
+    .section-header {
+        background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+        color: white;
+        padding: 1rem;
+        border-radius: 8px;
+        margin-bottom: 1.5rem;
+    }
+
+    .installment-summary {
+        background: #f8f9fa;
+        border-radius: 8px;
+        padding: 1.5rem;
+        margin-bottom: 2rem;
+    }
+
+    .stat-card {
+        text-align: center;
+        padding: 1rem;
+        border-radius: 8px;
+        background: white;
+        border: 1px solid #dee2e6;
+    }
+
+    .stat-value {
+        font-size: 1.8rem;
+        font-weight: bold;
+        margin: 0.5rem 0;
+    }
+
+    .stat-label {
+        color: #6c757d;
+        font-size: 0.9rem;
+    }
+
+    .late-fee-badge {
+        background: #dc3545;
+        color: white;
+        padding: 0.25rem 0.5rem;
+        border-radius: 4px;
+        font-size: 0.85rem;
+    }
+
+    .partial-payment-bar {
+        height: 8px;
+        background: #e9ecef;
+        border-radius: 4px;
+        overflow: hidden;
+        margin-top: 0.5rem;
+    }
+
+    .partial-payment-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #28a745 0%, #20c997 100%);
+        transition: width 0.3s;
+    }
+
+    .action-btn {
+        padding: 0.5rem 1rem;
+        border-radius: 6px;
+        border: none;
+        cursor: pointer;
+        transition: all 0.3s;
+    }
+
+    .action-btn:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    }
+
+    .modal-content {
+        border-radius: 12px;
+    }
+
+    .modal-header {
+        background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+        color: white;
+        border-radius: 12px 12px 0 0;
+    }
+</style>
+
+<div class="container-fluid py-4">
+    <!-- Page Header -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header text-white section-header">
+            <div class="d-flex justify-content-between align-items-center">
+                <h4 class="mb-0">
+                    <i class="bi bi-credit-card me-2"></i>
+                    إدارة أقساط الإيجار
+                </h4>
+                <?php echo renderContractStatus($property); ?>
+            </div>
+        </div>
+    </div>
+
+    <!-- Contract Info -->
+    <div class="row mb-4">
+        <div class="col-md-12">
+            <div class="card shadow-sm">
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-3">
+                            <p class="mb-1"><strong>رقم العقد:</strong> <?= $property['rakam3akd'] ?></p>
+                            <p class="mb-0"><strong>المستأجر:</strong> <?= htmlspecialchars($property['mostagername']) ?></p>
+                        </div>
+                        <div class="col-md-3">
+                            <p class="mb-1"><strong>العقار:</strong> <?= htmlspecialchars($property['aqaraddress']) ?></p>
+                            <p class="mb-0"><strong>قيمة القسط:</strong> <?= number_format($property['depositeamount'], 2) ?> ريال</p>
+                        </div>
+                        <div class="col-md-3">
+                            <p class="mb-1"><strong>بداية العقد:</strong>
+                                <?= $calendar->formatDateForDisplay($property['startegar'], $calendarType) ?>
+                            </p>
+                            <p class="mb-0"><strong>نهاية العقد:</strong>
+                                <?= $calendar->formatDateForDisplay($property['end3aqd'], $calendarType) ?>
+                            </p>
+                        </div>
+                        <div class="col-md-3 text-end">
+                            <a href="contract_history_viewer.hnt?rakam3akdid=<?= $contractId ?>" class="btn btn-info btn-sm">
+                                <i class="bi bi-clock-history me-1"></i>
+                                سجل التعديلات
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Installment Summary Statistics -->
+    <?php
+    // Calculate installment statistics for this specific property
+    // Note: Works with both old and new database schemas
+    $statsSql = "SELECT
+                    COUNT(*) as total_installments,
+                    SUM(CASE WHEN iscomplete = 1 THEN 1 ELSE 0 END) as paid_count,
+                    SUM(kastvalue + IFNULL(water, 0) + IFNULL(sa3ee, 0) + IFNULL(services, 0)) as total_amount
+                 FROM aksat
+                 WHERE egar_id = '$contractId'
+                 AND idsubaqar = '$idsubaqar'";
+    $statsResult = mysql_query($statsSql, $link);
+    $stats = mysql_fetch_assoc($statsResult);
+
+    // Provide defaults if query fails or returns no results
+    if (!$stats) {
+        $stats = [
+            'total_installments' => 0,
+            'paid_count' => 0,
+            'total_amount' => 0
+        ];
+    }
+
+    // Initialize values that may not exist in old schema
+    $stats['partial_count'] = 0;
+    $stats['overdue_count'] = 0;
+    $stats['total_paid'] = $stats['paid_count'] > 0 ? $stats['total_amount'] : 0;
+    $stats['total_remaining'] = $stats['total_amount'] - $stats['total_paid'];
+    $stats['total_late_fees'] = 0;
+    ?>
+
+    <div class="installment-summary">
+        <h5 class="mb-3">
+            <i class="bi bi-bar-chart me-2"></i>
+            ملخص الأقساط
+        </h5>
+        <div class="row g-3">
+            <div class="col-md-2">
+                <div class="stat-card">
+                    <div class="stat-label">إجمالي الأقساط</div>
+                    <div class="stat-value text-primary"><?= $stats['total_installments'] ?></div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="stat-card border-success">
+                    <div class="stat-label">مدفوعة</div>
+                    <div class="stat-value text-success"><?= $stats['paid_count'] ?></div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="stat-card border-warning">
+                    <div class="stat-label">جزئية</div>
+                    <div class="stat-value text-warning"><?= $stats['partial_count'] ?></div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="stat-card border-danger">
+                    <div class="stat-label">متأخرة</div>
+                    <div class="stat-value text-danger"><?= $stats['overdue_count'] ?></div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="stat-card">
+                    <div class="stat-label">المبلغ المدفوع</div>
+                    <div class="stat-value text-success"><?= number_format($stats['total_paid'], 2) ?></div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="stat-card">
+                    <div class="stat-label">المتبقي</div>
+                    <div class="stat-value text-danger"><?= number_format($stats['total_remaining'], 2) ?></div>
+                </div>
+            </div>
+        </div>
+        <?php if ($stats['total_late_fees'] > 0): ?>
+            <div class="alert alert-warning mt-3 mb-0">
+                <i class="bi bi-exclamation-triangle me-2"></i>
+                <strong>غرامات التأخير:</strong> <?= number_format($stats['total_late_fees'], 2) ?> ريال
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <!-- Quick Actions -->
+    <div class="card shadow-sm mb-4">
+        <div class="card-body">
+            <div class="d-flex gap-2 flex-wrap">
+                <button type="button" class="btn btn-primary" onclick="showAddInstallmentModal()">
+                    <i class="bi bi-plus-circle me-1"></i>
+                    إضافة قسط جديد
+                </button>
+                <button type="button" class="btn btn-success" onclick="markAllAsPaid()">
+                    <i class="bi bi-check-all me-1"></i>
+                    تحديد الكل كمدفوع
+                </button>
+                <button type="button" class="btn btn-info" onclick="calculateLateFees()">
+                    <i class="bi bi-calculator me-1"></i>
+                    حساب غرامات التأخير
+                </button>
+                <button type="button" class="btn btn-warning" onclick="showBulkPaymentModal()">
+                    <i class="bi bi-cash-stack me-1"></i>
+                    دفعة جماعية
+                </button>
+                <a href="egarstatus.hnt?rakam3akdid=<?= $contractId ?>" class="btn btn-outline-secondary">
+                    <i class="bi bi-arrow-return-right me-1"></i>
+                    عودة لحالة العقد
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Installments List -->
+    <div class="row" id="installmentsList">
+        <?php
+        // Get installments for this specific property
+        $sql = "SELECT * FROM aksat
+                WHERE egar_id = '$contractId'
+                AND idsubaqar = '$idsubaqar'
+                ORDER BY kastdate ASC";
+        $result = mysql_query($sql, $link);
+
+        $installmentNumber = 1;
+        while ($installment = mysql_fetch_assoc($result)):
+            // Initialize fields that may not exist in old schema
+            $installment['amount_paid'] = $installment['amount_paid'] ?? 0;
+            $installment['amount_remaining'] = $installment['amount_remaining'] ?? 0;
+            $installment['late_fee'] = $installment['late_fee'] ?? 0;
+            $installment['status'] = $installment['status'] ?? '';
+
+            // Calculate total amount
+            $totalAmount = $installment['kastvalue'] +
+                          ($installment['water'] ?? 0) +
+                          ($installment['sa3ee'] ?? 0) +
+                          ($installment['services'] ?? 0);
+
+            // Get status
+            $status = $installment['status'];
+            if (empty($status) && $installment['iscomplete'] == 1) {
+                $status = 'paid';
+            }
+
+            // Calculate payment percentage
+            $paymentPercentage = 0;
+            if ($totalAmount > 0) {
+                $paymentPercentage = ($installment['amount_paid'] / $totalAmount) * 100;
+            }
+
+            // Status badge configuration
+            $statusConfig = [
+                'paid' => ['color' => 'success', 'icon' => 'check-circle', 'label' => 'مدفوع'],
+                'partial' => ['color' => 'warning', 'icon' => 'exclamation-circle', 'label' => 'مدفوع جزئياً'],
+                'overdue' => ['color' => 'danger', 'icon' => 'x-circle', 'label' => 'متأخر'],
+                'due' => ['color' => 'info', 'icon' => 'clock', 'label' => 'مستحق'],
+                'pending' => ['color' => 'secondary', 'icon' => 'hourglass', 'label' => 'قادم'],
+                'cancelled' => ['color' => 'dark', 'icon' => 'slash-circle', 'label' => 'ملغي'],
+                'waived' => ['color' => 'muted', 'icon' => 'dash-circle', 'label' => 'معفى']
+            ];
+
+            $statusInfo = $statusConfig[$status] ?? $statusConfig['pending'];
+            $statusClass = 'status-' . $status;
+        ?>
+
+            <div class="col-md-6 col-lg-4 mb-4">
+                <div class="card installment-card <?= $statusClass ?> h-100">
+                    <div class="card-body">
+                        <!-- Header -->
+                        <div class="d-flex justify-content-between align-items-start mb-3">
+                            <div>
+                                <h5 class="card-title mb-1">
+                                    قسط رقم <?= $installment['kastname'] ?>
+                                </h5>
+                                <small class="text-muted">
+                                    <i class="bi bi-calendar3 me-1"></i>
+                                    <?= $calendar->formatDateForDisplay($installment['kastdate'], $calendarType) ?>
+                                </small>
+                            </div>
+                            <span class="badge bg-<?= $statusInfo['color'] ?> status-badge-lg">
+                                <i class="bi bi-<?= $statusInfo['icon'] ?> me-1"></i>
+                                <?= $statusInfo['label'] ?>
+                            </span>
+                        </div>
+
+                        <!-- Amount Details -->
+                        <div class="mb-3">
+                            <div class="d-flex justify-content-between mb-2">
+                                <span>قيمة الإيجار:</span>
+                                <strong><?= number_format($installment['kastvalue'], 2) ?></strong>
+                            </div>
+                            <?php if ($installment['water'] > 0): ?>
+                                <div class="d-flex justify-content-between mb-2">
+                                    <span class="text-muted">المياه:</span>
+                                    <span><?= number_format($installment['water'], 2) ?></span>
+                                </div>
+                            <?php endif; ?>
+                            <?php if ($installment['sa3ee'] > 0): ?>
+                                <div class="d-flex justify-content-between mb-2">
+                                    <span class="text-muted">السعي:</span>
+                                    <span><?= number_format($installment['sa3ee'], 2) ?></span>
+                                </div>
+                            <?php endif; ?>
+                            <?php if ($installment['services'] > 0): ?>
+                                <div class="d-flex justify-content-between mb-2">
+                                    <span class="text-muted">الخدمات:</span>
+                                    <span><?= number_format($installment['services'], 2) ?></span>
+                                </div>
+                            <?php endif; ?>
+                            <?php if ($installment['late_fee'] > 0): ?>
+                                <div class="d-flex justify-content-between mb-2">
+                                    <span class="text-danger">غرامة التأخير:</span>
+                                    <span class="late-fee-badge"><?= number_format($installment['late_fee'], 2) ?></span>
+                                </div>
+                            <?php endif; ?>
+                            <hr>
+                            <div class="d-flex justify-content-between">
+                                <strong>المجموع:</strong>
+                                <strong class="text-primary"><?= number_format($totalAmount + $installment['late_fee'], 2) ?> ريال</strong>
+                            </div>
+                        </div>
+
+                        <!-- Payment Progress -->
+                        <?php if ($status == 'partial' || $installment['amount_paid'] > 0): ?>
+                            <div class="mb-3">
+                                <div class="d-flex justify-content-between mb-1">
+                                    <small>المدفوع: <?= number_format($installment['amount_paid'], 2) ?></small>
+                                    <small>المتبقي: <?= number_format($installment['amount_remaining'], 2) ?></small>
+                                </div>
+                                <div class="partial-payment-bar">
+                                    <div class="partial-payment-fill" style="width: <?= $paymentPercentage ?>%"></div>
+                                </div>
+                                <small class="text-muted"><?= number_format($paymentPercentage, 1) ?>% مدفوع</small>
+                            </div>
+                        <?php endif; ?>
+
+                        <!-- Actions -->
+                        <div class="d-grid gap-2">
+                            <?php if ($status != 'paid' && $status != 'cancelled'): ?>
+                                <button type="button" class="btn btn-sm btn-success"
+                                        onclick="showPaymentModal(<?= $installment['kastid'] ?>)">
+                                    <i class="bi bi-cash me-1"></i>
+                                    تسجيل دفعة
+                                </button>
+                            <?php endif; ?>
+                            <div class="btn-group btn-group-sm" role="group">
+                                <button type="button" class="btn btn-outline-primary"
+                                        onclick="showEditModal(<?= $installment['kastid'] ?>)">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-info"
+                                        onclick="showPaymentHistory(<?= $installment['kastid'] ?>)">
+                                    <i class="bi bi-clock-history"></i>
+                                </button>
+                                <?php if ($status != 'paid' && $status != 'cancelled'): ?>
+                                    <button type="button" class="btn btn-outline-danger"
+                                            onclick="cancelInstallment(<?= $installment['kastid'] ?>)">
+                                        <i class="bi bi-x-circle"></i>
+                                    </button>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        <?php
+            $installmentNumber++;
+        endwhile;
+        ?>
+    </div>
+</div>
+
+<!-- Payment Modal -->
+<div class="modal fade" id="paymentModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-cash-stack me-2"></i>
+                    تسجيل دفعة
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="paymentForm">
+                    <input type="hidden" id="payment_kastid" name="kastid">
+                    <input type="hidden" name="action" value="record_payment">
+
+                    <div class="mb-3">
+                        <label class="form-label">المبلغ المدفوع</label>
+                        <input type="number" step="0.01" class="form-control" id="payment_amount" name="amount" required>
+                        <small class="text-muted">المتبقي: <span id="remaining_amount">0</span> ريال</small>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">تاريخ الدفع</label>
+                        <input type="text" class="form-control" id="payment_date" name="payment_date" value="<?= date('d/m/Y') ?>">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">طريقة الدفع</label>
+                        <select class="form-select" name="payment_method">
+                            <option value="cash">نقدي</option>
+                            <option value="bank_transfer">تحويل بنكي</option>
+                            <option value="check">شيك</option>
+                            <option value="online">دفع إلكتروني</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">رقم المرجع / الشيك</label>
+                        <input type="text" class="form-control" name="reference_number">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">ملاحظات</label>
+                        <textarea class="form-control" name="notes" rows="2"></textarea>
+                    </div>
+
+                    <div class="form-check mb-3">
+                        <input type="checkbox" class="form-check-input" id="create_receipt" name="create_receipt" checked>
+                        <label class="form-check-label" for="create_receipt">
+                            إنشاء سند قبض تلقائي
+                        </label>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-success" onclick="submitPayment()">
+                    <i class="bi bi-check-circle me-1"></i>
+                    تسجيل الدفعة
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Installment Modal -->
+<div class="modal fade" id="editModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-pencil me-2"></i>
+                    تعديل القسط
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="editForm">
+                    <input type="hidden" id="edit_kastid" name="kastid">
+                    <input type="hidden" name="action" value="update_installment">
+
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">رقم القسط</label>
+                            <input type="text" class="form-control" id="edit_kastname" name="kastname">
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">تاريخ الاستحقاق</label>
+                            <input type="text" class="form-control" id="edit_kastdate" name="kastdate">
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">قيمة الإيجار</label>
+                            <input type="number" step="0.01" class="form-control" id="edit_kastvalue" name="kastvalue">
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">المياه</label>
+                            <input type="number" step="0.01" class="form-control" id="edit_water" name="water">
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">السعي</label>
+                            <input type="number" step="0.01" class="form-control" id="edit_sa3ee" name="sa3ee">
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">الخدمات</label>
+                            <input type="number" step="0.01" class="form-control" id="edit_services" name="services">
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">الحالة</label>
+                        <select class="form-select" id="edit_status" name="status">
+                            <option value="pending">قادم</option>
+                            <option value="due">مستحق</option>
+                            <option value="overdue">متأخر</option>
+                            <option value="partial">مدفوع جزئياً</option>
+                            <option value="paid">مدفوع</option>
+                            <option value="waived">معفى</option>
+                            <option value="cancelled">ملغي</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">غرامة التأخير</label>
+                        <input type="number" step="0.01" class="form-control" id="edit_late_fee" name="late_fee">
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-primary" onclick="submitEdit()">
+                    <i class="bi bi-save me-1"></i>
+                    حفظ التعديلات
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Payment History Modal -->
+<div class="modal fade" id="historyModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-clock-history me-2"></i>
+                    سجل الدفعات
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="historyContent">
+                <div class="text-center py-4">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">جاري التحميل...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add Installment Modal -->
+<div class="modal fade" id="addInstallmentModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-plus-circle me-2"></i>
+                    إضافة قسط جديد
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="addInstallmentForm">
+                    <input type="hidden" name="action" value="add_installment">
+                    <input type="hidden" name="egar_id" value="<?= $contractId ?>">
+                    <input type="hidden" name="idsubaqar" value="<?= $idsubaqar ?>">
+
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">رقم القسط <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" name="kastname" required>
+                            <small class="text-muted">مثال: 1، 2، 3...</small>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">تاريخ الاستحقاق <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" name="kastdate" required placeholder="dd/mm/yyyy">
+                            <small class="text-muted">صيغة التاريخ: يوم/شهر/سنة</small>
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">قيمة الإيجار <span class="text-danger">*</span></label>
+                            <input type="number" step="0.01" class="form-control" name="kastvalue" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">المياه</label>
+                            <input type="number" step="0.01" class="form-control" name="water" value="0">
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">السعي</label>
+                            <input type="number" step="0.01" class="form-control" name="sa3ee" value="0">
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">الخدمات</label>
+                            <input type="number" step="0.01" class="form-control" name="services" value="0">
+                        </div>
+                    </div>
+
+                    <div class="alert alert-info">
+                        <i class="bi bi-info-circle me-2"></i>
+                        سيتم إضافة القسط بحالة "قادم" ويمكنك تعديله لاحقاً
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-primary" onclick="submitAddInstallment()">
+                    <i class="bi bi-plus-circle me-1"></i>
+                    إضافة القسط
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Bulk Payment Modal -->
+<div class="modal fade" id="bulkPaymentModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-cash-stack me-2"></i>
+                    دفعة جماعية
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="bulkPaymentForm">
+                    <input type="hidden" name="action" value="bulk_payment">
+                    <input type="hidden" name="egar_id" value="<?= $contractId ?>">
+
+                    <div class="mb-3">
+                        <label class="form-label">المبلغ الإجمالي <span class="text-danger">*</span></label>
+                        <input type="number" step="0.01" class="form-control" name="amount" id="bulk_amount" required>
+                        <small class="text-muted">سيتم توزيع المبلغ على الأقساط حسب التسلسل الزمني</small>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">تاريخ الدفع</label>
+                        <input type="text" class="form-control" name="payment_date" value="<?= date('d/m/Y') ?>">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">طريقة الدفع</label>
+                        <select class="form-select" name="payment_method">
+                            <option value="cash">نقدي</option>
+                            <option value="bank_transfer">تحويل بنكي</option>
+                            <option value="check">شيك</option>
+                            <option value="online">دفع إلكتروني</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">رقم المرجع / الشيك</label>
+                        <input type="text" class="form-control" name="reference_number">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">ملاحظات</label>
+                        <textarea class="form-control" name="notes" rows="2"></textarea>
+                    </div>
+
+                    <div class="alert alert-info">
+                        <i class="bi bi-info-circle me-2"></i>
+                        <strong>كيفية التوزيع:</strong><br>
+                        - سيتم دفع الأقساط بالترتيب الزمني<br>
+                        - الأقساط الكاملة تُدفع أولاً<br>
+                        - المتبقي يُسجل كدفعة جزئية في القسط التالي
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-success" onclick="submitBulkPayment()">
+                    <i class="bi bi-check-circle me-1"></i>
+                    تنفيذ الدفعة
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const paymentModal = new bootstrap.Modal(document.getElementById('paymentModal'));
+    const editModal = new bootstrap.Modal(document.getElementById('editModal'));
+    const historyModal = new bootstrap.Modal(document.getElementById('historyModal'));
+    const addInstallmentModal = new bootstrap.Modal(document.getElementById('addInstallmentModal'));
+    const bulkPaymentModal = new bootstrap.Modal(document.getElementById('bulkPaymentModal'));
+
+    // Show payment modal
+    function showPaymentModal(kastid) {
+        // Load installment data
+        $.ajax({
+            url: 'installments.api.hnt',
+            method: 'GET',
+            data: {
+                action: 'get_installment',
+                kastid: kastid
+            },
+            success: function(response) {
+                if (response.success) {
+                    const inst = response.data;
+                    $('#payment_kastid').val(kastid);
+                    $('#remaining_amount').text(parseFloat(inst.amount_remaining).toFixed(2));
+                    $('#payment_amount').val(inst.amount_remaining).attr('max', inst.amount_remaining);
+                    paymentModal.show();
+                }
+            }
+        });
+    }
+
+    // Submit payment
+    function submitPayment() {
+        const formData = $('#paymentForm').serialize();
+        $.ajax({
+            url: 'installments.api.hnt',
+            method: 'POST',
+            data: formData,
+            success: function(response) {
+                if (response.success) {
+                    showToast('success', 'تم تسجيل الدفعة بنجاح');
+                    paymentModal.hide();
+                    location.reload();
+                } else {
+                    showToast('error', response.message);
+                }
+            }
+        });
+    }
+
+    // Show edit modal
+    function showEditModal(kastid) {
+        $.ajax({
+            url: 'installments.api.hnt',
+            method: 'GET',
+            data: {
+                action: 'get_installment',
+                kastid: kastid
+            },
+            success: function(response) {
+                if (response.success) {
+                    const inst = response.data;
+                    $('#edit_kastid').val(kastid);
+                    $('#edit_kastname').val(inst.kastname);
+                    $('#edit_kastdate').val(inst.kastdate_formatted);
+                    $('#edit_kastvalue').val(inst.kastvalue);
+                    $('#edit_water').val(inst.water);
+                    $('#edit_sa3ee').val(inst.sa3ee);
+                    $('#edit_services').val(inst.services);
+                    $('#edit_status').val(inst.status);
+                    $('#edit_late_fee').val(inst.late_fee);
+                    editModal.show();
+                }
+            }
+        });
+    }
+
+    // Submit edit
+    function submitEdit() {
+        const formData = $('#editForm').serialize();
+        $.ajax({
+            url: 'installments.api.hnt',
+            method: 'POST',
+            data: formData,
+            success: function(response) {
+                if (response.success) {
+                    showToast('success', 'تم تحديث القسط بنجاح');
+                    editModal.hide();
+                    location.reload();
+                } else {
+                    showToast('error', response.message);
+                }
+            }
+        });
+    }
+
+    // Show payment history
+    function showPaymentHistory(kastid) {
+        historyModal.show();
+        $.ajax({
+            url: 'installments.api.hnt',
+            method: 'GET',
+            data: {
+                action: 'get_payment_history',
+                kastid: kastid
+            },
+            success: function(response) {
+                if (response.success) {
+                    let html = '';
+                    if (response.data.length === 0) {
+                        html = '<div class="alert alert-info">لا يوجد دفعات مسجلة لهذا القسط</div>';
+                    } else {
+                        response.data.forEach(function(payment) {
+                            html += `
+                                <div class="payment-history-item">
+                                    <div class="d-flex justify-content-between">
+                                        <div>
+                                            <strong>${parseFloat(payment.amount_paid).toFixed(2)} ريال</strong>
+                                            <span class="badge bg-secondary ms-2">${payment.payment_method}</span>
+                                        </div>
+                                        <small class="text-muted">${payment.payment_date}</small>
+                                    </div>
+                                    ${payment.reference_number ? `<small>المرجع: ${payment.reference_number}</small><br>` : ''}
+                                    ${payment.notes ? `<small class="text-muted">${payment.notes}</small>` : ''}
+                                </div>
+                            `;
+                        });
+                    }
+                    $('#historyContent').html(html);
+                }
+            }
+        });
+    }
+
+    // Cancel installment
+    function cancelInstallment(kastid) {
+        if (confirm('هل أنت متأكد من إلغاء هذا القسط؟')) {
+            $.ajax({
+                url: 'installments.api.hnt',
+                method: 'POST',
+                data: {
+                    action: 'cancel_installment',
+                    kastid: kastid
+                },
+                success: function(response) {
+                    if (response.success) {
+                        showToast('success', 'تم إلغاء القسط');
+                        location.reload();
+                    } else {
+                        showToast('error', response.message);
+                    }
+                }
+            });
+        }
+    }
+
+    // Calculate late fees
+    function calculateLateFees() {
+        if (confirm('هل تريد حساب غرامات التأخير للأقساط المتأخرة؟')) {
+            $.ajax({
+                url: 'installments.api.hnt',
+                method: 'POST',
+                data: {
+                    action: 'calculate_late_fees',
+                    egar_id: <?= $contractId ?>
+                },
+                success: function(response) {
+                    if (response.success) {
+                        showToast('success', `تم حساب غرامات التأخير: ${response.data.total_fees} ريال`);
+                        location.reload();
+                    }
+                }
+            });
+        }
+    }
+
+    // Show add installment modal
+    function showAddInstallmentModal() {
+        // Reset form
+        $('#addInstallmentForm')[0].reset();
+        addInstallmentModal.show();
+    }
+
+    // Submit add installment
+    function submitAddInstallment() {
+        const formData = $('#addInstallmentForm').serialize();
+        $.ajax({
+            url: 'installments.api.hnt',
+            method: 'POST',
+            data: formData,
+            success: function(response) {
+                if (response.success) {
+                    showToast('success', 'تم إضافة القسط بنجاح');
+                    addInstallmentModal.hide();
+                    location.reload();
+                } else {
+                    showToast('error', response.message || 'فشل في إضافة القسط');
+                }
+            },
+            error: function(xhr, status, error) {
+                showToast('error', 'حدث خطأ في الاتصال بالخادم');
+            }
+        });
+    }
+
+    // Show bulk payment modal
+    function showBulkPaymentModal() {
+        // Reset form
+        $('#bulkPaymentForm')[0].reset();
+        bulkPaymentModal.show();
+    }
+
+    // Submit bulk payment
+    function submitBulkPayment() {
+        const formData = $('#bulkPaymentForm').serialize();
+        const amount = parseFloat($('#bulk_amount').val());
+
+        if (!amount || amount <= 0) {
+            showToast('error', 'يرجى إدخال مبلغ صحيح');
+            return;
+        }
+
+        if (confirm(`هل أنت متأكد من توزيع مبلغ ${amount.toFixed(2)} ريال على الأقساط؟`)) {
+            $.ajax({
+                url: 'installments.api.hnt',
+                method: 'POST',
+                data: formData,
+                success: function(response) {
+                    if (response.success) {
+                        let message = `تم دفع ${response.data.paid_count} قسط`;
+                        if (response.data.partial_count > 0) {
+                            message += ` و ${response.data.partial_count} قسط جزئياً`;
+                        }
+                        if (response.data.remaining_amount > 0) {
+                            message += `\nالمبلغ المتبقي: ${parseFloat(response.data.remaining_amount).toFixed(2)} ريال`;
+                        }
+                        showToast('success', message);
+                        bulkPaymentModal.hide();
+                        setTimeout(() => location.reload(), 1500);
+                    } else {
+                        showToast('error', response.message || 'فشل في تنفيذ الدفعة الجماعية');
+                    }
+                },
+                error: function(xhr, status, error) {
+                    showToast('error', 'حدث خطأ في الاتصال بالخادم');
+                }
+            });
+        }
+    }
+
+    // Mark all as paid
+    function markAllAsPaid() {
+        if (confirm('هل أنت متأكد من تحديد جميع الأقساط غير المدفوعة كمدفوعة؟\nهذا الإجراء سيؤثر على جميع الأقساط المعلقة.')) {
+            $.ajax({
+                url: 'installments.api.hnt',
+                method: 'POST',
+                data: {
+                    action: 'mark_all_paid',
+                    egar_id: <?= $contractId ?>
+                },
+                success: function(response) {
+                    if (response.success) {
+                        showToast('success', `تم تحديد ${response.data.updated_count} قسط كمدفوع`);
+                        setTimeout(() => location.reload(), 1500);
+                    } else {
+                        showToast('error', response.message || 'فشل في تحديث الأقساط');
+                    }
+                },
+                error: function(xhr, status, error) {
+                    showToast('error', 'حدث خطأ في الاتصال بالخادم');
+                }
+            });
+        }
+    }
+
+    // Toast notification
+    function showToast(type, message) {
+        const bgClass = type === 'success' ? 'bg-success' : 'bg-danger';
+        const toast = `
+            <div class="toast ${bgClass} text-white" role="alert">
+                <div class="toast-body">
+                    ${message}
+                </div>
+            </div>
+        `;
+        // Implementation depends on your toast library
+        alert(message); // Fallback
+    }
+</script>
+
+<?php require("../../../foter.hnt"); ?>

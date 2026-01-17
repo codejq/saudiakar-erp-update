@@ -1,0 +1,286 @@
+<?php
+/**
+ * TODO Module - Email Processor
+ * Processes queued emails and sends them using PHPMailer 7 with SMTP
+ */
+
+// Set script execution timeout to 60 seconds (allows for 3 emails at 15-20 seconds each)
+set_time_limit(60);
+
+// Track execution time
+$start_time = microtime(true);
+
+// Include database connection
+require_once('../../connectdb.hnt');
+require_once('../../data.hnt');
+
+// Load TODO module
+require_once('./todo_init.hnt');
+
+// Load PHPMailer 7
+require_once('../../PHPMailer-7.0.1/src/PHPMailer.php');
+require_once('../../PHPMailer-7.0.1/src/SMTP.php');
+require_once('../../PHPMailer-7.0.1/src/Exception.php');
+
+// Use PHPMailer namespace
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\SMTP;
+use PHPMailer\PHPMailer\Exception as PHPMailerException;
+
+// Initialize TodoManager with database connection
+$todoManager = todo_init_manager();
+
+// Check for internet connectivity before processing
+error_log("TODO Email Processor: Checking internet connectivity...");
+
+$connected = @fsockopen("8.8.8.8", 53, $errno, $errstr, 5); // Google DNS, 5 second timeout
+
+if (!$connected) {
+    error_log("TODO Email Processor: No internet connection detected - Error: $errstr ($errno)");
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'processed' => 0,
+        'sent' => 0,
+        'failed' => 0,
+        'errors' => [],
+        'skipped' => true,
+        'skip_reason' => 'No internet connection detected',
+        'debug' => [
+            'connection_test' => 'Failed to connect to 8.8.8.8:53',
+            'error' => $errstr,
+            'error_code' => $errno,
+            'note' => 'Email processing skipped due to no internet connectivity',
+            'timestamp' => date('Y-m-d H:i:s')
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    exit;
+}
+
+fclose($connected);
+error_log("TODO Email Processor: Internet connection verified");
+
+// Get pending emails (limit to 3 at a time to prevent timeout)
+$pendingEmails = $todoManager->getPendingEmails(3);
+
+error_log("TODO Email Processor: Found " . count($pendingEmails) . " pending emails to process");
+
+$results = array(
+    'processed' => 0,
+    'sent' => 0,
+    'failed' => 0,
+    'errors' => array()
+);
+
+foreach ($pendingEmails as $email) {
+    $results['processed']++;
+    $email_start_time = microtime(true);
+
+    try {
+        // Prepare email data for sendmail system
+        $mailto = $email['email_to'];
+        $mailsubject = $email['subject'];
+        $mailbody = $email['body'];
+
+        error_log("TODO Email Processor: ========================================");
+        error_log("TODO Email Processor: Processing email ID {$email['id']} to $mailto");
+        error_log("TODO Email Processor: Subject: $mailsubject");
+
+        // Load mail settings
+        $mailsettings = @file_get_contents('../../mailsettings.cfg');
+
+        if (empty($mailsettings)) {
+            error_log("TODO Email Processor: Mail settings file not found or empty");
+            throw new Exception('إعدادات البريد غير موجودة - Mail settings file not found');
+        }
+
+        $mailsettings = base64_decode($mailsettings);
+        $mailsettings = str_replace("\r", "", $mailsettings);
+        $mailsettings = str_replace("\n", "", $mailsettings);
+        $mailsettings = explode("#", $mailsettings);
+
+        if (count($mailsettings) < 8) {
+            error_log("TODO Email Processor: Invalid mail settings format - expected 8 parts, got " . count($mailsettings));
+            throw new Exception('إعدادات البريد غير صحيحة - Invalid mail settings format');
+        }
+
+        $mailsendername = $bayanmaktabname??$mailsettings[0];
+        $mailusername = $mailsettings[1];
+        $mailpassword = $mailsettings[2];
+        $mailhost = $mailsettings[3];
+        $mailsmtpauth = $mailsettings[4];
+        $usessl = $mailsettings[5];
+        $mailport = $mailsettings[6];
+        $usetls = $mailsettings[7];
+
+        error_log("TODO Email Processor: Mail settings loaded - Host: $mailhost, Port: $mailport, User: $mailusername");
+        error_log("TODO Email Processor: SMTP Auth: " . ($mailsmtpauth ? 'true' : 'false') . ", SSL: " . ($usessl ?: 'none') . ", TLS: " . ($usetls ? 'true' : 'false'));
+
+        // Use PHPMailer 7 for reliable email delivery
+        error_log("TODO Email Processor: Attempting to send email using PHPMailer 7");
+
+        // Initialize PHPMailer 7
+        $mail = new PHPMailer(true); // Enable exceptions
+
+        // Configure SMTP
+        $mail->isSMTP();
+        $mail->CharSet = 'utf-8';
+        $mail->SMTPAuth = (bool)$mailsmtpauth;
+
+        // Enable debug output (0 = off, 1 = client, 2 = client and server)
+        $mail->SMTPDebug = 2;
+        $mail->Debugoutput = function($str, $level) {
+            error_log("PHPMailer Debug (Level $level): $str");
+        };
+
+        // Set timeout to 15 seconds
+        $mail->Timeout = 15;
+        $mail->SMTPKeepAlive = false; // Don't keep connections alive
+        $mail->SMTPOptions = array(
+            'ssl' => array(
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+                'allow_self_signed' => true
+            ),
+            'tls' => array(
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+                'allow_self_signed' => true
+            ),
+            'socket' => array(
+                'bindto' => '0.0.0.0:0' // Force IPv4 connection (fixes IPv6 network issues)
+            )
+        );
+
+        // Set encryption
+        if ($usetls) {
+            $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
+        } elseif ($usessl && strtolower($usessl) === 'ssl') {
+            $mail->SMTPSecure = PHPMailer::ENCRYPTION_SMTPS;
+        }
+
+        $mail->Host = $mailhost;
+        $mail->Port = $mailport;
+        $mail->Username = $mailusername;
+        $mail->Password = $mailpassword;
+
+        // Set sender and reply-to
+        $mail->setFrom($mailusername, $mailsendername);
+        $mail->addReplyTo($mailusername, $mailsendername);
+
+        // Parse recipients (support multiple emails separated by comma, semicolon, or newline)
+        $mailarray = str_replace(",", "#", $mailto);
+        $mailarray = str_replace(";", "#", $mailarray);
+        $mailarray = str_replace("\n", "#", $mailarray);
+        $mailarray = str_replace(" ", "", $mailarray);
+        $mailarray = explode("#", $mailarray);
+
+        foreach ($mailarray as $recipient) {
+            if (!empty($recipient)) {
+                $mail->addAddress($recipient, $recipient);
+            }
+        }
+
+        // Set subject and body
+        $mail->Subject = $mailsubject;
+        $mail->AltBody = 'To view the message, please use an HTML compatible email viewer!';
+
+        // Extract and attach files if present
+        $attachmentFiles = array();
+        if (preg_match('/<!-- ATTACHMENTS: (.*?) -->/', $mailbody, $matches)) {
+            $attachmentFiles = json_decode($matches[1], true);
+            if (is_array($attachmentFiles)) {
+                error_log("TODO Email Processor: Found " . count($attachmentFiles) . " attachments to attach");
+                foreach ($attachmentFiles as $filePath) {
+                    // Convert relative path to absolute path
+                    $absolutePath = '../../' . $filePath;
+                    if (file_exists($absolutePath)) {
+                        $fileName = basename($filePath);
+                        $mail->addAttachment($absolutePath, $fileName);
+                        error_log("TODO Email Processor: Attached file: $fileName");
+                    } else {
+                        error_log("TODO Email Processor: Attachment file not found: $absolutePath");
+                    }
+                }
+            }
+            // Remove attachment comment from body
+            $mailbody = preg_replace('/<!-- ATTACHMENTS: .*? -->/', '', $mailbody);
+        }
+
+        // Wrap body in HTML template
+        $mailbody_html = "<html dir=rtl><head>
+<meta http-equiv='Content-Language' content='ar-sa'>
+<meta http-equiv='Content-Type' content='text/html; charset=utf8'>
+</head><body topmargin=0 leftmargin=0 rightmargin=0 bottommargin=0 style='text-align: right;'>" . $mailbody . "</body></html>";
+
+        $mail->msgHTML($mailbody_html);
+
+        // Try to send email (PHPMailer 7 with exceptions will throw on error)
+        error_log("TODO Email Processor: Calling mail->send()...");
+        $mail->send();
+
+        // If we reach here, email was sent successfully
+        $email_time = round(microtime(true) - $email_start_time, 2);
+        error_log("TODO Email Processor: ✓ Email ID {$email['id']} sent successfully to $mailto in {$email_time}s");
+        $todoManager->markEmailSent($email['id']);
+        $results['sent']++;
+
+    } catch (PHPMailerException $e) {
+        // PHPMailer specific exception
+        $email_time = round(microtime(true) - $email_start_time, 2);
+        $errorMsg = "PHPMailer Error: " . $e->getMessage();
+        error_log("TODO Email Processor: ✗ PHPMailer exception for email ID {$email['id']} after {$email_time}s: $errorMsg");
+        $todoManager->markEmailFailed($email['id'], $errorMsg);
+        $results['failed']++;
+        $results['errors'][] = array(
+            'email_id' => $email['id'],
+            'error' => $errorMsg,
+            'to' => $mailto ?? 'unknown',
+            'subject' => $mailsubject ?? 'unknown',
+            'time_taken' => $email_time . 's'
+        );
+    } catch (Exception $e) {
+        $email_time = round(microtime(true) - $email_start_time, 2);
+        $errorMsg = $e->getMessage();
+        error_log("TODO Email Processor: ✗ Exception for email ID {$email['id']} after {$email_time}s: $errorMsg");
+        $todoManager->markEmailFailed($email['id'], $errorMsg);
+        $results['failed']++;
+        $results['errors'][] = array(
+            'email_id' => $email['id'],
+            'error' => $errorMsg,
+            'to' => $mailto ?? 'unknown',
+            'subject' => $mailsubject ?? 'unknown',
+            'time_taken' => $email_time . 's'
+        );
+    }
+}
+
+// Calculate execution time
+$execution_time = round(microtime(true) - $start_time, 2);
+
+// Add debug information
+$results['debug'] = array(
+    'php_error_log' => ini_get('error_log') ?: 'Check server default error log',
+    'note' => 'Using PHPMailer 7 with SMTP debugging enabled - Check PHP error log for detailed SMTP conversation',
+    'phpmailer_class_available' => class_exists('PHPMailer\\PHPMailer\\PHPMailer'),
+    'phpmailer_version' => class_exists('PHPMailer\\PHPMailer\\PHPMailer') ? 'PHPMailer 7.x' : 'Not loaded',
+    'smtp_timeout' => '15 seconds',
+    'smtp_debug_mode' => 'Level 2 (Client + Server)',
+    'batch_size' => '3 emails per run',
+    'script_timeout' => '60 seconds',
+    'execution_time' => $execution_time . ' seconds',
+    'timestamp' => date('Y-m-d H:i:s')
+);
+
+// Get final queue statistics
+$queueStats = $todoManager->getEmailQueueStats();
+$results['queue_stats'] = $queueStats;
+
+// Log summary
+error_log("TODO Email Processor: Completed in {$execution_time}s - Processed: {$results['processed']}, Sent: {$results['sent']}, Failed: {$results['failed']}");
+error_log("TODO Email Processor: Queue Stats - Total: {$queueStats['total']}, Sent: {$queueStats['sent']}, Pending: {$queueStats['pending']}, Failed: {$queueStats['failed']}");
+
+// Return results as JSON
+header('Content-Type: application/json; charset=utf-8');
+echo json_encode($results, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+?>

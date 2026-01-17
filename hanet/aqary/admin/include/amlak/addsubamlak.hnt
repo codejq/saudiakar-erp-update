@@ -1,0 +1,910 @@
+<?php
+// Extract POST variables early for processing
+extract($_REQUEST);
+
+// Initialize all variables to prevent undefined warnings
+$idsubaqar = isset($_REQUEST['idsubaqar']) ? intval($_REQUEST['idsubaqar']) : 0;
+$idaqar = isset($_REQUEST['idaqar']) ? intval($_REQUEST['idaqar']) : 0;
+$deletepic = isset($_REQUEST['deletepic']) ? trim($_REQUEST['deletepic']) : '';
+$aqarsubtype = isset($_POST['aqarsubtype']) ? intval($_POST['aqarsubtype']) : 0;
+$rakam = isset($_POST['rakam']) ? trim($_POST['rakam']) : '';
+$door = isset($_POST['door']) ? intval($_POST['door']) : 0;
+$gorfanum = isset($_POST['gorfanum']) ? intval($_POST['gorfanum']) : 0;
+$matbakhnum = isset($_POST['matbakhnum']) ? intval($_POST['matbakhnum']) : 0;
+$hamamatnum = isset($_POST['hamamatnum']) ? intval($_POST['hamamatnum']) : 0;
+$aircondetion = isset($_POST['aircondetion']) ? intval($_POST['aircondetion']) : 0;
+$finishing = isset($_POST['finishing']) ? intval($_POST['finishing']) : 0;
+$price = isset($_POST['price']) ? floatval($_POST['price']) : 0;
+$pricemethod = isset($_POST['pricemethod']) ? trim($_POST['pricemethod']) : '';
+$note = isset($_POST['note']) ? trim($_POST['note']) : '';
+$images = isset($_POST['images']) ? trim($_POST['images']) : '';
+$small = '';
+$hideforEdit = '';
+
+// Initialize row array with default values (including variations with spaces for database compatibility)
+$row = array(
+    'idsubaqar' => 0,
+    'idaqar' => $idaqar,
+    'aqarsubtype' => 0,
+    'rakam' => '',
+    'door' => 0,
+    ' door' => 0,  // Handle potential space in column name
+    'gorfanum' => 0,
+    ' gorfanum' => 0,  // Handle potential space in column name
+    'matbakhnum' => 0,
+    ' matbakhnum' => 0,  // Handle potential space in column name
+    'hamamatnum' => 0,
+    ' hamamatnum' => 0,  // Handle potential space in column name
+    'aircondetion' => 0,
+    'finishing' => 0,
+    'price' => 0,
+    ' price' => 0,  // Handle potential space in column name
+    'pricemethod' => '',
+    'note' => '',
+    'images' => ''
+);
+
+// Check if this is an AJAX form submission - handle it BEFORE any HTML output
+if (isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1') {
+    // This flag indicates AJAX submission - we'll process and return JSON only
+    $is_ajax_request = true;
+} else {
+    $is_ajax_request = false;
+}
+
+
+$sc_title = "اضافة وحدة";
+$sc_id = "100";
+$formtitle = "من فضلك قم بإضافة الوحدات التي تحتوي عليها ";
+$buttonCaption = "نعم قم بإضافة هذه الوحدة";
+
+if ($idsubaqar) {
+    $sc_title = "تعديل بيانات الوحدة";
+    $formtitle = "تعديل بيانات وحدة في ";
+    $hideforEdit = " hide ";
+    $buttonCaption = "حفظ التعديلات";
+}
+
+if ($is_ajax_request) {
+    // Include database connection and authentication
+    include_once "../../../reqloginajax.hnt";
+}
+
+
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../../nocash.hnt";
+    $_SERVER['HTTP_REFERER'] = "showeditaqar.hnt?idaqar=" . $_REQUEST['idaqar'];
+    include_once "../../../header.hnt";
+}
+
+include_once "amlakfunctions.hnt";
+
+
+// Load existing unit data if editing
+if ($idsubaqar) {
+    $sql = "SELECT * FROM amlakdetails WHERE idsubaqar='" . intval($idsubaqar) . "'";
+    $result = mysql_query($sql, $link);
+    if ($result && mysql_num_rows($result) > 0) {
+        $row_data = mysql_fetch_array($result, MYSQL_ASSOC);
+        // Update row array with database values, keeping defaults for missing keys
+        if (is_array($row_data)) {
+            foreach ($row_data as $key => $value) {
+                // Store both with and without leading space to handle database inconsistencies
+                $row[$key] = $value;
+                $trimmed_key = trim($key);
+                if ($trimmed_key !== $key) {
+                    $row[$trimmed_key] = $value;
+                }
+            }
+        }
+        $idaqar = isset($row['idaqar']) ? $row['idaqar'] : $idaqar;
+        $_REQUEST['idaqar'] = $idaqar;
+    }
+}
+
+// Delete image
+if ($deletepic) {
+    $images = str_replace($deletepic . ',', '', $row['images']);
+    $sql = "UPDATE amlakdetails SET images = '{$images}' WHERE idsubaqar='" . intval($idsubaqar) . "'";
+    mysql_query($sql, $link);
+    $row['images'] = $images;
+    @unlink("data/" . $deletepic);
+}
+
+// Process form submission
+if ($aqarsubtype) {
+    mysql_query("ALTER TABLE amlakdetails ADD images varchar(1000) NOT NULL", $link);
+
+    // Upload images
+    $attachedImages = '';
+    $file = $_FILES['img'];
+    if (isset($file['name']) && is_array($file['name'])) {
+        for ($i = 0; $i < count($file['name']); $i++) {
+            if (!$file['name'][$i]) {
+                continue;
+            }
+            $image = array(
+                'name' => $file['name'][$i],
+                'type' => $file['type'][$i],
+                'size' => $file['size'][$i],
+                'tmp_name' => $file['tmp_name'][$i],
+                'error' => $file['error'][$i]
+            );
+            $exten = strtolower(strrchr($image["name"], '.'));
+            $filename = md5($i . rand() . rand() . rand() . time()) . $exten;
+            move_uploaded_file($image["tmp_name"], "data/{$filename}");
+            $attachedImages .= $filename . ",";
+        }
+    }
+
+    // Check if villa (can only have limited units)
+    $sqlv = "SELECT COUNT(idsubaqar) as xp FROM amlakdetails WHERE idaqar='" . intval($idaqar) . "'";
+    $rowv = mysql_fetch_array(mysql_query($sqlv, $link));
+
+    if ($rowv['xp'] > 50 && $aqartype == 2) {
+        $error_msg = "لا يمكنك إضافة وحدات فرعية في هذا العقار";
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['success' => false, 'error' => $error_msg], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+        echo "<div class='alert alert-danger text-center'>{$error_msg}</div>";
+    } else {
+        // Update existing unit
+        if ($_POST['idsubaqar']) {
+            $attachedImages = $row['images'] . $attachedImages;
+            $sql = "UPDATE amlakdetails SET
+                    aqarsubtype='" . intval($aqarsubtype) . "',
+                    idaqar='" . intval($idaqar) . "',
+                    door='" . addslashes($door) . "',
+                    gorfanum='" . intval($gorfanum) . "',
+                    matbakhnum='" . intval($matbakhnum) . "',
+                    rakam='" . addslashes($rakam) . "',
+                    hamamatnum='" . intval($hamamatnum) . "',
+                    aircondetion='" . intval($aircondetion) . "',
+                    finishing='" . intval($finishing) . "',
+                    price='" . addslashes($price) . "',
+                    pricemethod='" . intval($pricemethod) . "',
+                    note='" . addslashes($note) . "',
+                    images = '{$attachedImages}'
+                    WHERE idsubaqar='" . intval($_REQUEST['idsubaqar']) . "'";
+            mysql_query($sql, $link);
+
+            if ($is_ajax_request) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'تم تحديث بيانات الوحدة بنجاح',
+                    'idsubaqar' => intval($_REQUEST['idsubaqar']),
+                    'idaqar' => intval($idaqar)
+                ], JSON_UNESCAPED_UNICODE);
+                exit();
+            }
+
+            $success_msg = "تم تحديث بيانات الوحدة بنجاح";
+        }
+        // Add new unit(s)
+        else {
+            if (!$tkrar) {
+                $tkrar = 1;
+            }
+            if ($tkrar > 30) {
+                $tkrar = 30;
+            }
+
+            $inserted_ids = [];
+            for ($j = 0; $j < $tkrar; $j++) {
+                $sql = "INSERT INTO amlakdetails SET
+                        aqarsubtype='" . intval($aqarsubtype) . "',
+                        idaqar='" . intval($idaqar) . "',
+                        door='" . addslashes($door) . "',
+                        gorfanum='" . intval($gorfanum) . "',
+                        matbakhnum='" . intval($matbakhnum) . "',
+                        rakam='" . addslashes($rakam) . "',
+                        hamamatnum='" . intval($hamamatnum) . "',
+                        aircondetion='" . intval($aircondetion) . "',
+                        finishing='" . intval($finishing) . "',
+                        price='" . addslashes($price) . "',
+                        pricemethod='" . intval($pricemethod) . "',
+                        note='" . addslashes($note) . "',
+                        images = '{$attachedImages}'";
+                mysql_query($sql, $link);
+                $inserted_ids[] = mysql_insert_id($link);
+                $rakam = intval($rakam) + 1;
+            }
+
+            if ($is_ajax_request) {
+                // Query the actual total unit count from database
+                $count_sql = "SELECT COUNT(idsubaqar) as total_units FROM amlakdetails WHERE idaqar='" . intval($idaqar) . "'";
+                $count_result = mysql_query($count_sql, $link);
+                $count_row = mysql_fetch_array($count_result);
+                $total_units = intval($count_row['total_units']);
+
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'تمت إضافة الوحدة بنجاح',
+                    'inserted_count' => $tkrar,
+                    'inserted_ids' => $inserted_ids,
+                    'idaqar' => intval($idaqar),
+                    'total_units' => $total_units
+                ], JSON_UNESCAPED_UNICODE);
+                exit();
+            }
+
+            $success_msg = "تمت إضافة الوحدة بنجاح. لإضافة وحدات أخرى قم بتعبئة بياناتها";
+        }
+    }
+}
+
+// Get unit count and next number
+$sqlv = "SELECT COUNT(idsubaqar) as xp FROM amlakdetails WHERE idaqar='" . intval($idaqar) . "'";
+$rowv = mysql_fetch_array(mysql_query($sqlv, $link));
+
+if (isset($row['rakam']) && $row['rakam']) {
+    $wehadNumber = $row['rakam'];
+} else {
+    $wehadNumber = $rowv['xp'] + 1;
+}
+
+// Get property details
+$sql = "SELECT * FROM amlak WHERE idaqar='" . intval($idaqar) . "' LIMIT 1";
+$rowamlak = mysql_fetch_array(mysql_query($sql, $link));
+
+// Initialize unit types if empty
+$sql = "SELECT MAX(aqarsubtype) as dd FROM aqarsubtype";
+$dd = mysql_fetch_array(mysql_query($sql, $link));
+$dd = $dd['dd'];
+
+if ($dd < 2) {
+    $sql = "INSERT INTO aqarsubtype (aqarsubtypename) VALUES
+        ('شقة عزاب'),('شقة عوائل'),('شقة عمال'),('ملحق'),('محل تجاري'),('ورشة'),
+        ('مطعم'),('سطح'),('فاترينة'),('فيلا سكنية'),('فيلا تصلح لمدرسة'),('دوبلكس'),
+        ('إستراحة'),('غرفة داخل الشقة'),('غرفة بحمام مستقل'),('مخزن'),('لوحة إعلانية'),
+        ('عمارة'),('بالكامل'),('محطة بنزين'),('صالة'),('ارض فضاء'),('مكتب'),
+        ('مستودع'),('مستوصف'),('مستشفى')";
+    mysql_query($sql, $link);
+}
+
+// Only render form if NOT AJAX request
+if (!$is_ajax_request) {
+?>
+
+    <style>
+        .compact-form {
+            background: #fff;
+        }
+
+        .section-header {
+            background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+            color: white;
+            padding: 0.75rem 1rem;
+            border-radius: 6px;
+            margin-bottom: 1.5rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 1.1rem;
+        }
+
+        .form-label {
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin-bottom: 0.35rem;
+            color: #495057;
+            text-align: right;
+        }
+
+        .form-control,
+        .form-select {
+            font-size: 0.9rem;
+            padding: 0.6rem 0.85rem;
+            text-align: right;
+            direction: rtl;
+            border: 1px solid #ced4da;
+            border-radius: 5px;
+        }
+
+        .form-control:focus,
+        .form-select:focus {
+            border-color: #0891b2;
+            box-shadow: 0 0 0 0.2rem rgba(8, 145, 178, 0.25);
+        }
+
+        .required-mark {
+            color: #dc3545;
+            font-weight: bold;
+        }
+
+        .image-preview {
+            position: relative;
+            display: inline-block;
+            margin: 0.5rem;
+        }
+
+        .image-preview img {
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        }
+
+        .image-preview .btn-delete {
+            position: absolute;
+            top: -8px;
+            right: -8px;
+            border-radius: 50%;
+            width: 32px;
+            height: 32px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .card {
+            border: none;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.08);
+        }
+
+        .alert-success-custom {
+            background: linear-gradient(135deg, #0a7047 0%, #0d9488 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+        }
+    </style>
+
+    <!-- Alerts are now handled via AJAX/JavaScript -->
+
+    <div class="container-fluid py-3">
+        <div class="card shadow-sm border-0">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+                <h4 class="mb-0">
+                    <i class="bi bi-house-add-fill me-2"></i>
+                    <?= $formtitle ?> <strong><?= $rowamlak['aqarname'] ?></strong>
+                </h4>
+                <small class="d-block mt-1">
+                    <i class="bi bi-info-circle me-1"></i>
+                    هذا العقار يحتوي حالياً على <strong id="unitCount"><?= $rowv['xp'] ?></strong> وحدة
+                </small>
+            </div>
+
+            <div class="card-body p-4 compact-form">
+                <form dir="rtl" method="post" action="addsubamlak.hnt" enctype="multipart/form-data" id="subAmlakForm">
+                    <!-- Hidden Fields -->
+                    <input type='hidden' name="formuid" id="formuid" value="<?= str_replace('.', '', microtime() . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+                    <input type='hidden' name='small' value='<?= $small; ?>'>
+                    <input type='hidden' name='idaqar' value='<?= $idaqar; ?>'>
+                    <input type='hidden' name='idsubaqar' value='<?= $idsubaqar; ?>'>
+
+                    <div class="row g-4">
+                        <!-- Left Column: Unit Details -->
+                        <div class="col-lg-6">
+                            <!-- Unit Type & Basic Info -->
+                            <div class="section-header">
+                                <i class="fas fa-door-open"></i>
+                                <span>معلومات الوحدة الأساسية</span>
+                            </div>
+
+                            <div class="row g-3 mb-4">
+                                <div class="col-md-6">
+                                    <label class="form-label">
+                                        <i class="bi bi-tag-fill text-primary me-1"></i>نوع الوحدة <span class="required-mark">*</span>
+                                    </label>
+                                    <div class="input-group">
+                                        <select name='aqarsubtype' id="aqarsubtype" class='form-select' required>
+                                            <option value="">-- اختر نوع الوحدة --</option>
+                                            <?php
+                                            $sql = "SELECT * FROM aqarsubtype ORDER BY aqarsubtypename";
+                                            $result = mysql_query($sql, $link);
+                                            while ($rowt = mysql_fetch_array($result)) {
+                                                $selected = (isset($row['aqarsubtype']) && $rowt['aqarsubtype'] == $row['aqarsubtype']) ? " selected" : "";
+                                                echo "<option value='{$rowt['aqarsubtype']}' {$selected}>{$rowt['aqarsubtypename']}</option>";
+                                            }
+                                            ?>
+                                        </select>
+                                        <a href="addamlak-sub-types.hnt?mytitle=xx&temp=<?= rand(); ?>"
+                                            onclick="return hs.htmlExpand(this, {contentId: 'my-content1', objectType: 'iframe', objectWidth: 450, width:450, objectHeight: 110});"
+                                            class="btn btn-outline-secondary"
+                                            title="إضافة نوع جديد">
+                                            <i class="bi bi-plus-lg"></i>
+                                        </a>
+                                    </div>
+                                </div>
+
+                                <div class="col-md-6">
+                                    <label class="form-label">
+                                        <i class="bi bi-sort-numeric-up text-info me-1"></i>رقم الوحدة <span class="required-mark">*</span>
+                                    </label>
+                                    <input type="text" name="rakam" id="rakam" value="<?= $wehadNumber; ?>" class="form-control" required>
+                                </div>
+
+                                <div class="col-md-6">
+                                    <label class="form-label">
+                                        <i class="bi bi-building text-warning me-1"></i>رقم الدور
+                                    </label>
+                                    <input type="text" name="door" value="<?= isset($row['door']) ? $row['door'] : ''; ?>" class="form-control">
+                                </div>
+
+                                <div class="col-md-6 <?= $hideforEdit ?>">
+                                    <label class="form-label">
+                                        <i class="bi bi-arrow-repeat text-success me-1"></i>عدد مرات التكرار
+                                    </label>
+                                    <input type="number" name="tkrar" value="1" min="1" max="30" class="form-control">
+                                    <small class="text-muted">لإضافة وحدات متعددة بنفس المواصفات</small>
+                                </div>
+                            </div>
+
+                            <!-- Room Details -->
+                            <div class="section-header">
+                                <i class="fas fa-bed"></i>
+                                <span>تفاصيل الغرف والمرافق</span>
+                            </div>
+
+                            <div class="row g-3 mb-4">
+                                <div class="col-md-4">
+                                    <label class="form-label">
+                                        <i class="bi bi-door-closed text-primary me-1"></i>عدد الغرف
+                                    </label>
+                                    <input type="number" name="gorfanum" value="<?= isset($row['gorfanum']) ? $row['gorfanum'] : 0; ?>" class="form-control" min="0">
+                                </div>
+
+                                <div class="col-md-4">
+                                    <label class="form-label">
+                                        <i class="fas fa-utensils text-danger me-1"></i>عدد المطابخ
+                                    </label>
+                                    <input type="number" name="matbakhnum" value="<?= isset($row['matbakhnum']) ? $row['matbakhnum'] : 0; ?>" class="form-control" min="0">
+                                </div>
+
+                                <div class="col-md-4">
+                                    <label class="form-label">
+                                        <i class="fas fa-bath text-info me-1"></i>عدد دورات المياه
+                                    </label>
+                                    <input type="number" name="hamamatnum" value="<?= isset($row['hamamatnum']) ? $row['hamamatnum'] : 0; ?>" class="form-control" min="0">
+                                </div>
+                            </div>
+
+                            <!-- Amenities -->
+                            <div class="row g-3 mb-4">
+                                <div class="col-md-6">
+                                    <label class="form-label">
+                                        <i class="fas fa-snowflake text-primary me-1"></i>التكييفات (إن وجد)
+                                    </label>
+                                    <select name="aircondetion" class="form-select">
+                                        <?php if (isset($row['aircondetion']) && $row['aircondetion']) { ?>
+                                            <option value='<?= $row['aircondetion']; ?>' selected>
+                                                <?= displayaircondetion($row['aircondetion']); ?>
+                                            </option>
+                                        <?php } ?>
+                                        <option value="0">لا يوجد مكيفات</option>
+                                        <option value="1">مكيف واحد</option>
+                                        <option value="2">اثنين مكيف</option>
+                                        <option value="3">ثلاث مكيفات</option>
+                                        <option value="4">أربع مكيفات</option>
+                                        <option value="5">خمس مكيفات</option>
+                                        <option value="6">ست مكيفات</option>
+                                        <option value="7">مكيف بكل غرفة</option>
+                                        <option value="8">تكيف مركزي</option>
+                                    </select>
+                                </div>
+
+                                <div class="col-md-6">
+                                    <label class="form-label">
+                                        <i class="fas fa-paint-roller text-warning me-1"></i>نوع التشطيب
+                                    </label>
+                                    <select name="finishing" class="form-select">
+                                        <?php if (isset($row['finishing']) && $row['finishing']) { ?>
+                                            <option value='<?= $row['finishing']; ?>' selected>
+                                                <?= displayfinishing($row['finishing']); ?>
+                                            </option>
+                                        <?php } ?>
+                                        <option value="1">عادي</option>
+                                        <option value="2">لوكس</option>
+                                        <option value="3">سوبر لوكس</option>
+                                        <option value="4">تشطيب فاخر</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Right Column: Financial & Media -->
+                        <div class="col-lg-6">
+                            <!-- Pricing Information -->
+                            <div class="section-header">
+                                <i class="fas fa-money-bill-wave"></i>
+                                <span>معلومات التسعير</span>
+                            </div>
+
+                            <div class="row g-3 mb-4">
+                                <div class="col-md-6">
+                                    <label class="form-label">
+                                        <i class="fas fa-dollar-sign text-success me-1"></i>قيمة الإيجار السنوي
+                                    </label>
+                                    <div class="input-group">
+                                        <input type="number" name="price" value="<?= isset($row['price']) ? $row['price'] : 0; ?>" class="form-control" step="0.01">
+                                        <span class="input-group-text"><?= $myomla; ?></span>
+                                    </div>
+                                </div>
+
+                                <div class="col-md-6">
+                                    <label class="form-label">
+                                        <i class="bi bi-calendar3 text-info me-1"></i>طريقة دفع الإيجار
+                                    </label>
+                                    <select name="pricemethod" class="form-select">
+                                        <?php if (isset($row['pricemethod']) && $row['pricemethod']) { ?>
+                                            <option value='<?= $row['pricemethod']; ?>' selected>
+                                                <?= displaypricemethod($row['pricemethod']); ?>
+                                            </option>
+                                        <?php } ?>
+                                        <option value="1">الدفع كل ستة أشهر</option>
+                                        <option value="2">دفع المبلغ كامل</option>
+                                        <option value="8">الدفع كل أربع أشهر</option>
+                                        <option value="3">الدفع كل ثلاث أشهر</option>
+                                        <option value="4">الدفع كل شهر</option>
+                                        <option value="5">كل 15 يوم</option>
+                                        <option value="6">كل اسبوع</option>
+                                        <option value="7">الإيجار اليومي</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <!-- Additional Specifications -->
+                            <div class="section-header">
+                                <i class="fas fa-clipboard-list"></i>
+                                <span>المواصفات الإضافية</span>
+                            </div>
+
+                            <div class="mb-4">
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <label class="form-label mb-0">
+                                        <i class="bi bi-card-text text-secondary me-1"></i>وصف الوحدة
+                                    </label>
+                                    <button type="button" class="btn btn-sm" id="aiDescriptionBtn" onclick="generateAIDescription()"
+                                        style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%); color: white; border: none; padding: 4px 12px; border-radius: 6px;">
+                                        <i class="bi bi-stars me-1"></i>إنشاء وصف بالذكاء الاصطناعي
+                                    </button>
+                                </div>
+                                <textarea name="note" id="note" class="form-control" rows="4" placeholder="أدخل أي مواصفات إضافية للوحدة..."><?= isset($row['note']) ? $row['note'] : ''; ?></textarea>
+                                <small class="text-muted">
+                                    <span id="aiDescriptionStatus" style="display: none;"></span>
+                                </small>
+                            </div>
+
+                            <!-- Image Upload -->
+                            <div class="section-header">
+                                <i class="fas fa-images"></i>
+                                <span>صور الوحدة</span>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">
+                                    <i class="bi bi-cloud-upload text-primary me-1"></i>تحميل الصور
+                                </label>
+                                <input type="file" name="img[]" multiple="multiple" accept="image/*" class="form-control">
+                                <small class="text-muted">
+                                    <i class="bi bi-info-circle me-1"></i>يمكن اختيار مجموعة صور (Ctrl + Click)
+                                </small>
+                            </div>
+
+                            <!-- Existing Images -->
+                            <?php if (isset($row['images']) && $row['images']) {
+                                $images = explode(",", $row['images']);
+                            ?>
+                                <div class="mt-3">
+                                    <label class="form-label">
+                                        <i class="bi bi-images text-info me-1"></i>الصور الحالية
+                                    </label>
+                                    <div class="d-flex flex-wrap gap-2">
+                                        <?php
+                                        for ($i = 0; $i < count($images) - 1; $i++) {
+                                            if (!empty($images[$i])) {
+                                        ?>
+                                                <div class="image-preview">
+                                                    <a href="data/<?= $images[$i] ?>" target="_blank">
+                                                        <img src="data/<?= $images[$i] ?>"
+                                                            style="height:120px; width:160px; object-fit:cover;"
+                                                            class="img-thumbnail">
+                                                    </a>
+                                                    <button type="button"
+                                                        class="btn btn-danger btn-sm btn-delete"
+                                                        onclick="deleteImage('<?= $images[$i] ?>')"
+                                                        title="حذف الصورة">
+                                                        <i class="bi bi-trash"></i>
+                                                    </button>
+                                                </div>
+                                        <?php
+                                            }
+                                        }
+                                        ?>
+                                    </div>
+                                </div>
+                            <?php } ?>
+                        </div>
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div class="text-center mt-4 pt-3 border-top">
+                        <button type="submit" class="btn btn-success btn-lg px-5 me-2">
+                            <i class="bi bi-check-circle me-2"></i><?= $buttonCaption ?>
+                        </button>
+                        <a href="showeditaqar.hnt?idaqar=<?= $idaqar ?>" class="btn btn-outline-secondary btn-lg px-4">
+                            <i class="bi bi-arrow-right-circle me-2"></i>عودة للعقار الرئيسي
+                        </a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Delete image function
+        function deleteImage(imageName) {
+            if (confirm('هل ترغب بالفعل في حذف هذه الصورة؟')) {
+                window.location.href = '?idaqar=<?= $idaqar; ?>&idsubaqar=<?= $idsubaqar; ?>&deletepic=' + imageName;
+            }
+        }
+
+        // AJAX Form Submission
+        $(document).ready(function() {
+            $('#subAmlakForm').on('submit', function(e) {
+                e.preventDefault(); // Prevent default form submission
+
+                // Create FormData to handle file uploads
+                var formData = new FormData(this);
+                formData.append('ajax_submit', '1'); // Add AJAX flag
+
+                // Show loading state
+                var submitBtn = $(this).find('button[type="submit"]');
+                var originalBtnText = submitBtn.html();
+                submitBtn.prop('disabled', true).html('<i class="bi bi-hourglass-split me-2"></i>جاري الحفظ...');
+
+                // Submit via AJAX
+                $.ajax({
+                    url: 'addsubamlak.hnt',
+                    type: 'POST',
+                    data: formData,
+                    processData: false, // Important for file upload
+                    contentType: false, // Important for file upload
+                    dataType: 'json',
+                    success: function(response) {
+                        submitBtn.prop('disabled', false).html(originalBtnText);
+
+                        if (response.success) {
+                            // Remove any existing alerts first
+                            $('.alert').remove();
+
+                            // Show success message
+                            var alertHtml = '<div class="alert alert-success alert-dismissible fade show" role="alert">' +
+                                '<i class="bi bi-check-circle me-2"></i>' + response.message +
+                                '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+                                '</div>';
+
+                            $('#subAmlakForm').before(alertHtml);
+
+                            // Auto-dismiss after 2.5 seconds
+                            setTimeout(function() {
+                                $('.alert').fadeOut(300, function() {
+                                    $(this).remove();
+                                });
+                            }, 2500);
+
+                            // Always update unit count from response
+                            console.log('Response total_units:', response.total_units);
+                            if (response.total_units !== undefined) {
+                                document.getElementById('unitCount').innerText = response.total_units;
+                                document.getElementById('rakam').value = parseInt(response.total_units) + 1;
+
+                            }
+
+                            // If editing, scroll to top
+                            if ($('input[name="idsubaqar"]').val()) {
+                                $('html, body').animate({
+                                    scrollTop: 0
+                                }, 'slow');
+                            }
+                            // If adding new, reset form or redirect
+                            else {
+                                // Save hidden field values before reset
+                                var idaqarVal = $('input[name="idaqar"]').val();
+                                var smallVal = $('input[name="small"]').val();
+
+                                // Reset form
+                                $('#subAmlakForm')[0].reset();
+
+                                // Restore hidden fields
+                                $('input[name="idaqar"]').val(idaqarVal);
+                                $('input[name="small"]').val(smallVal);
+                                $('input[name="idsubaqar"]').val('');
+
+                                // Update unit number (use total_units + 1 for next unit)
+                                if (response.total_units !== undefined) {
+                                    $('input[name="rakam"]').val(response.total_units + 1);
+                                }
+
+                                // Scroll to top to see success message
+                                $('html, body').animate({
+                                    scrollTop: 0
+                                }, 'slow');
+                            }
+                        } else {
+                            // Remove any existing alerts first
+                            $('.alert').remove();
+
+                            // Show error message
+                            var alertHtml = '<div class="alert alert-danger alert-dismissible fade show" role="alert">' +
+                                '<i class="bi bi-exclamation-triangle me-2"></i>' + (response.error || 'حدث خطأ أثناء الحفظ') +
+                                '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+                                '</div>';
+
+                            $('#subAmlakForm').before(alertHtml);
+                            $('html, body').animate({
+                                scrollTop: 0
+                            }, 'slow');
+
+                            // Auto-dismiss error after 3 seconds
+                            setTimeout(function() {
+                                $('.alert').fadeOut(300, function() {
+                                    $(this).remove();
+                                });
+                            }, 3000);
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        submitBtn.prop('disabled', false).html(originalBtnText);
+                        console.error('AJAX Error:', error);
+
+                        // Remove any existing alerts first
+                        $('.alert').remove();
+
+                        var alertHtml = '<div class="alert alert-danger alert-dismissible fade show" role="alert">' +
+                            '<i class="bi bi-exclamation-triangle me-2"></i>حدث خطأ في الاتصال. الرجاء المحاولة مرة أخرى' +
+                            '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+                            '</div>';
+
+                        $('#subAmlakForm').before(alertHtml);
+                        $('html, body').animate({
+                            scrollTop: 0
+                        }, 'slow');
+
+                        // Auto-dismiss error after 3 seconds
+                        setTimeout(function() {
+                            $('.alert').fadeOut(300, function() {
+                                $(this).remove();
+                            });
+                        }, 3000);
+                    }
+                });
+
+                return false;
+            });
+        });
+
+        // AI Description Generator for Unit
+        window.generateAIDescription = function() {
+            const btn = document.getElementById('aiDescriptionBtn');
+            const descriptionField = document.getElementById('note');
+            const statusSpan = document.getElementById('aiDescriptionStatus');
+            const unitTypeSelect = document.querySelector('select[name="aqarsubtype"]');
+            const roomsInput = document.querySelector('input[name="gorfanum"]');
+            const kitchensInput = document.querySelector('input[name="matbakhnum"]');
+            const bathroomsInput = document.querySelector('input[name="hamamatnum"]');
+            const floorInput = document.querySelector('input[name="door"]');
+            const priceInput = document.querySelector('input[name="price"]');
+            const airConditionSelect = document.querySelector('select[name="aircondetion"]');
+            const finishingSelect = document.querySelector('select[name="finishing"]');
+
+            // Get values
+            const unitTypeText = unitTypeSelect.options[unitTypeSelect.selectedIndex]?.text || '';
+            const rooms = roomsInput?.value || '0';
+            const kitchens = kitchensInput?.value || '0';
+            const bathrooms = bathroomsInput?.value || '0';
+            const floor = floorInput?.value || '';
+            const price = priceInput?.value || '';
+            const airCondition = airConditionSelect?.options[airConditionSelect.selectedIndex]?.text || '';
+            const finishing = finishingSelect?.options[finishingSelect.selectedIndex]?.text || '';
+            const existingDescription = descriptionField?.value || '';
+
+            // Build property name from unit details
+            const propertyName = unitTypeText + (rooms > 0 ? ' - ' + rooms + ' غرف' : '') + (floor ? ' - الدور ' + floor : '');
+
+            // Build address/details from amenities
+            const propertyAddress = [
+                rooms > 0 ? rooms + ' غرف' : '',
+                kitchens > 0 ? kitchens + ' مطابخ' : '',
+                bathrooms > 0 ? bathrooms + ' حمامات' : '',
+                airCondition && airCondition !== 'لا يوجد مكيفات' ? airCondition : '',
+                finishing ? 'تشطيب ' + finishing : '',
+                price ? 'الإيجار ' + price + ' ريال' : ''
+            ].filter(Boolean).join('، ');
+
+            // Validate minimum requirements
+            if (!unitTypeText) {
+                alert('يرجى اختيار نوع الوحدة على الأقل لإنشاء وصف ذكي');
+                return;
+            }
+
+            // Disable button and show loading
+            btn.disabled = true;
+            btn.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>جاري الإنشاء...';
+            statusSpan.style.display = 'inline';
+            statusSpan.className = 'text-info';
+            statusSpan.innerHTML = '<i class="bi bi-stars me-1"></i>الذكاء الاصطناعي يعمل...';
+
+            // Prepare data
+            const formData = new FormData();
+            formData.append('property_type', unitTypeText);
+            formData.append('property_name', propertyName);
+            formData.append('property_address', propertyAddress);
+            formData.append('existing_description', existingDescription);
+            formData.append('style', 'professional');
+
+            // Make AJAX request
+            fetch('../../ai/features/property_description.hnt', {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'same-origin' // Include session cookies
+                })
+                .then(response => {
+                    // Check if response is OK
+                    if (!response.ok) {
+                        throw new Error('خطأ في الاتصال بالخادم: ' + response.status);
+                    }
+                    // Check content type
+                    const contentType = response.headers.get('content-type');
+                    if (!contentType || !contentType.includes('application/json')) {
+                        throw new Error('الخادم أرجع استجابة غير صالحة. تأكد من تسجيل الدخول.');
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.success) {
+                        // Set the generated description
+                        descriptionField.value = data.description;
+
+                        // Show success status
+                        statusSpan.className = 'text-success';
+                        statusSpan.innerHTML = `<i class="bi bi-check-circle me-1"></i>تم الإنشاء! (${data.stats.tokens} كلمة، $${data.stats.cost})`;
+
+                        // Reset button
+                        btn.disabled = false;
+                        btn.innerHTML = '<i class="bi bi-stars me-1"></i>إنشاء وصف بالذكاء الاصطناعي';
+
+                        // Hide status after 5 seconds
+                        setTimeout(() => {
+                            statusSpan.style.display = 'none';
+                        }, 5000);
+                    } else {
+                        throw new Error(data.message || 'فشل في إنشاء الوصف');
+                    }
+                })
+                .catch(error => {
+                    console.error('AI Error:', error);
+
+                    // Show error status
+                    statusSpan.className = 'text-danger';
+                    statusSpan.innerHTML = `<i class="bi bi-exclamation-triangle me-1"></i>${error.message}`;
+
+                    // Reset button
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="bi bi-stars me-1"></i>إنشاء وصف بالذكاء الاصطناعي';
+
+                    // Hide error after 8 seconds
+                    setTimeout(() => {
+                        statusSpan.style.display = 'none';
+                    }, 8000);
+
+                    alert('خطأ: ' + error.message);
+                });
+        };
+    </script>
+
+    <iframe name="tooltipf" id="tooltipf" style="border:0px; position: absolute; top: 10px; display:none; width:350;" src=""></iframe>
+
+<?php
+    require('../../../foter.hnt');
+} // End if (!$is_ajax_request)
+?>

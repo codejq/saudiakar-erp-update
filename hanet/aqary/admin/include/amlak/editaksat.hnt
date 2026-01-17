@@ -1,0 +1,974 @@
+<?
+
+$sc_title = "حالة الإيجارات";
+$sc_id = "134";
+include_once "../../../nocash.hnt";
+
+// Initialize variables from GET/POST
+$report = $_REQUEST['report'] ?? 0;
+$mostagerid = $_REQUEST['mostagerid'] ?? 0;
+$saveaksat = $_REQUEST['saveaksat'] ?? 0;
+$saveegar = $_REQUEST['saveegar'] ?? 0;
+$deletekastid = $_REQUEST['deletekastid'] ?? 0;
+$deletekastidx = $_REQUEST['deletekastidx'] ?? 0;
+$notes = $_REQUEST['notes'] ?? '';
+$hnt_dll = $hnt_dll ?? 0;
+$hnt_supper_dll = $_REQUEST['hnt_supper_dll'] ?? 0;
+
+$_SERVER['HTTP_REFERER'] = "egarstatus.hnt";
+$canscroll = 1;
+if ($report == 1) {
+	include_once "../../../report_header.hnt";
+} else {
+	include_once "../../../header.hnt";
+}
+
+require '../arabicTools.class.hnt';
+require '../uCal.class.hnt';
+$dcal = new uCal;
+$arabicTools = new ArabicTools('Hijri');
+include_once "amlakfunctions.hnt";
+	//###############prepare the data ###################//
+
+	$sql = "select * from amlakdetails where idsubaqar='" . $idsubaqar . "'";
+	$row = mysql_fetch_array(mysql_query($sql, $link));
+
+	$sql2 = "select * from  amlak where idaqar='" . $row['idaqar'] . "' ";
+	$row1 = mysql_fetch_array(mysql_query($sql2, $link));
+
+
+	$sql = "select * from  egar  where rakam3akdid='" . $row['rakam3akdid'] . "' ";
+	$row2 = mysql_fetch_array(mysql_query($sql, $link));
+
+
+	//###################mostager detalis ###########################//
+
+	$sql = "select  *   from mostagereen where  mostagerid='$mostagerid' ";
+	$row3 = mysql_fetch_array(mysql_query($sql, $link));
+?>
+<SCRIPT LANGUAGE="JavaScript">
+    function formHandler(form) {
+        var URL = document.form.site.options[document.form.site.selectedIndex].value;
+        window.location.href = URL;
+    }
+</SCRIPT>
+
+
+<div class='col_12 uifont18'>
+
+
+	<? if ($report != 1) { ?>
+        <form name=form method=get action=?>
+            <input type='hidden' name=formuid id="formuid"
+                   value="<?= str_replace('.', '', microtime() . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+            <INPUT TYPE=hidden NAME=nonehnt_dll VALUE="<?= $hnt_dll; ?>">
+            <table align=center border=0 bordercolordark=ffffff bordercolorlight=000000 class="uifont16">
+                <tr>
+
+                    <td  class="uifont16">
+                        أختر العقار ليتم عرض تقرير المتابعة الخاص به:
+						<?
+						include_once "amlakfunctions.hnt";
+						$sqlaq = "select idsubaqar,rakam,idaqar,aqarsubtype,mostagerid from amlakdetails where mostagerid!=0  order by aqarsubtype ";
+						$resaq = mysql_query($sqlaq, $link);
+						echo "
+<input type=hidden name=idsubaqar value=$idsubaqar>
+<select  class='uifont16' name=site onChange=\"javascript:formHandler(form)\"><option value='editaksat.hnt'> أختر العقار ";
+						while ($rowaq = mysql_fetch_array($resaq)) {
+							if ($idsubaqar == $rowaq['idsubaqar']) {
+								$selcted = " selected ";
+							} else {
+								$selcted = "";
+							}
+							echo "<option $selcted value='editaksat.hnt?idsubaqar=" . $rowaq['idsubaqar'] . "&mostagerid=" . $rowaq['mostagerid'] . "'>" . displaysubtype($rowaq['aqarsubtype']);
+							echo "رقم " . $rowaq['rakam'] . " موجود فى " . displayaqarname($rowaq['idaqar']);
+						}
+						echo "</select>";
+						?>
+
+            </table>
+        </form>
+	<? } ?>
+
+
+
+
+	<?
+	// start save aksat
+	if ($saveaksat) {
+		$maxKey = 0;
+		foreach ($iscomplete as $key => $value){
+			if($iscomplete[$key] && $key > $maxKey ){
+				$maxKey = $key;
+			}
+		}
+		$sql = "update aksat set iscomplete=1 where kastid < " .$maxKey . " and idsubaqar='" . $idsubaqar . "'	";
+		mysql_query($sql, $link);
+
+		// not to break older custumer
+		$sql = "select kastid from aksat where idsubaqar='" . $idsubaqar . "'   order by kastid asc ";
+		if($row2["insert_date"] > 1571751136 ){
+			$sql = "select kastid from aksat where idsubaqar='" . $idsubaqar . "' and egar_id ='".$row['rakam3akdid']."'  order by kastid asc ";
+		}
+
+		$result = mysql_query($sql, $link);
+		while ($re = mysql_fetch_array($result)) {
+
+
+			$id = $re['kastid'];
+
+
+			list($st_datet, $st_montht, $st_yeart) = explode("/", $kastdate[$id]);
+//echo $kastdate[$id] ."<br>";
+			if ($st_yeart < 1900) {
+//convert from hegery  to melady
+
+				list($st_date, $st_month, $st_year) = explode("/", $kastdate[$id]);
+
+				$t1 = $arabicTools->dateHejri2Geo(($st_date + 1) . "/" . ($st_month) . "/" . $st_year);
+				$t1 = explode("-", $t1);
+
+				$dateo = $dcal->u2g($st_date, $st_month, $st_year);
+				$kastdate[$id] = mktime(0, 0, 0, $dateo['month'], $dateo['day'], $dateo['year']);
+
+			} else {
+				$t1 = explode("/", $kastdate[$id]);
+				$kastdate[$id] = mktime(0, 0, 0, $t1[1], $t1[0], $t1[2]);
+//echo "$t1[1], $t1[0], $t1[2]<br>";
+			}
+
+			if($id < $maxKey){
+				$iscomplete[$id] = 1;
+			}
+
+			$sql = "update aksat set
+kastname='" . ($kastname[$id] ?? '') . "',
+kastvalue='" . ($kastvalue[$id] ?? 0) . "',
+dof3at='" . ($dof3at[$id] ?? 0) . "',
+dof3at_tafsel='" . ($dof3at_tafsel[$id] ?? 0) . "',
+kastdate='" . ($kastdate[$id] ?? 0) . "',
+water='" . ($water[$id] ?? 0) . "',
+sa3ee='" . ($sa3ee[$id] ?? 0) . "',
+services='" . ($services[$id] ?? 0) . "',
+iscomplete='" . ($iscomplete[$id] ?? 0) . "'
+where kastid='" . $id . "'
+";
+
+			mysql_query($sql, $link);
+
+		}
+
+// add new field
+
+		if ($kastname['rosa']) {
+
+			list($st_datett, $st_monthtt, $st_yeartt) = explode("/", $kastdate['rosa']);
+
+			if ($st_yeartt < 1900) {
+//convert from hegery  to melady
+
+				list($st_date, $st_month, $st_year) = explode("/", $kastdate['rosa']);
+				$t1 = $arabicTools->dateHejri2Geo(($st_date + 1) . "/" . ($st_month) . "/" . $st_year);
+				$t1 = explode("-", $t1);
+
+				$dateo = $dcal->u2g($st_date, $st_month, $st_year);
+				$kastdate['rosa'] = mktime(0, 0, 0, $dateo['month'], $dateo['day'], $dateo['year']);
+
+
+			} else {
+				$t1 = explode("/", $kastdate['rosa']);
+				$kastdate['rosa'] = mktime(0, 0, 0, $t1[1], $t1[0], $t1[2]);
+
+			}
+
+
+			$sql = "insert into  aksat set
+kastname='" . $kastname['rosa'] . "',
+kastvalue='" . $kastvalue['rosa'] . "',
+dof3at='" . $dof3at['rosa'] . "',
+dof3at_tafsel='" . $dof3at_tafsel['rosa'] . "',
+kastdate='" . $kastdate['rosa'] . "',
+water='" . $water['rosa'] . "',
+sa3ee='" . $sa3ee['rosa'] . "',
+iscomplete='" . $iscomplete['rosa'] . "',
+egar_id = '" . $row['rakam3akdid'] . "',
+idsubaqar='" . $idsubaqar . "'
+";
+			mysql_query($sql, $link);
+
+
+		}
+
+
+	}
+
+
+	// end
+	//start save egar data
+
+	if ($saveegar) {
+
+		list($st_datettt, $st_monthttt, $st_yearttt) = explode("/", $startegar1);
+
+		if ($st_yearttt < 1900) {
+//convert from hegery  to melady
+
+			list($st_date, $st_month, $st_year) = explode("/", $startegar1);
+
+			$t1 = $arabicTools->dateHejri2Geo(($st_date + 1) . "/" . ($st_month) . "/" . $st_year);
+
+			$t1 = explode("-", $t1);
+
+
+			$dateo = $dcal->u2g($st_date, $st_month, $st_year);
+			$t1 = mktime(0, 0, 0, $dateo['month'], $dateo['day'], $dateo['year']);
+
+
+			list($st_date, $st_month, $st_year) = explode("/", $end3aqd1);
+			$t2 = $arabicTools->dateHejri2Geo(($st_date + 1) . "/" . ($st_month) . "/" . $st_year);
+			$t2 = explode("-", $t2);
+
+			$dateo = $dcal->u2g($st_date, $st_month, $st_year);
+			$t2 = mktime(0, 0, 0, $dateo['month'], $dateo['day'], $dateo['year']);
+
+
+			list($st_date, $st_month, $st_year) = explode("/", $date3akd1);
+			$t3 = $arabicTools->dateHejri2Geo(($st_date + 1) . "/" . ($st_month) . "/" . $st_year);
+			$t3 = explode("-", $t3);
+			$t3 = mktime(0, 0, 0, $t3[1], $t3[0], $t3[2]);
+
+			$dateo = $dcal->u2g($st_date, $st_month, $st_year);
+			$t3 = mktime(0, 0, 0, $dateo['month'], $dateo['day'], $dateo['year']);
+
+
+		} else {
+
+
+			$t1 = explode("/", $startegar1);
+			$t1 = mktime(0, 0, 0, $t1[1], $t1[0], $t1[2]);
+
+			$t2 = explode("/", $end3aqd1);
+			$t2 = mktime(0, 0, 0, $t2[1], $t2[0], $t2[2]);
+
+			$t3 = explode("/", $date3akd1);
+			$t3 = mktime(0, 0, 0, $t3[1], $t3[0], $t3[2]);
+
+
+		}
+
+		$sql = "
+            update egar set
+            duration='" . $duration . "',
+            depositeamount ='" . $depositeamount . "',
+            payedamount='" . $payedamount . "',
+            fristsa3e='" . $fristsa3e . "',
+            secondsa3e='" . $secondsa3e . "',
+            water ='" . $water . "',
+            tamen ='" . $tamen . "',
+            startegar='" . $t1 . "',
+            end3aqd='" . $t2 . "',
+            date3akd='" . $t3 . "',
+            annualprice='" . $annualprice . "',
+            aqaraddress='" . $aqaraddress . "',
+            vat_type='" . $vat_type . "',
+            water_duration = '".$water_duration."',
+            services_duration = '".$services_duration."',
+            secondsa3e_duration = '".$secondsa3e_duration."'
+            where
+            rakam3akdid='" . $rakam3akdid . "'
+
+        ";
+
+
+		mysql_query($sql, $link);
+		mysql_query("update aksat set egar_id = '".$rakam3akdid."' where
+		  idsubaqar='" . $idsubaqar . "' and iscomplete=0", $link);
+		$sql = "select * from  egar  where rakam3akdid='" . $row['rakam3akdid'] . "' ";
+		$row2 = mysql_fetch_array(mysql_query($sql, $link));
+
+	}
+
+
+	//end
+
+
+	// delete aksat
+
+	if ($deletekastid) {
+		$sql = "update aksat set idsubaqar=-idsubaqar
+,iscomplete=1
+ where  kastid='" . $deletekastid . "' ";
+		mysql_query($sql, $link);
+	}
+
+	// restore aksat
+
+	if ($deletekastidx) {
+		$sql = "update aksat set idsubaqar=-idsubaqar
+,iscomplete=0
+ where  kastid='" . $deletekastidx . "' ";
+		mysql_query($sql, $link);
+	}
+
+
+
+
+
+	?>
+
+
+    بيانات الإيجار :
+    <span class="uifont14">
+    لاحظ ان تعديل البيانات في الجدول التالي سوف تؤثر فقط علي تجديد العقد عن انتهاء الاقساط الحالية ولن تتأثر الاقساط الحالية باي تعديل في الجدول الخاص بالايجار
+        </span>
+
+    <br>
+
+	<?
+	//**************no to break the old custumer code
+	if (!$row2['duration']) {
+
+		$sql = "select kastdate from aksat where idsubaqar='" . $idsubaqar . "' order by kastdate limit 2 ";
+		$moda = mysql_query($sql, $link);
+		while ($rowmoda = mysql_fetch_array($moda)) {
+
+			$mymoda = $rowmoda['kastdate'] - $mymoda;
+
+		}
+		$mymoda = sqrt($mymoda * $mymoda);
+
+		$mymoda = ceil(($mymoda) / (60 * 60 * 24 * 30));
+		if ($mymoda > 12 or $mymoda < 1) {
+			$mymoda = 12;
+		}
+		$row2['duration'] = $mymoda;
+		$sql = "update egar set duration='" . $mymoda . "' where rakam3akdid='" . $re['rakam3akdid'] . "' ";
+		mysql_query($sql, $link);
+
+
+	}
+
+	//******************end****************//
+
+
+	?>
+    <form method=post action="editaksat.hnt?idsubaqar=<?=$idsubaqar?>" id=formxx name=formxx  class="uifont16">
+        <INPUT TYPE=hidden NAME=nonaehnt_dll VALUE="<?= $hnt_dll; ?>">
+        <input type=hidden name=idsubaqar value="<?= $idsubaqar; ?>">
+        <input type=hidden name=saveegar value="1">
+        <input type=hidden name=rakam3akdid value="<?= $row2['rakam3akdid']; ?>">
+
+
+        <div align=right class="uifont16">
+            <table style="border:5px solid #dedede " border=0 bgcolor=threedface width=400 cellspacing=1 cellpadding=0 class="table uifont16">
+
+                <tr bgcolor=ffffff>
+                    <td align=left style="max-width: 150px;" class="uifont16">
+                        القسط كل :
+                    <td>
+                        <input type=text name=duration value="<?= $row2['duration']; ?>"> &nbsp;&nbsp;&nbsp;&nbsp; شهر
+
+
+                    <td align=left class="uifont16">
+                        قيمة الايجار :
+                    <td>
+                        <input type=text name=annualprice value="<?= $row2['annualprice']; ?>">
+                        &nbsp;&nbsp;&nbsp;&nbsp; <?= $myomla ?>
+
+
+                <tr bgcolor=ffffff>
+                    <td align=left class="uifont16">
+                        قيمة القسط :
+                    <td>
+                        <input type=text name=depositeamount value="<?= $row2['depositeamount']; ?>"> &nbsp;&nbsp;&nbsp;&nbsp; <?= $myomla ?>
+                    <td align=left class="uifont16">
+                        اول دفعة :
+                    <td>
+                        <input type=text name=payedamount value="<?= $row2['payedamount']; ?>">
+                        &nbsp;&nbsp;&nbsp;&nbsp; <?= $myomla ?>
+
+                <tr bgcolor=ffffff>
+                    <td align=left class="uifont16">
+                        التأمين :
+                    <td>
+                        <input type=text name=tamen value="<?= $row2['tamen']; ?>">
+                        &nbsp;&nbsp;&nbsp;&nbsp; <?= $myomla ?>
+
+
+                    <td align=left class="uifont16">
+                        السعي :
+                    <td>
+                        <input type=text name=fristsa3e value="<?= $row2['fristsa3e']; ?>">
+                        &nbsp;&nbsp;&nbsp;&nbsp; <?= $myomla ?>
+                <tr bgcolor=ffffff>
+                    <td align=left class="uifont16">
+                        السعي السنوي :
+                    <td>
+                        <input type=text name=secondsa3e value="<?= $row2['secondsa3e']; ?>">
+                        &nbsp;&nbsp;&nbsp;&nbsp; <?= $myomla ?>
+
+                        <select  name="secondsa3e_duration" id="secondsa3e_duration">
+                            <option value="0">عند التجديد</option>
+                            <option value="1">مع كل قسط</option>
+                        </select>
+                    </td>
+
+                    <td align=left class="uifont16">
+                        الخدمات :
+                    <td>
+                        <input type=text name=services value="<?= $row2['services']; ?>">
+                        &nbsp;&nbsp;&nbsp;&nbsp; <?= $myomla ?>
+
+                        <select  name="services_duration" id="services_duration">
+                            <option value="0">عند التجديد</option>
+                            <option value="1">مع كل قسط</option>
+                        </select>
+                    </td></tr>
+                <tr bgcolor=ffffff>
+                    <td align=left class="uifont16">
+                        المياه :
+                    <td>
+                        <input type=text name=water value="<?= $row2['water']; ?>">
+                        &nbsp;&nbsp;&nbsp;&nbsp; <?= $myomla ?>
+<select  name="water_duration" id="water_duration">
+    <option value="0">عند التجديد</option>
+    <option value="1">مع كل قسط</option>
+</select>
+
+
+						<?
+						if ($hnt_dll || $hnt_supper_dll == 5) {
+
+							$startegar1 = date("d/m/Y", $row2['startegar']);
+							$end3aqd1 = date("d/m/Y", $row2['end3aqd']);
+							$date3akd1 = date("d/m/Y", $row2['date3akd']);
+
+
+						} else {
+
+
+							/*
+							$startegar1=$arabicTools->arabicDate('hj:d/m/Y', $row2['startegar']);
+							$end3aqd1=$arabicTools->arabicDate('hj:d/m/Y', $row2['end3aqd']);
+							$date3akd1=$arabicTools->arabicDate('hj:d/m/Y', $row2['date3akd']);
+
+
+							$startegar1=$arabicTools->arabicDate('hj:d/m/Y', $row2['startegar']);
+							$end3aqd1=$arabicTools->arabicDate('hj:d/m/Y', $row2['end3aqd']);
+							$date3akd1=$arabicTools->arabicDate('hj:d/m/Y', $row2['date3akd']);
+							*/
+
+							$dateo = $dcal->g2u(date("d", $row2['startegar']), date("m", $row2['startegar']), date("Y", $row2['startegar']));
+							$startegar1 = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'];
+
+							$dateo = $dcal->g2u(date("d", $row2['end3aqd']), date("m", $row2['end3aqd']), date("Y", $row2['end3aqd']));
+							$end3aqd1 = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'];
+
+							$dateo = $dcal->g2u(date("d", $row2['date3akd']), date("m", $row2['date3akd']), date("Y", $row2['date3akd']));
+							$date3akd1 = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'];
+
+
+						}
+
+
+						?>
+                    <td align=left class="uifont16">
+                        شروط اضافية :
+                    <td>
+                        <input type=text name=notes value="<?=  $notes; ?>"> &nbsp;&nbsp;&nbsp;&nbsp;
+                <tr bgcolor=ffffff>
+                    <td align=left class="uifont16">
+                        بداية الايجار :
+                    <td>
+                        <input type=text name=startegar1 value="<?= $startegar1; ?>"> &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    <td align=left class="uifont16">
+                        نهاية الايجار :
+                    <td>
+                        <input type=text name=end3aqd1 value="<?= $end3aqd1; ?>"> &nbsp;&nbsp;&nbsp;&nbsp;
+                <tr bgcolor=ffffff>
+                    <td align=left class="uifont16">
+                        تاريخ العقد :
+                    <td>
+                        <input type=text name=date3akd1 value="<?= $date3akd1; ?>"> &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    <td align=left class="uifont16">
+                        عنوان العقار :
+                    <td>
+                        <input type=text name=aqaraddress value="<?= $row2['aqaraddress']; ?>"> &nbsp;&nbsp;&nbsp;&nbsp;
+
+                <tr bgcolor=ffffff>
+                    <td align=left class="uifont16">
+                        نوع الضريبة:
+                    <td>
+                        <select class="uifont16 required" id="vat_type" name="vat_type" >
+                            <option value="0">لا تنتطبق عليه الضريبة</option>
+                            <option  value="1">سكني ضريبة مبيعات 15% علي العمولة فقط </option>
+                            <option value="2">تجاري ضريبة مبيعات 15% علي الايجار والعمولة</option>
+                        </select>
+                    <td></td><td></td>
+                <tr bgcolor=ffffff>
+                    <td colspan=4 align=center style="text-align: center">
+
+
+                        <input type='submit' class='<?= "policy_" . $sc_id . "_edits" ?>' value="حفظ التعديلات ">
+
+            </table>
+        </div>
+    </form>
+<?
+$timezone = date_default_timezone_get();
+echo date('m/d/Y h:i:s a', time());
+?>
+    <script langauge=javascript>
+
+        $(function () {
+            $("#vat_type").val("<?=$row2["vat_type"];?>").trigger('change');
+            $("#water_duration").val("<?=$row2["water_duration"];?>").trigger('change');
+            $("#services_duration").val("<?=$row2["services_duration"];?>").trigger('change');
+            $("#secondsa3e_duration").val("<?=$row2["secondsa3e_duration"];?>").trigger('change');
+        });
+
+    </script>
+    <hr>
+
+    <form action="editaksat.hnt?idsubaqar=<?=$idsubaqar?>" method=post id=formx2 name=formx2>
+        <INPUT TYPE=hidden NAME=nonaehnt_dll VALUE="<?= $hnt_dll; ?>">
+        <input type=hidden name=idsubaqar value="<?= $idsubaqar; ?>">
+        <input type=hidden name=saveaksat value="1">
+
+        بيانات الاقساط :
+        <span class="uifont12">ان تعديل بيانات الاقساط او اعتبارها محصله قد يؤثر علي الحسابات ان كنت لا تعرف ما تفعل الرجاء عدم التعديل من هذه الشاشة </span>
+        <br>
+        <table class="table table-striped table-hover table-bordered">
+
+
+            <tr bgcolor=#a7eaa7 >
+                <td>                    القسط
+                <td> القيمة
+                <td>ضريبة</td>
+                <td> المدفوع
+                <td> تفاصيل الدفعات
+                <td>التاريخ
+                <td> المياه
+                <td>السعي
+				<td>خدمات
+                <td >مدفوع
+                <td > حذف
+                </td>
+            </tr>
+					<?
+// not to break older custumer
+$sql = "select * from aksat where idsubaqar='" . $idsubaqar . "'   order by kastid asc ";
+if($row2["insert_date"] > 1571751136 ){
+	$sql = "select * from aksat where idsubaqar='" . $idsubaqar . "' and egar_id ='".$row['rakam3akdid']."'  order by kastid asc ";
+}
+
+					$result = mysql_query($sql, $link);
+					while ($rowa = mysql_fetch_array($result)) {
+
+						if ($hnt_dll || $hnt_supper_dll == 5) {
+							$dhd = date("d/m/Y", $rowa['kastdate']);
+						} else {
+
+							$dhd = $arabicTools->arabicDate('hj:d/m/Y', $rowa['kastdate']);
+
+
+							$dateo = $dcal->g2u(date("d", $rowa['kastdate']), date("m", $rowa['kastdate']), date("Y", $rowa['kastdate']));
+							$dhd = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'];
+
+
+						}
+
+                        $vat_value = 0;
+                        $rentValue = $rowa['kastvalue'] - $rowa['water']- $rowa['sa3ee']- $rowa['services'];
+                        if($row2['vat_type'] == 1) {
+                            $vat_value = $rowa['sa3ee'] * 0.15 ;
+                        }
+                        if($row2['vat_type'] == 2) {
+                            $vat_value = $rowa['sa3ee'] * 0.15 + $rentValue * 0.15 ;
+                        }
+                        $vat_value = number_format($vat_value,2,".","");
+
+						echo "<tr ><td >
+<input
+onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+style='border:none' size=3 type=text name=kastname[" . $rowa['kastid'] . "] value='" . $rowa['kastname'] . "' >
+<td>
+<input
+onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+style='border:none' size=12 type=text name=kastvalue[" . $rowa['kastid'] . "] value='" . $rowa['kastvalue'] . "' >
+
+<td>
+$vat_value
+</td>
+
+<td>
+<input
+onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+style='border:none'  size=12 type=text name=dof3at[" . $rowa['kastid'] . "] value='" . $rowa['dof3at'] . "' >
+
+
+<td >
+<input
+onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+style='border:none'  size=45 type=text name=dof3at_tafsel[" . $rowa['kastid'] . "] value='" . $rowa['dof3at_tafsel'] . "' >
+<td>
+
+<input
+onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+style='border:none'  size=10 type=text name=kastdate[" . $rowa['kastid'] . "] value='$dhd' >
+
+
+<td>
+<input
+onfocus=\"this.style.border='1px solid red';\";
+onblur=\"this.style.border='none';\";
+style='border:none'  size=7 type=text name=water[" . $rowa['kastid'] . "] value='" . $rowa['water'] . "' >
+
+<td>
+<input
+onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+style='border:none' size=7 type=text name=sa3ee[" . $rowa['kastid'] . "] value='" . $rowa['sa3ee'] . "' >
+
+<td>
+<input
+onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+style='border:none' size=7 type=text name=services[" . $rowa['kastid'] . "] value='" . $rowa['services'] . "' >
+
+
+<td>
+<input  type=checkbox
+onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+style='border:none' size=3 type=text name=iscomplete[" . $rowa['kastid'] . "] value='1'";
+
+						if ($rowa['iscomplete']) {
+							echo "checked";
+						}
+
+						echo "
+ >
+<td align=center style='cursor:hand' onclick=\"confirm('هل ترغب بالفعل فى حذف هذا القسط '
+,'تحذير'
+,'editaksat.hnt?idsubaqar=" . $idsubaqar . "&cchnt_dll=" . $hnt_dll . "&deletekastid=" . $rowa['kastid'] . "');\">
+
+<img src='../../images/delete.gif' class='policy_{$sc_id}_deleetes'  border=0>
+ </tr>
+
+  ";
+
+
+					}
+
+
+					echo "<tr bgcolor=fffff9> <td colspan=14>
+اضافة قسط جديد
+";
+					$rowa['kastid'] = "rosa";
+					echo "<tr bgcolor=ffffff >
+<td >
+<input
+ onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+ style='border:none' size=3 type=text name=kastname[" . $rowa['kastid'] . "]   >
+<td>
+<input
+ onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+style='border:none' size=12 type=text name=kastvalue[" . $rowa['kastid'] . "]   >
+
+<td></td>
+
+<td>
+<input style='border:none'
+onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+ size=12 type=text name=dof3at[" . $rowa['kastid'] . "]  >
+
+
+<td >
+<input
+ onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+
+style='border:none'  size=45 type=text name=dof3at_tafsel[" . $rowa['kastid'] . "]   >
+<td>
+
+<input
+ onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+style='border:none'  size=10 type=text name=kastdate[" . $rowa['kastid'] . "]   >
+
+
+<td>
+<input
+ onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+style='border:none'  size=3 type=text name=water[" . $rowa['kastid'] . "]   >
+
+<td>
+<input
+ onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+style='border:none' size=3 type=text name=sa3ee[" . $rowa['kastid'] . "]   >
+
+
+<td>
+<input type=checkbox
+onfocus=\"this.style.border='1px solid red ';\";
+onblur=\"this.style.border='none';\";
+style='border:none' size=3 type=text name=iscomplete[" . $rowa['kastid'] . "]
+
+>
+<td>
+<img src=../../images/true.gif  border=0>
+</td>
+<td></td>
+ </tr>";
+
+
+					?>
+        </table>
+
+        <br>
+        <center>
+            <input type='submit' class='<?= "policy_" . $sc_id . "_edits" ?>' value="حفظ التعديلات ">
+        </center>
+
+
+    </form>
+    <hr>
+
+
+    <form action="editaksat.hnt?idsubaqar=<?=$idsubaqar?>" method=post id=formx3 name=formx3>
+        <INPUT TYPE=hidden NAME=nonaehnt_dll VALUE="<?= $hnt_dll; ?>">
+        <input type=hidden name=idsubaqar value="<?= $idsubaqar; ?>">
+        <input type=hidden name=saveaksat value="1">
+
+
+        <font color=blue><b>
+                بيانات الاقساط المحذوفة:<b></font> سيتم تفريغ هذه الاقساط تلقائيا بعد شهر من تاريخ الحذف <br>
+        <table class="table table-striped table-hover table-bordered">
+
+            <tr bgcolor=ffffff>
+                <td> م
+                <td> العقار
+                <td>
+
+                    القسط
+                <td> القيمة
+                <td> المدفوع
+                <td> تفاصيل الدفعات
+                <td> تاريخ الاستحقاق
+                <td> المياه
+                <td>السعي
+                <td>مدفوع
+                <td> اعادة
+
+					<?
+					$sql = "select * from aksat where idsubaqar='" . -$idsubaqar . "'
+order by kastid asc
+";
+
+
+					$result = mysql_query($sql, $link);
+					while ($rowa = mysql_fetch_array($result)) {
+
+						if ($hnt_dll || $hnt_supper_dll == 5) {
+							$dhd = date("d/m/Y", $rowa['kastdate']);
+						} else {
+							$dhd = $arabicTools->arabicDate('hj:d/m/Y', $rowa['kastdate']);
+
+							$dateo = $dcal->g2u(date("d", $rowa['kastdate']), date("m", $rowa['kastdate']), date("Y", $rowa['kastdate']));
+							$dhd = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'];
+						}
+
+						echo "<tr bgcolor=ffffff ><td> " . $rowa['kastid'] . " <td> " . $rowa['idsubaqar'] . "
+<td >
+<input
+
+style='border:none' size=3 type=text name=kastname[" . $rowa['kastid'] . "] value='" . $rowa['kastname'] . "' >
+<td>
+<input
+
+style='border:none' size=12 type=text name=kastvalue[" . $rowa['kastid'] . "] value='" . $rowa['kastvalue'] . "' >
+
+
+<td>
+<input
+
+style='border:none'  size=12 type=text name=dof3at[" . $rowa['kastid'] . "] value='" . $rowa['dof3at'] . "' >
+
+
+<td >
+<input
+
+style='border:none'  size=45 type=text name=dof3at_tafsel[" . $rowa['kastid'] . "] value='" . $rowa['dof3at_tafsel'] . "' >
+<td>
+
+<input
+
+style='border:none'  size=10 type=text name=kastdate[" . $rowa['kastid'] . "] value='$dhd' >
+
+
+<td>
+<input
+
+style='border:none'  size=3 type=text name=water[" . $rowa['kastid'] . "] value='" . $rowa['water'] . "' >
+
+<td>
+<input
+
+style='border:none' size=3 type=text name=sa3ee[" . $rowa['kastid'] . "] value='" . $rowa['sa3ee'] . "' >
+
+
+<td>
+<input  type=checkbox
+
+style='border:none' size=3 type=text name=iscomplete[" . $rowa['kastid'] . "] value='1'";
+
+						if ($rowa['iscomplete']) {
+							echo "checked";
+						}
+
+						echo "
+ >
+<td align=center style='cursor:hand' onclick=\"confirm('هل ترغب بالفعل فى استعادة  هذا القسط '
+,'تحذير'
+,'editaksat.hnt?idsubaqar=" . $idsubaqar . "&cchnt_dll=" . $hnt_dll . "&deletekastidx=" . $rowa['kastid'] . "');}\">
+
+<img src=../../images/true.gif  border=0>
+ </tr>
+
+  ";
+
+
+					}
+
+
+					?>
+        </table>
+
+
+    </form>
+
+
+    <form action="editaksat.hnt?idsubaqar=<?=$idsubaqar?>" method=post id=formx4 name=formx4>
+        <INPUT TYPE=hidden NAME=nonaehnt_dll VALUE="<?= $hnt_dll; ?>">
+        <input type=hidden name=idsubaqar value="<?= $idsubaqar; ?>">
+        <input type=hidden name=saveaksat value="1">
+
+
+        <font color=blue><b>بيانات الاقساط المنتهية <br>
+                <table class="table table-striped table-hover table-bordered">
+
+            <tr bgcolor=#ff8888>
+                <td> م
+                <td> العقار
+                <td>
+
+                    القسط
+                <td> القيمة
+                <td> المدفوع
+                <td> تفاصيل الدفعات
+                <td> تاريخ الاستحقاق
+                <td> المياه
+                <td>السعي
+                <td>مدفوع
+
+					<?
+
+// not to break older custumer
+$sql = "select * from aksat where  (formuid!='' and formuid != '" . $row2['formuid'] . "' and idsubaqar='" . $idsubaqar . "' ) order by kastid asc";
+if($row2["insert_date"] > 1571751136 ){
+	$sql = "select * from aksat where idsubaqar='" . $idsubaqar . "' and egar_id !='".$row['rakam3akdid']."'  order by kastid asc ";
+}
+
+
+
+					$result = mysql_query($sql, $link);
+					while ($rowa = mysql_fetch_array($result)) {
+
+						if ($hnt_dll || $hnt_supper_dll == 5) {
+							$dhd = date("d/m/Y", $rowa['kastdate']);
+						} else {
+							$dhd = $arabicTools->arabicDate('hj:d/m/Y', $rowa['kastdate']);
+
+							$dateo = $dcal->g2u(date("d", $rowa['kastdate']), date("m", $rowa['kastdate']), date("Y", $rowa['kastdate']));
+							$dhd = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'];
+						}
+
+						echo "<tr bgcolor=ffffff ><td> " . $rowa['kastid'] . " <td> " . $rowa['idsubaqar'] . "
+<td >
+<input
+
+style='border:none' size=3 type=text name=kastname[" . $rowa['kastid'] . "] value='" . $rowa['kastname'] . "' >
+<td>
+<input
+
+style='border:none' size=12 type=text name=kastvalue[" . $rowa['kastid'] . "] value='" . $rowa['kastvalue'] . "' >
+
+
+<td>
+<input
+
+style='border:none'  size=12 type=text name=dof3at[" . $rowa['kastid'] . "] value='" . $rowa['dof3at'] . "' >
+
+
+<td >
+<input
+
+style='border:none'  size=45 type=text name=dof3at_tafsel[" . $rowa['kastid'] . "] value='" . $rowa['dof3at_tafsel'] . "' >
+<td>
+
+<input
+
+style='border:none'  size=10 type=text name=kastdate[" . $rowa['kastid'] . "] value='$dhd' >
+
+
+<td>
+<input
+
+style='border:none'  size=3 type=text name=water[" . $rowa['kastid'] . "] value='" . $rowa['water'] . "' >
+
+<td>
+<input
+
+style='border:none' size=3 type=text name=sa3ee[" . $rowa['kastid'] . "] value='" . $rowa['sa3ee'] . "' >
+
+
+<td>
+<input  type=checkbox
+
+style='border:none' size=3 type=text name=iscomplete[" . $rowa['kastid'] . "] value='1'";
+
+						if ($rowa['iscomplete']) {
+							echo "checked";
+						}
+
+						echo "
+ >
+
+ </tr>
+
+  ";
+
+
+					}
+
+
+					?>
+        </table>
+
+
+    </form>
+
+</div>

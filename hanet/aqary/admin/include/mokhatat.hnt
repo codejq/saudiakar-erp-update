@@ -1,0 +1,562 @@
+<?php
+$sc_title = "إدارة المناطق والأحياء";
+$sc_id = "107";
+include_once"../../nocash.hnt";
+include_once"../../connectdb.hnt";
+
+// Handle AJAX actions BEFORE including header to prevent HTML output
+
+// Handle delete action
+if (isset($action) && $action == 'delete') {
+	$mokhatatid = isset($mokhatatid) ? intval($mokhatatid) : 0;
+
+	if($mokhatatid <= 0) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => 'معرف المنطقة غير صحيح'
+		], JSON_UNESCAPED_UNICODE);
+		exit();
+	}
+
+	$delete_sql = "DELETE FROM mokhatat WHERE mokhatatid={$mokhatatid}";
+	$result = mysql_query($delete_sql, $link);
+
+	if($result) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => true,
+			'message' => 'تم حذف المنطقة بنجاح'
+		], JSON_UNESCAPED_UNICODE);
+	} else {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => 'فشل في حذف المنطقة: ' . mysql_error($link)
+		], JSON_UNESCAPED_UNICODE);
+	}
+	exit();
+}
+
+// Handle edit action
+if (isset($action) && $action == 'edit') {
+	$mokhatatid = isset($mokhatatid) ? intval($mokhatatid) : 0;
+	$mokhatatname = isset($mokhatatname) ? trim($mokhatatname) : '';
+	$cityid = isset($cityid) ? intval($cityid) : 0;
+
+	if($mokhatatid <= 0) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => 'معرف المنطقة غير صحيح'
+		], JSON_UNESCAPED_UNICODE);
+		exit();
+	}
+
+	if(empty($mokhatatname)) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => 'برجاء كتابة اسم المنطقة'
+		], JSON_UNESCAPED_UNICODE);
+		exit();
+	}
+
+	// Check for duplicate (excluding current region)
+	$mokhatatname_escaped = mysql_real_escape_string($mokhatatname);
+	$check_sql = "SELECT COUNT(*) as count FROM mokhatat WHERE mokhatatname='{$mokhatatname_escaped}' AND cityid={$cityid} AND mokhatatid != {$mokhatatid}";
+	$check_result = mysql_query($check_sql, $link);
+	$check_row = mysql_fetch_array($check_result);
+
+	if($check_row['count'] > 0) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => "المنطقة '{$mokhatatname}' موجودة بالفعل في هذه المدينة"
+		], JSON_UNESCAPED_UNICODE);
+		exit();
+	}
+
+	// Update region
+	$update_sql = "UPDATE mokhatat SET mokhatatname='{$mokhatatname_escaped}' WHERE mokhatatid={$mokhatatid}";
+	$update_result = mysql_query($update_sql, $link);
+
+	if(!$update_result) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => 'فشل في تعديل المنطقة: ' . mysql_error($link)
+		], JSON_UNESCAPED_UNICODE);
+		exit();
+	}
+
+	header('Content-Type: application/json; charset=utf-8');
+	echo json_encode([
+		'success' => true,
+		'message' => "تم تعديل المنطقة إلى '{$mokhatatname}' بنجاح",
+		'mokhatatid' => $mokhatatid,
+		'mokhatatname' => $mokhatatname
+	], JSON_UNESCAPED_UNICODE);
+	exit();
+}
+
+// Handle insert action
+if (isset($action) && $action == 'insert') {
+	$mokhatatname = isset($mokhatatname) ? trim($mokhatatname) : '';
+	$cityid = isset($cityid) ? intval($cityid) : 0;
+
+	if(empty($mokhatatname)) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => 'برجاء كتابة اسم المنطقة'
+		], JSON_UNESCAPED_UNICODE);
+		exit();
+	}
+
+	if($cityid <= 0) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => 'برجاء اختيار المدينة'
+		], JSON_UNESCAPED_UNICODE);
+		exit();
+	}
+
+	// Check for duplicate
+	$mokhatatname_escaped = mysql_real_escape_string($mokhatatname);
+	$check_sql = "SELECT COUNT(*) as count FROM mokhatat WHERE mokhatatname='{$mokhatatname_escaped}' AND cityid={$cityid}";
+	$check_result = mysql_query($check_sql, $link);
+	$check_row = mysql_fetch_array($check_result);
+
+	if($check_row['count'] > 0) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => "المنطقة '{$mokhatatname}' موجودة بالفعل في هذه المدينة"
+		], JSON_UNESCAPED_UNICODE);
+		exit();
+	}
+
+	// Insert new region
+	$insert_sql = "INSERT INTO mokhatat SET mokhatatname='{$mokhatatname_escaped}', cityid={$cityid}";
+	$insert_result = mysql_query($insert_sql, $link);
+
+	if(!$insert_result) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => 'فشل في إضافة المنطقة: ' . mysql_error($link)
+		], JSON_UNESCAPED_UNICODE);
+		exit();
+	}
+
+	$id = mysql_insert_id();
+	header('Content-Type: application/json; charset=utf-8');
+	echo json_encode([
+		'success' => true,
+		'message' => "تم إضافة منطقة '{$mokhatatname}' بنجاح",
+		'mokhatatid' => $id,
+		'mokhatatname' => $mokhatatname
+	], JSON_UNESCAPED_UNICODE);
+	exit();
+}
+
+// Include header after AJAX handlers (for non-AJAX requests)
+include_once"../../header.hnt";
+
+// Get city information
+$cityid = isset($cityid) ? intval($cityid) : 0;
+$cityname = '';
+$countryid = '';
+
+if($cityid > 0) {
+	$city_result = mysql_query("SELECT cityname, countryid FROM city WHERE cityid={$cityid}", $link);
+	if($city_row = mysql_fetch_array($city_result)) {
+		$cityname = $city_row['cityname'];
+		$countryid = $city_row['countryid'];
+	}
+}
+
+// View action - show regions list
+if(isset($action) && $action == 'view') {
+?>
+
+<div class="container-fluid py-4">
+
+<div id="maintitlebox" class="mb-3"></div>
+
+<!-- Page Header -->
+<div class="card shadow-sm mb-4">
+	<div class="card-header bg-info text-white">
+		<h4 class="mb-0">
+			<i class="bi bi-geo-alt"></i>
+			مناطق وأحياء مدينة: <strong><?=htmlspecialchars($cityname)?></strong>
+		</h4>
+	</div>
+</div>
+
+<!-- Add New Region Form -->
+<div class="card shadow-sm mb-4">
+	<div class="card-header bg-success text-white">
+		<h5 class="mb-0"><i class="bi bi-plus-circle"></i> إضافة منطقة أو حي جديد</h5>
+	</div>
+	<div class="card-body">
+		<form dir="rtl" method="post" id="regionForm">
+			<input type="hidden" name="action" value="insert">
+			<input type="hidden" name="cityid" value="<?=$cityid?>">
+			<div class="row g-3">
+				<div class="col-md-8">
+					<label for="mokhatatname" class="form-label">اسم المنطقة أو الحي:</label>
+					<input type="text" name="mokhatatname" id="mokhatatname" class="form-control" dir="rtl" placeholder="أدخل اسم المنطقة" required autofocus>
+				</div>
+				<div class="col-md-4 d-flex align-items-end">
+					<button type="submit" class="btn btn-success btn-lg w-100" id="submitBtn">
+						<i class="bi bi-plus-lg"></i> إضافة إلى القائمة
+					</button>
+				</div>
+			</div>
+		</form>
+	</div>
+</div>
+
+<!-- Search and Filter -->
+<div class="card shadow-sm mb-4">
+	<div class="card-body">
+		<div class="row g-3">
+			<div class="col-md-6">
+				<div class="input-group">
+					<span class="input-group-text"><i class="bi bi-search"></i></span>
+					<input type="text" id="searchInput" class="form-control" placeholder="ابحث عن منطقة..." dir="rtl">
+					<button class="btn btn-outline-secondary" type="button" onclick="$('#searchInput').val(''); loadRegions();">
+						<i class="bi bi-x-lg"></i> مسح
+					</button>
+				</div>
+			</div>
+			<div class="col-md-6 text-end">
+				<button class="btn btn-primary" onclick="loadRegions()">
+					<i class="bi bi-arrow-clockwise"></i> تحديث
+				</button>
+				<a href="city.hnt?countryid=<?=$countryid?>" class="btn btn-secondary">
+					<i class="bi bi-arrow-left"></i> العودة للمدن
+				</a>
+			</div>
+		</div>
+	</div>
+</div>
+
+<!-- Regions Table -->
+<div class="card shadow-sm">
+	<div class="card-header bg-secondary text-white">
+		<h5 class="mb-0"><i class="bi bi-list-ul"></i> قائمة المناطق والأحياء</h5>
+	</div>
+	<div class="card-body">
+		<div id="regionsContainer" class="table-responsive"></div>
+	</div>
+</div>
+
+</div>
+
+<!-- Edit Region Modal -->
+<div class="modal fade" id="editRegionModal" tabindex="-1" aria-labelledby="editRegionModalLabel" aria-hidden="true">
+	<div class="modal-dialog modal-dialog-centered">
+		<div class="modal-content">
+			<div class="modal-header bg-primary text-white">
+				<h5 class="modal-title" id="editRegionModalLabel">
+					<i class="bi bi-pencil"></i> تعديل اسم المنطقة
+				</h5>
+				<button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+			</div>
+			<div class="modal-body" dir="rtl">
+				<form id="editRegionForm">
+					<input type="hidden" id="edit_mokhatatid" name="mokhatatid">
+					<input type="hidden" id="edit_cityid" name="cityid">
+					<input type="hidden" name="action" value="edit">
+
+					<div class="mb-3">
+						<label for="edit_mokhatatname" class="form-label">اسم المنطقة الجديد:</label>
+						<input type="text" class="form-control form-control-lg" id="edit_mokhatatname" name="mokhatatname" dir="rtl" required autofocus>
+					</div>
+				</form>
+			</div>
+			<div class="modal-footer">
+				<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+					<i class="bi bi-x-lg"></i> إلغاء
+				</button>
+				<button type="button" class="btn btn-primary" id="saveEditBtn">
+					<i class="bi bi-check-lg"></i> حفظ التعديل
+				</button>
+			</div>
+		</div>
+	</div>
+</div>
+
+<script>
+const cityid = <?=$cityid?>;
+const cityname = '<?=addslashes($cityname)?>';
+
+// Load regions table
+function loadRegions() {
+	const searchTerm = $('#searchInput').val();
+
+	$('#regionsContainer').html('<div class="text-center py-4"><div class="spinner-border text-primary" role="status"><span class="visually-hidden">جاري التحميل...</span></div></div>');
+
+	$.ajax({
+		url: 'mokhatat_list.php',
+		type: 'GET',
+		data: { cityid: cityid, search: searchTerm },
+		dataType: 'json',
+		success: function(response) {
+			if(response.success && response.regions.length > 0) {
+				let tableHtml = '<table class="table table-hover table-striped align-middle">';
+				tableHtml += '<thead class="table-dark">';
+				tableHtml += '<tr>';
+				tableHtml += '<th width="60">#</th>';
+				tableHtml += '<th>اسم المنطقة / الحي</th>';
+				tableHtml += '<th width="200" class="text-center">الإجراءات</th>';
+				tableHtml += '</tr>';
+				tableHtml += '</thead>';
+				tableHtml += '<tbody>';
+
+				response.regions.forEach(function(region, index) {
+					tableHtml += '<tr id="region_' + region.mokhatatid + '">';
+					tableHtml += '<td>' + (index + 1) + '</td>';
+					tableHtml += '<td><strong>' + region.mokhatatname + '</strong></td>';
+					tableHtml += '<td class="text-center">';
+					tableHtml += '<div class="btn-group btn-group-sm" role="group">';
+					tableHtml += `<button class="btn btn-primary ms-1" onclick="editRegion(${region.mokhatatid} , '${region.mokhatatname.replace(/'/g, '')}' )" title="تعديل">`;
+					tableHtml += '<i class="bi bi-pencil"></i> تعديل';
+					tableHtml += '</button>';
+					tableHtml += `<button class="btn btn-danger ms-1" onclick="deleteRegion(${region.mokhatatid},   '${region.mokhatatname.replace(/'/g, '')}' )" title="حذف">`;
+					tableHtml += '<i class="bi bi-trash"></i> حذف';
+					tableHtml += '</button>';
+					tableHtml += '</div>';
+					tableHtml += '</td>';
+					tableHtml += '</tr>';
+				});
+
+				tableHtml += '</tbody>';
+				tableHtml += '</table>';
+
+				$('#regionsContainer').html(tableHtml);
+			} else {
+				$('#regionsContainer').html('<div class="alert alert-warning text-center"><i class="bi bi-exclamation-triangle"></i> لا توجد مناطق في هذه المدينة</div>');
+			}
+		},
+		error: function() {
+			$('#regionsContainer').html('<div class="alert alert-danger text-center"><i class="bi bi-x-circle"></i> حدث خطأ في تحميل البيانات</div>');
+		}
+	});
+}
+
+// Edit region function
+function editRegion(mokhatatid, mokhatatname) {
+	// Set values in modal form
+	$('#edit_mokhatatid').val(mokhatatid);
+	$('#edit_cityid').val(cityid);
+	$('#edit_mokhatatname').val(mokhatatname);
+
+	// Show modal
+	var editModal = new bootstrap.Modal(document.getElementById('editRegionModal'));
+	editModal.show();
+
+	// Focus on input after modal is shown
+	$('#editRegionModal').on('shown.bs.modal', function() {
+		$('#edit_mokhatatname').focus().select();
+	});
+}
+
+// Handle Enter key press in edit modal
+$('#edit_mokhatatname').on('keypress', function(e) {
+	if(e.which === 13) { // Enter key
+		e.preventDefault();
+		$('#saveEditBtn').click();
+	}
+});
+
+// Handle edit form submission
+$('#saveEditBtn').on('click', function() {
+	const formData = $('#editRegionForm').serialize();
+	const saveBtn = $(this);
+	const originalBtnText = saveBtn.html();
+
+	// Validate input
+	const newName = $('#edit_mokhatatname').val().trim();
+	if(!newName) {
+		alert('برجاء كتابة اسم المنطقة');
+		$('#edit_mokhatatname').focus();
+		return;
+	}
+
+	// Disable button and show loading
+	saveBtn.prop('disabled', true)
+		.html('<span class="spinner-border spinner-border-sm"></span> جاري الحفظ...');
+
+	$.ajax({
+		url: 'mokhatat.hnt',
+		type: 'POST',
+		data: formData,
+		dataType: 'json',
+		success: function(response) {
+			if(response.success) {
+				// Hide modal
+				bootstrap.Modal.getInstance(document.getElementById('editRegionModal')).hide();
+
+				// Show success message
+				$('#maintitlebox').html(
+					'<div class="alert alert-success alert-dismissible fade show">' +
+					'<strong>نجح!</strong> ' + response.message +
+					'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+					'</div>'
+				);
+
+				// Reload regions
+				loadRegions();
+
+				// Auto-hide alert
+				setTimeout(function() {
+					$('#maintitlebox .alert').fadeOut();
+				}, 3000);
+			} else {
+				alert('خطأ: ' + response.message);
+			}
+
+			// Restore button
+			saveBtn.prop('disabled', false).html(originalBtnText);
+		},
+		error: function() {
+			alert('حدث خطأ في الاتصال بالخادم');
+			saveBtn.prop('disabled', false).html(originalBtnText);
+		}
+	});
+});
+
+// Delete region function
+function deleteRegion(mokhatatid, mokhatatname) {
+	if(confirm('هل أنت متأكد من حذف منطقة "' + mokhatatname + '"؟')) {
+		$.ajax({
+			url: 'mokhatat.hnt',
+			type: 'POST',
+			data: { action: 'delete', mokhatatid: mokhatatid },
+			dataType: 'json',
+			success: function(response) {
+				if(response.success) {
+					$('#maintitlebox').html(
+						'<div class="alert alert-success alert-dismissible fade show">' +
+						'<strong>نجح!</strong> ' + response.message +
+						'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+						'</div>'
+					);
+					loadRegions();
+					setTimeout(function() {
+						$('#maintitlebox .alert').fadeOut();
+					}, 3000);
+				} else {
+					alert('خطأ: ' + response.message);
+				}
+			},
+			error: function() {
+				alert('حدث خطأ في الاتصال بالخادم');
+			}
+		});
+	}
+}
+
+// Handle form submission
+$(document).ready(function() {
+	// Load regions on page load
+	loadRegions();
+
+	// Search on keyup
+	$('#searchInput').on('keyup', function() {
+		loadRegions();
+	});
+
+	// Handle form submission via AJAX
+	$('#regionForm').on('submit', function(e) {
+		e.preventDefault();
+
+		const formData = $(this).serialize();
+		const submitBtn = $('#submitBtn');
+		const originalBtnText = submitBtn.html();
+
+		submitBtn.prop('disabled', true)
+			.html('<span class="spinner-border spinner-border-sm"></span> جاري الإضافة...');
+
+		$.ajax({
+			url: 'mokhatat.hnt',
+			type: 'POST',
+			data: formData,
+			dataType: 'json',
+			success: function(response) {
+				if(response.success) {
+					$('#maintitlebox').html(
+						'<div class="alert alert-success alert-dismissible fade show">' +
+						'<strong>نجح!</strong> ' + response.message +
+						'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+						'</div>'
+					);
+					$('#mokhatatname').val('').focus();
+					loadRegions();
+					setTimeout(function() {
+						$('#maintitlebox .alert').fadeOut();
+					}, 5000);
+				} else {
+					$('#maintitlebox').html(
+						'<div class="alert alert-danger alert-dismissible fade show">' +
+						'<strong>خطأ!</strong> ' + response.message +
+						'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+						'</div>'
+					);
+				}
+			},
+			error: function() {
+				$('#maintitlebox').html(
+					'<div class="alert alert-danger alert-dismissible fade show">' +
+					'<strong>خطأ!</strong> حدث خطأ في الاتصال بالخادم' +
+					'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+					'</div>'
+				);
+			},
+			complete: function() {
+				submitBtn.prop('disabled', false).html(originalBtnText);
+			}
+		});
+	});
+});
+</script>
+
+<style>
+/* Button spacing */
+.btn-group .btn {
+	margin-left: 4px !important;
+}
+
+.btn-group .btn:first-child {
+	margin-left: 0 !important;
+}
+
+/* Table styling */
+.table tbody tr:hover {
+	background-color: #f8f9fa;
+}
+</style>
+
+<?php
+require('../../foter.hnt');
+exit;
+}
+?>
+
+<!-- Default add form (if no action specified) -->
+<div class="container-fluid py-4">
+	<div class="alert alert-info">
+		<i class="bi bi-info-circle"></i>
+		<strong>ملاحظة:</strong> لعرض المناطق، استخدم الرابط:
+		<code>mokhatat.hnt?action=view&cityid=[رقم_المدينة]</code>
+	</div>
+</div>
+
+<?php
+require('../../foter.hnt');
+?>

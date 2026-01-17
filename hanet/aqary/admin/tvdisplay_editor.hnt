@@ -1,0 +1,703 @@
+<?php
+/**
+ * TV Display Editor
+ * Create and edit TV displays with slides
+ */
+
+$sc_title = "محرر شاشات العرض";
+$sc_id = "146";
+
+extract($_REQUEST);
+
+// Check if AJAX request
+$is_ajax = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+if ($is_ajax) {
+    include_once "../nocash.hnt";
+    include_once "../reqloginajax.hnt";
+    header('Content-Type: application/json; charset=utf-8');
+
+    $action = isset($_POST['action']) ? $_POST['action'] : '';
+
+    // Save display
+    if ($action == 'save_display') {
+        $display_id = isset($_POST['display_id']) ? intval($_POST['display_id']) : 0;
+        $display_name = addslashes(trim($_POST['display_name']));
+        $display_description = addslashes(trim($_POST['display_description']));
+        $transition_duration = intval($_POST['transition_duration']);
+        $is_active = isset($_POST['is_active']) ? 1 : 0;
+        $show_clock = isset($_POST['show_clock']) ? 1 : 0;
+        $show_weather = isset($_POST['show_weather']) ? 1 : 0;
+
+        if ($display_id > 0) {
+            // Update
+            $sql = "UPDATE tv_displays SET
+                    display_name = '$display_name',
+                    display_description = '$display_description',
+                    transition_duration = '$transition_duration',
+                    is_active = '$is_active',
+                    show_clock = '$show_clock',
+                    show_weather = '$show_weather'
+                    WHERE display_id = '$display_id'";
+        } else {
+            // Insert
+            $sql = "INSERT INTO tv_displays SET
+                    display_name = '$display_name',
+                    display_description = '$display_description',
+                    transition_duration = '$transition_duration',
+                    is_active = '$is_active',
+                    show_clock = '$show_clock',
+                    show_weather = '$show_weather',
+                    display_order = 0";
+        }
+
+        if (mysql_query($sql, $link)) {
+            $new_id = $display_id > 0 ? $display_id : mysql_insert_id($link);
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم حفظ شاشة العرض بنجاح',
+                'display_id' => $new_id
+            ], JSON_UNESCAPED_UNICODE);
+        } else {
+            echo json_encode([
+                'success' => false,
+                'error' => 'حدث خطأ أثناء الحفظ'
+            ], JSON_UNESCAPED_UNICODE);
+        }
+        exit;
+    }
+
+    // Save slide
+    if ($action == 'save_slide') {
+        $slide_id = isset($_POST['slide_id']) ? intval($_POST['slide_id']) : 0;
+        $display_id = intval($_POST['display_id']);
+        $slide_title = addslashes(trim($_POST['slide_title']));
+        $slide_content = addslashes(trim($_POST['slide_content']));
+        $slide_type = addslashes($_POST['slide_type']);
+        $property_id = isset($_POST['property_id']) ? intval($_POST['property_id']) : 0;
+        $slide_duration = intval($_POST['slide_duration']);
+
+        if ($slide_id > 0) {
+            $sql = "UPDATE tv_slides SET
+                    slide_title = '$slide_title',
+                    slide_content = '$slide_content',
+                    slide_type = '$slide_type',
+                    property_id = '$property_id',
+                    slide_duration = '$slide_duration'
+                    WHERE slide_id = '$slide_id'";
+        } else {
+            $order_result = mysql_query("SELECT MAX(slide_order) as max_order FROM tv_slides WHERE display_id = '$display_id'", $link);
+            $order_row = mysql_fetch_array($order_result);
+            $next_order = ($order_row['max_order'] ?? 0) + 1;
+
+            $sql = "INSERT INTO tv_slides SET
+                    display_id = '$display_id',
+                    slide_title = '$slide_title',
+                    slide_content = '$slide_content',
+                    slide_type = '$slide_type',
+                    property_id = '$property_id',
+                    slide_duration = '$slide_duration',
+                    slide_order = '$next_order'";
+        }
+
+        if (mysql_query($sql, $link)) {
+            $new_slide_id = $slide_id > 0 ? $slide_id : mysql_insert_id($link);
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم حفظ الشريحة بنجاح',
+                'slide_id' => $new_slide_id
+            ], JSON_UNESCAPED_UNICODE);
+        } else {
+            echo json_encode([
+                'success' => false,
+                'error' => 'حدث خطأ أثناء حفظ الشريحة'
+            ], JSON_UNESCAPED_UNICODE);
+        }
+        exit;
+    }
+
+    // Get slide data for editing
+    if ($action == 'get_slide') {
+        $slide_id = intval($_POST['slide_id']);
+
+        $slide_query = mysql_query("SELECT * FROM tv_slides WHERE slide_id = '$slide_id'", $link);
+        if ($slide = mysql_fetch_array($slide_query)) {
+            echo json_encode([
+                'success' => true,
+                'slide' => [
+                    'slide_id' => $slide['slide_id'],
+                    'slide_title' => $slide['slide_title'],
+                    'slide_content' => $slide['slide_content'],
+                    'slide_type' => $slide['slide_type'],
+                    'property_id' => $slide['property_id'],
+                    'slide_duration' => $slide['slide_duration']
+                ]
+            ], JSON_UNESCAPED_UNICODE);
+        } else {
+            echo json_encode([
+                'success' => false,
+                'error' => 'الشريحة غير موجودة'
+            ], JSON_UNESCAPED_UNICODE);
+        }
+        exit;
+    }
+
+    // Delete slide
+    if ($action == 'delete_slide') {
+        $slide_id = intval($_POST['slide_id']);
+
+        // Get media file to delete
+        $media_query = mysql_query("SELECT media_url FROM tv_slides WHERE slide_id = '$slide_id'", $link);
+        if ($media_row = mysql_fetch_array($media_query)) {
+            if ($media_row['media_url']) {
+                $media_path = upload_path('media.tvdisplay', $media_row['media_url']);
+                if (file_exists($media_path)) {
+                    @unlink($media_path);
+                }
+            }
+        }
+
+        if (mysql_query("DELETE FROM tv_slides WHERE slide_id = '$slide_id'", $link)) {
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم حذف الشريحة بنجاح'
+            ], JSON_UNESCAPED_UNICODE);
+        } else {
+            echo json_encode([
+                'success' => false,
+                'error' => 'حدث خطأ أثناء الحذف'
+            ], JSON_UNESCAPED_UNICODE);
+        }
+        exit;
+    }
+
+    echo json_encode(['success' => false, 'error' => 'إجراء غير صالح'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+include_once "../nocash.hnt";
+include_once "../header.hnt";
+
+// Include Select2 CSS and JS (jQuery should already be loaded from header)
+echo '<link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />';
+echo '<link href="https://cdn.jsdelivr.net/npm/select2-bootstrap-5-theme@1.3.0/dist/select2-bootstrap-5-theme.min.css" rel="stylesheet" />';
+echo '<script>';
+echo 'if (typeof jQuery === "undefined") { document.write(\'<script src="https://code.jquery.com/jquery-3.7.1.min.js"><\\/script>\'); }';
+echo '</script>';
+echo '<script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>';
+
+// Handle delete display
+if (isset($_GET['action']) && $_GET['action'] == 'delete' && isset($_GET['id'])) {
+    $delete_id = intval($_GET['id']);
+
+    // Delete all slides and their media
+    $slides_query = mysql_query("SELECT media_url FROM tv_slides WHERE display_id = '$delete_id'", $link);
+    while ($slide = mysql_fetch_array($slides_query)) {
+        if ($slide['media_url']) {
+            $slide_media_path = upload_path('media.tvdisplay', $slide['media_url']);
+            if (file_exists($slide_media_path)) {
+                @unlink($slide_media_path);
+            }
+        }
+    }
+    mysql_query("DELETE FROM tv_slides WHERE display_id = '$delete_id'", $link);
+    mysql_query("DELETE FROM tv_displays WHERE display_id = '$delete_id'", $link);
+
+    echo "<script>window.location.href='tvdisplay.hnt';</script>";
+    exit;
+}
+
+// Get display data if editing
+$display_data = null;
+$slides = [];
+if (isset($_GET['id'])) {
+    $display_id = intval($_GET['id']);
+    $display_query = mysql_query("SELECT * FROM tv_displays WHERE display_id = '$display_id'", $link);
+    $display_data = mysql_fetch_array($display_query);
+
+    // Get slides
+    $slides_query = mysql_query("SELECT * FROM tv_slides WHERE display_id = '$display_id' ORDER BY slide_order", $link);
+    while ($row = mysql_fetch_array($slides_query)) {
+        $slides[] = $row;
+    }
+}
+
+// Get properties for dropdown
+$properties_query = mysql_query("SELECT idaqar, aqarname FROM amlak ORDER BY aqarname", $link);
+$properties = [];
+if ($properties_query) {
+    while ($row = mysql_fetch_array($properties_query)) {
+        $properties[] = $row;
+    }
+}
+?>
+
+<style>
+.slide-item {
+    border: 2px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 0.75rem;
+    background: white;
+    transition: all 0.2s;
+}
+
+.slide-item:hover {
+    border-color: #0891b2;
+    box-shadow: 0 4px 12px rgba(8, 145, 178, 0.1);
+}
+
+.slide-preview {
+    width: 100px;
+    height: 60px;
+    border-radius: 4px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 24px;
+}
+
+.slide-controls {
+    display: flex;
+    gap: 0.5rem;
+}
+</style>
+
+<div class="container-fluid py-4">
+    <!-- Header -->
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <div class="d-flex justify-content-between align-items-center">
+                <h4 class="mb-0">
+                    <i class="bi bi-pencil-square me-2"></i>
+                    <?= $display_data ? 'تعديل شاشة العرض' : 'إنشاء شاشة عرض جديدة' ?>
+                </h4>
+                <a href="tvdisplay.hnt" class="btn btn-light btn-sm">
+                    <i class="bi bi-arrow-right me-1"></i>
+                    رجوع
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <!-- Display Settings -->
+        <div class="col-lg-4">
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-light">
+                    <h5 class="mb-0"><i class="bi bi-gear me-2"></i>إعدادات الشاشة</h5>
+                </div>
+                <div class="card-body">
+                    <form id="displayForm" dir="rtl">
+                        <input type="hidden" name="display_id" value="<?= $display_data['display_id'] ?? '' ?>">
+
+                        <div class="mb-3">
+                            <label class="form-label">
+                                <i class="bi bi-tag text-primary me-1"></i>
+                                اسم الشاشة <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" name="display_name" class="form-control"
+                                   value="<?= $display_data['display_name'] ?? '' ?>" required>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label">
+                                <i class="bi bi-text-paragraph text-success me-1"></i>
+                                الوصف
+                            </label>
+                            <textarea name="display_description" class="form-control" rows="2"><?= $display_data['display_description'] ?? '' ?></textarea>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label">
+                                <i class="bi bi-clock text-info me-1"></i>
+                                مدة عرض كل شريحة (ثانية)
+                            </label>
+                            <input type="number" name="transition_duration" class="form-control"
+                                   value="<?= $display_data['transition_duration'] ?? 5 ?>" min="1" max="60">
+                        </div>
+
+                        <div class="mb-3">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" name="is_active"
+                                       <?= ($display_data['is_active'] ?? 1) == 1 ? 'checked' : '' ?>>
+                                <label class="form-check-label">شاشة نشطة</label>
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" name="show_clock"
+                                       <?= ($display_data['show_clock'] ?? 1) == 1 ? 'checked' : '' ?>>
+                                <label class="form-check-label">عرض الساعة</label>
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" name="show_weather"
+                                       <?= ($display_data['show_weather'] ?? 0) == 1 ? 'checked' : '' ?>>
+                                <label class="form-check-label">عرض الطقس</label>
+                            </div>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary w-100 policy_<?= $sc_id ?>_adds">
+                            <i class="bi bi-save me-2"></i>
+                            حفظ الإعدادات
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slides Management -->
+        <div class="col-lg-8">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-light">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-images me-2"></i>الشرائح</h5>
+                        <button class="btn btn-sm btn-success" onclick="addNewSlide()"
+                                <?= !$display_data ? 'disabled title="احفظ الشاشة أولاً"' : '' ?>>
+                            <i class="bi bi-plus-circle me-1"></i>
+                            إضافة شريحة
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div id="slidesList">
+                        <?php if (count($slides) > 0) {
+                            foreach ($slides as $slide) { ?>
+                        <div class="slide-item" data-slide-id="<?= $slide['slide_id'] ?>">
+                            <div class="d-flex gap-3">
+                                <div class="slide-preview">
+                                    <?php
+                                    $type_icons = [
+                                        'property' => 'building',
+                                        'video' => 'play-circle',
+                                        'image' => 'image',
+                                        'custom' => 'text-paragraph'
+                                    ];
+                                    $icon = $type_icons[$slide['slide_type']] ?? 'text-paragraph';
+                                    ?>
+                                    <i class="bi bi-<?= $icon ?>"></i>
+                                </div>
+                                <div class="flex-grow-1">
+                                    <h6 class="mb-1"><?= $slide['slide_title'] ?></h6>
+                                    <p class="small text-muted mb-2"><?= substr($slide['slide_content'], 0, 100) ?><?= strlen($slide['slide_content']) > 100 ? '...' : '' ?></p>
+                                    <div class="small">
+                                        <span class="badge bg-info">
+                                            <?php
+                                            $type_labels = [
+                                                'property' => 'عقار',
+                                                'video' => 'فيديو',
+                                                'image' => 'صورة',
+                                                'custom' => 'نص مخصص'
+                                            ];
+                                            echo $type_labels[$slide['slide_type']] ?? 'نص مخصص';
+                                            ?>
+                                        </span>
+                                        <span class="text-muted ms-2"><?= $slide['slide_duration'] ?>ث</span>
+                                    </div>
+                                </div>
+                                <div class="slide-controls">
+                                    <button class="btn btn-sm btn-primary" onclick="editSlide(<?= $slide['slide_id'] ?>)">
+                                        <i class="bi bi-pencil"></i>
+                                    </button>
+                                    <button class="btn btn-sm btn-danger" onclick="deleteSlide(<?= $slide['slide_id'] ?>)">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <?php }
+                        } else { ?>
+                        <div class="text-center py-5 text-muted">
+                            <i class="bi bi-images" style="font-size: 48px;"></i>
+                            <p class="mt-2">لا توجد شرائح بعد</p>
+                        </div>
+                        <?php } ?>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide Modal -->
+<div class="modal fade" id="slideModal" tabindex="-1" dir="rtl">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header" style="background: linear-gradient(135deg, #29a0f0ff 0%, #146594ff 100%); color: white;">
+                <h5 class="modal-title" id="modalTitle">
+                    <i class="bi bi-plus-circle me-2"></i>إضافة شريحة جديدة
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="slideForm">
+                    <input type="hidden" name="slide_id" id="slide_id">
+                    <input type="hidden" name="display_id" value="<?= $display_data['display_id'] ?? '' ?>">
+
+                    <div class="mb-3">
+                        <label class="form-label">نوع الشريحة</label>
+                        <select name="slide_type" id="slide_type" class="form-select" onchange="updateSlideForm()">
+                            <option value="custom">نص مخصص</option>
+                            <option value="image">صورة</option>
+                            <option value="video">فيديو</option>
+                            <option value="property">عقار</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">العنوان</label>
+                        <input type="text" name="slide_title" id="slide_title" class="form-control" required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">المحتوى</label>
+                        <textarea name="slide_content" id="slide_content" class="form-control" rows="3"></textarea>
+                    </div>
+
+                    <div class="mb-3" id="property_select_div" style="display:none;">
+                        <label class="form-label">
+                            <i class="bi bi-search me-1"></i>
+                            ابحث عن العقار (عقار، أرض، عمارة، فيلا)
+                        </label>
+                        <select name="property_id" id="property_id" class="form-select" dir="rtl">
+                            <option value="">-- ابحث عن عقار أو أرض أو عمارة أو فيلا --</option>
+                        </select>
+                        <small class="text-muted">اكتب للبحث في جميع العقارات والأراضي والعمارات والفلل</small>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">مدة العرض (ثانية)</label>
+                        <input type="number" name="slide_duration" id="slide_duration" class="form-control" value="5" min="1" max="60">
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                    <i class="bi bi-x-circle me-1"></i>
+                    إلغاء
+                </button>
+                <button type="button" class="btn btn-primary" id="saveSlideBtn" onclick="saveSlide()">
+                    <i class="bi bi-check-circle me-1"></i>
+                    حفظ
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let slideModal;
+
+document.addEventListener('DOMContentLoaded', function() {
+    slideModal = new bootstrap.Modal(document.getElementById('slideModal'));
+
+    // Fix for Select2 in Bootstrap Modal - Allow focus on search input
+    $(document).on('select2:open', () => {
+        document.querySelector('.select2-search__field').focus();
+    });
+
+    // Initialize Select2 for property search
+    $('#property_id').select2({
+        theme: 'bootstrap-5',
+        dir: 'rtl',
+        dropdownParent: $('#slideModal'),  // CRITICAL: Attach to modal to fix focus issue
+        language: {
+            inputTooShort: function() {
+                return 'اكتب للبحث...';
+            },
+            searching: function() {
+                return 'جاري البحث...';
+            },
+            noResults: function() {
+                return 'لا توجد نتائج';
+            },
+            loadingMore: function() {
+                return 'جاري تحميل المزيد...';
+            }
+        },
+        placeholder: '-- ابحث عن عقار أو أرض أو عمارة أو فيلا --',
+        allowClear: true,
+        ajax: {
+            url: 'tvdisplay_ajax_properties.hnt',
+            dataType: 'json',
+            delay: 250,
+            data: function (params) {
+                return {
+                    q: params.term,
+                    page: params.page || 1
+                };
+            },
+            processResults: function (data) {
+                return {
+                    results: data.results,
+                    pagination: data.pagination
+                };
+            },
+            cache: true
+        },
+        minimumInputLength: 1
+    });
+});
+
+// Save display settings
+document.getElementById('displayForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+
+    const formData = new FormData(this);
+    formData.append('ajax_submit', '1');
+    formData.append('action', 'save_display');
+
+    fetch('tvdisplay_editor.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            alert(data.message);
+            if (!document.querySelector('input[name="display_id"]').value) {
+                window.location.href = 'tvdisplay_editor.hnt?id=' + data.display_id;
+            }
+        } else {
+            alert(data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('حدث خطأ في الاتصال');
+    });
+});
+
+function addNewSlide() {
+    document.getElementById('slideForm').reset();
+    document.getElementById('slide_id').value = '';
+    document.getElementById('modalTitle').innerHTML = '<i class="bi bi-plus-circle me-2"></i>إضافة شريحة جديدة';
+    document.getElementById('saveSlideBtn').innerHTML = '<i class="bi bi-check-circle me-1"></i>حفظ';
+
+    // Clear Select2
+    $('#property_id').val(null).trigger('change');
+
+    updateSlideForm();
+    slideModal.show();
+}
+
+function editSlide(slideId) {
+    // Fetch slide data via AJAX
+    const formData = new FormData();
+    formData.append('ajax_submit', '1');
+    formData.append('action', 'get_slide');
+    formData.append('slide_id', slideId);
+
+    fetch('tvdisplay_editor.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const slide = data.slide;
+
+            // Populate form fields
+            document.getElementById('slide_id').value = slide.slide_id;
+            document.getElementById('slide_title').value = slide.slide_title;
+            document.getElementById('slide_content').value = slide.slide_content || '';
+            document.getElementById('slide_type').value = slide.slide_type;
+            document.getElementById('slide_duration').value = slide.slide_duration;
+
+            // Update modal title and button
+            document.getElementById('modalTitle').innerHTML = '<i class="bi bi-pencil-square me-2"></i>تعديل الشريحة';
+            document.getElementById('saveSlideBtn').innerHTML = '<i class="bi bi-save me-1"></i>حفظ التعديلات';
+
+            // Clear Select2 first
+            $('#property_id').val(null).trigger('change');
+
+            // Set property_id for Select2 if exists
+            if (slide.property_id && slide.property_id != '0') {
+                $('#property_id').val(slide.property_id).trigger('change');
+            }
+
+            // Update form visibility based on slide type
+            updateSlideForm();
+
+            // Show modal
+            slideModal.show();
+        } else {
+            alert(data.error || 'حدث خطأ في تحميل بيانات الشريحة');
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('حدث خطأ في الاتصال');
+    });
+}
+
+function saveSlide() {
+    const form = document.getElementById('slideForm');
+    const formData = new FormData(form);
+    formData.append('ajax_submit', '1');
+    formData.append('action', 'save_slide');
+
+    fetch('tvdisplay_editor.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            alert(data.message);
+            slideModal.hide();
+            window.location.reload();
+        } else {
+            alert(data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('حدث خطأ في الاتصال');
+    });
+}
+
+function deleteSlide(slideId) {
+    if (!confirm('هل أنت متأكد من حذف هذه الشريحة؟')) return;
+
+    const formData = new FormData();
+    formData.append('ajax_submit', '1');
+    formData.append('action', 'delete_slide');
+    formData.append('slide_id', slideId);
+
+    fetch('tvdisplay_editor.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            alert(data.message);
+            window.location.reload();
+        } else {
+            alert(data.error);
+        }
+    });
+}
+
+function updateSlideForm() {
+    const slideType = document.getElementById('slide_type').value;
+    const propertyDiv = document.getElementById('property_select_div');
+
+    if (slideType === 'property') {
+        propertyDiv.style.display = 'block';
+    } else {
+        propertyDiv.style.display = 'none';
+    }
+}
+</script>
+
+<?php
+require("../foter.hnt");
+?>

@@ -1,0 +1,898 @@
+<?php
+/**
+ * ============================================================================
+ * Auto Add Installments Service - Modernized
+ * ============================================================================
+ *
+ * Purpose: Automatically add installments for contracts
+ *
+ * Scenarios handled:
+ * 1. Contracts with ALL installments paid → Add new installments batch
+ * 2. Contracts approaching last installment (within 60 days) → Add more installments
+ * 3. New installments based on contract duration/length
+ *
+ * Strategy:
+ * - Add installments WITHOUT changing contract end date
+ * - Use fixed_payment_day for consistent dates
+ * - Track extension via installments_extended_to field
+ * - Start new installments from last installment date
+ *
+ * Execution:
+ * - Browser: ?run=1
+ * - CLI: php auto_add_installments.api.hnt
+ * - Cron: Daily at 2:00 AM
+ *
+ * Date: 2025-12-05
+ * ============================================================================
+ */
+
+// Security and environment setup
+$isCLI = php_sapi_name() === 'cli';
+$runParam = isset($_GET['run']) && $_GET['run'] == '1';
+
+if (!isset($link)) {
+    if (!$isCLI && !$runParam) {
+        die('Access denied. Use ?run=1 to execute.');
+    }
+
+    require_once '../../../connectdb.hnt';
+    require_once 'CalendarManager.class.hnt';
+    require_once 'auto_renewal_config.hnt';
+    require_once '../arabicTools.class.hnt';
+    require_once '../uCal.class.hnt';
+}
+
+// Initialize calendar tools
+$calendar = new CalendarManager();
+$dcal = new uCal();
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+$thresholdDays = defined('INSTALLMENT_GENERATION_THRESHOLD_DAYS') ? INSTALLMENT_GENERATION_THRESHOLD_DAYS : 60;
+$initialMonthsToGenerate = 24; // Generate 2 years upfront for new contracts
+$extensionMonths = null; // Use contract duration (null = auto-detect)
+$maxHijriDay = defined('MAX_HIJRI_DAY') ? MAX_HIJRI_DAY : 29;
+$maxGregorianDay = defined('MAX_GREGORIAN_DAY') ? MAX_GREGORIAN_DAY : 28;
+$gracePeriod = defined('INSTALLMENT_GRACE_PERIOD_DAYS') ? INSTALLMENT_GRACE_PERIOD_DAYS : 5;
+$logActions = defined('LOG_AUTO_RENEWALS') ? LOG_AUTO_RENEWALS : true;
+
+// ============================================================================
+// Initialize Report
+// ============================================================================
+
+$report = [
+    'start_time' => time(),
+    'contracts_checked' => 0,
+    'contracts_with_no_installments' => 0,
+    'contracts_needing_extension' => 0,
+    'installments_added' => 0,
+    'contracts_processed' => 0,
+    'errors' => [],
+    'details' => []
+];
+
+$now = time();
+$thresholdTimestamp = $now + ($thresholdDays * 24 * 60 * 60);
+
+// ============================================================================
+// SCENARIO 1: Find Contracts with ALL Installments Paid
+// ============================================================================
+// These are contracts where all existing installments are marked as paid (iscomplete = 1)
+// They need new installments to be generated for the next period
+
+$sqlNoInstallments = "SELECT
+            e.rakam3akdid,
+            e.end3aqd,
+            e.installments_extended_to,
+            e.fixed_payment_day,
+            e.duration,
+            e.depositeamount,
+            e.secondsa3e,
+            e.water,
+            e.services,
+            e.secondsa3e_duration,
+            e.water_duration,
+            e.services_duration,
+            ad.hnt_dll_type,
+            e.status,
+            ad.idsubaqar,
+            COUNT(a.kastid) as total_installments,
+            MAX(a.kastdate) as last_installment_date
+        FROM egar e
+        LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
+        LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+        WHERE e.end3aqd IS NOT NULL
+        AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'active_expiring_soon'))
+        GROUP BY e.rakam3akdid
+        HAVING COUNT(a.kastid) > 0
+        AND COUNT(a.kastid) = SUM(CASE WHEN a.iscomplete = 1 THEN 1 ELSE 0 END)
+        ORDER BY e.rakam3akdid ASC";
+
+$resultNoInstallments = mysql_query($sqlNoInstallments, $link);
+
+if (!$resultNoInstallments) {
+    $report['errors'][] = "Scenario 1 Query Failed: " . mysql_error($link);
+} else {
+    while ($contract = mysql_fetch_assoc($resultNoInstallments)) {
+        $report['contracts_checked']++;
+        $report['contracts_with_no_installments']++;
+
+        // Use contract duration for all-paid contracts (similar to extension)
+        $monthsToAdd = intval($contract['duration']);
+
+        // Debug log
+        error_log("Processing contract {$contract['rakam3akdid']} (Unit {$contract['idsubaqar']}) - All paid scenario");
+
+        processContract($contract, $monthsToAdd, 'all_paid', $report, $link, $calendar, $dcal, $now, $maxHijriDay, $maxGregorianDay, $gracePeriod, $logActions);
+    }
+}
+
+// ============================================================================
+// SCENARIO 2: Find Contracts Approaching Last Installment
+// ============================================================================
+
+$sqlNeedingExtension = "SELECT
+            e.rakam3akdid,
+            e.end3aqd,
+            e.installments_extended_to,
+            e.fixed_payment_day,
+            e.duration,
+            e.depositeamount,
+            e.secondsa3e,
+            e.water,
+            e.services,
+            e.secondsa3e_duration,
+            e.water_duration,
+            e.services_duration,
+            ad.hnt_dll_type,
+            e.status,
+            ad.idsubaqar,
+            MAX(a.kastdate) as last_installment_date,
+            COUNT(a.kastid) as total_installments
+        FROM egar e
+        LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
+        LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+        WHERE e.end3aqd IS NOT NULL
+        AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'active_expiring_soon'))
+        GROUP BY e.rakam3akdid
+        HAVING COUNT(a.kastid) > 0
+        AND MAX(a.kastdate) IS NOT NULL
+        AND MAX(a.kastdate) <= {$thresholdTimestamp}
+        ORDER BY MAX(a.kastdate) ASC";
+
+$resultNeedingExtension = mysql_query($sqlNeedingExtension, $link);
+
+if ($resultNeedingExtension) {
+    while ($contract = mysql_fetch_assoc($resultNeedingExtension)) {
+        // Skip if already processed in scenario 1
+        if ($contract['total_installments'] == 0) {
+            continue;
+        }
+
+        $report['contracts_checked']++;
+        $report['contracts_needing_extension']++;
+
+        // Use contract duration for extensions (or configured value)
+        $monthsToAdd = is_null($extensionMonths) ? intval($contract['duration']) : $extensionMonths;
+
+        processContract($contract, $monthsToAdd, 'extension', $report, $link, $calendar, $dcal, $now, $maxHijriDay, $maxGregorianDay, $gracePeriod, $logActions);
+    }
+}
+
+// ============================================================================
+// Process Contract Function
+// ============================================================================
+
+function processContract($contract, $monthsToGenerate, $type, &$report, $link, $calendar, $dcal, $now, $maxHijriDay, $maxGregorianDay, $gracePeriod, $logActions) {
+    $contractId = $contract['rakam3akdid'];
+    $duration = intval($contract['duration']);
+    $fixedPaymentDay = intval($contract['fixed_payment_day']);
+    $calendarType = intval($contract['hnt_dll_type']); // 0 = Hijri, 1 = Gregorian
+    $idsubaqar = $contract['idsubaqar'];
+    $contractEnd = $contract['end3aqd'];
+
+    // Get contract payment details
+    $depositeamount = floatval($contract['depositeamount']);
+    $secondsa3e = floatval($contract['secondsa3e'] ?? 0);
+    $water = floatval($contract['water'] ?? 0);
+    $services = floatval($contract['services'] ?? 0);
+
+    // Get duration settings for fees
+    $secondsa3e_duration = intval($contract['secondsa3e_duration'] ?? 0);
+    $water_duration = intval($contract['water_duration'] ?? 0);
+    $services_duration = intval($contract['services_duration'] ?? 0);
+
+    // Determine start point for new installments
+    // For 'all_paid' and 'extension' - start from last installment date
+    $lastInstallmentDate = $contract['last_installment_date'];
+
+    // Validate fixed payment day
+    if ($calendarType == 0 && $fixedPaymentDay > $maxHijriDay) {
+        $report['errors'][] = "Contract {$contractId}: Hijri day {$fixedPaymentDay} exceeds maximum {$maxHijriDay}";
+        return;
+    }
+    if ($calendarType == 1 && $fixedPaymentDay > $maxGregorianDay) {
+        $report['errors'][] = "Contract {$contractId}: Gregorian day {$fixedPaymentDay} exceeds maximum {$maxGregorianDay}";
+        return;
+    }
+
+    // If no fixed payment day, extract from start date
+    if (!$fixedPaymentDay) {
+        if ($calendarType == 0) {
+            // Hijri
+            $dateo = $dcal->g2u(date("d", $lastInstallmentDate), date("m", $lastInstallmentDate), date("Y", $lastInstallmentDate));
+            $fixedPaymentDay = min($dateo['day'], $maxHijriDay);
+        } else {
+            // Gregorian
+            $fixedPaymentDay = min(intval(date('j', $lastInstallmentDate)), $maxGregorianDay);
+        }
+
+        // Update contract with fixed payment day
+        $updateDaySql = "UPDATE egar SET fixed_payment_day = '{$fixedPaymentDay}' WHERE rakam3akdid = '{$contractId}'";
+        mysql_query($updateDaySql, $link);
+    }
+
+    // Calculate number of installments to generate
+    // If last installment is in the past, we need to catch up to current date + threshold
+    $thresholdDays = defined('INSTALLMENT_GENERATION_THRESHOLD_DAYS') ? INSTALLMENT_GENERATION_THRESHOLD_DAYS : 60;
+    $targetDate = $now + ($thresholdDays * 24 * 60 * 60); // 60 days from now
+
+    if ($lastInstallmentDate < $targetDate) {
+        // Calculate approximate months behind
+        $secondsBehind = $targetDate - $lastInstallmentDate;
+        $monthsBehind = ceil($secondsBehind / (30 * 24 * 60 * 60)); // Approximate: 30 days per month
+
+        // Generate enough installments to catch up
+        $monthsToGenerate = max($monthsToGenerate, $monthsBehind);
+    }
+
+    $numInstallments = ceil($monthsToGenerate / $duration);
+
+    // Start transaction
+    mysql_query("START TRANSACTION", $link);
+
+    try {
+        $installmentsAdded = 0;
+        $newExtendedTo = $lastInstallmentDate;
+        $calendarTypeStr = $calendarType == 0 ? 'hijri' : 'gregorian';
+
+        // Get base count for installment numbering
+        $baseInstallmentCount = intval($contract['total_installments']);
+
+        // Generate installments
+        for ($i = 1; $i <= $numInstallments; $i++) {
+            // Calculate installment date
+            $monthsFromStart = $duration * $i;
+
+            // Use CalendarManager to add months correctly
+            $nextDate = $calendar->addMonths($lastInstallmentDate, $monthsFromStart, $calendarTypeStr);
+
+            // Ensure we use the fixed payment day
+            $nextDate = adjustToFixedDay($nextDate, $fixedPaymentDay, $calendarType, $dcal);
+
+            // Determine installment status
+            $installmentStatus = $nextDate < $now ? 'overdue' : 'pending';
+
+            // Calculate effective due date (with grace period)
+            $effectiveDueDate = $nextDate + ($gracePeriod * 24 * 60 * 60);
+
+            // Generate installment name - sequential number based on total count
+            $installmentNumber = $baseInstallmentCount + $i;
+            $installmentName = "{$installmentNumber}";
+
+            // Determine installment type and calculate values
+            // Using the same logic as generateInstallments in egar.api.hnt
+            // Check if this is a year start installment
+            if (($duration * ($installmentNumber - 1)) % 12 == 0 && $installmentNumber > 1) {
+                // Start of new year: includes annual commission and fees
+                $sa3e_value = $secondsa3e;
+                $water_value = $water;
+                $services_value = $services;
+            } else {
+                // Regular installment: includes only recurring fees
+                $sa3e_value = ($secondsa3e_duration ? $secondsa3e : 0);
+                $water_value = ($water_duration ? $water : 0);
+                $services_value = ($services_duration ? $services : 0);
+            }
+
+            $kastvalue = floatval($depositeamount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
+
+            // Insert installment
+            $insertSql = "INSERT INTO aksat (
+                egar_id,
+                idsubaqar,
+                kastdate,
+                kastvalue,
+                water,
+                sa3ee,
+                services,
+                kastname,
+                iscomplete,
+                status,
+                amount_paid,
+                amount_remaining,
+                dof3at,
+                grace_period_days,
+                effective_due_date,
+                created_at,
+                updated_at
+            ) VALUES (
+                '{$contractId}',
+                '{$idsubaqar}',
+                '{$nextDate}',
+                '{$kastvalue}',
+                '{$water_value}',
+                '{$sa3e_value}',
+                '{$services_value}',
+                '" . addslashes($installmentName) . "',
+                0,
+                '{$installmentStatus}',
+                0,
+                '{$kastvalue}',
+                0,
+                '{$gracePeriod}',
+                '{$effectiveDueDate}',
+                '{$now}',
+                '{$now}'
+            )";
+
+            if (!mysql_query($insertSql, $link)) {
+                throw new Exception("Failed to insert installment: " . mysql_error($link));
+            }
+
+            $installmentsAdded++;
+            $newExtendedTo = max($newExtendedTo, $nextDate);
+        }
+
+        // Update contract's installments_extended_to field
+        // NOTE: We do NOT update end3aqd - that stays fixed until user manually renews
+        $updateSql = "UPDATE egar
+                      SET installments_extended_to = '{$newExtendedTo}',
+                          updated_at = '{$now}'
+                      WHERE rakam3akdid = '{$contractId}'";
+
+        if (!mysql_query($updateSql, $link)) {
+            throw new Exception("Failed to update contract: " . mysql_error($link));
+        }
+
+        // Log to history
+        if ($type === 'initial') {
+            $actionType = 'installments_initial_generation';
+            $changeDescription = "Auto-generated {$installmentsAdded} initial installments. Extended to " . date('Y-m-d', $newExtendedTo);
+        } elseif ($type === 'all_paid') {
+            $actionType = 'installments_all_paid_renewal';
+            $changeDescription = "All installments paid. Auto-generated {$installmentsAdded} new installments. Extended to " . date('Y-m-d', $newExtendedTo) . ". Contract end date unchanged.";
+        } else {
+            $actionType = 'installments_extended';
+            $changeDescription = "Auto-generated {$installmentsAdded} installments. Extended to " . date('Y-m-d', $newExtendedTo) . ". Contract end date unchanged.";
+        }
+
+        if ($logActions) {
+            $changeDescriptionEscaped = mysql_real_escape_string($changeDescription, $link);
+            $historyUserId = isset($_SESSION['userid']) ? intval($_SESSION['userid']) : 0;
+
+            $historySql = "INSERT INTO egar_history (
+                egar_id,
+                action_type,
+                change_description,
+                changed_by_userid,
+                changed_at
+            ) VALUES (
+                '{$contractId}',
+                '{$actionType}',
+                '{$changeDescriptionEscaped}',
+                '{$historyUserId}',
+                '{$now}'
+            )";
+            mysql_query($historySql, $link);
+        }
+
+        // Commit transaction
+        mysql_query("COMMIT", $link);
+
+        // Update report
+        $report['installments_added'] += $installmentsAdded;
+        $report['contracts_processed']++;
+
+        // Determine type label and note
+        if ($type === 'initial') {
+            $typeLabel = 'إنشاء أولي';
+            $note = 'عقد جديد - إنشاء الأقساط';
+        } elseif ($type === 'all_paid') {
+            $typeLabel = 'تجديد (كل الأقساط مدفوعة)';
+            $note = 'جميع الأقساط مدفوعة - إضافة أقساط جديدة';
+        } else {
+            $typeLabel = 'تمديد';
+            $note = 'تاريخ نهاية العقد لم يتغير';
+        }
+
+        $report['details'][] = [
+            'contract_id' => $contractId,
+            'type' => $typeLabel,
+            'installments_added' => $installmentsAdded,
+            'extended_to' => date('Y-m-d', $newExtendedTo),
+            'contract_end' => date('Y-m-d', $contractEnd),
+            'note' => $note
+        ];
+
+    } catch (Exception $e) {
+        // Rollback on error
+        mysql_query("ROLLBACK", $link);
+        $report['errors'][] = "Contract {$contractId}: " . $e->getMessage();
+    }
+}
+
+// ============================================================================
+// Helper Function: Adjust Date to Fixed Day
+// ============================================================================
+
+function adjustToFixedDay($timestamp, $fixedDay, $calendarType, $dcal) {
+    if ($calendarType == 0) {
+        // Hijri calendar - need to be careful with day conversion
+        $dateo = $dcal->g2u(date("d", $timestamp), date("m", $timestamp), date("Y", $timestamp));
+        $currentDay = $dateo['day'];
+
+        if ($currentDay != $fixedDay) {
+            // Adjust within same month
+            $dayDiff = $fixedDay - $currentDay;
+            return $timestamp + ($dayDiff * 24 * 60 * 60);
+        }
+    } else {
+        // Gregorian calendar
+        $currentDay = intval(date('j', $timestamp));
+
+        if ($currentDay != $fixedDay) {
+            $dayDiff = $fixedDay - $currentDay;
+            return $timestamp + ($dayDiff * 24 * 60 * 60);
+        }
+    }
+
+    return $timestamp;
+}
+
+// ============================================================================
+// Output Report
+// ============================================================================
+
+function outputReport($report) {
+    $isCLI = php_sapi_name() === 'cli';
+
+    if ($isCLI) {
+        // CLI output
+        echo "\n========================================\n";
+        echo "Auto Add Installments Service Report\n";
+        echo "========================================\n\n";
+        echo "Execution Time: " . date('Y-m-d H:i:s', $report['start_time']) . "\n";
+        echo "Duration: " . (time() - $report['start_time']) . " seconds\n\n";
+        echo "Contracts Checked: " . $report['contracts_checked'] . "\n";
+        echo "- With all installments paid: " . $report['contracts_with_no_installments'] . "\n";
+        echo "- Needing extension: " . $report['contracts_needing_extension'] . "\n";
+        echo "Contracts Processed: " . $report['contracts_processed'] . "\n";
+        echo "Installments Added: " . $report['installments_added'] . "\n\n";
+
+        if (!empty($report['errors'])) {
+            echo "Errors (" . count($report['errors']) . "):\n";
+            foreach ($report['errors'] as $error) {
+                echo "  - {$error}\n";
+            }
+            echo "\n";
+        }
+
+        if (!empty($report['details'])) {
+            echo "Details:\n";
+            foreach ($report['details'] as $detail) {
+                echo "  Contract {$detail['contract_id']} ({$detail['type']}): ";
+                echo "{$detail['installments_added']} installments added, ";
+                echo "extended to {$detail['extended_to']} ";
+                echo "(contract end: {$detail['contract_end']})\n";
+            }
+        }
+
+        echo "\n========================================\n";
+
+    } else {
+        // Web output - Modern HTML
+        ?>
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>تقرير إضافة الأقساط التلقائية</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            color: #2c3e50;
+            border-bottom: 4px solid #667eea;
+            padding-bottom: 15px;
+            margin-bottom: 30px;
+            font-size: 2rem;
+        }
+
+        .alert {
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            border-right: 4px solid;
+        }
+
+        .alert-info {
+            background: #e3f2fd;
+            border-color: #2196f3;
+            color: #1565c0;
+        }
+
+        .alert-success {
+            background: #e8f5e9;
+            border-color: #4caf50;
+            color: #2e7d32;
+        }
+
+        .alert-warning {
+            background: #fff3e0;
+            border-color: #ff9800;
+            color: #e65100;
+        }
+
+        .alert-danger {
+            background: #ffebee;
+            border-color: #f44336;
+            color: #c62828;
+        }
+
+        .summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 20px;
+            margin: 30px 0;
+        }
+
+        .metric {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px;
+            border-radius: 12px;
+            text-align: center;
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+            transition: transform 0.3s ease;
+        }
+
+        .metric:hover {
+            transform: translateY(-5px);
+        }
+
+        .metric.success {
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            box-shadow: 0 4px 12px rgba(17, 153, 142, 0.4);
+        }
+
+        .metric.info {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            box-shadow: 0 4px 12px rgba(79, 172, 254, 0.4);
+        }
+
+        .metric.warning {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            box-shadow: 0 4px 12px rgba(240, 147, 251, 0.4);
+        }
+
+        .metric-value {
+            font-size: 3em;
+            font-weight: bold;
+            margin: 15px 0;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .metric-label {
+            font-size: 0.95em;
+            opacity: 0.95;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 30px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        thead {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        th {
+            padding: 16px;
+            text-align: right;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.9em;
+            letter-spacing: 0.5px;
+        }
+
+        td {
+            padding: 14px 16px;
+            text-align: right;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        tbody tr {
+            transition: background-color 0.2s ease;
+        }
+
+        tbody tr:hover {
+            background-color: #f5f5f5;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .badge-initial {
+            background: #e3f2fd;
+            color: #1976d2;
+        }
+
+        .badge-extension {
+            background: #f3e5f5;
+            color: #7b1fa2;
+        }
+
+        .footer {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 2px solid #e0e0e0;
+            text-align: center;
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        .icon {
+            font-size: 1.2em;
+            margin-left: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1><span class="icon">⚙️</span>تقرير إضافة الأقساط التلقائية</h1>
+
+        <div class="alert alert-info">
+            <strong><span class="icon">ℹ️</span>ملاحظة هامة:</strong> هذه الخدمة تضيف الأقساط للعقود تلقائياً وتتعامل مع سيناريوهين:
+            <ul style="margin: 10px 0 0 20px;">
+                <li><strong>العقود التي جميع أقساطها مدفوعة</strong> → إضافة أقساط جديدة (حسب مدة العقد)</li>
+                <li><strong>العقود التي تقترب من آخر قسط</strong> (خلال 60 يوم) → إضافة أقساط جديدة (حسب مدة العقد)</li>
+            </ul>
+            <strong>مهم:</strong> تاريخ نهاية العقد يبقى كما هو حتى يقوم المستخدم بتجديده يدوياً.
+        </div>
+
+        <div class="summary">
+            <div class="metric info">
+                <div class="metric-value"><?= $report['contracts_checked'] ?></div>
+                <div class="metric-label">عقد تم فحصه</div>
+            </div>
+            <div class="metric warning">
+                <div class="metric-value"><?= $report['contracts_with_no_installments'] ?></div>
+                <div class="metric-label">عقد بأقساط مدفوعة كلياً</div>
+            </div>
+            <div class="metric" style="background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);">
+                <div class="metric-value"><?= $report['contracts_needing_extension'] ?></div>
+                <div class="metric-label">عقد يحتاج تمديد</div>
+            </div>
+            <div class="metric success">
+                <div class="metric-value"><?= $report['contracts_processed'] ?></div>
+                <div class="metric-label">عقد تمت معالجته</div>
+            </div>
+            <div class="metric" style="background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%); color: #333;">
+                <div class="metric-value"><?= $report['installments_added'] ?></div>
+                <div class="metric-label">قسط تم إضافته</div>
+            </div>
+        </div>
+
+        <?php if (!empty($report['errors'])): ?>
+        <h2><span class="icon">⚠️</span>أخطاء (<?= count($report['errors']) ?>)</h2>
+        <?php foreach ($report['errors'] as $error): ?>
+        <div class="alert alert-danger"><?= htmlspecialchars($error) ?></div>
+        <?php endforeach; ?>
+        <?php endif; ?>
+
+        <?php if (!empty($report['details'])): ?>
+        <h2><span class="icon">📋</span>التفاصيل</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>رقم العقد</th>
+                    <th>النوع</th>
+                    <th>الأقساط المضافة</th>
+                    <th>الأقساط ممتدة حتى</th>
+                    <th>نهاية العقد</th>
+                    <th>ملاحظة</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ($report['details'] as $detail): ?>
+                <tr>
+                    <td><strong><?= $detail['contract_id'] ?></strong></td>
+                    <td>
+                        <span class="badge <?= $detail['type'] === 'إنشاء أولي' ? 'badge-initial' : 'badge-extension' ?>">
+                            <?= $detail['type'] ?>
+                        </span>
+                    </td>
+                    <td><?= $detail['installments_added'] ?></td>
+                    <td><?= $detail['extended_to'] ?></td>
+                    <td><?= $detail['contract_end'] ?></td>
+                    <td><?= $detail['note'] ?></td>
+                </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php else: ?>
+        <div class="alert alert-success">
+            <span class="icon">✅</span>
+            <strong>رائع!</strong> لا توجد عقود بحاجة لإضافة أقساط في الوقت الحالي. جميع العقود محدّثة.
+        </div>
+        <?php endif; ?>
+
+        <div class="footer">
+            <p>
+                <span class="icon">🕐</span>وقت التنفيذ: <?= date('Y-m-d H:i:s', $report['start_time']) ?> |
+                <span class="icon">⏱️</span>المدة: <?= (time() - $report['start_time']) ?> ثانية
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+        <?php
+    }
+}
+
+// ============================================================================
+// DEBUG: Show contracts with all installments paid (for testing)
+// ============================================================================
+if (isset($_GET['debug']) && $_GET['debug'] == '1') {
+    echo "<h2>Debug: Contracts Analysis</h2>";
+
+    // First, show what the actual query will find
+    echo "<h3>Step 1: Contracts that WILL be processed by Scenario 1 (All Paid)</h3>";
+    $actualQuerySql = "SELECT
+        e.rakam3akdid,
+        e.status,
+        e.end3aqd,
+        e.duration,
+        e.depositeamount,
+        e.secondsa3e,
+        e.water,
+        e.services,
+        ad.idsubaqar,
+        COUNT(a.kastid) as total_installments,
+        SUM(CASE WHEN a.iscomplete = 1 THEN 1 ELSE 0 END) as paid_installments,
+        MAX(a.kastdate) as last_installment_date
+    FROM egar e
+    LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
+    LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+    WHERE e.end3aqd IS NOT NULL
+    AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'active_expiring_soon'))
+    GROUP BY e.rakam3akdid
+    HAVING COUNT(a.kastid) > 0
+    AND COUNT(a.kastid) = SUM(CASE WHEN a.iscomplete = 1 THEN 1 ELSE 0 END)
+    ORDER BY e.rakam3akdid ASC";
+
+    $actualResult = mysql_query($actualQuerySql, $link);
+    if (mysql_num_rows($actualResult) > 0) {
+        echo "<table border='1' style='margin: 20px; border-collapse: collapse;'>";
+        echo "<tr style='background: #d4edda;'>";
+        echo "<th style='padding: 8px;'>Contract ID</th>";
+        echo "<th style='padding: 8px;'>Unit ID</th>";
+        echo "<th style='padding: 8px;'>Status</th>";
+        echo "<th style='padding: 8px;'>Duration</th>";
+        echo "<th style='padding: 8px;'>Total/Paid Inst.</th>";
+        echo "</tr>";
+        while ($row = mysql_fetch_assoc($actualResult)) {
+            echo "<tr>";
+            echo "<td style='padding: 8px;'>{$row['rakam3akdid']}</td>";
+            echo "<td style='padding: 8px;'>{$row['idsubaqar']}</td>";
+            echo "<td style='padding: 8px;'>{$row['status']}</td>";
+            echo "<td style='padding: 8px;'>{$row['duration']}</td>";
+            echo "<td style='padding: 8px;'>{$row['total_installments']}/{$row['paid_installments']}</td>";
+            echo "</tr>";
+        }
+        echo "</table>";
+    } else {
+        echo "<p style='color: red;'>❌ No contracts found by Scenario 1 query!</p>";
+    }
+
+    echo "<hr><h3>Step 2: ALL Contracts (for comparison)</h3>";
+
+    $debugSql = "SELECT
+        e.rakam3akdid,
+        e.status,
+        e.end3aqd,
+        e.duration,
+        e.depositeamount,
+        e.secondsa3e,
+        e.water,
+        e.services,
+        ad.idsubaqar,
+        COUNT(a.kastid) as total_installments,
+        SUM(CASE WHEN a.iscomplete = 1 THEN 1 ELSE 0 END) as paid_installments,
+        MAX(a.kastdate) as last_installment_date
+    FROM egar e
+    LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
+    LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+    WHERE e.end3aqd IS NOT NULL
+    GROUP BY e.rakam3akdid
+    HAVING COUNT(a.kastid) > 0
+    ORDER BY e.rakam3akdid ASC";
+
+    $debugResult = mysql_query($debugSql, $link);
+
+    echo "<table border='1' style='margin: 20px; border-collapse: collapse;'>";
+    echo "<tr style='background: #f0f0f0;'>";
+    echo "<th style='padding: 8px;'>Contract ID</th>";
+    echo "<th style='padding: 8px;'>Unit ID</th>";
+    echo "<th style='padding: 8px;'>Status</th>";
+    echo "<th style='padding: 8px;'>Duration</th>";
+    echo "<th style='padding: 8px;'>Total Inst.</th>";
+    echo "<th style='padding: 8px;'>Paid Inst.</th>";
+    echo "<th style='padding: 8px;'>All Paid?</th>";
+    echo "<th style='padding: 8px;'>Status OK?</th>";
+    echo "<th style='padding: 8px;'>Will Process?</th>";
+    echo "</tr>";
+
+    while ($row = mysql_fetch_assoc($debugResult)) {
+        $allPaid = $row['total_installments'] == $row['paid_installments'];
+        $statusOk = is_null($row['status']) || in_array($row['status'], ['active', 'active_arrears', 'active_expiring_soon']);
+        $willProcess = $allPaid && $statusOk;
+
+        echo "<tr style='background: " . ($willProcess ? '#d4edda' : '#fff3cd') . ";'>";
+        echo "<td style='padding: 8px;'>{$row['rakam3akdid']}</td>";
+        echo "<td style='padding: 8px;'>{$row['idsubaqar']}</td>";
+        echo "<td style='padding: 8px;'>" . ($row['status'] ?: 'NULL') . "</td>";
+        echo "<td style='padding: 8px;'>{$row['duration']}</td>";
+        echo "<td style='padding: 8px;'>{$row['total_installments']}</td>";
+        echo "<td style='padding: 8px;'>{$row['paid_installments']}</td>";
+        echo "<td style='padding: 8px;'>" . ($allPaid ? 'YES' : 'NO') . "</td>";
+        echo "<td style='padding: 8px;'>" . ($statusOk ? 'YES' : 'NO') . "</td>";
+        echo "<td style='padding: 8px; font-weight: bold;'>" . ($willProcess ? 'YES' : 'NO') . "</td>";
+        echo "</tr>";
+    }
+
+    echo "</table>";
+    echo "<p><strong>Green rows</strong> = Will be processed by the script</p>";
+    echo "<p><strong>Yellow rows</strong> = Will NOT be processed (check Status or All Paid columns)</p>";
+    die();
+}
+
+$report['end_time'] = time();
+outputReport($report);
+?>

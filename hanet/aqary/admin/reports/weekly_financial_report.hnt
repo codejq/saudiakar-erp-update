@@ -1,0 +1,358 @@
+<?php
+/**
+ * Weekly Financial Report - Main Page
+ * Displays rent and voucher data, allows manual email sending
+ */
+
+$sc_title = "التقرير المالي الأسبوعي";
+$sc_id = "200";
+
+require_once('../../nocash.hnt');
+require_once('../../header.hnt');
+require_once('./send_weekly_report.hnt');
+
+// Get report data
+$rentData = getRentData();
+$voucherData = getVoucherData();
+$recipients = getRecipientEmails();
+$lockData = getLockFileData();
+
+// Calculate statistics
+$rentCount = count($rentData);
+$rentTotal = 0;
+foreach ($rentData as $rent) {
+	$rentTotal += $rent['amount_remaining'] ?? $rent['kastvalue'];
+}
+
+$voucherCount = count($voucherData);
+$voucherTotal = 0;
+foreach ($voucherData as $voucher) {
+	$voucherTotal += $voucher['depositeamount'];
+}
+
+// Lock file status
+$canSend = checkLockFile();
+$lockStatus = '';
+if ($lockData) {
+	$nextSendDate = date('Y-m-d H:i', $lockData['next_send_after'] ?? 0);
+	$lastSentDate = date('Y-m-d H:i', $lockData['last_sent'] ?? 0);
+	if ($canSend) {
+		$lockStatus = '<div class="alert alert-success"><i class="bi bi-check-circle"></i> يمكن إرسال التقرير الآن (آخر إرسال: ' . $lastSentDate . ')</div>';
+	} else {
+		$lockStatus = '<div class="alert alert-warning"><i class="bi bi-lock"></i> تم إرسال التقرير مؤخراً. الإرسال التالي متاح بعد: ' . $nextSendDate . '</div>';
+	}
+} else {
+	$lockStatus = '<div class="alert alert-info"><i class="bi bi-info-circle"></i> لم يتم إرسال التقرير من قبل</div>';
+}
+
+// Payment type mapping
+$paymentTypes = [
+	1 => 'نقداً',
+	2 => 'شيك',
+	3 => 'طريقة أخرى',
+	4 => 'تحويل',
+	5 => 'شبكة'
+];
+?>
+
+<style>
+.summary-card {
+	background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+	border-right: 4px solid #0891b2;
+	padding: 20px;
+	margin: 15px 0;
+	border-radius: 8px;
+	box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+.summary-card .stat {
+	margin: 10px 0;
+	font-size: 16px;
+}
+.summary-card .stat strong {
+	color: #0891b2;
+}
+.amount-total {
+	font-size: 24px;
+	font-weight: bold;
+	color: #047857;
+}
+</style>
+
+<div class="container-fluid py-4">
+
+	<!-- Page Header -->
+	<div class="card shadow-sm mb-4">
+		<div class="card-header text-white" style="background: linear-gradient(135deg, #0891b2 0%, #06b6d4 100%);">
+			<h4 class="mb-0">
+				<i class="bi bi-file-earmark-bar-graph"></i> التقرير المالي الأسبوعي
+			</h4>
+		</div>
+	</div>
+
+	<!-- Alert Messages Container -->
+	<div id="alertContainer"></div>
+
+	<!-- Lock File Status -->
+	<?= $lockStatus ?>
+
+	<!-- Email Recipients Info -->
+	<?php if (!empty($recipients)): ?>
+		<div class="alert alert-info" dir="rtl">
+			<i class="bi bi-envelope"></i> <strong>المستلمون (<?= count($recipients) ?>):</strong>
+			<?= implode(', ', $recipients) ?>
+		</div>
+	<?php else: ?>
+		<div class="alert alert-danger" dir="rtl">
+			<i class="bi bi-exclamation-triangle"></i> <strong>تنبيه:</strong>
+			لا توجد عناوين بريد إلكتروني مُعرّفة. يرجى تحديث البريد الإلكتروني في
+			<a href="../option.notefications.hnt">إعدادات التنبيهات</a> أو في
+			<a href="../../editdata.hnt">بيانات المكتب</a>.
+		</div>
+	<?php endif; ?>
+
+	<!-- Summary Statistics -->
+	<div class="card shadow-sm mb-4">
+		<div class="card-header bg-primary text-white">
+			<h5 class="mb-0"><i class="bi bi-graph-up"></i> ملخص عام</h5>
+		</div>
+		<div class="card-body">
+			<div class="summary-card" dir="rtl">
+				<div class="row">
+					<div class="col-md-6">
+						<div class="stat">
+							<strong>📋 عدد الإيجارات المستحقة القادمة:</strong>
+							<span class="badge bg-info text-dark fs-6"><?= $rentCount ?></span>
+						</div>
+						<div class="stat">
+							<strong>💵 إجمالي المبالغ المطلوبة:</strong>
+							<span class="amount-total"><?= number_format($rentTotal, 2) ?> ريال</span>
+						</div>
+					</div>
+					<div class="col-md-6">
+						<div class="stat">
+							<strong>💰 عدد المدفوعات المستلمة (آخر 7 أيام):</strong>
+							<span class="badge bg-success fs-6"><?= $voucherCount ?></span>
+						</div>
+						<div class="stat">
+							<strong>💸 إجمالي المدفوعات:</strong>
+							<span class="amount-total"><?= number_format($voucherTotal, 2) ?> ريال</span>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- Upcoming Rents Table -->
+	<div class="card shadow-sm mb-4">
+		<div class="card-header bg-success text-white">
+			<h5 class="mb-0"><i class="bi bi-calendar-check"></i> الإيجارات المستحقة القادمة (أول 100)</h5>
+		</div>
+		<div class="card-body">
+			<div class="table-responsive">
+				<table class="table table-striped table-hover align-middle">
+					<thead class="table-dark">
+						<tr>
+							<th width="50">#</th>
+							<th>اسم المستأجر</th>
+							<th>العقار</th>
+							<th>رقم الوحدة</th>
+							<th>المبلغ المطلوب</th>
+							<th>تاريخ الاستحقاق</th>
+							<th>رقم الجوال</th>
+						</tr>
+					</thead>
+					<tbody>
+						<?php if (!empty($rentData)): ?>
+							<?php $index = 1; foreach ($rentData as $rent): ?>
+								<?php
+									$dueDate = date('Y-m-d', $rent['kastdate']);
+									$amount = number_format($rent['amount_remaining'] ?? $rent['kastvalue'], 2);
+								?>
+								<tr>
+									<td><?= $index ?></td>
+									<td><strong><?= htmlspecialchars($rent['mostagername']) ?></strong></td>
+									<td><?= htmlspecialchars($rent['property_name']) ?></td>
+									<td><span class="badge bg-secondary"><?= htmlspecialchars($rent['unit_number']) ?></span></td>
+									<td><span class="text-success fw-bold"><?= $amount ?> ريال</span></td>
+									<td><?= $dueDate ?></td>
+									<td><a href="tel:<?= $rent['mostagertel'] ?>"><?= htmlspecialchars($rent['mostagertel']) ?></a></td>
+								</tr>
+								<?php $index++; ?>
+							<?php endforeach; ?>
+						<?php else: ?>
+							<tr>
+								<td colspan="7" class="text-center text-muted py-4">
+									<i class="bi bi-inbox fs-1 d-block mb-2"></i>
+									لا توجد إيجارات مستحقة قادمة
+								</td>
+							</tr>
+						<?php endif; ?>
+					</tbody>
+				</table>
+			</div>
+		</div>
+	</div>
+
+	<!-- Payment Vouchers Table -->
+	<div class="card shadow-sm mb-4">
+		<div class="card-header bg-info text-white">
+			<h5 class="mb-0"><i class="bi bi-receipt"></i> المدفوعات المستلمة (آخر 7 أيام)</h5>
+		</div>
+		<div class="card-body">
+			<div class="table-responsive">
+				<table class="table table-striped table-hover align-middle">
+					<thead class="table-dark">
+						<tr>
+							<th width="50">#</th>
+							<th>اسم الدافع</th>
+							<th>العقار</th>
+							<th>المبلغ</th>
+							<th>طريقة الدفع</th>
+							<th>التاريخ</th>
+							<th>البيان</th>
+						</tr>
+					</thead>
+					<tbody>
+						<?php if (!empty($voucherData)): ?>
+							<?php $index = 1; foreach ($voucherData as $voucher): ?>
+								<?php
+									$voucherDate = date('Y-m-d H:i', $voucher['sanaddate']);
+									$amount = number_format($voucher['depositeamount'], 2);
+									$paymentType = $paymentTypes[$voucher['payment_type']] ?? 'غير محدد';
+								?>
+								<tr>
+									<td><?= $index ?></td>
+									<td><strong><?= htmlspecialchars($voucher['mostagername']) ?></strong></td>
+									<td><?= htmlspecialchars($voucher['aqarname']) ?></td>
+									<td><span class="text-success fw-bold"><?= $amount ?> ريال</span></td>
+									<td><span class="badge bg-primary"><?= $paymentType ?></span></td>
+									<td><?= $voucherDate ?></td>
+									<td><?= htmlspecialchars($voucher['mybyan']) ?></td>
+								</tr>
+								<?php $index++; ?>
+							<?php endforeach; ?>
+						<?php else: ?>
+							<tr>
+								<td colspan="7" class="text-center text-muted py-4">
+									<i class="bi bi-inbox fs-1 d-block mb-2"></i>
+									لا توجد مدفوعات خلال آخر 7 أيام
+								</td>
+							</tr>
+						<?php endif; ?>
+					</tbody>
+				</table>
+			</div>
+		</div>
+	</div>
+
+	<!-- Send Email Card -->
+	<div class="card shadow-sm mb-4">
+		<div class="card-header bg-warning text-dark">
+			<h5 class="mb-0"><i class="bi bi-send"></i> إرسال التقرير عبر البريد الإلكتروني</h5>
+		</div>
+		<div class="card-body" dir="rtl">
+			<form id="sendReportForm">
+				<div class="mb-3">
+					<div class="form-check">
+						<input class="form-check-input" type="checkbox" id="override_lock" name="override_lock" value="1">
+						<label class="form-check-label" for="override_lock">
+							<strong>تجاوز قفل الإرسال</strong> (إرسال حتى لو تم الإرسال خلال آخر 7 أيام)
+						</label>
+					</div>
+				</div>
+
+				<div class="d-grid gap-2 d-md-flex">
+					<button type="submit" class="btn btn-success btn-lg" id="sendBtn" <?= empty($recipients) ? 'disabled' : '' ?>>
+						<i class="bi bi-envelope-check"></i> إرسال التقرير الآن
+					</button>
+					<button type="button" class="btn btn-outline-primary btn-lg" onclick="window.location.reload()">
+						<i class="bi bi-arrow-clockwise"></i> تحديث البيانات
+					</button>
+				</div>
+			</form>
+
+			<?php if (empty($recipients)): ?>
+				<div class="alert alert-warning mt-3">
+					<i class="bi bi-exclamation-triangle"></i>
+					<strong>ملاحظة:</strong> زر الإرسال معطل لأنه لا توجد عناوين بريد إلكتروني للمستلمين.
+				</div>
+			<?php endif; ?>
+		</div>
+	</div>
+
+</div>
+
+<script>
+$(document).ready(function() {
+	// Handle form submission
+	$('#sendReportForm').on('submit', function(e) {
+		e.preventDefault();
+
+		const sendBtn = $('#sendBtn');
+		const originalText = sendBtn.html();
+		const overrideLock = $('#override_lock').is(':checked') ? '1' : '0';
+
+		// Disable button and show loading
+		sendBtn.prop('disabled', true)
+			.html('<span class="spinner-border spinner-border-sm"></span> جاري الإرسال...');
+
+		$.ajax({
+			url: 'send_weekly_report.hnt',
+			type: 'POST',
+			data: {
+				action: 'send_report',
+				override_lock: overrideLock
+			},
+			dataType: 'json',
+			success: function(response) {
+				if (response.success) {
+					$('#alertContainer').html(
+						'<div class="alert alert-success alert-dismissible fade show" dir="rtl">' +
+						'<i class="bi bi-check-circle"></i> <strong>نجح!</strong> ' + response.message +
+						'<br><small>عدد المستلمين: ' + response.recipients_count + '</small>' +
+						'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+						'</div>'
+					);
+
+					// Reload page after 2 seconds to update lock status
+					setTimeout(function() {
+						window.location.reload();
+					}, 2000);
+				} else {
+					$('#alertContainer').html(
+						'<div class="alert alert-danger alert-dismissible fade show" dir="rtl">' +
+						'<i class="bi bi-x-circle"></i> <strong>خطأ!</strong> ' + response.message +
+						'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+						'</div>'
+					);
+				}
+
+				// Restore button
+				sendBtn.prop('disabled', false).html(originalText);
+			},
+			error: function(xhr, status, error) {
+				$('#alertContainer').html(
+					'<div class="alert alert-danger alert-dismissible fade show" dir="rtl">' +
+					'<i class="bi bi-x-circle"></i> <strong>خطأ!</strong> حدث خطأ في الاتصال بالخادم' +
+					'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+					'</div>'
+				);
+
+				sendBtn.prop('disabled', false).html(originalText);
+			}
+		});
+	});
+
+	// Auto-scroll to alert
+	$(document).on('DOMNodeInserted', '#alertContainer', function() {
+		$('html, body').animate({
+			scrollTop: $('#alertContainer').offset().top - 100
+		}, 500);
+	});
+});
+</script>
+
+<?php
+require('../../foter.hnt');
+?>

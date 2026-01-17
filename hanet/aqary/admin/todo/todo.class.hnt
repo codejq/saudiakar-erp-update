@@ -1,0 +1,628 @@
+<?php
+/**
+ * TODO Module - Main Class
+ * ====================================
+ * Handles all TODO list and item operations
+ *
+ * @author TODO Module
+ * @version 1.0
+ * @date 2025-11-06
+ */
+
+class TodoManager {
+
+    private $db;
+    private $uploadDir;
+
+    /**
+     * Constructor
+     */
+    public function __construct($db) {
+        $this->db = $db;
+        $this->uploadDir = __DIR__ . '/uploads/';
+
+        // Create uploads directory if it doesn't exist
+        if (!is_dir($this->uploadDir)) {
+            @mkdir($this->uploadDir, 0755, true);
+        }
+    }
+
+    // ==================== TODO LISTS METHODS ====================
+
+    /**
+     * Create new todo list
+     */
+    public function createList($data) {
+        $sql = "INSERT INTO todo_lists (title, description, user_id, shared_with, color, is_active)
+                VALUES (?, ?, ?, ?, ?, ?)";
+
+        $stmt = $this->db->prepare($sql);
+
+        if ($stmt === false) {
+            error_log("TODO Module: Failed to prepare createList query - " . $this->db->error);
+            return false;
+        }
+
+        $stmt->bind_param(
+            "ssissi",
+            $data['title'],
+            $data['description'],
+            $data['user_id'],
+            $data['shared_with'],
+            $data['color'],
+            $data['is_active']
+        );
+
+        if ($stmt->execute()) {
+            return $this->db->insert_id;
+        }
+
+        error_log("TODO Module: Failed to execute createList - " . $stmt->error);
+        return false;
+    }
+
+    /**
+     * Update todo list
+     */
+    public function updateList($id, $data) {
+        $sql = "UPDATE todo_lists
+                SET title = ?, description = ?, shared_with = ?, color = ?, is_active = ?, updated_at = NOW()
+                WHERE id = ?";
+
+        $stmt = $this->db->prepare($sql);
+
+        if ($stmt === false) {
+            return false;
+        }
+
+        $stmt->bind_param(
+            "sssiii",
+            $data['title'],
+            $data['description'],
+            $data['shared_with'],
+            $data['color'],
+            $data['is_active'],
+            $id
+        );
+
+        return $stmt->execute();
+    }
+
+    /**
+     * Get todo list by ID
+     */
+    public function getList($id) {
+        $sql = "SELECT l.*,
+                    COUNT(DISTINCT i.id) as total_items,
+                    SUM(CASE WHEN i.is_completed = 1 THEN 1 ELSE 0 END) as completed_items,
+                    SUM(CASE WHEN i.is_completed = 0 THEN 1 ELSE 0 END) as pending_items
+                FROM todo_lists l
+                LEFT JOIN todo_items i ON l.id = i.todo_list_id
+                WHERE l.id = ?
+                GROUP BY l.id";
+
+        $stmt = $this->db->prepare($sql);
+
+        if ($stmt === false) {
+            return null;
+        }
+
+        $stmt->bind_param("i", $id);
+
+        if (!$stmt->execute()) {
+            return null;
+        }
+
+        $result = $stmt->get_result()->fetch_assoc();
+
+        // Ensure counts are numeric
+        if ($result) {
+            $result['total_items'] = intval($result['total_items'] ?? 0);
+            $result['completed_items'] = intval($result['completed_items'] ?? 0);
+            $result['pending_items'] = intval($result['pending_items'] ?? 0);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Get all todo lists for a user
+     */
+    public function getAllLists($userId, $filters = array()) {
+        $where = array("(l.user_id = ? OR FIND_IN_SET(?, l.shared_with))");
+        $params = array($userId, $userId);
+        $types = "ii";
+
+        if (isset($filters['is_active'])) {
+            $where[] = "l.is_active = ?";
+            $params[] = $filters['is_active'];
+            $types .= "i";
+        }
+
+        if (isset($filters['search']) && !empty($filters['search'])) {
+            $where[] = "(l.title LIKE ? OR l.description LIKE ?)";
+            $search = "%" . $filters['search'] . "%";
+            $params[] = $search;
+            $params[] = $search;
+            $types .= "ss";
+        }
+
+        $sql = "SELECT l.*,
+                    COUNT(DISTINCT i.id) as total_items,
+                    SUM(CASE WHEN i.is_completed = 1 THEN 1 ELSE 0 END) as completed_items,
+                    SUM(CASE WHEN i.is_completed = 0 THEN 1 ELSE 0 END) as pending_items
+                FROM todo_lists l
+                LEFT JOIN todo_items i ON l.id = i.todo_list_id
+                WHERE " . implode(" AND ", $where) . "
+                GROUP BY l.id
+                ORDER BY l.updated_at DESC";
+
+        $stmt = $this->db->prepare($sql);
+
+        if ($stmt === false) {
+            error_log("TODO Module: Failed to prepare getAllLists - " . $this->db->error);
+            return array();
+        }
+
+        if (!empty($params)) {
+            $stmt->bind_param($types, ...$params);
+        }
+
+        if (!$stmt->execute()) {
+            error_log("TODO Module: Failed to execute getAllLists - " . $stmt->error);
+            return array();
+        }
+
+        $result = $stmt->get_result();
+        $lists = array();
+
+        while ($row = $result->fetch_assoc()) {
+            $lists[] = $row;
+        }
+
+        return $lists;
+    }
+
+    /**
+     * Delete todo list
+     */
+    public function deleteList($id) {
+        // Items will be deleted automatically via CASCADE
+        $stmt = $this->db->prepare("DELETE FROM todo_lists WHERE id = ?");
+
+        if ($stmt === false) {
+            return false;
+        }
+
+        $stmt->bind_param("i", $id);
+        return $stmt->execute();
+    }
+
+    // ==================== TODO ITEMS METHODS ====================
+
+    /**
+     * Create new todo item
+     */
+    public function createItem($data) {
+        $sql = "INSERT INTO todo_items
+                (todo_list_id, title, description, priority, due_date, assigned_to, tags, display_order, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+        $stmt = $this->db->prepare($sql);
+
+        if ($stmt === false) {
+            error_log("TODO Module: Failed to prepare createItem - " . $this->db->error);
+            return false;
+        }
+
+        $stmt->bind_param(
+            "issssisii",
+            $data['todo_list_id'],
+            $data['title'],
+            $data['description'],
+            $data['priority'],
+            $data['due_date'],
+            $data['assigned_to'],
+            $data['tags'],
+            $data['display_order'],
+            $data['created_by']
+        );
+
+        if ($stmt->execute()) {
+            // Update list timestamp
+            $this->db->query("UPDATE todo_lists SET updated_at = NOW() WHERE id = " . intval($data['todo_list_id']));
+
+            // Get the inserted ID
+            $insertId = $this->db->insert_id;
+
+            // If insert_id is 0, try to get the last inserted ID another way
+            if ($insertId == 0) {
+                $result = $this->db->query("SELECT LAST_INSERT_ID() as id");
+                if ($result) {
+                    $row = $result->fetch_assoc();
+                    $insertId = $row['id'];
+                }
+            }
+
+            // Log for debugging
+            error_log("TODO createItem - Executed successfully, insert_id: " . $insertId);
+
+            return $insertId ? $insertId : true; // Return true if we can't get ID but execution succeeded
+        }
+
+        error_log("TODO createItem - Execute failed: " . $stmt->error);
+        return false;
+    }
+
+    /**
+     * Update todo item
+     */
+    public function updateItem($id, $data) {
+        $sql = "UPDATE todo_items
+                SET title = ?, description = ?, priority = ?, due_date = ?, assigned_to = ?, tags = ?, updated_at = NOW()
+                WHERE id = ?";
+
+        $stmt = $this->db->prepare($sql);
+
+        if ($stmt === false) {
+            return false;
+        }
+
+        $stmt->bind_param(
+            "ssssisi",
+            $data['title'],
+            $data['description'],
+            $data['priority'],
+            $data['due_date'],
+            $data['assigned_to'],
+            $data['tags'],
+            $id
+        );
+
+        if ($stmt->execute()) {
+            // Get list ID to update timestamp
+            $item = $this->getItem($id);
+            if ($item) {
+                $this->db->query("UPDATE todo_lists SET updated_at = NOW() WHERE id = " . intval($item['todo_list_id']));
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Toggle item completion status
+     */
+    public function toggleItemCompletion($id) {
+        $item = $this->getItem($id);
+
+        if (!$item) {
+            return false;
+        }
+
+        $newStatus = $item['is_completed'] == 1 ? 0 : 1;
+        $completedAt = $newStatus == 1 ? "NOW()" : "NULL";
+
+        $sql = "UPDATE todo_items SET is_completed = ?, completed_at = $completedAt, updated_at = NOW() WHERE id = ?";
+        $stmt = $this->db->prepare($sql);
+
+        if ($stmt === false) {
+            return false;
+        }
+
+        $stmt->bind_param("ii", $newStatus, $id);
+
+        if ($stmt->execute()) {
+            // Update list timestamp
+            $this->db->query("UPDATE todo_lists SET updated_at = NOW() WHERE id = " . intval($item['todo_list_id']));
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Get todo item by ID
+     */
+    public function getItem($id) {
+        $sql = "SELECT * FROM todo_items WHERE id = ?";
+        $stmt = $this->db->prepare($sql);
+
+        if ($stmt === false) {
+            return null;
+        }
+
+        $stmt->bind_param("i", $id);
+
+        if (!$stmt->execute()) {
+            return null;
+        }
+
+        return $stmt->get_result()->fetch_assoc();
+    }
+
+    /**
+     * Get all items for a list
+     */
+    public function getListItems($listId, $filters = array()) {
+        $where = array("todo_list_id = ?");
+        $params = array($listId);
+        $types = "i";
+
+        if (isset($filters['is_completed'])) {
+            $where[] = "is_completed = ?";
+            $params[] = $filters['is_completed'];
+            $types .= "i";
+        }
+
+        if (isset($filters['priority']) && $filters['priority'] != 'all') {
+            $where[] = "priority = ?";
+            $params[] = $filters['priority'];
+            $types .= "s";
+        }
+
+        // Simplified query without joins (comments/attachments can be added later)
+        $sql = "SELECT *
+                FROM todo_items
+                WHERE " . implode(" AND ", $where) . "
+                ORDER BY display_order ASC, created_at DESC";
+
+        $stmt = $this->db->prepare($sql);
+
+        if ($stmt === false) {
+            error_log("TODO Module: Failed to prepare getListItems - " . $this->db->error);
+            return array();
+        }
+
+        if (!empty($params)) {
+            $stmt->bind_param($types, ...$params);
+        }
+
+        if (!$stmt->execute()) {
+            error_log("TODO Module: Failed to execute getListItems - " . $stmt->error);
+            return array();
+        }
+
+        $result = $stmt->get_result();
+        $items = array();
+
+        while ($row = $result->fetch_assoc()) {
+            // Add default counts
+            $row['comment_count'] = 0;
+            $row['attachment_count'] = 0;
+            $items[] = $row;
+        }
+
+        return $items;
+    }
+
+    /**
+     * Delete todo item
+     */
+    public function deleteItem($id) {
+        $item = $this->getItem($id);
+
+        if (!$item) {
+            return false;
+        }
+
+        $stmt = $this->db->prepare("DELETE FROM todo_items WHERE id = ?");
+
+        if ($stmt === false) {
+            return false;
+        }
+
+        $stmt->bind_param("i", $id);
+
+        if ($stmt->execute()) {
+            // Update list timestamp
+            $this->db->query("UPDATE todo_lists SET updated_at = NOW() WHERE id = " . intval($item['todo_list_id']));
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Reorder items
+     */
+    public function reorderItems($items) {
+        foreach ($items as $order => $itemId) {
+            $stmt = $this->db->prepare("UPDATE todo_items SET display_order = ? WHERE id = ?");
+            if ($stmt) {
+                $stmt->bind_param("ii", $order, $itemId);
+                $stmt->execute();
+            }
+        }
+        return true;
+    }
+
+    // ==================== STATISTICS METHODS ====================
+
+    /**
+     * Get dashboard statistics
+     */
+    public function getStats($userId) {
+        $sql = "SELECT
+                    COUNT(DISTINCT l.id) as total_lists,
+                    COUNT(DISTINCT i.id) as total_items,
+                    SUM(CASE WHEN i.is_completed = 1 THEN 1 ELSE 0 END) as completed_items,
+                    SUM(CASE WHEN i.is_completed = 0 THEN 1 ELSE 0 END) as pending_items,
+                    SUM(CASE WHEN i.due_date < CURDATE() AND i.is_completed = 0 THEN 1 ELSE 0 END) as overdue_items,
+                    SUM(CASE WHEN i.due_date = CURDATE() AND i.is_completed = 0 THEN 1 ELSE 0 END) as due_today
+                FROM todo_lists l
+                LEFT JOIN todo_items i ON l.id = i.todo_list_id
+                WHERE l.user_id = ? OR FIND_IN_SET(?, l.shared_with)";
+
+        $stmt = $this->db->prepare($sql);
+
+        if ($stmt === false) {
+            return array(
+                'total_lists' => 0,
+                'total_items' => 0,
+                'completed_items' => 0,
+                'pending_items' => 0,
+                'overdue_items' => 0,
+                'due_today' => 0
+            );
+        }
+
+        $stmt->bind_param("ii", $userId, $userId);
+
+        if (!$stmt->execute()) {
+            return array(
+                'total_lists' => 0,
+                'total_items' => 0,
+                'completed_items' => 0,
+                'pending_items' => 0,
+                'overdue_items' => 0,
+                'due_today' => 0
+            );
+        }
+
+        $stats = $stmt->get_result()->fetch_assoc();
+
+        // Ensure numeric values
+        foreach ($stats as $key => $value) {
+            $stats[$key] = intval($value ?? 0);
+        }
+
+        return $stats;
+    }
+
+    // ==================== EMAIL NOTIFICATION METHODS ====================
+
+    /**
+     * Queue email notification for todo item
+     */
+    public function queueEmail($itemId, $userId, $email, $subject, $body) {
+        $sql = "INSERT INTO todo_mail_queue (todo_item_id, user_id, email_to, subject, body)
+                VALUES (?, ?, ?, ?, ?)";
+
+        $stmt = $this->db->prepare($sql);
+
+        if ($stmt === false) {
+            error_log("TODO queueEmail - Prepare failed: " . $this->db->error);
+            return false;
+        }
+
+        $stmt->bind_param("iisss", $itemId, $userId, $email, $subject, $body);
+
+        $result = $stmt->execute();
+
+        if (!$result) {
+            error_log("TODO queueEmail - Execute failed: " . $stmt->error);
+        } else {
+            error_log("TODO queueEmail - Success, inserted ID: " . $this->db->insert_id);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Get pending emails
+     */
+    public function getPendingEmails($limit = 10) {
+        $sql = "SELECT * FROM todo_mail_queue WHERE is_sent = 0 AND retry_count < 5 LIMIT ?";
+        $stmt = $this->db->prepare($sql);
+
+        if ($stmt === false) {
+            return array();
+        }
+
+        $stmt->bind_param("i", $limit);
+        $stmt->execute();
+
+        $result = $stmt->get_result();
+        $emails = array();
+
+        while ($row = $result->fetch_assoc()) {
+            $emails[] = $row;
+        }
+
+        return $emails;
+    }
+
+    /**
+     * Mark email as sent
+     */
+    public function markEmailSent($emailId) {
+        $stmt = $this->db->prepare("UPDATE todo_mail_queue SET is_sent = 1, sent_at = NOW() WHERE id = ?");
+
+        if ($stmt === false) {
+            return false;
+        }
+
+        $stmt->bind_param("i", $emailId);
+        return $stmt->execute();
+    }
+
+    /**
+     * Mark email failed
+     */
+    public function markEmailFailed($emailId, $error) {
+        $stmt = $this->db->prepare("UPDATE todo_mail_queue SET retry_count = retry_count + 1, last_error = ? WHERE id = ?");
+
+        if ($stmt === false) {
+            return false;
+        }
+
+        $stmt->bind_param("si", $error, $emailId);
+        return $stmt->execute();
+    }
+
+    /**
+     * Reset failed emails for retry
+     * Useful when mail configuration has been fixed
+     */
+    public function resetFailedEmails($maxRetryCount = null) {
+        if ($maxRetryCount !== null) {
+            $sql = "UPDATE todo_mail_queue SET retry_count = 0, last_error = '' WHERE is_sent = 0 AND retry_count >= ?";
+            $stmt = $this->db->prepare($sql);
+            if ($stmt === false) {
+                return false;
+            }
+            $stmt->bind_param("i", $maxRetryCount);
+        } else {
+            $sql = "UPDATE todo_mail_queue SET retry_count = 0, last_error = '' WHERE is_sent = 0";
+            $stmt = $this->db->prepare($sql);
+            if ($stmt === false) {
+                return false;
+            }
+        }
+
+        $result = $stmt->execute();
+        $affectedRows = $stmt->affected_rows;
+
+        error_log("TODO Module: Reset $affectedRows failed emails for retry");
+
+        return $affectedRows;
+    }
+
+    /**
+     * Get email queue statistics
+     */
+    public function getEmailQueueStats() {
+        $sql = "SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN is_sent = 1 THEN 1 ELSE 0 END) as sent,
+                    SUM(CASE WHEN is_sent = 0 AND retry_count < 10 THEN 1 ELSE 0 END) as pending,
+                    SUM(CASE WHEN is_sent = 0 AND retry_count >= 10 THEN 1 ELSE 0 END) as failed
+                FROM todo_mail_queue";
+
+        $result = $this->db->query($sql);
+
+        if ($result === false) {
+            return array(
+                'total' => 0,
+                'sent' => 0,
+                'pending' => 0,
+                'failed' => 0
+            );
+        }
+
+        return $result->fetch_assoc();
+    }
+}
+?>

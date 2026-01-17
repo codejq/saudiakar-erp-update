@@ -1,0 +1,450 @@
+<?php
+// Set page variables
+$sc_title = "استمارة بيانات فيلا";
+$sc_id = "27";
+$canscroll = 0;
+$noteditable = "not";
+
+// Include authentication and headers
+include_once "../../../nocash.hnt";
+include_once"../../../report_header.hnt";
+
+// Define application base path for URL generation
+if (!defined('APP_BASE_PATH')) {
+    define('APP_BASE_PATH', '/aqary');
+}
+
+// Initialize variables
+$id = isset($_REQUEST['id']) ? intval($_REQUEST['id']) : 0;
+$nosendata = isset($_REQUEST['nosendata']) ? intval($_REQUEST['nosendata']) : 0;
+$mymasderarr = array();
+
+
+
+// Get villa data
+$vilaid = $id;
+$sql = "SELECT * FROM vila WHERE vilaid='" . intval($vilaid) . "'";
+$result = mysql_query($sql, $link);
+$rowk = mysql_fetch_array($result);
+
+if (!$rowk) {
+    die("<div class='alert alert-warning mt-5 text-center'><i class='bi bi-info-circle me-2'></i>لم يتم العثور على بيانات الفيلا</div>");
+}
+
+// Hide sensitive data if user doesn't have permission
+if (($rowk['custumerid'] != $_SESSION['useridv']) && !$_SESSION['seeothermasder'] && !$allprevilage) {
+    $rowk['malekbayan1'] = $rowk['malekbayan2'] = $rowk['malekbayan3'] = $rowk['malekbayan4'] = $rowk['malekbayan5'] = "";
+    $rowk['malekbayan6'] = $rowk['malekbayan7'] = $rowk['malekbayan8'] = $rowk['malekbayan9'] = $rowk['malekbayan10'] = "";
+    $rowk['oldmalekbayan1'] = $rowk['oldmalekbayan2'] = $rowk['oldmalekbayan3'] = $rowk['oldmalekbayan4'] = $rowk['oldmalekbayan5'] = "";
+    $rowk['oldmalekbayan6'] = $rowk['oldmalekbayan7'] = $rowk['oldmalekbayan8'] = $rowk['oldmalekbayan9'] = $rowk['oldmalekbayan10'] = $rowk['secretinfo'] = "";
+}
+
+// Status colors and text
+$statusClass = '';
+$statusText = '';
+switch ($rowk['statusx']) {
+    case 0:
+        $statusClass = 'bg-light';
+        $statusText = 'في الانتظار';
+        break;
+    case 1:
+        $statusClass = 'bg-warning bg-opacity-25';
+        $statusText = 'الفيلا محجوزة';
+        break;
+    case 2:
+        $statusClass = 'bg-secondary bg-opacity-50';
+        $statusText = 'الفيلا مباعة';
+        break;
+    case 3:
+        $statusClass = 'bg-danger bg-opacity-25';
+        $statusText = 'الفيلا محذوفة';
+        break;
+}
+
+// Get map coordinates
+$mainlat = 21.583061886336214;
+$mainlng = 39.20806601643562;
+if ($rowk['center_x'] != 0) {
+    $mainlat = $rowk['center_x'];
+    $mainlng = $rowk['center_y'];
+}
+
+// Get city name
+$sqlci = "SELECT city.cityid, city.cityname FROM city, mokhatat WHERE city.cityid=mokhatat.cityid AND mokhatatid='" . addslashes($rowk['mokhatatid']) . "'";
+$resultcity = mysql_query($sqlci, $link);
+$citynamex = mysql_fetch_array($resultcity);
+$cityidx = isset($citynamex['cityid']) ? $citynamex['cityid'] : '';
+$citynamex = isset($citynamex['cityname']) ? $citynamex['cityname'] : '';
+
+// Get mokhatat name
+$mokhatatname = mysql_fetch_array(mysql_query("SELECT * FROM mokhatat WHERE mokhatatid='" . addslashes($rowk['mokhatatid']) . "'", $link));
+
+// Get reserved by username
+$rv = '';
+$ert = mysql_fetch_array(mysql_query("SELECT username FROM user WHERE userid='" . intval($rowk['reversedby']) . "'", $link));
+if (($rowk['reversedby'] != $_SESSION['useridv']) && $rowk['reversedby'] > 0) {
+    $rv = isset($ert['username']) ? $ert['username'] : '';
+}
+
+// Parse sale options
+$trekatbe3 = $rowk['s11'] ? "للفيلا" : "للوحدة";
+$shor = $rowk['s13'] ? "على الشور" : "";
+$tafawod = $rowk['s12'] ? "قابل للتفاوض" : "";
+$mob = !$rowk['mobasher'] ? "عن طريق وسيط" : "من المالك";
+$rdt = $rowk['vilatype'];
+
+// Get user's masder IDs
+$sqlmasderid = "SELECT masderid FROM arady WHERE custummerid='" . intval($_SESSION['useridv']) . "' GROUP BY masderid";
+$masderarr = mysql_query($sqlmasderid, $link);
+while ($row = mysql_fetch_array($masderarr)) {
+    $mymasderarr[] = $row['masderid'];
+}
+
+$sqlmasderid = "SELECT masderid FROM vila WHERE custumerid='" . intval($_SESSION['useridv']) . "' GROUP BY masderid";
+$masderarr = mysql_query($sqlmasderid, $link);
+while ($row = mysql_fetch_array($masderarr)) {
+    $mymasderarr[] = $row['masderid'];
+}
+
+// Get manager ID
+$sql = "SELECT MIN(userid) as dd FROM user";
+$row = mysql_fetch_array(mysql_query($sql, $link));
+$mangerid = isset($row['dd']) ? $row['dd'] : 0;
+
+// Get masder data
+$sql = "SELECT * FROM masder WHERE masderid='" . addslashes($rowk['masderid']) . "'";
+$result = mysql_query($sql, $link);
+$row = mysql_fetch_array($result);
+
+// Hide masder data if no permission
+if ($_SESSION['useridv'] != $mangerid && $row['maktab'] != "1" && !$_SESSION['seeothermasder']) {
+    if (!in_array($row['masderid'], $mymasderarr)) {
+        $row['masdername'] = $row['masdertel'] = $row['masderfax'] = $row['masderemail'] = $row['masderaddress'] = $row['addationalinfo'] = $rowk['secretinfo'] = "****************";
+    }
+}
+
+// Parse boundaries
+$hedod = explode(";", $rowk['hedod']);
+$hedod0 = "";
+if (isset($hedod[0]) && $hedod[0]) $hedod0 .= $hedod[0] . " شمال - ";
+if (isset($hedod[1]) && $hedod[1]) $hedod0 .= $hedod[1] . " جنوب - ";
+if (isset($hedod[2]) && $hedod[2]) $hedod0 .= $hedod[2] . " شرق - ";
+if (isset($hedod[3]) && $hedod[3]) $hedod0 .= $hedod[3] . " غرب - ";
+$rowk['hedod'] = rtrim($hedod0, " - ");
+
+// Parse services
+$services = array();
+if ($rowk['s1']) $services[] = "مياه";
+if ($rowk['s2']) $services[] = "كهرباء";
+if ($rowk['s3']) $services[] = "سفلت";
+if ($rowk['s4']) $services[] = "مدارس";
+if ($rowk['s5']) $services[] = "مستشفى";
+if ($rowk['s6']) $services[] = "تطل على ساحة";
+if ($rowk['s7']) $services[] = "جوار مسجد";
+if ($rowk['s8']) $services[] = "جوار شركات";
+if ($rowk['s9']) $services[] = "جوار مزرعة";
+if ($rowk['s10']) $services[] = "هاتف";
+
+// Build data array
+$fdata = array();
+$fdata['الرقم التسلسلي'] = $rowk['vilaid'];
+$fdata['حالة الفيلا'] = $statusText;
+$fdata['المدينة'] = $citynamex;
+$fdata['المخطط'] = isset($mokhatatname['mokhatatname']) ? $mokhatatname['mokhatatname'] : '';
+$fdata['رقم الفيلا'] = $rowk['vilarakam'];
+$fdata['بيانات الحجز'] = $rowk['reversedfor'];
+$fdata['بيانات البيع'] = $rowk['soldto'];
+$fdata['محجوزة عن طريق'] = $rv;
+$fdata['اسم الحي'] = $rowk['hay'];
+$fdata['الشارع الرئيسي'] = $rowk['block'];
+$fdata['الشارع الفرعي'] = $rowk['share3'];
+$fdata['حدود الفيلا'] = $rowk['hedod'];
+$fdata['الطول'] = $rowk['tol'];
+$fdata['العرض'] = $rowk['al3ard'];
+$fdata['إجمالي المساحة'] = $rowk['mesaha'];
+$fdata['مساحة البناء'] = $rowk['benamesaha'];
+$fdata['لوحة حديدية'] = $rowk['en_date'];
+$fdata['عدد الأدوار'] = $rowk['adwarnum'];
+$fdata['إجمالي عدد الوحدات'] = $rowk['wehdatnum'];
+$fdata['عدد دورات المياه'] = $rowk['hamamatnum'];
+$fdata['المطابخ بالوحدة'] = $rowk['matbakhnum'];
+$fdata['الدخل السنوي'] = $rowk['dakhl'];
+$fdata['عمر العقار'] = $rowk['aqarage'];
+$fdata['عدد المداخل'] = $rowk['madakhel'];
+$fdata['عدد الغرف'] = $rowk['ghorfanum'];
+$fdata['عدد غرف النوم'] = $rowk['nomghorf'];
+$fdata['عدد الصالات'] = $rowk['salatnumber'];
+$fdata['طريقة البيع'] = $trekatbe3;
+$fdata['السعر الإجمالي (حد)'] = $rowk['price'];
+$fdata['السعر الإجمالي (سوم)'] = $rowk['pricesom'];
+$fdata['طريقة التمويل'] = $rowk['tamweelmethod'];
+$fdata['طريقة الدفع'] = $rowk['daf3method'];
+$fdata['الخدمة المطلوبة'] = $rowk['khdma'];
+$fdata['خزينة'] = $rowk['khazina'];
+$fdata['درج'] = $rowk['dorg'];
+$fdata['رف'] = $rowk['raf'];
+$fdata['ملف ورقي'] = $rowk['paperfile'];
+$fdata['الشور'] = $shor;
+$fdata['التفاوض'] = $tafawod;
+$fdata['مباشر أو وسيط'] = $mob;
+$fdata['نوع الفيلا'] = $rdt;
+$fdata['اسم المالك'] = $rowk['malekbayan1'];
+$fdata['جوال المالك'] = $rowk['malekbayan2'];
+$fdata['عنوان المالك'] = $rowk['malekbayan3'];
+$fdata['رقم الصك الحالي'] = $rowk['malekbayan4'];
+$fdata['هاتف منزل المالك'] = $rowk['malekbayan5'];
+$fdata['هاتف عمل المالك'] = $rowk['malekbayan6'];
+$fdata['صندوق بريد المالك'] = $rowk['malekbayan7'];
+$fdata['بريد إلكتروني'] = $rowk['malekbayan8'];
+$fdata['جهة عمل المالك'] = $rowk['malekbayan9'];
+$fdata['ملحوظات إضافية للمالك'] = $rowk['malekbayan10'];
+$fdata['اسم المالك السابق'] = $rowk['oldmalekbayan1'];
+$fdata['جوال المالك السابق'] = $rowk['oldmalekbayan2'];
+$fdata['عنوان المالك السابق'] = $rowk['oldmalekbayan3'];
+$fdata['رقم الصك السابق'] = $rowk['oldmalekbayan4'];
+$fdata['هاتف منزل المالك السابق'] = $rowk['oldmalekbayan5'];
+$fdata['هاتف عمل المالك السابق'] = $rowk['oldmalekbayan6'];
+$fdata['صندوق بريد المالك السابق'] = $rowk['oldmalekbayan7'];
+$fdata['بريد إلكتروني سابق'] = $rowk['oldmalekbayan8'];
+$fdata['جهة عمل المالك السابق'] = $rowk['oldmalekbayan9'];
+$fdata['ملحوظات إضافية للمالك السابق'] = $rowk['oldmalekbayan10'];
+$fdata['اسم الوسيط'] = isset($row['masdername']) ? $row['masdername'] : '';
+$fdata['جوال الوسيط'] = isset($row['masdertel']) ? $row['masdertel'] : '';
+$fdata['هاتف الوسيط'] = isset($row['masderphone']) ? $row['masderphone'] : '';
+$fdata['فاكس الوسيط'] = isset($row['masderfax']) ? $row['masderfax'] : '';
+$fdata['بريد الوسيط'] = isset($row['masderemail']) ? $row['masderemail'] : '';
+$fdata['عنوان الوسيط'] = isset($row['masderaddress']) ? $row['masderaddress'] : '';
+$fdata['بيانات إضافية للوسيط'] = isset($row['addationalinfo']) ? $row['addationalinfo'] : '';
+$fdata['بيانات سرية'] = $rowk['secretinfo'];
+$fdata['وصف عام'] = $rowk['note'];
+$fdata['خدمات متوفرة'] = implode(" - ", $services);
+
+// Hide sensitive data if nosendata flag is set
+if ($nosendata) {
+    $fdata['الشارع الفرعي'] = $fdata['الشارع الرئيسي'] = $fdata['اسم المالك'] = $fdata['جوال المالك'] = '';
+    $fdata['عنوان المالك'] = $fdata['رقم الصك الحالي'] = $fdata['هاتف منزل المالك'] = $fdata['هاتف عمل المالك'] = '';
+    $fdata['صندوق بريد المالك'] = $fdata['بريد إلكتروني'] = $fdata['جهة عمل المالك'] = $fdata['ملحوظات إضافية للمالك'] = '';
+    $fdata['اسم المالك السابق'] = $fdata['جوال المالك السابق'] = $fdata['عنوان المالك السابق'] = $fdata['رقم الصك السابق'] = '';
+    $fdata['هاتف منزل المالك السابق'] = $fdata['هاتف عمل المالك السابق'] = $fdata['صندوق بريد المالك السابق'] = '';
+    $fdata['بريد إلكتروني سابق'] = $fdata['جهة عمل المالك السابق'] = $fdata['ملحوظات إضافية للمالك السابق'] = '';
+    $fdata['اسم الوسيط'] = $fdata['جوال الوسيط'] = $fdata['هاتف الوسيط'] = $fdata['فاكس الوسيط'] = '';
+    $fdata['بريد الوسيط'] = $fdata['عنوان الوسيط'] = $fdata['بيانات إضافية للوسيط'] = $fdata['بيانات سرية'] = '';
+    $fdata['مباشر أو وسيط'] = '';
+}
+?>
+
+<style>
+@media print {
+    .no-print {
+        display: none !important;
+    }
+    .print-only {
+        display: block !important;
+    }
+}
+
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 2rem;
+}
+
+.data-table td {
+    padding: 0.75rem;
+    border: 1px solid #dee2e6;
+}
+
+.data-table td:first-child {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    font-weight: 600;
+    width: 30%;
+}
+
+.image-gallery {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 1rem;
+    margin: 2rem 0;
+}
+
+.image-item {
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.image-item img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.file-link {
+    display: block;
+    padding: 1rem;
+    text-align: center;
+    background: #f8f9fa;
+    text-decoration: none;
+    color: #0891b2;
+    transition: background 0.2s;
+}
+
+.file-link:hover {
+    background: #e9ecef;
+}
+</style>
+
+<div class="container-fluid py-4">
+    <!-- Page Header -->
+    <div class="card shadow-sm border-0 mb-4 no-print">
+        <div class="card-header text-white <?= $statusClass ?>" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <div class="d-flex justify-content-between align-items-center">
+                <h4 class="mb-0">
+                    <i class="bi bi-building me-2"></i>
+                    <?= htmlspecialchars($sc_title, ENT_QUOTES, 'UTF-8') ?>
+                </h4>
+                <span class="badge bg-light text-dark"><?= htmlspecialchars($statusText, ENT_QUOTES, 'UTF-8') ?></span>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <i class="bi bi-info-circle me-2"></i>
+                    رقم الفيلا: <strong><?= htmlspecialchars($rowk['vilaid'], ENT_QUOTES, 'UTF-8') ?></strong>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- Villa Data -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-body">
+            <table class="data-table">
+                <?php
+                $i = 0;
+                foreach ($fdata as $key => $val) {
+                    if (!$val) continue;
+
+                    if ($i % 2 == 0) echo "<tr>";
+
+                    echo "<td>" . htmlspecialchars($key, ENT_QUOTES, 'UTF-8') . "</td>";
+                    echo "<td>" . htmlspecialchars($val, ENT_QUOTES, 'UTF-8') . "</td>";
+
+                    if ($i % 2 == 1) echo "</tr>";
+                    $i++;
+                }
+
+                if ($i % 2 == 1) echo "<td colspan='2'></td></tr>";
+                ?>
+            </table>
+        </div>
+    </div>
+
+    <!-- Images and Files -->
+    <?php
+    $hasImages = false;
+    $imageExtensions = array('jpg', 'gif', 'png', 'bmp');
+    $fileExtensions = array('pdf', 'tif', 'doc', 'ppt', 'pps', 'avi', 'mepg', 'wmv', 'swf', 'xls', 'mdi');
+
+    // Check if any images exist
+    for ($i = 0; $i < 15; $i++) {
+        foreach ($imageExtensions as $ext) {
+            if (file_exists(upload_path('properties.images', $vilaid . "_" . $i . "_." . $ext)) ||
+                file_exists(upload_path('properties.images', "go" . $vilaid . "_" . $i . "_." . $ext))) {
+                $hasImages = true;
+                break 2;
+            }
+        }
+    }
+
+    if ($hasImages):
+    ?>
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header" style="background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%); color: white;">
+            <h5 class="mb-0">
+                <i class="bi bi-images me-2"></i>
+                الصور والملفات المرفقة
+            </h5>
+        </div>
+        <div class="card-body">
+            <div class="image-gallery">
+                <?php
+                for ($i = 0; $i < 15; $i++) {
+                    // Display images
+                    foreach ($imageExtensions as $ext) {
+                        $file_path = upload_path('properties.images', $vilaid . "_" . $i . "_." . $ext);
+                        $file_url = upload_url('properties.images', $vilaid . "_" . $i . "_." . $ext);
+                        if (file_exists($file_path)) {
+                            echo "<div class='image-item'>";
+                            echo "<img src='" . htmlspecialchars($file_url, ENT_QUOTES, 'UTF-8') . "' alt='صورة " . ($i + 1) . "'>";
+                            echo "</div>";
+                        }
+
+                        $file_path = upload_path('properties.images', "go" . $vilaid . "_" . $i . "_." . $ext);
+                        $file_url = upload_url('properties.images', "go" . $vilaid . "_" . $i . "_." . $ext);
+                        if (file_exists($file_path)) {
+                            echo "<div class='image-item'>";
+                            echo "<img src='" . htmlspecialchars($file_url, ENT_QUOTES, 'UTF-8') . "' alt='صورة " . ($i + 1) . "'>";
+                            echo "</div>";
+                        }
+                    }
+
+                    // Display file links
+                    $fileTypes = array(
+                        'pdf' => 'ملف PDF',
+                        'tif' => 'ملف TIF',
+                        'doc' => 'ملف Word',
+                        'ppt' => 'ملف PowerPoint',
+                        'pps' => 'ملف PowerPoint',
+                        'avi' => 'ملف فيديو',
+                        'mepg' => 'ملف فيديو',
+                        'wmv' => 'ملف فيديو',
+                        'swf' => 'ملف Flash',
+                        'xls' => 'ملف Excel',
+                        'mdi' => 'ملف MDI'
+                    );
+
+                    foreach ($fileTypes as $ext => $label) {
+                        $file_path = upload_path('properties.images', $vilaid . "_" . $i . "_." . $ext);
+                        $file_url = upload_url('properties.images', $vilaid . "_" . $i . "_." . $ext);
+                        if (file_exists($file_path)) {
+                            echo "<div class='image-item'>";
+                            echo "<a href='" . htmlspecialchars($file_url, ENT_QUOTES, 'UTF-8') . "' target='_blank' class='file-link'>";
+                            echo "<i class='bi bi-file-earmark me-2'></i>" . htmlspecialchars($label, ENT_QUOTES, 'UTF-8');
+                            echo "</a>";
+                            echo "</div>";
+                        }
+                    }
+                }
+                ?>
+            </div>
+        </div>
+    </div>
+    <?php endif; ?>
+
+    <!-- Map -->
+    <?php if ($mainlat && $mainlng): ?>
+    <div class="card shadow-sm border-0 mb-4 no-print">
+        <div class="card-header" style="background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%); color: white;">
+            <h5 class="mb-0">
+                <i class="bi bi-map me-2"></i>
+                الموقع على الخريطة
+            </h5>
+        </div>
+        <div class="card-body p-0">
+            <?php
+            $PolygonArray = str_replace("(", "Array(", $rowk['polypath']);
+            include_once "../../../mapv3.html";
+            include_once "../../../map-place.html";
+            ?>
+        </div>
+    </div>
+    <?php endif; ?>
+</div>
+
+<?php
+require"../../../reportfooter.hnt";
+?>

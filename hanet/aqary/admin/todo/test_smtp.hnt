@@ -1,0 +1,142 @@
+<?php
+/**
+ * SMTP Connection Test Script
+ * Tests SMTP settings and diagnoses authentication issues
+ */
+
+// Load PHPMailer 7
+require_once('../../PHPMailer-7.0.1/src/PHPMailer.php');
+require_once('../../PHPMailer-7.0.1/src/SMTP.php');
+require_once('../../PHPMailer-7.0.1/src/Exception.php');
+
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\SMTP;
+
+echo "<h1>SMTP Connection Test</h1>";
+
+// Load mail settings
+$mailsettings = @file_get_contents('../../mailsettings.cfg');
+
+if (empty($mailsettings)) {
+    die("<p style='color: red;'><strong>Error:</strong> Could not load mailsettings.cfg</p>");
+}
+
+$mailsettings = base64_decode($mailsettings);
+$mailsettings = str_replace("\r", "", $mailsettings);
+$mailsettings = str_replace("\n", "", $mailsettings);
+$mailsettings = explode("#", $mailsettings);
+
+$mailsendername = $mailsettings[0];
+$mailusername = $mailsettings[1];
+$mailpassword = $mailsettings[2];
+$mailhost = $mailsettings[3];
+$mailsmtpauth = $mailsettings[4];
+$usessl = $mailsettings[5];
+$mailport = $mailsettings[6];
+$usetls = $mailsettings[7];
+
+echo "<h2>Current Mail Settings:</h2>";
+echo "<table border='1' cellpadding='5' style='border-collapse: collapse;'>";
+echo "<tr><td><strong>Sender Name</strong></td><td>" . htmlspecialchars($mailsendername) . "</td></tr>";
+echo "<tr><td><strong>Username</strong></td><td>" . htmlspecialchars($mailusername) . "</td></tr>";
+echo "<tr><td><strong>Password</strong></td><td>" . str_repeat('*', strlen($mailpassword)) . " (" . strlen($mailpassword) . " characters)</td></tr>";
+echo "<tr><td><strong>Host</strong></td><td>" . htmlspecialchars($mailhost) . "</td></tr>";
+echo "<tr><td><strong>Port</strong></td><td>" . htmlspecialchars($mailport) . "</td></tr>";
+echo "<tr><td><strong>SMTP Auth</strong></td><td>" . ($mailsmtpauth ? 'Enabled (true)' : 'Disabled (false/empty)') . "</td></tr>";
+echo "<tr><td><strong>SSL</strong></td><td>" . ($usessl ? htmlspecialchars($usessl) : 'Not set') . "</td></tr>";
+echo "<tr><td><strong>TLS</strong></td><td>" . ($usetls ? 'Enabled (true)' : 'Not set') . "</td></tr>";
+echo "</table>";
+
+echo "<h2>Diagnosis:</h2>";
+echo "<ul>";
+
+// Check port and encryption combination
+if ($mailport == '25') {
+    echo "<li><strong style='color: orange;'>Warning:</strong> Port 25 is typically for unencrypted SMTP. For authentication, consider:";
+    echo "<ul>";
+    echo "<li>Port 587 with STARTTLS (TLS enabled)</li>";
+    echo "<li>Port 465 with SSL</li>";
+    echo "</ul></li>";
+}
+
+if (!$usessl && !$usetls) {
+    echo "<li><strong style='color: orange;'>Warning:</strong> No encryption (SSL/TLS) is enabled. Modern SMTP servers usually require encryption.</li>";
+}
+
+if (!$mailsmtpauth) {
+    echo "<li><strong style='color: red;'>Error:</strong> SMTP Authentication is disabled but authentication is required.</li>";
+}
+
+echo "</ul>";
+
+echo "<h2>Testing Connection:</h2>";
+echo "<pre style='background: #f5f5f5; padding: 10px; border: 1px solid #ddd;'>";
+
+try {
+    $mail = new PHPMailer(true);
+
+    // Configure SMTP
+    $mail->isSMTP();
+    $mail->SMTPDebug = 3; // Full debug
+    $mail->Debugoutput = 'html';
+
+    $mail->Host = $mailhost;
+    $mail->Port = $mailport;
+    $mail->SMTPAuth = (bool)$mailsmtpauth;
+    $mail->Username = $mailusername;
+    $mail->Password = $mailpassword;
+    $mail->Timeout = 15;
+
+    // Set encryption
+    if ($usetls) {
+        $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
+        echo "Using STARTTLS encryption\n\n";
+    } elseif ($usessl && strtolower($usessl) === 'ssl') {
+        $mail->SMTPSecure = PHPMailer::ENCRYPTION_SMTPS;
+        echo "Using SSL encryption\n\n";
+    } else {
+        echo "No encryption enabled\n\n";
+    }
+
+    $mail->SMTPOptions = array(
+        'ssl' => array(
+            'verify_peer' => false,
+            'verify_peer_name' => false,
+            'allow_self_signed' => true
+        ),
+        'tls' => array(
+            'verify_peer' => false,
+            'verify_peer_name' => false,
+            'allow_self_signed' => true
+        ),
+        'socket' => array(
+            'bindto' => '0.0.0.0:0' // Force IPv4 connection (fixes IPv6 network issues)
+        )
+    );
+
+    // Try to connect
+    echo "Attempting to connect to $mailhost:$mailport...\n\n";
+    $mail->smtpConnect();
+
+    echo "\n<strong style='color: green;'>✓ SUCCESS: Connected and authenticated successfully!</strong>\n";
+
+    $mail->smtpClose();
+
+} catch (Exception $e) {
+    echo "\n<strong style='color: red;'>✗ FAILED: " . $e->getMessage() . "</strong>\n";
+}
+
+echo "</pre>";
+
+echo "<h2>Recommendations:</h2>";
+echo "<ol>";
+echo "<li><strong>For most servers:</strong> Use Port 587 with STARTTLS (TLS enabled)</li>";
+echo "<li><strong>For Gmail/Google Workspace:</strong> Port 587, TLS, with app-specific password</li>";
+echo "<li><strong>For Office365:</strong> Port 587, TLS</li>";
+echo "<li><strong>For cPanel/WHM servers:</strong> Port 587 or 465</li>";
+echo "<li><strong>Check with your hosting provider</strong> for the correct SMTP settings</li>";
+echo "</ol>";
+
+echo "<hr>";
+echo "<p><a href='process_emails.hnt'>← Back to Email Processor</a></p>";
+?>

@@ -1,0 +1,1006 @@
+<?php
+/**
+ * Journal Entries Module
+ * القيود اليومية
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "القيود اليومية";
+$sc_id = "202";
+include_once "../../../../nocash.hnt";
+include_once "../../../../connectdb.hnt";
+include_once "../../../../header.hnt";
+include_once "../../includes/accounting_class.hnt";
+
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+
+// Handle AJAX actions
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $action = $_POST['ajax_action'];
+    $response = ['success' => false, 'message' => ''];
+
+    switch ($action) {
+        case 'create_entry':
+            $data = [
+                'entry_date' => $_POST['entry_date'],
+                'entry_type' => $_POST['entry_type'] ?? 'manual',
+                'reference_type' => $_POST['reference_type'] ?? null,
+                'reference_id' => $_POST['reference_id'] ?? null,
+                'description' => $_POST['description'],
+                'status' => $_POST['status'] ?? 'draft'
+            ];
+
+            $lines = json_decode($_POST['lines'], true);
+
+            $result = $accountingManager->createJournalEntry($data, $lines);
+            $response = $result;
+            $response['message'] = $result['success'] ? 'تم إنشاء القيد بنجاح' : ($result['error'] ?? 'فشل في إنشاء القيد');
+            break;
+
+        case 'update_entry':
+            $entryId = $_POST['entry_id'];
+            $data = [
+                'entry_date' => $_POST['entry_date'],
+                'entry_type' => $_POST['entry_type'] ?? 'manual',
+                'description' => $_POST['description']
+            ];
+
+            $lines = json_decode($_POST['lines'], true);
+
+            // Delete old lines
+            $db->query("DELETE FROM acc_journal_entry_lines WHERE entry_id = $entryId");
+
+            // Update entry (allow editing of both draft and posted entries)
+            $updateSql = "UPDATE acc_journal_entries SET
+                         entry_date = '{$data['entry_date']}',
+                         entry_type = '{$data['entry_type']}',
+                         description = '{$db->real_escape_string($data['description'])}'
+                         WHERE entry_id = $entryId";
+
+            if ($db->query($updateSql)) {
+                // Insert new lines
+                $totalDebit = 0;
+                $totalCredit = 0;
+                $lineNumber = 1;
+
+                foreach ($lines as $line) {
+                    $accountId = intval($line['account_id']);
+                    $desc = $db->real_escape_string($line['description']);
+                    $debit = floatval($line['debit_amount']);
+                    $credit = floatval($line['credit_amount']);
+
+                    $totalDebit += $debit;
+                    $totalCredit += $credit;
+
+                    $lineSql = "INSERT INTO acc_journal_entry_lines
+                               (entry_id, line_number, account_id, description, debit_amount, credit_amount)
+                               VALUES ($entryId, $lineNumber, $accountId, '$desc', $debit, $credit)";
+                    $db->query($lineSql);
+                    $lineNumber++;
+                }
+
+                // Update totals
+                $db->query("UPDATE acc_journal_entries SET total_debit = $totalDebit, total_credit = $totalCredit WHERE entry_id = $entryId");
+
+                $response = ['success' => true, 'message' => 'تم تحديث القيد بنجاح'];
+            } else {
+                $response = ['success' => false, 'message' => 'فشل في تحديث القيد'];
+            }
+            break;
+
+        case 'post_entry':
+            $entryId = $_POST['entry_id'];
+            $result = $accountingManager->postJournalEntry($entryId);
+            $response = $result;
+            $response['message'] = $result['success'] ? 'تم ترحيل القيد بنجاح' : 'فشل في ترحيل القيد';
+            break;
+
+        case 'delete_entry':
+            $entryId = $_POST['entry_id'];
+
+            // Only allow deletion of draft entries (not posted)
+            $checkQuery = "SELECT status FROM acc_journal_entries WHERE entry_id = $entryId";
+            $checkResult = $db->query($checkQuery);
+
+            if ($checkResult && $checkResult->num_rows > 0) {
+                $entry = $checkResult->fetch_assoc();
+
+                if ($entry['status'] == 'draft') {
+                    // Delete entry lines first
+                    $db->query("DELETE FROM acc_journal_entry_lines WHERE entry_id = $entryId");
+
+                    // Delete the entry
+                    if ($db->query("DELETE FROM acc_journal_entries WHERE entry_id = $entryId")) {
+                        $response = ['success' => true, 'message' => 'تم حذف القيد بنجاح'];
+                    } else {
+                        $response = ['success' => false, 'message' => 'فشل في حذف القيد'];
+                    }
+                } else {
+                    $response = ['success' => false, 'message' => 'لا يمكن حذف قيد مرحّل. استخدم قيد عكسي بدلاً من ذلك.'];
+                }
+            } else {
+                $response = ['success' => false, 'message' => 'القيد غير موجود'];
+            }
+            break;
+    }
+
+    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// Pagination and filters
+$page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
+$perPage = 20;
+$offset = ($page - 1) * $perPage;
+
+// Filter parameters
+$search = isset($_GET['search']) ? $db->real_escape_string($_GET['search']) : '';
+$status = isset($_GET['status']) ? $_GET['status'] : '';
+$entryType = isset($_GET['entry_type']) ? $_GET['entry_type'] : '';
+$dateFrom = isset($_GET['date_from']) ? $_GET['date_from'] : '';
+$dateTo = isset($_GET['date_to']) ? $_GET['date_to'] : '';
+
+// Build WHERE clause
+$where = [];
+if ($search) {
+    $where[] = "(entry_number LIKE '%$search%' OR description LIKE '%$search%')";
+}
+if ($status) {
+    $where[] = "status = '$status'";
+}
+if ($entryType) {
+    $where[] = "entry_type = '$entryType'";
+}
+if ($dateFrom) {
+    $where[] = "entry_date >= '$dateFrom'";
+}
+if ($dateTo) {
+    $where[] = "entry_date <= '$dateTo'";
+}
+
+$whereClause = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
+
+// Count total entries
+$countQuery = "SELECT COUNT(*) as total FROM acc_journal_entries $whereClause";
+$countResult = $db->query($countQuery);
+$totalEntries = $countResult->fetch_assoc()['total'];
+$totalPages = ceil($totalEntries / $perPage);
+
+// Get entries
+$entriesQuery = "SELECT * FROM acc_journal_entries $whereClause ORDER BY entry_date DESC, entry_id DESC LIMIT $perPage OFFSET $offset";
+$entriesResult = $db->query($entriesQuery);
+$entries = [];
+if ($entriesResult) {
+    while ($row = $entriesResult->fetch_assoc()) {
+        $entries[] = $row;
+    }
+}
+
+// Get all accounts for dropdown
+$accounts = $accountingManager->getAllAccounts(['is_active' => 1, 'is_leaf' => 1]);
+
+// Get all entry lines for the current page entries
+$entryLines = [];
+if (!empty($entries)) {
+    $entryIds = array_column($entries, 'entry_id');
+    $entryIdsStr = implode(',', $entryIds);
+    $linesQuery = "SELECT jel.*, acc.account_code, acc.account_name_ar
+                   FROM acc_journal_entry_lines jel
+                   JOIN acc_chart_of_accounts acc ON jel.account_id = acc.account_id
+                   WHERE jel.entry_id IN ($entryIdsStr)
+                   ORDER BY jel.entry_id, jel.line_number";
+    $linesResult = $db->query($linesQuery);
+    if ($linesResult) {
+        while ($row = $linesResult->fetch_assoc()) {
+            $entryId = $row['entry_id'];
+            if (!isset($entryLines[$entryId])) {
+                $entryLines[$entryId] = [];
+            }
+            $entryLines[$entryId][] = $row;
+        }
+    }
+}
+?>
+
+<style>
+:root {
+    --primary-color: #667eea;
+    --secondary-color: #764ba2;
+}
+
+.page-header {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    padding: 2rem;
+    border-radius: 15px;
+    margin-bottom: 2rem;
+}
+
+.entry-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    transition: all 0.3s ease;
+}
+
+.entry-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.12);
+}
+
+.entry-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid #f0f0f0;
+    margin-bottom: 1rem;
+}
+
+.entry-number {
+    font-weight: 700;
+    font-size: 1.2rem;
+    color: var(--primary-color);
+}
+
+.badge-status {
+    padding: 0.5rem 1rem;
+    border-radius: 20px;
+    font-weight: 600;
+}
+
+.line-item {
+    padding: 0.75rem;
+    background: #f8f9fa;
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+}
+
+.btn-add-entry {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    border: none;
+    color: white;
+    padding: 0.75rem 1.5rem;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+.modal-content {
+    border-radius: 15px;
+    border: none;
+}
+
+.modal-header {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    border-radius: 15px 15px 0 0;
+}
+
+.entry-line-row {
+    background: #f8f9fa;
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+}
+
+.total-row {
+    background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+    color: white;
+    padding: 1rem;
+    border-radius: 8px;
+    font-weight: 700;
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-journal-text me-2"></i>القيود اليومية
+                </h1>
+                <p class="mb-0 opacity-75">Journal Entries (<?= number_format($totalEntries) ?> قيد)</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-add-entry btn-lg ms-2" data-bs-toggle="modal" data-bs-target="#addEntryModal">
+                    <i class="bi bi-plus-circle me-2"></i>قيد جديد
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Search and Filters -->
+    <div class="card mb-4">
+        <div class="card-body">
+            <form method="GET" action="index.hnt" class="row g-3">
+                <div class="col-md-3">
+                    <label class="form-label">بحث</label>
+                    <input type="text" class="form-control" name="search" placeholder="رقم القيد أو الوصف" value="<?= htmlspecialchars($search) ?>">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">الحالة</label>
+                    <select class="form-select" name="status">
+                        <option value="">الكل</option>
+                        <option value="draft" <?= $status == 'draft' ? 'selected' : '' ?>>مسودة</option>
+                        <option value="posted" <?= $status == 'posted' ? 'selected' : '' ?>>مرحل</option>
+                        <option value="cancelled" <?= $status == 'cancelled' ? 'selected' : '' ?>>ملغي</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">نوع القيد</label>
+                    <select class="form-select" name="entry_type">
+                        <option value="">الكل</option>
+                        <option value="manual" <?= $entryType == 'manual' ? 'selected' : '' ?>>يدوي</option>
+                        <option value="opening" <?= $entryType == 'opening' ? 'selected' : '' ?>>افتتاحي</option>
+                        <option value="closing" <?= $entryType == 'closing' ? 'selected' : '' ?>>ختامي</option>
+                        <option value="adjustment" <?= $entryType == 'adjustment' ? 'selected' : '' ?>>تسوية</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">من تاريخ</label>
+                    <input type="date" class="form-control" name="date_from" value="<?= htmlspecialchars($dateFrom) ?>">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">إلى تاريخ</label>
+                    <input type="date" class="form-control" name="date_to" value="<?= htmlspecialchars($dateTo) ?>">
+                </div>
+                <div class="col-md-1 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary w-100">
+                        <i class="bi bi-search"></i>
+                    </button>
+                </div>
+            </form>
+            <?php if ($search || $status || $entryType || $dateFrom || $dateTo): ?>
+            <div class="mt-2">
+                <a href="index.hnt" class="btn btn-sm btn-outline-secondary">
+                    <i class="bi bi-x-circle me-1"></i>مسح الفلاتر
+                </a>
+            </div>
+            <?php endif; ?>
+        </div>
+    </div>
+
+    <!-- Entries List -->
+    <div class="row">
+        <div class="col-12">
+            <?php if (empty($entries)): ?>
+            <div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>
+                لا توجد قيود يومية. انقر على "قيد جديد" لإضافة أول قيد.
+            </div>
+            <?php else: ?>
+            <?php foreach ($entries as $entry): ?>
+            <div class="entry-card">
+                <div class="entry-header">
+                    <div>
+                        <span class="entry-number"><?php echo $entry['entry_number']; ?></span>
+                        <span class="text-muted ms-3"><?php echo date('Y-m-d', strtotime($entry['entry_date'])); ?></span>
+                    </div>
+                    <div>
+                        <?php if ($entry['status'] == 'draft'): ?>
+                        <span class="badge bg-warning badge-status">مسودة</span>
+                        <button class="btn btn-sm btn-primary ms-2" onclick="editEntry(<?php echo $entry['entry_id']; ?>)">
+                            <i class="bi bi-pencil me-1"></i>تعديل
+                        </button>
+                        <button class="btn btn-sm btn-success ms-2" onclick="postEntry(<?php echo $entry['entry_id']; ?>)">
+                            <i class="bi bi-check-circle me-1"></i>ترحيل
+                        </button>
+                        <button class="btn btn-sm btn-danger ms-2" onclick="deleteEntry(<?php echo $entry['entry_id']; ?>)">
+                            <i class="bi bi-trash me-1"></i>حذف
+                        </button>
+                        <?php elseif ($entry['status'] == 'posted'): ?>
+                        <span class="badge bg-success badge-status">مرحل</span>
+                        <button class="btn btn-sm btn-primary ms-2" onclick="editEntry(<?php echo $entry['entry_id']; ?>)">
+                            <i class="bi bi-pencil me-1"></i>تعديل
+                        </button>
+                        <?php else: ?>
+                        <span class="badge bg-danger badge-status">ملغي</span>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+                <div class="mb-3">
+                    <strong>الوصف:</strong> <?php echo $entry['description']; ?>
+                </div>
+
+                <?php
+                // Get entry lines
+                $linesQuery = "SELECT jel.*, acc.account_code, acc.account_name_ar
+                              FROM acc_journal_entry_lines jel
+                              JOIN acc_chart_of_accounts acc ON jel.account_id = acc.account_id
+                              WHERE jel.entry_id = {$entry['entry_id']}
+                              ORDER BY jel.line_number";
+                $linesResult = $db->query($linesQuery);
+                ?>
+
+                <div class="table-responsive">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>الحساب</th>
+                                <th>البيان</th>
+                                <th class="text-end">مدين</th>
+                                <th class="text-end">دائن</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php while ($line = $linesResult->fetch_assoc()): ?>
+                            <tr>
+                                <td><?php echo $line['account_code'] . ' - ' . $line['account_name_ar']; ?></td>
+                                <td><?php echo $line['description']; ?></td>
+                                <td class="text-end"><?php echo $line['debit_amount'] > 0 ? number_format($line['debit_amount'], 2) : '-'; ?></td>
+                                <td class="text-end"><?php echo $line['credit_amount'] > 0 ? number_format($line['credit_amount'], 2) : '-'; ?></td>
+                            </tr>
+                            <?php endwhile; ?>
+                            <tr class="fw-bold">
+                                <td colspan="2">الإجمالي</td>
+                                <td class="text-end"><?php echo number_format($entry['total_debit'], 2); ?></td>
+                                <td class="text-end"><?php echo number_format($entry['total_credit'], 2); ?></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <?php endforeach; ?>
+
+            <!-- Pagination -->
+            <?php if ($totalPages > 1): ?>
+            <nav aria-label="Page navigation" class="mt-4">
+                <ul class="pagination justify-content-center">
+                    <!-- Previous -->
+                    <?php if ($page > 1): ?>
+                    <li class="page-item">
+                        <a class="page-link" href="?page=<?= $page - 1 ?><?= $search ? '&search=' . urlencode($search) : '' ?><?= $status ? '&status=' . $status : '' ?><?= $entryType ? '&entry_type=' . $entryType : '' ?><?= $dateFrom ? '&date_from=' . $dateFrom : '' ?><?= $dateTo ? '&date_to=' . $dateTo : '' ?>">
+                            السابق
+                        </a>
+                    </li>
+                    <?php endif; ?>
+
+                    <!-- Page Numbers -->
+                    <?php
+                    $startPage = max(1, $page - 2);
+                    $endPage = min($totalPages, $page + 2);
+
+                    for ($i = $startPage; $i <= $endPage; $i++):
+                    ?>
+                    <li class="page-item <?= $i == $page ? 'active' : '' ?>">
+                        <a class="page-link" href="?page=<?= $i ?><?= $search ? '&search=' . urlencode($search) : '' ?><?= $status ? '&status=' . $status : '' ?><?= $entryType ? '&entry_type=' . $entryType : '' ?><?= $dateFrom ? '&date_from=' . $dateFrom : '' ?><?= $dateTo ? '&date_to=' . $dateTo : '' ?>">
+                            <?= $i ?>
+                        </a>
+                    </li>
+                    <?php endfor; ?>
+
+                    <!-- Next -->
+                    <?php if ($page < $totalPages): ?>
+                    <li class="page-item">
+                        <a class="page-link" href="?page=<?= $page + 1 ?><?= $search ? '&search=' . urlencode($search) : '' ?><?= $status ? '&status=' . $status : '' ?><?= $entryType ? '&entry_type=' . $entryType : '' ?><?= $dateFrom ? '&date_from=' . $dateFrom : '' ?><?= $dateTo ? '&date_to=' . $dateTo : '' ?>">
+                            التالي
+                        </a>
+                    </li>
+                    <?php endif; ?>
+                </ul>
+                <div class="text-center text-muted">
+                    صفحة <?= $page ?> من <?= $totalPages ?> (<?= number_format($totalEntries) ?> قيد)
+                </div>
+            </nav>
+            <?php endif; ?>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<!-- Add Entry Modal -->
+<div class="modal fade" id="addEntryModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-plus-circle me-2"></i>قيد يومية جديد
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="addEntryForm">
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-6">
+                            <label class="form-label">تاريخ القيد *</label>
+                            <input type="date" class="form-control" name="entry_date" value="<?php echo date('Y-m-d'); ?>" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">نوع القيد</label>
+                            <select class="form-select" name="entry_type">
+                                <option value="manual">يدوي</option>
+                                <option value="opening">افتتاحي</option>
+                                <option value="closing">ختامي</option>
+                                <option value="adjustment">تسوية</option>
+                            </select>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">الوصف *</label>
+                            <textarea class="form-control" name="description" rows="2" required></textarea>
+                        </div>
+                    </div>
+
+                    <h6 class="mb-3"><i class="bi bi-list-ul me-2"></i>بنود القيد</h6>
+
+                    <div id="entryLines">
+                        <!-- Lines will be added here -->
+                    </div>
+
+                    <button type="button" class="btn btn-outline-primary mb-3" onclick="addLine()">
+                        <i class="bi bi-plus-circle me-2"></i>إضافة بند
+                    </button>
+
+                    <div class="total-row">
+                        <div class="row">
+                            <div class="col-6 text-end">
+                                إجمالي المدين: <span id="totalDebit">0.00</span> ر.س
+                            </div>
+                            <div class="col-6 text-end">
+                                إجمالي الدائن: <span id="totalCredit">0.00</span> ر.س
+                            </div>
+                        </div>
+                        <div class="text-center mt-2" id="balanceWarning" style="display:none;">
+                            <i class="bi bi-exclamation-triangle me-2"></i>
+                            القيد غير متوازن!
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-warning" onclick="submitEntry('draft')">
+                    <i class="bi bi-save me-2"></i>حفظ كمسودة
+                </button>
+                <button type="button" class="btn btn-success" onclick="submitEntry('posted')">
+                    <i class="bi bi-check-circle me-2"></i>حفظ وترحيل
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Entry Modal -->
+<div class="modal fade" id="editEntryModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-pencil me-2"></i>تعديل قيد يومية
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="editEntryForm">
+                    <input type="hidden" id="edit_entry_id" name="entry_id">
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-6">
+                            <label class="form-label">تاريخ القيد *</label>
+                            <input type="date" class="form-control" id="edit_entry_date" name="entry_date" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">نوع القيد</label>
+                            <select class="form-select" id="edit_entry_type" name="entry_type">
+                                <option value="manual">يدوي</option>
+                                <option value="opening">افتتاحي</option>
+                                <option value="closing">ختامي</option>
+                                <option value="adjustment">تسوية</option>
+                            </select>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">الوصف *</label>
+                            <textarea class="form-control" id="edit_description" name="description" rows="2" required></textarea>
+                        </div>
+                    </div>
+
+                    <h6 class="mb-3"><i class="bi bi-list-ul me-2"></i>بنود القيد</h6>
+
+                    <div id="editEntryLines">
+                        <!-- Lines will be loaded here -->
+                    </div>
+
+                    <button type="button" class="btn btn-outline-primary mb-3" onclick="addEditLine()">
+                        <i class="bi bi-plus-circle me-2"></i>إضافة بند
+                    </button>
+
+                    <div class="total-row">
+                        <div class="row">
+                            <div class="col-6 text-end">
+                                إجمالي المدين: <span id="editTotalDebit">0.00</span> ر.س
+                            </div>
+                            <div class="col-6 text-end">
+                                إجمالي الدائن: <span id="editTotalCredit">0.00</span> ر.س
+                            </div>
+                        </div>
+                        <div class="text-center mt-2" id="editBalanceWarning" style="display:none;">
+                            <i class="bi bi-exclamation-triangle me-2"></i>
+                            القيد غير متوازن!
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-primary" onclick="submitEditEntry()">
+                    <i class="bi bi-save me-2"></i>حفظ التعديلات
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Result Modal -->
+<div class="modal fade" id="resultModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header" id="resultModalHeader">
+                <h5 class="modal-title text-white" id="resultModalTitle"></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p id="resultModalMessage"></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إغلاق</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+
+<script>
+const accounts = <?php echo json_encode($accounts); ?>;
+const entriesData = <?php echo json_encode($entries); ?>;
+const entryLinesData = <?php echo json_encode($entryLines); ?>;
+let lineCounter = 0;
+
+function addLine() {
+    lineCounter++;
+    const lineHtml = `
+        <div class="entry-line-row" id="line_${lineCounter}">
+            <div class="row g-2">
+                <div class="col-md-4">
+                    <select class="form-control account-select" name="account_id_${lineCounter}" required>
+                        <option value="">اختر الحساب</option>
+                        ${accounts.map(acc => `<option value="${acc.account_id}">${acc.account_code} - ${acc.account_name_ar}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <input type="text" class="form-control" name="description_${lineCounter}" placeholder="البيان" required>
+                </div>
+                <div class="col-md-2">
+                    <input type="number" step="0.01" class="form-control debit-input" name="debit_${lineCounter}" placeholder="مدين" value="0" onchange="calculateTotals()">
+                </div>
+                <div class="col-md-2">
+                    <input type="number" step="0.01" class="form-control credit-input" name="credit_${lineCounter}" placeholder="دائن" value="0" onchange="calculateTotals()">
+                </div>
+                <div class="col-md-1">
+                    <button type="button" class="btn btn-danger btn-sm" onclick="removeLine(${lineCounter})">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    document.getElementById('entryLines').insertAdjacentHTML('beforeend', lineHtml);
+}
+
+function removeLine(lineId) {
+    document.getElementById('line_' + lineId).remove();
+    calculateTotals();
+}
+
+function calculateTotals() {
+    let totalDebit = 0;
+    let totalCredit = 0;
+
+    document.querySelectorAll('.debit-input').forEach(input => {
+        totalDebit += parseFloat(input.value) || 0;
+    });
+
+    document.querySelectorAll('.credit-input').forEach(input => {
+        totalCredit += parseFloat(input.value) || 0;
+    });
+
+    document.getElementById('totalDebit').textContent = totalDebit.toFixed(2);
+    document.getElementById('totalCredit').textContent = totalCredit.toFixed(2);
+
+    const warning = document.getElementById('balanceWarning');
+    if (Math.abs(totalDebit - totalCredit) > 0.01) {
+        warning.style.display = 'block';
+    } else {
+        warning.style.display = 'none';
+    }
+}
+
+function submitEntry(status) {
+    const form = document.getElementById('addEntryForm');
+    const formData = new FormData(form);
+
+    // Collect lines
+    const lines = [];
+    for (let i = 1; i <= lineCounter; i++) {
+        const accountSelect = document.querySelector(`[name="account_id_${i}"]`);
+        if (accountSelect && accountSelect.value) {
+            lines.push({
+                account_id: accountSelect.value,
+                description: document.querySelector(`[name="description_${i}"]`).value,
+                debit_amount: parseFloat(document.querySelector(`[name="debit_${i}"]`).value) || 0,
+                credit_amount: parseFloat(document.querySelector(`[name="credit_${i}"]`).value) || 0,
+                cost_center_id: null
+            });
+        }
+    }
+
+    if (lines.length < 2) {
+        showResultModal(false, 'يجب إضافة بندين على الأقل');
+        return;
+    }
+
+    formData.append('ajax_action', 'create_entry');
+    formData.append('status', status);
+    formData.append('lines', JSON.stringify(lines));
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        const modal = bootstrap.Modal.getInstance(document.getElementById('addEntryModal'));
+        modal.hide();
+
+        showResultModal(data.success, data.message);
+
+        if (data.success) {
+            setTimeout(() => location.reload(), 1500);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showResultModal(false, 'حدث خطأ أثناء الحفظ');
+    });
+}
+
+function postEntry(entryId) {
+    if (!confirm('هل تريد ترحيل هذا القيد؟')) return;
+
+    const formData = new FormData();
+    formData.append('ajax_action', 'post_entry');
+    formData.append('entry_id', entryId);
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        showResultModal(data.success, data.message);
+        if (data.success) {
+            setTimeout(() => location.reload(), 1500);
+        }
+    });
+}
+
+function deleteEntry(entryId) {
+    if (!confirm('هل أنت متأكد من حذف هذا القيد؟\n\nتنبيه: يمكن حذف المسودات فقط. القيود المرحّلة تحتاج إلى قيد عكسي.')) return;
+
+    const formData = new FormData();
+    formData.append('ajax_action', 'delete_entry');
+    formData.append('entry_id', entryId);
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        showResultModal(data.success, data.message);
+        if (data.success) {
+            setTimeout(() => location.reload(), 1500);
+        }
+    });
+}
+
+function showResultModal(success, message) {
+    const modal = new bootstrap.Modal(document.getElementById('resultModal'));
+    const header = document.getElementById('resultModalHeader');
+    const title = document.getElementById('resultModalTitle');
+    const messageEl = document.getElementById('resultModalMessage');
+
+    if (success) {
+        header.style.background = 'linear-gradient(135deg, #28a745, #20c997)';
+        title.innerHTML = '<i class="bi bi-check-circle me-2"></i>نجحت العملية';
+    } else {
+        header.style.background = 'linear-gradient(135deg, #dc3545, #c82333)';
+        title.innerHTML = '<i class="bi bi-x-circle me-2"></i>فشلت العملية';
+    }
+
+    messageEl.textContent = message;
+    modal.show();
+}
+
+// Add initial lines
+addLine();
+addLine();
+
+// Edit functionality
+let editLineCounter = 0;
+let currentEditEntry = null;
+
+function editEntry(entryId) {
+    // Fetch entry details
+    fetch(`index.hnt?entry_id=${entryId}`)
+        .then(response => response.text())
+        .then(html => {
+            // Parse the HTML to extract entry data
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+
+            // Get entry from PHP data (we'll use a simpler approach - fetch via AJAX with JSON)
+            fetchEntryData(entryId);
+        });
+}
+
+function fetchEntryData(entryId) {
+    const entry = entriesData.find(e => e.entry_id == entryId);
+    if (!entry) {
+        alert('القيد غير موجود');
+        return;
+    }
+
+    // Populate edit form
+    document.getElementById('edit_entry_id').value = entry.entry_id;
+    document.getElementById('edit_entry_date').value = entry.entry_date;
+    document.getElementById('edit_entry_type').value = entry.entry_type;
+    document.getElementById('edit_description').value = entry.description;
+
+    // Fetch and populate lines
+    fetchEntryLines(entryId);
+
+    // Show modal
+    const modal = new bootstrap.Modal(document.getElementById('editEntryModal'));
+    modal.show();
+}
+
+function fetchEntryLines(entryId) {
+    // Clear existing lines
+    document.getElementById('editEntryLines').innerHTML = '';
+    editLineCounter = 0;
+
+    // Get lines from embedded data
+    const lines = entryLinesData[entryId] || [];
+
+    if (lines.length > 0) {
+        lines.forEach(line => {
+            addEditLine(line);
+        });
+        calculateEditTotals();
+    } else {
+        // Fallback: add empty lines
+        addEditLine();
+        addEditLine();
+    }
+}
+
+function addEditLine(lineData = null) {
+    editLineCounter++;
+    const lineHtml = `
+        <div class="entry-line-row" id="edit_line_${editLineCounter}">
+            <div class="row g-2">
+                <div class="col-md-4">
+                    <select class="form-control account-select" name="account_id_${editLineCounter}" required>
+                        <option value="">اختر الحساب</option>
+                        ${accounts.map(acc => `<option value="${acc.account_id}" ${lineData && lineData.account_id == acc.account_id ? 'selected' : ''}>${acc.account_code} - ${acc.account_name_ar}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <input type="text" class="form-control" name="description_${editLineCounter}" placeholder="البيان" value="${lineData ? lineData.description : ''}" required>
+                </div>
+                <div class="col-md-2">
+                    <input type="number" step="0.01" class="form-control edit-debit-input" name="debit_${editLineCounter}" placeholder="مدين" value="${lineData ? lineData.debit_amount : '0'}" onchange="calculateEditTotals()">
+                </div>
+                <div class="col-md-2">
+                    <input type="number" step="0.01" class="form-control edit-credit-input" name="credit_${editLineCounter}" placeholder="دائن" value="${lineData ? lineData.credit_amount : '0'}" onchange="calculateEditTotals()">
+                </div>
+                <div class="col-md-1">
+                    <button type="button" class="btn btn-danger btn-sm" onclick="removeEditLine(${editLineCounter})">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    document.getElementById('editEntryLines').insertAdjacentHTML('beforeend', lineHtml);
+}
+
+function removeEditLine(lineId) {
+    document.getElementById('edit_line_' + lineId).remove();
+    calculateEditTotals();
+}
+
+function calculateEditTotals() {
+    let totalDebit = 0;
+    let totalCredit = 0;
+
+    document.querySelectorAll('.edit-debit-input').forEach(input => {
+        totalDebit += parseFloat(input.value) || 0;
+    });
+
+    document.querySelectorAll('.edit-credit-input').forEach(input => {
+        totalCredit += parseFloat(input.value) || 0;
+    });
+
+    document.getElementById('editTotalDebit').textContent = totalDebit.toFixed(2);
+    document.getElementById('editTotalCredit').textContent = totalCredit.toFixed(2);
+
+    const warning = document.getElementById('editBalanceWarning');
+    if (Math.abs(totalDebit - totalCredit) > 0.01) {
+        warning.style.display = 'block';
+    } else {
+        warning.style.display = 'none';
+    }
+}
+
+function submitEditEntry() {
+    const form = document.getElementById('editEntryForm');
+    const formData = new FormData(form);
+
+    // Collect lines
+    const lines = [];
+    for (let i = 1; i <= editLineCounter; i++) {
+        const accountSelect = document.querySelector(`[name="account_id_${i}"]`);
+        if (accountSelect && accountSelect.value) {
+            lines.push({
+                account_id: accountSelect.value,
+                description: document.querySelector(`[name="description_${i}"]`).value,
+                debit_amount: parseFloat(document.querySelector(`[name="debit_${i}"]`).value) || 0,
+                credit_amount: parseFloat(document.querySelector(`[name="credit_${i}"]`).value) || 0
+            });
+        }
+    }
+
+    if (lines.length < 2) {
+        showResultModal(false, 'يجب إضافة بندين على الأقل');
+        return;
+    }
+
+    formData.append('ajax_action', 'update_entry');
+    formData.append('lines', JSON.stringify(lines));
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        const modal = bootstrap.Modal.getInstance(document.getElementById('editEntryModal'));
+        modal.hide();
+
+        showResultModal(data.success, data.message);
+
+        if (data.success) {
+            setTimeout(() => location.reload(), 1500);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showResultModal(false, 'حدث خطأ أثناء الحفظ');
+    });
+}
+</script>
+
+<?php require("../../../../foter.hnt"); ?>

@@ -1,0 +1,1051 @@
+<?php
+/**
+ * Word Template Management - Modern UI/UX
+ * Manages Word document templates for contracts, receipts, and other documents
+ * Allows file upload, margin configuration, and background paper settings
+ */
+
+$sc_title = "إدارة قوالب العقود والسندات";
+$sc_id = "118";
+
+// Detect AJAX request before any includes
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Include storage helpers
+require_once(__DIR__ . '/../lib/storage/helpers.php');
+
+// Handle file restore action (before any includes)
+if (isset($_REQUEST['restorepaper']) && $_REQUEST['restorepaper']) {
+    $filename = basename($_REQUEST['restorepaper']); // Security: prevent directory traversal
+    $source = upload_path('documents.templates.original', $filename);
+    $destination = upload_path('documents.templates.word', $filename);
+
+    if (file_exists($source)) {
+        copy($source, $destination);
+
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم استعادة القالب الافتراضي بنجاح'
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    } else {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'error' => 'الملف الأصلي غير موجود'
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    }
+    exit;
+}
+
+// Authentication and database connection
+include_once "../reqloginajax.hnt";
+
+// Load global variables from database
+$result = mysql_query("SELECT * FROM global", $link);
+while ($gl = mysql_fetch_array($result)) {
+    $GLOBALS[$gl['variblename']] = $gl['valuribalevalue'];
+}
+
+// Initialize margin settings if they don't exist
+if (!isset($egarleftmargin)) {
+    mysql_query("INSERT INTO global (variblename, valuribalevalue) VALUES
+        ('egarleftmargin', 12), ('egarrightmargin', 12), ('egartopmargin', 35), ('egardownmargin', 20),
+        ('sandleftmargin', 12), ('sandrightmargin', 12), ('sandtopmargin', 35), ('sanddownmargin', 20),
+        ('sellleftmargin', 12), ('sellrightmargin', 12), ('selltopmargin', 35), ('selldownmargin', 20),
+        ('edraleftmargin', 12), ('edrarightmargin', 12), ('edratopmargin', 35), ('edradownmargin', 20),
+        ('recleftmargin', 12), ('recrightmargin', 12), ('rectopmargin', 35), ('recdownmargin', 20),
+        ('matanleftmargin', 12), ('matanrightmargin', 12), ('matantopmargin', 35), ('matandownmargin', 20),
+        ('freeleftmargin', 12), ('freerightmargin', 12), ('freetopmargin', 35), ('freedownmargin', 20)", $link);
+
+    // Reload variables
+    $result = mysql_query("SELECT * FROM global", $link);
+    while ($gl = mysql_fetch_array($result)) {
+        $GLOBALS[$gl['variblename']] = $gl['valuribalevalue'];
+    }
+}
+
+// Handle AJAX margin update
+if ($is_ajax_request && isset($_POST['update_margin'])) {
+    $varname = mysql_real_escape_string($_POST['varname'], $link);
+    $value = intval($_POST['value']);
+
+    $sql = "UPDATE global SET valuribalevalue = '{$value}' WHERE variblename = '{$varname}' LIMIT 1";
+    mysql_query($sql, $link);
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'تم تحديث الهامش بنجاح'
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// Handle AJAX background paper setting update
+if ($is_ajax_request && isset($_POST['update_paper_setting'])) {
+    $varname = mysql_real_escape_string($_POST['varname'], $link);
+    $value = intval($_POST['value']);
+
+    $sql = "UPDATE global SET valuribalevalue = '{$value}' WHERE variblename = '{$varname}' LIMIT 1";
+    mysql_query($sql, $link);
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'تم تحديث الإعدادات بنجاح'
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// Handle file upload
+if (isset($_FILES['fullpaper']) && isset($_FILES['fullpaper']['name']) && $_FILES['fullpaper']['name']) {
+    $targetfile = $_POST['targetfile'];
+
+    // Validate file type
+    if ($_FILES['fullpaper']['type'] != "application/msword" &&
+        $_FILES['fullpaper']['type'] != "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'error' => 'يجب أن يكون نوع الملف MS Word (doc أو docx)'
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    }
+
+    // Validate file size (max 10MB)
+    if ($_FILES['fullpaper']['size'] > 10000000) {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'error' => 'أقصى حجم مسموح به 10 ميجا. يجب تقليل حجم الملف'
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    }
+
+    // Move uploaded file
+    if (move_uploaded_file($_FILES['fullpaper']['tmp_name'], $targetfile)) {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم رفع الملف بنجاح'
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    } else {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'error' => 'فشل رفع الملف. تحقق من الصلاحيات'
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    }
+}
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../header.hnt";
+}
+
+// Template configurations
+$templates = [
+    [
+        'id' => 'egar',
+        'title' => 'عقد الإيجار',
+        'icon' => 'bi-file-earmark-text',
+        'color' => '#0891b2',
+        'filename' => 'contrato.doc',
+        'show_background' => isset($fullpaper) ? $fullpaper : 0,
+        'background_var' => 'fullpaper',
+        'margins' => [
+            'right' => $egarrightmargin ?? 12,
+            'left' => $egarleftmargin ?? 12,
+            'top' => $egartopmargin ?? 35,
+            'bottom' => $egardownmargin ?? 20
+        ]
+    ],
+    [
+        'id' => 'sand',
+        'title' => 'سندات القبض والصرف',
+        'icon' => 'bi-receipt',
+        'color' => '#10b981',
+        'filename' => 'sanad.doc',
+        'show_background' => isset($halfpaper) ? $halfpaper : 0,
+        'background_var' => 'halfpaper',
+        'margins' => [
+            'right' => $sandrightmargin ?? 12,
+            'left' => $sandleftmargin ?? 12,
+            'top' => $sandtopmargin ?? 35,
+            'bottom' => $sanddownmargin ?? 20
+        ]
+    ],
+    [
+        'id' => 'sell',
+        'title' => 'عقد البيع',
+        'icon' => 'bi-cart-check',
+        'color' => '#f59e0b',
+        'filename' => 'sellcontrato.doc',
+        'show_background' => 0,
+        'background_var' => null,
+        'margins' => [
+            'right' => $sellrightmargin ?? 12,
+            'left' => $sellleftmargin ?? 12,
+            'top' => $selltopmargin ?? 35,
+            'bottom' => $selldownmargin ?? 20
+        ]
+    ],
+    [
+        'id' => 'edra',
+        'title' => 'عقد إدارة أملاك',
+        'icon' => 'bi-building',
+        'color' => '#8b5cf6',
+        'filename' => 'edarah.doc',
+        'show_background' => 0,
+        'background_var' => null,
+        'margins' => [
+            'right' => $edrarightmargin ?? 12,
+            'left' => $edraleftmargin ?? 12,
+            'top' => $edratopmargin ?? 35,
+            'bottom' => $edradownmargin ?? 20
+        ]
+    ],
+    [
+        'id' => 'rec',
+        'title' => 'محضر استلام',
+        'icon' => 'bi-clipboard-check',
+        'color' => '#ec4899',
+        'filename' => 'recite.doc',
+        'show_background' => 0,
+        'background_var' => null,
+        'margins' => [
+            'right' => $recrightmargin ?? 12,
+            'left' => $recleftmargin ?? 12,
+            'top' => $rectopmargin ?? 35,
+            'bottom' => $recdownmargin ?? 20
+        ]
+    ],
+    [
+        'id' => 'matan',
+        'title' => 'عقد صيانة',
+        'icon' => 'bi-tools',
+        'color' => '#14b8a6',
+        'filename' => 'mainten.doc',
+        'show_background' => 0,
+        'background_var' => null,
+        'margins' => [
+            'right' => $matanrightmargin ?? 12,
+            'left' => $matanleftmargin ?? 12,
+            'top' => $matantopmargin ?? 35,
+            'bottom' => $matandownmargin ?? 20
+        ]
+    ],
+    [
+        'id' => 'free',
+        'title' => 'عقد حر',
+        'icon' => 'bi-file-earmark-break',
+        'color' => '#6366f1',
+        'filename' => 'freecontrato.doc',
+        'show_background' => 0,
+        'background_var' => null,
+        'margins' => [
+            'right' => $freerightmargin ?? 12,
+            'left' => $freeleftmargin ?? 12,
+            'top' => $freetopmargin ?? 35,
+            'bottom' => $freedownmargin ?? 20
+        ]
+    ]
+];
+
+if (!$is_ajax_request) {
+?>
+
+<style>
+.templates-container {
+    background: #f8f9fa;
+    min-height: 100vh;
+    padding: 1.5rem 0;
+}
+
+.page-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.template-card {
+    background: white;
+    border: none;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+    margin-bottom: 1.5rem;
+    overflow: hidden;
+    transition: box-shadow 0.3s ease;
+}
+
+.template-card:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.template-header {
+    padding: 1rem 1.25rem;
+    border-bottom: 2px solid #f1f5f9;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.template-header i {
+    font-size: 1.5rem;
+}
+
+.template-header h3 {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 600;
+}
+
+.template-body {
+    padding: 1.25rem;
+}
+
+.upload-section {
+    border: 2px dashed #cbd5e1;
+    border-radius: 6px;
+    padding: 1.25rem;
+    background: #f8fafc;
+    margin-bottom: 1rem;
+    transition: all 0.3s ease;
+}
+
+.upload-section:hover {
+    border-color: #0891b2;
+    background: #f0f9ff;
+}
+
+.upload-section.dragover {
+    border-color: #0891b2;
+    background: #e0f2fe;
+}
+
+.file-input-wrapper {
+    position: relative;
+    display: inline-block;
+    width: 100%;
+}
+
+.file-input-wrapper input[type="file"] {
+    position: absolute;
+    left: 0;
+    top: 0;
+    opacity: 0;
+    width: 100%;
+    height: 100%;
+    cursor: pointer;
+}
+
+.file-input-label {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: white;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-weight: 500;
+}
+
+.file-input-label:hover {
+    background: #f8fafc;
+    border-color: #0891b2;
+    color: #0891b2;
+}
+
+.file-name-display {
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    background: white;
+    border-radius: 4px;
+    font-size: 0.875rem;
+    color: #64748b;
+    display: none;
+}
+
+.file-name-display.active {
+    display: block;
+}
+
+.action-buttons {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+}
+
+.btn-upload {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    border: none;
+    color: white;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+}
+
+.btn-upload:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(8, 145, 178, 0.3);
+}
+
+.btn-restore {
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    border: none;
+    color: white;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+}
+
+.btn-restore:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(245, 158, 11, 0.3);
+}
+
+.btn-download {
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    border: none;
+    color: white;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+}
+
+.btn-download:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(16, 185, 129, 0.3);
+}
+
+.margins-section {
+    background: #f8fafc;
+    border-radius: 6px;
+    padding: 1rem;
+    margin-top: 1rem;
+}
+
+.margins-section h5 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #475569;
+    margin-bottom: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.margin-input-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.margin-input-group label {
+    min-width: 100px;
+    font-size: 0.875rem;
+    color: #64748b;
+    margin: 0;
+}
+
+.margin-input-group input {
+    width: 80px;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    font-size: 0.875rem;
+    text-align: center;
+}
+
+.margin-input-group input:focus {
+    outline: none;
+    border-color: #0891b2;
+    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
+}
+
+.margin-input-group span {
+    font-size: 0.875rem;
+    color: #94a3b8;
+}
+
+.background-setting {
+    background: #f0f9ff;
+    border-radius: 6px;
+    padding: 1rem;
+    margin-top: 1rem;
+    border-left: 4px solid #0891b2;
+}
+
+.background-setting label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+    cursor: pointer;
+    font-weight: 500;
+    color: #0f172a;
+}
+
+.background-setting input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+    cursor: pointer;
+}
+
+.progress-bar-container {
+    display: none;
+    margin-top: 0.75rem;
+}
+
+.progress-bar-container.active {
+    display: block;
+}
+
+@media (max-width: 768px) {
+    .margin-input-group {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .margin-input-group label {
+        min-width: auto;
+    }
+
+    .action-buttons {
+        flex-direction: column;
+    }
+
+    .action-buttons button {
+        width: 100%;
+    }
+}
+</style>
+
+<div class="templates-container" dir="rtl">
+    <div class="container-fluid">
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>
+                <i class="bi bi-file-earmark-word"></i>
+                <?= $sc_title ?>
+            </h1>
+            <p class="mb-0 mt-2" style="opacity: 0.95; font-size: 0.95rem;">
+                إدارة قوالب المستندات وتخصيص الهوامش والإعدادات
+            </p>
+        </div>
+
+        <?php foreach ($templates as $template): ?>
+        <!-- Template Card -->
+        <div class="template-card" data-template-id="<?= $template['id'] ?>">
+            <div class="template-header" style="color: <?= $template['color'] ?>;">
+                <i class="<?= $template['icon'] ?>"></i>
+                <h3><?= $template['title'] ?></h3>
+            </div>
+
+            <div class="template-body">
+                <div class="row">
+
+                    <!-- Upload Section -->
+                    <div class="col-md-6">
+                        <div class="upload-section">
+                            <form class="upload-form" data-template-id="<?= $template['id'] ?>">
+                                <input type="hidden" name="ajax_submit" value="1">
+                                <input type="hidden" name="targetfile" value="word/<?= $template['filename'] ?>">
+
+                                <div class="file-input-wrapper">
+                                    <label class="file-input-label">
+                                        <i class="bi bi-cloud-upload"></i>
+                                        <span>اختر ملف Word (.doc)</span>
+                                    </label>
+                                    <input type="file"
+                                           name="fullpaper"
+                                           accept=".doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                           class="file-input">
+                                </div>
+
+                                <div class="file-name-display"></div>
+
+                                <div class="progress-bar-container">
+                                    <div class="progress">
+                                        <div class="progress-bar progress-bar-striped progress-bar-animated"
+                                             role="progressbar"
+                                             style="width: 0%"></div>
+                                    </div>
+                                </div>
+
+                                <div class="action-buttons">
+                                    <button type="submit" class="btn btn-upload" disabled>
+                                        <i class="bi bi-upload me-2"></i>رفع الملف
+                                    </button>
+
+                                    <button type="button"
+                                            class="btn btn-restore"
+                                            onclick="restoreTemplate('<?= $template['filename'] ?>', '<?= $template['title'] ?>')">
+                                        <i class="bi bi-arrow-counterclockwise me-2"></i>استعادة الافتراضي
+                                    </button>
+
+                                    <button type="button"
+                                            class="btn btn-download"
+                                            onclick="downloadTemplate('<?= $template['filename'] ?>')">
+                                        <i class="bi bi-download me-2"></i>تحميل للتعديل
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+
+                        <?php if ($template['background_var']): ?>
+                        <!-- Background Paper Setting -->
+                        <div class="background-setting">
+                            <label>
+                                <input type="checkbox"
+                                       class="background-checkbox"
+                                       data-varname="<?= $template['background_var'] ?>"
+                                       <?= $template['show_background'] == 1 ? 'checked' : '' ?>>
+                                <i class="bi bi-image"></i>
+                                إظهار الورقة الرسمية كخلفية
+                            </label>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+
+                    <!-- Margins Section -->
+                    <div class="col-md-6">
+                        <div class="margins-section">
+                            <h5>
+                                <i class="bi bi-rulers"></i>
+                                إعدادات الهوامش
+                            </h5>
+
+                            <div class="margin-input-group">
+                                <label>الهامش الأيمن:</label>
+                                <input type="number"
+                                       class="margin-input"
+                                       data-varname="<?= $template['id'] ?>rightmargin"
+                                       value="<?= $template['margins']['right'] ?>"
+                                       min="0"
+                                       max="100">
+                                <span>مم</span>
+                            </div>
+
+                            <div class="margin-input-group">
+                                <label>الهامش الأيسر:</label>
+                                <input type="number"
+                                       class="margin-input"
+                                       data-varname="<?= $template['id'] ?>leftmargin"
+                                       value="<?= $template['margins']['left'] ?>"
+                                       min="0"
+                                       max="100">
+                                <span>مم</span>
+                            </div>
+
+                            <div class="margin-input-group">
+                                <label>الهامش الأعلى:</label>
+                                <input type="number"
+                                       class="margin-input"
+                                       data-varname="<?= $template['id'] ?>topmargin"
+                                       value="<?= $template['margins']['top'] ?>"
+                                       min="0"
+                                       max="100">
+                                <span>مم</span>
+                            </div>
+
+                            <div class="margin-input-group">
+                                <label>الهامش الأسفل:</label>
+                                <input type="number"
+                                       class="margin-input"
+                                       data-varname="<?= $template['id'] ?>downmargin"
+                                       value="<?= $template['margins']['bottom'] ?>"
+                                       min="0"
+                                       max="100">
+                                <span>مم</span>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+        <?php endforeach; ?>
+
+    </div>
+</div>
+
+<script>
+/**
+ * Modern Template Management JavaScript
+ * Handles file uploads, margin updates, and background settings with AJAX
+ */
+
+// ============================================================================
+// FILE UPLOAD HANDLING
+// ============================================================================
+
+/**
+ * Initialize file upload handlers for all templates
+ */
+document.addEventListener('DOMContentLoaded', function() {
+
+    // Handle file selection
+    document.querySelectorAll('.file-input').forEach(input => {
+        input.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            const form = this.closest('.upload-form');
+            const displayDiv = form.querySelector('.file-name-display');
+            const uploadBtn = form.querySelector('.btn-upload');
+
+            if (file) {
+                // Display selected file name
+                displayDiv.textContent = `الملف المحدد: ${file.name}`;
+                displayDiv.classList.add('active');
+                uploadBtn.disabled = false;
+
+                // Validate file type
+                const validTypes = ['application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+                if (!validTypes.includes(file.type) && !file.name.match(/\.(doc|docx)$/i)) {
+                    showBootstrapNotification('يجب اختيار ملف Word بصيغة .doc أو .docx', 'error', 5000);
+                    uploadBtn.disabled = true;
+                    return;
+                }
+
+                // Validate file size (10MB max)
+                if (file.size > 10000000) {
+                    showBootstrapNotification('حجم الملف كبير جداً. الحد الأقصى 10 ميجا', 'error', 5000);
+                    uploadBtn.disabled = true;
+                    return;
+                }
+            } else {
+                displayDiv.classList.remove('active');
+                uploadBtn.disabled = true;
+            }
+        });
+    });
+
+    // Handle form submission
+    document.querySelectorAll('.upload-form').forEach(form => {
+        form.addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const formData = new FormData(this);
+            const uploadBtn = this.querySelector('.btn-upload');
+            const progressContainer = this.querySelector('.progress-bar-container');
+            const progressBar = this.querySelector('.progress-bar');
+            const fileInput = this.querySelector('.file-input');
+
+            if (!fileInput.files[0]) {
+                showBootstrapNotification('الرجاء اختيار ملف أولاً', 'warning', 3000);
+                return;
+            }
+
+            // Disable button and show progress
+            uploadBtn.disabled = true;
+            uploadBtn.innerHTML = '<i class="bi bi-hourglass-split me-2"></i>جاري الرفع...';
+            progressContainer.classList.add('active');
+            progressBar.style.width = '0%';
+
+            try {
+                const xhr = new XMLHttpRequest();
+
+                // Track upload progress
+                xhr.upload.addEventListener('progress', function(e) {
+                    if (e.lengthComputable) {
+                        const percentComplete = (e.loaded / e.total) * 100;
+                        progressBar.style.width = percentComplete + '%';
+                    }
+                });
+
+                // Handle completion
+                xhr.addEventListener('load', function() {
+                    if (xhr.status === 200) {
+                        let response;
+                        try {
+                            response = JSON.parse(xhr.responseText);
+                        } catch (err) {
+                            response = { success: true };
+                        }
+
+                        if (response.success) {
+                            showBootstrapNotification(response.message || 'تم رفع الملف بنجاح', 'success', 3000);
+
+                            // Reset form
+                            fileInput.value = '';
+                            form.querySelector('.file-name-display').classList.remove('active');
+                            uploadBtn.disabled = true;
+
+                            setTimeout(() => {
+                                progressContainer.classList.remove('active');
+                                progressBar.style.width = '0%';
+                            }, 1000);
+                        } else {
+                            showBootstrapNotification(response.error || 'حدث خطأ أثناء رفع الملف', 'error', 5000);
+                        }
+                    } else {
+                        showBootstrapNotification('حدث خطأ في الاتصال بالخادم', 'error', 5000);
+                    }
+
+                    uploadBtn.disabled = false;
+                    uploadBtn.innerHTML = '<i class="bi bi-upload me-2"></i>رفع الملف';
+                });
+
+                // Handle errors
+                xhr.addEventListener('error', function() {
+                    showBootstrapNotification('حدث خطأ في الاتصال بالخادم', 'error', 5000);
+                    uploadBtn.disabled = false;
+                    uploadBtn.innerHTML = '<i class="bi bi-upload me-2"></i>رفع الملف';
+                    progressContainer.classList.remove('active');
+                });
+
+                xhr.open('POST', 'option.templet.word.hnt');
+                xhr.send(formData);
+
+            } catch (error) {
+                console.error('Upload error:', error);
+                showBootstrapNotification('حدث خطأ أثناء رفع الملف', 'error', 5000);
+                uploadBtn.disabled = false;
+                uploadBtn.innerHTML = '<i class="bi bi-upload me-2"></i>رفع الملف';
+                progressContainer.classList.remove('active');
+            }
+        });
+    });
+
+    // Drag and drop support
+    document.querySelectorAll('.upload-section').forEach(section => {
+        section.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            this.classList.add('dragover');
+        });
+
+        section.addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            this.classList.remove('dragover');
+        });
+
+        section.addEventListener('drop', function(e) {
+            e.preventDefault();
+            this.classList.remove('dragover');
+
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                const fileInput = this.querySelector('.file-input');
+                fileInput.files = files;
+
+                // Trigger change event
+                const event = new Event('change', { bubbles: true });
+                fileInput.dispatchEvent(event);
+            }
+        });
+    });
+});
+
+// ============================================================================
+// MARGIN UPDATE HANDLING
+// ============================================================================
+
+/**
+ * Update margin value via AJAX
+ */
+let marginUpdateTimeout = null;
+
+document.querySelectorAll('.margin-input').forEach(input => {
+    input.addEventListener('input', function() {
+        // Only allow numbers
+        this.value = this.value.replace(/[^0-9]/g, '');
+
+        const varname = this.dataset.varname;
+        const value = parseInt(this.value) || 0;
+
+        // Debounce the AJAX call
+        clearTimeout(marginUpdateTimeout);
+        marginUpdateTimeout = setTimeout(() => {
+            updateMargin(varname, value);
+        }, 500);
+    });
+});
+
+/**
+ * Send margin update to server
+ */
+async function updateMargin(varname, value) {
+    try {
+        const formData = new FormData();
+        formData.append('ajax_submit', '1');
+        formData.append('update_margin', '1');
+        formData.append('varname', varname);
+        formData.append('value', value);
+
+        const response = await fetch('option.templet.word.hnt', {
+            method: 'POST',
+            body: formData
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            // Silent update - no notification needed for margins
+            console.log('Margin updated:', varname, value);
+        }
+    } catch (error) {
+        console.error('Margin update error:', error);
+    }
+}
+
+// ============================================================================
+// BACKGROUND PAPER SETTING
+// ============================================================================
+
+/**
+ * Handle background paper checkbox changes
+ */
+document.querySelectorAll('.background-checkbox').forEach(checkbox => {
+    checkbox.addEventListener('change', async function() {
+        const varname = this.dataset.varname;
+        const value = this.checked ? 1 : 0;
+
+        try {
+            const formData = new FormData();
+            formData.append('ajax_submit', '1');
+            formData.append('update_paper_setting', '1');
+            formData.append('varname', varname);
+            formData.append('value', value);
+
+            const response = await fetch('option.templet.word.hnt', {
+                method: 'POST',
+                body: formData
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                showBootstrapNotification(data.message, 'success', 2000);
+            } else {
+                showBootstrapNotification(data.error || 'حدث خطأ', 'error', 3000);
+                // Revert checkbox
+                this.checked = !this.checked;
+            }
+        } catch (error) {
+            console.error('Background setting error:', error);
+            showBootstrapNotification('حدث خطأ في الاتصال', 'error', 3000);
+            // Revert checkbox
+            this.checked = !this.checked;
+        }
+    });
+});
+
+// ============================================================================
+// TEMPLATE ACTIONS
+// ============================================================================
+
+/**
+ * Restore template to default
+ */
+async function restoreTemplate(filename, title) {
+    const confirmed = await confirm(
+        `هل ترغب بالفعل في حذف ${title} المعدل واستعادة الافتراضي؟`,
+        'تحذير'
+    );
+
+    if (!confirmed) return;
+
+    try {
+        const response = await fetch(`option.templet.word.hnt?restorepaper=${encodeURIComponent(filename)}&ajax_submit=1`);
+        const data = await response.json();
+
+        if (data.success) {
+            showBootstrapNotification(data.message, 'success', 3000);
+        } else {
+            showBootstrapNotification(data.error || 'حدث خطأ أثناء الاستعادة', 'error', 5000);
+        }
+    } catch (error) {
+        console.error('Restore error:', error);
+        showBootstrapNotification('حدث خطأ في الاتصال بالخادم', 'error', 5000);
+    }
+}
+
+/**
+ * Download template for editing
+ */
+function downloadTemplate(filename) {
+    window.location.href = `forcedownload.hnt?filename=word/${encodeURIComponent(filename)}`;
+}
+
+/**
+ * Custom confirm dialog (assuming this function exists in the global scope)
+ */
+function confirm(message, title) {
+    return new Promise((resolve) => {
+        if (typeof parent.confirm === 'function') {
+            parent.confirm(message, title, function() {
+                resolve(true);
+            });
+        } else {
+            resolve(window.confirm(message));
+        }
+    });
+}
+
+// ============================================================================
+// NOTIFICATIONS
+// ============================================================================
+
+/**
+ * Show notification (assuming showBootstrapNotification exists globally)
+ */
+if (typeof showBootstrapNotification !== 'function') {
+    window.showBootstrapNotification = function(message, type, duration) {
+        console.log(`[${type}] ${message}`);
+        alert(message);
+    };
+}
+
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Template management system initialized');
+    setTimeout(() => {
+        showBootstrapNotification('يمكنك الآن إدارة قوالب العقود والسندات', 'success', 3000);
+    }, 500);
+});
+</script>
+
+<?php
+require("../foter.hnt");
+}
+?>

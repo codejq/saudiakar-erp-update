@@ -1,0 +1,520 @@
+<?php
+$sc_title="اضافة المدن والأحياء";
+$sc_id="73";
+include_once"../../nocash.hnt";
+include_once"../../header.hnt";
+
+// Initialize country variables
+$country = isset($country) && $country != "" ? $country : $programmcountery;
+$countryid = isset($countryid) && $countryid != "" ? $countryid : $programmcountryid;
+?>
+
+<div class="container-fluid py-4">
+
+<?php
+
+// Handle delete action
+if (isset($action) && $action == 'delete') {
+	$cityid = isset($cityid) ? intval($cityid) : 0;
+
+	if($cityid <= 0) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => 'معرف المدينة غير صحيح'
+		]);
+		exit();
+	}
+
+	// Delete regions first
+	$delete_regions = "DELETE FROM mokhatat WHERE cityid={$cityid}";
+	mysql_query($delete_regions, $link);
+
+	// Delete city
+	$delete_city = "DELETE FROM city WHERE cityid={$cityid}";
+	$result = mysql_query($delete_city, $link);
+
+	if($result) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => true,
+			'message' => 'تم حذف المدينة بنجاح'
+		]);
+	} else {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => 'فشل في حذف المدينة: ' . mysql_error($link)
+		]);
+	}
+	exit();
+}
+
+// Only process form if action is insert
+if (isset($action) && $action == 'insert') {
+
+	// Sanitize inputs
+	$cityname = isset($cityname) ? trim($cityname) : '';
+	$countryid = isset($countryid) ? intval($countryid) : 0;
+
+	// Validate city name is not empty
+	if(empty($cityname)) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => 'برجاء كتابة اسم المدينة'
+		]);
+		exit();
+	}
+
+	// Validate country is selected
+	if($countryid <= 0) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => 'برجاء اختيار الدولة'
+		]);
+		exit();
+	}
+
+	// Check for duplicate city in the same country
+	$cityname_escaped = mysql_real_escape_string($cityname);
+	$sql = "SELECT COUNT(*) as count FROM city WHERE cityname='{$cityname_escaped}' AND countryid={$countryid}";
+	$result = mysql_query($sql, $link);
+	$row = mysql_fetch_array($result);
+
+	if ($row['count'] > 0) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => "المدينة '{$cityname}' موجودة بالفعل في هذه الدولة"
+		]);
+		exit();
+	}
+
+	// Insert new city
+	$sql = "INSERT INTO city SET cityname='{$cityname_escaped}', countryid={$countryid}";
+	$insert_result = mysql_query($sql, $link);
+
+	if(!$insert_result) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode([
+			'success' => false,
+			'message' => 'فشل في إضافة المدينة: ' . mysql_error($link)
+		]);
+		exit();
+	}
+
+	// Return JSON response for AJAX
+	$id = mysql_insert_id();
+
+	// Create default region for the new city
+	if($id > 0) {
+		$default_region_sql = "INSERT INTO mokhatat SET cityid={$id}, mokhatatname='منطقة'";
+		mysql_query($default_region_sql, $link);
+	}
+
+	// Return JSON response
+	header('Content-Type: application/json; charset=utf-8');
+	echo json_encode([
+		'success' => true,
+		'message' => "تم إضافة مدينة '{$cityname}' بنجاح",
+		'cityid' => $id,
+		'cityname' => $cityname,
+		'countryid' => $countryid
+	]);
+	exit();
+}
+
+?>
+
+
+<div id="maintitlebox" class="mb-3"></div>
+
+<!-- Select2 CSS -->
+<link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+<link href="https://cdn.jsdelivr.net/npm/select2-bootstrap-5-theme@1.3.0/dist/select2-bootstrap-5-theme.min.css" rel="stylesheet" />
+
+<!-- Select2 JS -->
+<script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+
+<div class="card shadow-sm mb-4">
+	<div class="card-header bg-primary text-white">
+		<h5 class="mb-0"><i class="bi bi-plus-circle"></i> إضافة مدينة جديدة</h5>
+	</div>
+	<div class="card-body">
+		<form dir="rtl" method="post" action="city.hnt" id="cityForm">
+			<div class="row g-3">
+				<div class="col-md-6">
+					<label for="countrySelect" class="form-label">اختر الدولة:</label>
+					<select name="countryid" id="countrySelect" class="form-select" required>
+						<option value="">اختر الدولة...</option>
+						<?php
+						$sql_countries = "SELECT countryid, country FROM countries ORDER BY country";
+						$result_countries = mysql_query($sql_countries, $link);
+						while($country_row = mysql_fetch_array($result_countries)) {
+							$selected = ($country_row['countryid'] == $countryid) ? 'selected' : '';
+							echo "<option value='{$country_row['countryid']}' {$selected}>{$country_row['country']}</option>";
+						}
+						?>
+					</select>
+				</div>
+				<div class="col-md-6">
+					<label for="cityname" class="form-label">اسم المدينة:</label>
+					<input type="text" name="cityname" id="cityname" class="form-control" dir="rtl" placeholder="أدخل اسم المدينة" required>
+				</div>
+				<div class="col-12">
+					<input type="hidden" name="action" value="insert">
+					<button type="submit" class="btn btn-success btn-lg" id="submitBtn">
+						<i class="bi bi-plus-lg"></i> إضافة إلى قائمة المدن
+					</button>
+					<button type="button" class="btn btn-secondary btn-lg" onclick="document.getElementById('cityname').value='';document.getElementById('cityname').focus();">
+						<i class="bi bi-x-lg"></i> مسح
+					</button>
+				</div>
+			</div>
+		</form>
+	</div>
+</div>
+
+<div class="card shadow-sm">
+	<div class="card-header bg-secondary text-white">
+		<h5 class="mb-0"><i class="bi bi-list-ul"></i> قائمة المدن والمناطق</h5>
+	</div>
+	<div class="card-body">
+		<div id="containerid" class="table-responsive"></div>
+	</div>
+</div>
+
+<script>
+// Load cities for selected country
+function loadCitiesForCountry(countryId) {
+	if(countryId) {
+		// Reload page with selected country
+		window.location.href = 'city.hnt?countryid=' + countryId;
+	}
+}
+
+// Load cities table via AJAX with Bootstrap 5 table
+function fillfreecontrato(){
+	var countryid = document.getElementById('countrySelect') ? document.getElementById('countrySelect').value : '<?=$countryid;?>';
+
+	if(!countryid) {
+		document.getElementById('containerid').innerHTML = '<div class="alert alert-info text-center"><i class="bi bi-info-circle"></i> الرجاء اختيار دولة لعرض المدن</div>';
+		return;
+	}
+
+	// Show loading indicator
+	document.getElementById('containerid').innerHTML = '<div class="text-center py-4"><div class="spinner-border text-primary" role="status"><span class="visually-hidden">جاري التحميل...</span></div></div>';
+
+	// Load cities data via AJAX
+	$.ajax({
+		url: 'city_list.php',
+		type: 'GET',
+		data: { countryid: countryid },
+		dataType: 'json',
+		success: function(response) {
+			if(response.success && response.cities.length > 0) {
+				var tableHtml = '<table class="table table-hover table-striped align-middle">';
+				tableHtml += '<thead class="table-dark">';
+				tableHtml += '<tr>';
+				tableHtml += '<th width="60">#</th>';
+				tableHtml += '<th>المدينة</th>';
+				tableHtml += '<th width="120">عدد المناطق</th>';
+				tableHtml += '<th width="200" class="text-center">الإجراءات</th>';
+				tableHtml += '</tr>';
+				tableHtml += '</thead>';
+				tableHtml += '<tbody>';
+
+				response.cities.forEach(function(city, index) {
+					tableHtml += '<tr>';
+					tableHtml += '<td>' + (index + 1) + '</td>';
+					tableHtml += '<td><strong>' + city.cityname + '</strong></td>';
+					tableHtml += '<td><span class="badge bg-info">' + city.region_count + '</span></td>';
+					tableHtml += '<td class="text-center">';
+					tableHtml += '<div class="btn-group btn-group-sm gap-1" role="group">';
+					tableHtml += '<a href="/aqary/admin/include/mokhatat.hnt?action=view&cityid=' + city.cityid + '" class="btn btn-primary" title="عرض المناطق">';
+					tableHtml += '<i class="bi bi-eye"></i> عرض';
+					tableHtml += '</a>';
+					tableHtml += '<a href="/aqary/admin/include/mokhatat.hnt?action=add&cityid=' + city.cityid + '" class="btn btn-success ms-1" title="إضافة منطقة">';
+					tableHtml += '<i class="bi bi-plus-circle"></i> إضافة';
+					tableHtml += '</a>';
+					tableHtml += `<button class="btn btn-danger ms-1" onclick="deleteCity(' + city.cityid + ', '' + city.cityname.replace(/'/g, "\'") + '')" title="حذف">`;
+					tableHtml += '<i class="bi bi-trash"></i> حذف';
+					tableHtml += '</button>';
+					tableHtml += '</div>';
+					tableHtml += '</td>';
+					tableHtml += '</tr>';
+				});
+
+				tableHtml += '</tbody>';
+				tableHtml += '</table>';
+
+				document.getElementById('containerid').innerHTML = tableHtml;
+			} else {
+				document.getElementById('containerid').innerHTML = '<div class="alert alert-warning text-center"><i class="bi bi-exclamation-triangle"></i> لا توجد مدن في هذه الدولة</div>';
+			}
+		},
+		error: function() {
+			document.getElementById('containerid').innerHTML = '<div class="alert alert-danger text-center"><i class="bi bi-x-circle"></i> حدث خطأ في تحميل البيانات</div>';
+		}
+	});
+}
+
+// Delete city function
+function deleteCity(cityid, cityname) {
+	if(confirm('هل أنت متأكد من حذف مدينة "' + cityname + '"؟\nسيتم حذف جميع المناطق المرتبطة بها.')) {
+		$.ajax({
+			url: 'city.hnt',
+			type: 'POST',
+			data: { action: 'delete', cityid: cityid },
+			dataType: 'json',
+			success: function(response) {
+				if(response.success) {
+					// Show success message
+					$('#maintitlebox').html(
+						'<div class="alert alert-success alert-dismissible fade show">' +
+						'<strong>نجح!</strong> ' + response.message +
+						'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+						'</div>'
+					);
+					// Reload table
+					fillfreecontrato();
+					// Auto-hide
+					setTimeout(function() {
+						$('#maintitlebox .alert').fadeOut();
+					}, 3000);
+				} else {
+					alert('خطأ: ' + response.message);
+				}
+			},
+			error: function() {
+				alert('حدث خطأ في الاتصال بالخادم');
+			}
+		});
+	}
+}
+
+// Initialize Select2 and event handlers
+$(document).ready(function() {
+
+	// Handle form submission via AJAX
+	$('#cityForm').on('submit', function(e) {
+		e.preventDefault(); // Prevent default form submission
+
+		var formData = $(this).serialize();
+		var submitBtn = $('#submitBtn');
+		var originalBtnText = submitBtn.html();
+
+		// Disable button and show loading
+		submitBtn.prop('disabled', true)
+			.html('<span class="spinner-border spinner-border-sm" role="status"></span> جاري الإضافة...');
+
+		// Send AJAX request
+		$.ajax({
+			url: 'city.hnt',
+			type: 'POST',
+			data: formData,
+			dataType: 'json',
+			success: function(response) {
+				if(response.success) {
+					// Show success message
+					$('#maintitlebox').html(
+						'<div class="alert alert-success alert-dismissible fade show" role="alert">' +
+						'<strong>نجح!</strong> ' + response.message +
+						'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+						'</div>'
+					);
+
+					// Clear form
+					$('#cityname').val('').focus();
+
+					// Reload cities table
+					fillfreecontrato();
+
+					// Auto-hide success message after 5 seconds
+					setTimeout(function() {
+						$('#maintitlebox .alert').fadeOut();
+					}, 5000);
+
+				} else {
+					// Show error message
+					$('#maintitlebox').html(
+						'<div class="alert alert-danger alert-dismissible fade show" role="alert">' +
+						'<strong>خطأ!</strong> ' + response.message +
+						'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+						'</div>'
+					);
+				}
+			},
+			error: function(xhr, status, error) {
+				// Show error message
+				$('#maintitlebox').html(
+					'<div class="alert alert-danger alert-dismissible fade show" role="alert">' +
+					'<strong>خطأ!</strong> حدث خطأ في الاتصال بالخادم' +
+					'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+					'</div>'
+				);
+				console.error('AJAX Error:', status, error);
+			},
+			complete: function() {
+				// Re-enable button and restore text
+				submitBtn.prop('disabled', false).html(originalBtnText);
+			}
+		});
+	});
+
+	// Initialize Select2 with RTL support and search
+	if($('#countrySelect').length) {
+		$('#countrySelect').select2({
+			theme: 'bootstrap-5',
+			placeholder: 'ابحث عن الدولة...',
+			allowClear: true,
+			dir: 'rtl',
+			language: {
+				noResults: function() {
+					return "لا توجد نتائج";
+				},
+				searching: function() {
+					return "جاري البحث...";
+				},
+				inputTooShort: function() {
+					return "الرجاء إدخال حرف أو أكثر";
+				}
+			},
+			width: '100%'
+		});
+
+		// Trigger event when country is selected
+		$('#countrySelect').on('select2:select', function(e) {
+			var countryId = e.params.data.id;
+			console.log('Country selected:', countryId);
+
+			// Load cities without page reload for better UX
+			fillfreecontrato();
+
+			// Update URL without reload
+			if(history.pushState) {
+				history.pushState(null, null, 'city.hnt?countryid=' + countryId);
+			}
+		});
+
+		// Trigger event when country is cleared
+		$('#countrySelect').on('select2:clear', function() {
+			document.getElementById('containerid').innerHTML = '<div class="alert alert-info text-center"><i class="bi bi-info-circle"></i> الرجاء اختيار دولة لعرض المدن</div>';
+		});
+	}
+
+	// Load cities if country is already selected on page load
+	<?php if($countryid): ?>
+	fillfreecontrato();
+	<?php endif; ?>
+});
+</script>
+
+<style>
+/* Custom Select2 RTL styling */
+.select2-container--bootstrap-5 .select2-selection {
+	min-height: 38px;
+	border-color: #dee2e6;
+}
+
+.select2-container--bootstrap-5 .select2-selection--single .select2-selection__rendered {
+	line-height: 36px;
+	padding-right: 12px;
+	padding-left: 30px;
+}
+
+.select2-container--bootstrap-5 .select2-selection--single .select2-selection__arrow {
+	right: auto;
+	left: 1px;
+	height: 36px;
+}
+
+.select2-container--bootstrap-5.select2-container--focus .select2-selection,
+.select2-container--bootstrap-5.select2-container--open .select2-selection {
+	border-color: #86b7fe;
+	box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+}
+
+.select2-dropdown {
+	border-color: #dee2e6;
+}
+
+.select2-search--dropdown .select2-search__field {
+	border: 1px solid #dee2e6;
+	border-radius: 0.375rem;
+	padding: 0.375rem 0.75rem;
+	direction: rtl;
+}
+
+.select2-results__option {
+	text-align: right;
+	direction: rtl;
+}
+
+/* Action buttons spacing */
+.btn-group .btn {
+	margin-left: 4px !important;
+}
+
+.btn-group .btn:first-child {
+	margin-left: 0 !important;
+}
+
+/* Table styling improvements */
+.table tbody tr:hover {
+	background-color: #f8f9fa;
+}
+
+.table .btn-group {
+	white-space: nowrap;
+}
+</style>
+
+<br><br><br><br><br><br><br><br>
+
+</div>
+
+<script>
+function showcontextlayer(objtr,idtr)
+{
+	document.getElementById('contextlayer').style.display='block';
+	objtr.bgColor='#bedadc';
+	document.getElementById('contextlayer').style.top=(currentMousePos.y ) + "px";DL_GetElementTop(objtr);
+	document.getElementById('contextlayer').style.left=(currentMousePos.x) + "px";
+	document.getElementById('idtr').value=idtr;
+	return false;
+}
+
+var myVar;
+function hideontextlayer(){
+	myVar=setTimeout(function(){$('#contextlayer').hide();},1000);
+}
+
+</script>
+<!------------------نهاية جافا سكربت --------------->
+
+<div dir="rtl" id="contextlayer" class="dropdown-menu shadow" style="display:none; position:fixed;"
+	onmouseover="clearTimeout(myVar);$('#contextlayer').show();return false;"
+	onmouseout="hideontextlayer();return false;">
+
+<a href="#" class="dropdown-item" onclick="window.location.href='/aqary/admin/include/mokhatat.hnt?action=add&cityid='+document.getElementById('idtr').value;return false;">
+	<i class="bi bi-plus-circle text-success"></i> إضافة منطقة
+</a>
+
+<a href="#" class="dropdown-item" onclick="window.location.href='/aqary/admin/include/mokhatat.hnt?action=view&cityid='+document.getElementById('idtr').value;return false;">
+	<i class="bi bi-eye text-primary"></i> عرض المناطق
+</a>
+
+<div class="dropdown-divider"></div>
+
+<a href="#" class="dropdown-item text-danger <?="policy_".$sc_id."_deleetes"?>"
+	onclick="confirm('هل ترغب فى حذف هذا الحقل ','تحذير',function(){ajaxmysql('delete from city where cityid=''+document.getElementById('idtr').value+''');mid='mtr'+document.getElementById('idtr').value;trelement=document.getElementById(mid);deleteRow(trelement);});return false;">
+	<i class="bi bi-trash"></i> حذف
+</a>
+
+<input type="hidden" name="idtr" id="idtr">
+</div>
+
+<?require('../../foter.hnt');?>

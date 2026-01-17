@@ -1,0 +1,354 @@
+<?php
+/**
+ * Amlak (Property Management) Integration
+ * تكامل نظام إدارة العقارات مع المحاسبة
+ * 
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+class AmlakAccountingIntegration {
+    private $db;
+    private $accountingManager;
+    
+    public function __construct($db, $accountingManager) {
+        $this->db = $db;
+        $this->accountingManager = $accountingManager;
+    }
+    
+    /**
+     * Create invoice from rental contract (egar)
+     * إنشاء فاتورة من عقد الإيجار
+     */
+    public function createInvoiceFromEgar($egarId) {
+        // Get contract details
+        $egarQuery = "SELECT e.*, m.mostagername, m.mostagervatnumber, 
+                      ad.aqarname, a.aqarname as main_aqar
+                      FROM egar e
+                      LEFT JOIN mostagereen m ON e.mostagerid = m.mostagerid
+                      LEFT JOIN amlakdetails ad ON e.idsubaqar = ad.idsubaqar
+                      LEFT JOIN amlak a ON e.idaqar = a.idaqar
+                      WHERE e.rakam3akdid = ?";
+        $stmt = $this->db->prepare($egarQuery);
+        $stmt->bind_param('i', $egarId);
+        $stmt->execute();
+        $egar = $stmt->get_result()->fetch_assoc();
+        
+        if (!$egar) {
+            return ['success' => false, 'message' => 'Contract not found'];
+        }
+        
+        // Calculate amounts
+        $annualPrice = $egar['annualprice'] ?? 0;
+        $subtotal = $annualPrice / 1.15; // Remove VAT
+        $vatAmount = $annualPrice - $subtotal;
+        
+        // Prepare invoice data
+        $invoiceData = [
+            'invoice_type' => 'standard',
+            'customer_name' => $egar['mostagername'] ?? 'مستأجر',
+            'customer_vat_number' => $egar['mostagervatnumber'] ?? null,
+            'customer_address' => null,
+            'invoice_date' => date('Y-m-d'),
+            'due_date' => $egar['egarenddate'] ?? null,
+            'payment_method' => 'bank_transfer',
+            'notes' => "إيجار {$egar['aqarname']} - عقد رقم {$egar['rakam3akdid']}"
+        ];
+        
+        // Prepare items
+        $items = [
+            [
+                'description' => "إيجار {$egar['aqarname']} - عقد {$egar['rakam3akdid']}",
+                'quantity' => 1,
+                'unit_price' => $subtotal,
+                'vat_rate' => 15,
+                'vat_amount' => $vatAmount,
+                'total_amount' => $annualPrice
+            ]
+        ];
+        
+        // Create invoice
+        $result = $this->accountingManager->createInvoice($invoiceData, $items);
+        
+        if ($result['success']) {
+            // Update egar with invoice reference
+            $updateQuery = "UPDATE egar SET invoice_id = ? WHERE rakam3akdid = ?";
+            $stmt = $this->db->prepare($updateQuery);
+            $stmt->bind_param('ii', $result['invoice_id'], $egarId);
+            $stmt->execute();
+        }
+        
+        return $result;
+    }
+    
+    /**
+     * Create journal entry from payment voucher (sanad)
+     * إنشاء قيد من سند القبض
+     */
+    public function createEntryFromSanad($sanadId) {
+        // Get sanad details
+        $sanadQuery = "SELECT * FROM sanad WHERE idsanad = ?";
+        $stmt = $this->db->prepare($sanadQuery);
+        $stmt->bind_param('i', $sanadId);
+        $stmt->execute();
+        $sanad = $stmt->get_result()->fetch_assoc();
+
+        if (!$sanad) {
+            return ['success' => false, 'message' => 'Voucher not found'];
+        }
+
+        // Get the correct amount - try multiple fields
+        $amount = 0;
+        if (!empty($sanad['depositeamount'])) {
+            $amount = floatval($sanad['depositeamount']);
+        } elseif (!empty($sanad['price'])) {
+            $amount = floatval($sanad['price']);
+        } elseif (!empty($sanad['mablagh'])) {
+            $amount = floatval($sanad['mablagh']);
+        }
+
+        // Validate amount
+        if ($amount <= 0) {
+            return ['success' => false, 'message' => 'Invalid amount in voucher'];
+        }
+
+        // Convert timestamp to date (sanaddate is in seconds)
+        $sanadDate = date('Y-m-d');
+        if (!empty($sanad['sanaddate'])) {
+            $sanadDate = date('Y-m-d', $sanad['sanaddate']);
+        }
+
+        // Prepare journal entry
+        $entryData = [
+            'entry_date' => $sanadDate,
+            'entry_type' => 'payment',
+            'reference_type' => 'sanad',
+            'reference_id' => $sanadId,
+            'description' => $sanad['mybyan'] ?? "سند قبض رقم " . ($sanad['sanadrakam'] ?? $sanadId),
+            'status' => 'posted'
+        ];
+
+        // Get account IDs from chart of accounts by code
+        $cashAccountQuery = "SELECT account_id FROM acc_chart_of_accounts WHERE account_code = '1111' AND is_active = 1 LIMIT 1";
+        $cashResult = $this->db->query($cashAccountQuery);
+        $cashAccount = $cashResult->fetch_assoc();
+        $cashAccountId = $cashAccount['account_id'] ?? 2;
+
+        $bankAccountQuery = "SELECT account_id FROM acc_chart_of_accounts WHERE account_code = '1112' AND is_active = 1 LIMIT 1";
+        $bankResult = $this->db->query($bankAccountQuery);
+        $bankAccount = $bankResult->fetch_assoc();
+        $bankAccountId = $bankAccount['account_id'] ?? 3;
+
+        $receivableAccountQuery = "SELECT account_id FROM acc_chart_of_accounts WHERE account_code = '1121' AND is_active = 1 LIMIT 1";
+        $receivableResult = $this->db->query($receivableAccountQuery);
+        $receivableAccount = $receivableResult->fetch_assoc();
+        $receivableAccountId = $receivableAccount['account_id'] ?? 4;
+
+        // Determine payment account based on type
+        $paymentAccountId = $cashAccountId; // Default to cash
+        $sanadType = $sanad['payment_type'] ?? $sanad['sanadtype'] ?? 0;
+
+        if ($sanadType == 1 || $sanadType == 'bank') { // Bank transfer
+            $paymentAccountId = $bankAccountId;
+        }
+
+        $description = $sanad['mybyan'] ?? 'دفعة';
+
+        $lines = [
+            [
+                'account_id' => $paymentAccountId,
+                'description' => "استلام دفعة - {$description}",
+                'debit_amount' => $amount,
+                'credit_amount' => 0
+            ],
+            [
+                'account_id' => $receivableAccountId,
+                'description' => "تسديد - {$description}",
+                'debit_amount' => 0,
+                'credit_amount' => $amount
+            ]
+        ];
+
+        return $this->accountingManager->createJournalEntry($entryData, $lines);
+    }
+    
+    /**
+     * Create journal entry from expense (masrofat)
+     * إنشاء قيد من المصروفات
+     */
+    public function createEntryFromMasrofat($masrofatId) {
+        // Get expense details
+        $masrofatQuery = "SELECT * FROM masrofat WHERE masrofatid = ?";
+        $stmt = $this->db->prepare($masrofatQuery);
+        $stmt->bind_param('i', $masrofatId);
+        $stmt->execute();
+        $masrofat = $stmt->get_result()->fetch_assoc();
+        
+        if (!$masrofat) {
+            return ['success' => false, 'error' => 'Expense not found'];
+        }
+        
+        $amount = $masrofat['masrofatamount'] ?? 0;
+        
+        // Prepare journal entry
+        $entryData = [
+            'entry_date' => $masrofat['masrofatdate'] ?? date('Y-m-d'),
+            'entry_type' => 'expense',
+            'reference_type' => 'masrofat',
+            'reference_id' => $masrofatId,
+            'description' => $masrofat['masrofatdescription'] ?? "مصروف رقم {$masrofatId}",
+            'status' => 'posted'
+        ];
+        
+        // Determine accounts
+        $cashAccountId = 2; // Cash account
+        $expenseAccountId = 10; // Expenses account (5000)
+        
+        $lines = [
+            [
+                'account_id' => $expenseAccountId,
+                'description' => $masrofat['masrofatdescription'],
+                'debit_amount' => $amount,
+                'credit_amount' => 0
+            ],
+            [
+                'account_id' => $cashAccountId,
+                'description' => "صرف - {$masrofat['masrofatdescription']}",
+                'debit_amount' => 0,
+                'credit_amount' => $amount
+            ]
+        ];
+        
+        return $this->accountingManager->createJournalEntry($entryData, $lines);
+    }
+    
+    /**
+     * Sync property owner as customer
+     * مزامنة مالك العقار كعميل
+     */
+    public function syncMalekAsCustomer($malekId) {
+        // Get malek details
+        $malekQuery = "SELECT * FROM malek WHERE malekid = ?";
+        $stmt = $this->db->prepare($malekQuery);
+        $stmt->bind_param('i', $malekId);
+        $stmt->execute();
+        $malek = $stmt->get_result()->fetch_assoc();
+        
+        if (!$malek) {
+            return ['success' => false, 'message' => 'Owner not found'];
+        }
+        
+        // Check if customer already exists
+        $checkQuery = "SELECT customer_id FROM acc_customers WHERE customer_name = ?";
+        $stmt = $this->db->prepare($checkQuery);
+        $malekName = $malek['malekbayan1'] ?? 'مالك';
+        $stmt->bind_param('s', $malekName);
+        $stmt->execute();
+        $existing = $stmt->get_result()->fetch_assoc();
+        
+        if ($existing) {
+            return ['success' => true, 'customer_id' => $existing['customer_id'], 'message' => 'Customer already exists'];
+        }
+        
+        // Create customer
+        $insertQuery = "INSERT INTO acc_customers (customer_name, phone, address, is_active, created_at) 
+                       VALUES (?, ?, ?, 1, NOW())";
+        $stmt = $this->db->prepare($insertQuery);
+        $phone = $malek['malekbayan2'] ?? null; // malekbayan2 might be phone
+        $address = $malek['malekbayan3'] ?? null; // malekbayan3 might be address
+        $stmt->bind_param('sss', $malekName, $phone, $address);
+        
+        if ($stmt->execute()) {
+            return ['success' => true, 'customer_id' => $this->db->insert_id];
+        }
+        
+        return ['success' => false, 'message' => 'Failed to create customer: ' . $this->db->error];
+    }
+    
+    /**
+     * Sync tenant as customer
+     * مزامنة المستأجر كعميل
+     */
+    public function syncMostagerAsCustomer($mostagerId) {
+        // Get mostager details
+        $mostagerQuery = "SELECT * FROM mostagereen WHERE mostagerid = ?";
+        $stmt = $this->db->prepare($mostagerQuery);
+        $stmt->bind_param('i', $mostagerId);
+        $stmt->execute();
+        $mostager = $stmt->get_result()->fetch_assoc();
+        
+        if (!$mostager) {
+            return ['success' => false, 'error' => 'Tenant not found'];
+        }
+        
+        // Check if customer already exists
+        $checkQuery = "SELECT customer_id FROM acc_customers WHERE customer_name = ?";
+        $stmt = $this->db->prepare($checkQuery);
+        $mostagerName = $mostager['mostagername'];
+        $stmt->bind_param('s', $mostagerName);
+        $stmt->execute();
+        $existing = $stmt->get_result()->fetch_assoc();
+        
+        if ($existing) {
+            return ['success' => true, 'customer_id' => $existing['customer_id'], 'message' => 'Customer already exists'];
+        }
+        
+        // Create customer
+        $insertQuery = "INSERT INTO acc_customers (customer_name, vat_number, phone, email, address, is_active, created_at) 
+                       VALUES (?, ?, ?, ?, ?, 1, NOW())";
+        $stmt = $this->db->prepare($insertQuery);
+        $vatNumber = $mostager['mostagervatnumber'] ?? null;
+        $phone = $mostager['mostagerphone'] ?? null;
+        $email = $mostager['mostageremail'] ?? null;
+        $address = $mostager['mostageraddress'] ?? null;
+        $stmt->bind_param('sssss', $mostagerName, $vatNumber, $phone, $email, $address);
+        
+        if ($stmt->execute()) {
+            return ['success' => true, 'customer_id' => $this->db->insert_id];
+        }
+        
+        return ['success' => false, 'error' => 'Failed to create customer'];
+    }
+    
+    /**
+     * Get property financial summary
+     * ملخص مالي للعقار
+     */
+    public function getPropertyFinancialSummary($idaqar, $dateFrom = null, $dateTo = null) {
+        if (!$dateFrom) $dateFrom = date('Y-01-01');
+        if (!$dateTo) $dateTo = date('Y-m-d');
+        
+        // Get total rental income
+        $incomeQuery = "SELECT SUM(annualprice) as total_income 
+                       FROM egar 
+                       WHERE idaqar = ? 
+                       AND egarstartdate BETWEEN ? AND ?";
+        $stmt = $this->db->prepare($incomeQuery);
+        $stmt->bind_param('iss', $idaqar, $dateFrom, $dateTo);
+        $stmt->execute();
+        $income = $stmt->get_result()->fetch_assoc();
+        
+        // Get total expenses
+        $expenseQuery = "SELECT SUM(masrofatamount) as total_expense 
+                        FROM masrofat 
+                        WHERE idaqar = ? 
+                        AND masrofatdate BETWEEN ? AND ?";
+        $stmt = $this->db->prepare($expenseQuery);
+        $stmt->bind_param('iss', $idaqar, $dateFrom, $dateTo);
+        $stmt->execute();
+        $expense = $stmt->get_result()->fetch_assoc();
+        
+        $totalIncome = $income['total_income'] ?? 0;
+        $totalExpense = $expense['total_expense'] ?? 0;
+        $netIncome = $totalIncome - $totalExpense;
+        
+        return [
+            'total_income' => $totalIncome,
+            'total_expense' => $totalExpense,
+            'net_income' => $netIncome,
+            'date_from' => $dateFrom,
+            'date_to' => $dateTo
+        ];
+    }
+}
+?>

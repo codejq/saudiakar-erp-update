@@ -1,0 +1,648 @@
+<?php
+/**
+ * Egar API - Contract Management Backend
+ * Handles all contract operations: create, validate, rent generation
+ * Returns JSON responses for AJAX calls
+ */
+
+// Set response type to JSON
+header('Content-Type: application/json; charset=utf-8');
+header('Access-Control-Allow-Origin: *');
+
+// Include required files
+include_once "../../../reqloginajax.hnt";
+include_once "../../../connectdb.hnt";
+require_once('../../../iconv_cross.hnt');
+require '../arabicTools.class.hnt';
+require '../uCal.class.hnt';
+include_once "amlakfunctions.hnt";
+require_once 'CalendarManager.class.hnt';
+require_once 'auto_renewal_config.hnt';
+require_once '../../../lib/storage/helpers.php';
+
+// Initialize calendar utility
+$dcal = new uCal;
+$calendar = new CalendarManager();
+
+// Initialize user data from session
+$user_data = isset($_SESSION['user_data']) ? $_SESSION['user_data'] : ['name' => 'Unknown'];
+
+// Get action from request
+$action = isset($_REQUEST['action']) ? $_REQUEST['action'] : '';
+
+// Response array
+$response = [
+    'success' => false,
+    'message' => '',
+    'data' => null
+];
+
+try {
+    switch ($action) {
+        case 'create_contract':
+            $response = createContract($_REQUEST, $link, $dcal, $user_data);
+            break;
+
+        case 'validate_contract':
+            $response = validateContract($_REQUEST, $link);
+            break;
+
+        case 'get_unit_price':
+            $response = getUnitPrice($_REQUEST, $link);
+            break;
+
+        case 'check_duplicate':
+            $response = checkDuplicateContract($_REQUEST, $link);
+            break;
+
+        case 'convert_date':
+            $response = convertDate($_REQUEST, $calendar);
+            break;
+
+        case 'calculate_end_date':
+            $response = calculateEndDate($_REQUEST, $calendar);
+            break;
+
+        case 'validate_date':
+            $response = validateDate($_REQUEST, $calendar);
+            break;
+
+        default:
+            $response['message'] = 'Invalid action';
+    }
+} catch (Exception $e) {
+    $response['success'] = false;
+    $response['message'] = 'Error: ' . $e->getMessage();
+}
+
+// Output JSON response
+echo json_encode($response, JSON_UNESCAPED_UNICODE);
+exit;
+
+/**
+ * Create new contract with tenant and rent installments
+ */
+function createContract($data, $link, $dcal, $user_data) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    // Check for duplicate submission
+    if (isset($data['formuid'])) {
+        $sql = "SELECT COUNT(rakam3akdid) as dd FROM egar WHERE formuid = '" . mysql_real_escape_string($data['formuid']) . "'";
+        $row = mysql_fetch_array(mysql_query($sql, $link));
+        if ($row['dd']) {
+            $response['message'] = 'محاولة تكرار التأجير - هذا العقد تم إنشاؤه مسبقاً';
+            return $response;
+        }
+    }
+
+    // Clean numeric values
+    $depositeamount = str_replace(",", "", $data['depositeamount']);
+    $fristsa3e = str_replace(",", "", $data['fristsa3e']);
+    $secondsa3e = str_replace(",", "", $data['secondsa3e']);
+    $services = str_replace(",", "", $data['services']);
+    $water = str_replace(",", "", $data['water']);
+    $tamen = str_replace(",", "", $data['tamen']);
+    $payedamount = str_replace(",", "", $data['payedamount']);
+
+    // Parse dates
+    $parts_x = explode("/", $data['st_datex_']);
+    $st_datex = $parts_x[0] ?? 1;
+    $st_monthx = $parts_x[1] ?? 1;
+    $st_yearx = $parts_x[2] ?? date('Y');
+
+    $parts = explode("/", $data['st_date_']);
+    $st_date = $parts[0] ?? 1;
+    $st_month = $parts[1] ?? 1;
+    $st_year = $parts[2] ?? date('Y');
+
+    $parts_0 = explode("/", $data['st_date0_']);
+    $st_date0 = $parts_0[0] ?? 1;
+    $st_month0 = $parts_0[1] ?? 1;
+    $st_year0 = $parts_0[2] ?? date('Y');
+
+    $hnt_dll = isset($data['hnt_dll']) ? intval($data['hnt_dll']) : 1;
+
+    // Convert Hijri to Gregorian if needed
+    if ($hnt_dll == 0) {
+        $dateo = $dcal->u2g($st_date, $st_month, $st_year);
+        $st_date = $dateo['day'];
+        $st_month = $dateo['month'];
+        $st_year = $dateo['year'];
+
+        $dateo = $dcal->u2g($st_date0, $st_month0, $st_year0);
+        $st_date0 = $dateo['day'];
+        $st_month0 = $dateo['month'];
+        $st_year0 = $dateo['year'];
+
+        $dateo = $dcal->u2g($st_datex, $st_monthx, $st_yearx);
+        $st_datex = $dateo['day'];
+        $st_monthx = $dateo['month'];
+        $st_yearx = $dateo['year'];
+    }
+
+    // Create timestamps
+    $startegar = mktime(0, 0, 0, $st_month, $st_date, $st_year);
+    $end3aqd = mktime(12, 0, 0, $st_month0, $st_date0, $st_year0);
+    $date3akd = mktime(0, 0, 0, $st_monthx, $st_datex, $st_yearx);
+
+    // Extract fixed payment day from start date
+    $fixed_payment_day = intval($st_date);
+
+    // Validate fixed payment day for Hijri calendar only
+    // Gregorian calendar allows any day (1-31)
+    $maxHijriDay = defined('MAX_HIJRI_DAY') ? MAX_HIJRI_DAY : 29;
+
+    if ($hnt_dll == 0 && $fixed_payment_day > $maxHijriDay) {
+        $response['message'] = "يرجى استخدام اليوم {$maxHijriDay} كحد أقصى للتقويم الهجري. اليوم {$fixed_payment_day} قد لا يتوفر في جميع الأشهر الهجرية.";
+        return $response;
+    }
+    // Note: Gregorian calendar has no restriction - allows days 1-31
+
+    // Handle tenant creation/update
+    $mostagerid = handleTenant($data, $link);
+    if (!$mostagerid) {
+        $response['message'] = 'فشل في إنشاء/تحديث بيانات المستأجر';
+        return $response;
+    }
+
+    // Insert contract
+    $sql = "INSERT INTO egar SET
+        aqaraddress='" . mysql_real_escape_string($data['aqaraddress']) . "',
+        depositeamount='" . $depositeamount . "',
+        payedamount='" . $payedamount . "',
+        mostagerid='" . $mostagerid . "',
+        startegar='" . $startegar . "',
+        aqartype='" . mysql_real_escape_string($data['aqartype']) . "',
+        end3aqd='" . $end3aqd . "',
+        rakam3akd='" . mysql_real_escape_string($data['rakam3akd']) . "',
+        annualprice='" . mysql_real_escape_string($data['annualprice']) . "',
+        tamen='" . $tamen . "',
+        fristsa3e='" . $fristsa3e . "',
+        secondsa3e='" . $secondsa3e . "',
+        services='" . $services . "',
+        elect_reading='" . mysql_real_escape_string($data['elect_reading']) . "',
+        elect='" . mysql_real_escape_string($data['elect']) . "',
+        notes='" . mysql_real_escape_string($data['notes']) . "',
+        date3akd='" . $date3akd . "',
+        water='" . $water . "',
+        secondsa3e_duration='" . intval($data['secondsa3e_duration']) . "',
+        water_duration='" . intval($data['water_duration']) . "',
+        services_duration='" . intval($data['services_duration']) . "',
+        duration='" . intval($data['duration']) . "',
+        egartahseldate='" . $st_date . "',
+        insert_date='" . time() . "',
+        vat_type='" . intval($data['vat_type']) . "',
+        formuid='" . mysql_real_escape_string($data['formuid']) . "',
+        calendar_type='" . $hnt_dll . "',
+        status='active',
+        fixed_payment_day='" . $fixed_payment_day . "',
+        installments_extended_to='" . $end3aqd . "',
+        created_by_userid='" . intval($_SESSION['userid'] ?? 0) . "',
+        updated_at='" . time() . "',
+        updated_by_userid='" . intval($_SESSION['userid'] ?? 0) . "'";
+
+    if (!mysql_query($sql, $link)) {
+        $response['message'] = 'فشل في إنشاء العقد: ' . mysql_error($link);
+        return $response;
+    }
+
+    $contractId = mysql_insert_id();
+
+    // Log contract creation to history
+    $historySql = "INSERT INTO egar_history SET
+        egar_id='" . $contractId . "',
+        action_type='created',
+        change_description='Contract created with status: active, calendar_type: " . ($hnt_dll == 0 ? 'Hijri' : 'Gregorian') . "',
+        changed_by_userid='" . intval($_SESSION['userid'] ?? 0) . "',
+        changed_at='" . time() . "'";
+    mysql_query($historySql, $link);
+
+    // Generate QR code for contract
+    generateContractQR($contractId, $data, $startegar, $end3aqd, $depositeamount);
+
+    // Update property unit
+    $sql = "UPDATE amlakdetails SET
+        mostagerid='" . $mostagerid . "',
+        rakam3akdid='" . $contractId . "',
+        hnt_dll_type='" . $hnt_dll . "'
+        WHERE idsubaqar='" . intval($data['idsubaqar']) . "' LIMIT 1";
+    mysql_query($sql, $link);
+
+    // Generate rent installments
+    $installments = generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed_payment_day);
+
+    // Create payment receipt if payment made
+    if ($payedamount > 0 && isset($installments[0])) {
+        createPaymentReceipt($installments[0], $data, $mostagerid, $payedamount, $user_data, $link);
+    }
+
+    $response['success'] = true;
+    $response['message'] = 'تم إنشاء العقد بنجاح';
+    $response['data'] = [
+        'contract_id' => $contractId,
+        'tenant_id' => $mostagerid,
+        'installments' => count($installments)
+    ];
+
+    return $response;
+}
+
+/**
+ * Handle tenant creation or update
+ */
+function handleTenant($data, $link) {
+    $mostagerid = isset($data['mostagerid']) ? intval($data['mostagerid']) : 0;
+
+    if (!$mostagerid && isset($data['addmostager']) && $data['addmostager'] == 1) {
+        // Create new tenant
+        $sql = "INSERT INTO mostagereen SET
+            mostageremail='" . mysql_real_escape_string(isset($data['mostageremail']) ? $data['mostageremail'] : '') . "',
+            mostagervatnumber='" . mysql_real_escape_string(isset($data['mostagervatnumber']) ? $data['mostagervatnumber'] : '') . "',
+            mostagerwebsite='" . mysql_real_escape_string(isset($data['mostagerwebsite']) ? $data['mostagerwebsite'] : '') . "',
+            mostageragent='" . mysql_real_escape_string(isset($data['mostageragent']) ? $data['mostageragent'] : '') . "',
+            mostageridtype='" . mysql_real_escape_string(isset($data['mostageridtype']) ? $data['mostageridtype'] : '') . "',
+            mostageridplace='" . mysql_real_escape_string(isset($data['mostageridplace']) ? $data['mostageridplace'] : '') . "',
+            mostageriddate='" . mysql_real_escape_string(isset($data['mostageriddate']) ? $data['mostageriddate'] : '') . "',
+            mostagername='" . mysql_real_escape_string(isset($data['mostagername']) ? $data['mostagername'] : '') . "',
+            mostageraddress='" . mysql_real_escape_string(isset($data['mostageraddress']) ? $data['mostageraddress'] : '') . "',
+            mostageridnumber='" . mysql_real_escape_string(isset($data['mostageridnumber']) ? $data['mostageridnumber'] : '') . "',
+            mostagergensia='" . mysql_real_escape_string(isset($data['mostagergensia']) ? $data['mostagergensia'] : '') . "',
+            mostagertel='" . mysql_real_escape_string(isset($data['mostagertel']) ? $data['mostagertel'] : '') . "',
+            workaddress='" . mysql_real_escape_string(isset($data['workaddress']) ? $data['workaddress'] : '') . "',
+            kafelname='" . mysql_real_escape_string(isset($data['kafelname']) ? $data['kafelname'] : '') . "',
+            kafeladdress='" . mysql_real_escape_string(isset($data['kafeladdress']) ? $data['kafeladdress'] : '') . "',
+            kafelphone='" . mysql_real_escape_string(isset($data['kafelphone']) ? $data['kafelphone'] : '') . "',
+            mostagerpic='" . mysql_real_escape_string(isset($data['myfile']) ? $data['myfile'] : '') . "',
+            work='" . mysql_real_escape_string(isset($data['work']) ? $data['work'] : '') . "',
+            formuid='" . mysql_real_escape_string(isset($data['formuid']) ? $data['formuid'] : '') . "'";
+
+        mysql_query($sql, $link);
+        $mostagerid = mysql_insert_id();
+    }
+
+    return $mostagerid;
+}
+
+/**
+ * Generate rent installments using CalendarManager
+ * Now generates 24 months of installments upfront to allow tracking of all arrears
+ * Uses fixed_payment_day to ensure consistent payment dates across all months
+ */
+function generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed_payment_day) {
+    global $calendar;
+
+    $installments = [];
+    $duration = intval($data['duration']); // Payment period (how often rent is paid: 1, 2, 3 months, etc.)
+    $depositeamount = str_replace(",", "", $data['depositeamount']);
+    $payedamount = str_replace(",", "", $data['payedamount']);
+    $total_vat = str_replace(",", "", $data['total_vat']);
+    $total_amound_width_vat = str_replace(",", "", $data['total_amound_width_vat']);
+    $fristsa3e = str_replace(",", "", $data['fristsa3e']);
+    $secondsa3e = str_replace(",", "", $data['secondsa3e']);
+    $secondsa3e_duration = intval($data['secondsa3e_duration']);
+    $water = str_replace(",", "", $data['water']);
+    $water_duration = intval($data['water_duration']);
+    $services = str_replace(",", "", $data['services']);
+    $services_duration = intval($data['services_duration']);
+
+
+
+
+    // Use CalendarManager for accurate date calculations
+    $startTimestamp = $calendar->dateToTimestamp($data['st_date_'], $hnt_dll);
+    $endTimestamp = $calendar->dateToTimestamp($data['st_date0_'], $hnt_dll);
+
+    // MODIFIED: Generate installments upfront (configured in auto_renewal_config.hnt)
+    // This allows seeing how far behind tenants are even if they haven't paid
+    $monthsToGenerate = INSTALLMENT_MONTHS_UPFRONT; // From config file
+
+    // Calculate months difference using CalendarManager for accuracy
+    $contractMonths = $calendar->monthsDifference($startTimestamp, $endTimestamp, $hnt_dll);
+
+    // Generate installments for 24 months or contract duration, whichever is longer
+    $numInstallments = ceil(max($monthsToGenerate, $contractMonths) / $duration);
+
+    for ($i = 1; $i <= $numInstallments; $i++) {
+        // Calculate installment date using CalendarManager
+        $monthsToAdd = $duration * ($i - 1);
+        $kastdate = $calendar->addMonths($startTimestamp, $monthsToAdd, $hnt_dll);
+
+        // Adjust to fixed payment day to ensure consistency across months
+        $currentDay = intval(date('j', $kastdate));
+        if ($currentDay != $fixed_payment_day) {
+            $dayDiff = $fixed_payment_day - $currentDay;
+            $kastdate = $kastdate + ($dayDiff * 24 * 60 * 60);
+        }
+
+        // Initialize installment variables
+        $iscomplete = 0;
+        $fpayedamount = 0;
+        $installment_status = 'pending';
+
+        // Determine installment type and calculate values
+        if ($i == 1) {
+            // First installment: includes first commission, all fees, and VAT
+            $kastvalue = $total_amound_width_vat;
+            $sa3e_value = $fristsa3e;
+            $water_value = $water;
+            $services_value = $services;
+
+            if ($payedamount >= $total_amound_width_vat) {
+                $iscomplete = 1;
+                $installment_status = 'paid';
+                $fpayedamount = $payedamount;
+            } else {
+                $fpayedamount = $payedamount;
+                $installment_status = ($fpayedamount > 0) ? 'partial' : 'pending';
+            }
+        } elseif (($duration * ($i - 1)) % 12 == 0) {
+            // Start of new year: includes annual commission and fees
+            $sa3e_value = $secondsa3e;
+            $water_value = $water;
+            $services_value = $services;
+            $kastvalue = floatval($depositeamount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
+        } else {
+            // Regular installment: includes only recurring fees
+            $sa3e_value = ($secondsa3e_duration ? $secondsa3e : 0);
+            $water_value = ($water_duration ? $water : 0);
+            $services_value = ($services_duration ? $services : 0);
+            $kastvalue = floatval($depositeamount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
+        }
+
+        // Determine effective due date (with grace period if configured)
+        $gracePeriod = 0; // Can be made configurable
+        $effectiveDueDate = $kastdate + ($gracePeriod * 24 * 60 * 60);
+
+        // Insert installment with new fields
+        $sql = "INSERT INTO aksat SET
+            idsubaqar='" . intval($data['idsubaqar']) . "',
+            kastname='" . $i . "',
+            kastvalue='" . $kastvalue . "',
+            dof3at='" . $fpayedamount . "',
+            kastdate='" . $kastdate . "',
+            iscomplete='" . $iscomplete . "',
+            egar_id='" . $contractId . "',
+            formuid='" . mysql_real_escape_string($data['formuid']) . "',
+            status='" . $installment_status . "',
+            amount_paid='" . $fpayedamount . "',
+            amount_remaining='" . ($kastvalue - $fpayedamount) . "',
+            water='" . $water_value . "',
+            sa3ee='" . $sa3e_value . "',
+            services='" . $services_value . "',
+            grace_period_days='" . $gracePeriod . "',
+            effective_due_date='" . $effectiveDueDate . "',
+            created_at='" . time() . "',
+            updated_at='" . time() . "'";
+
+        mysql_query($sql, $link);
+        $installments[] = mysql_insert_id();
+    }
+
+    return $installments;
+}
+
+/**
+ * Create payment receipt
+ */
+function createPaymentReceipt($kastid, $data, $mostagerid, $payedamount, $user_data, $link) {
+    $sql = "INSERT INTO sanad SET
+        mostagerid='" . $mostagerid . "',
+        mostagername='" . mysql_real_escape_string($data['mostagername']) . "',
+        kastid='" . $kastid . "',
+        depositeamount='" . $payedamount . "',
+        recivername='" . $user_data['name'] . "',
+        mybyan='قيمة القسط الأول',
+        idaqar='" . intval($data['idaqar']) . "',
+        idsubaqar='" . intval($data['idsubaqar']) . "',
+        sanaddate='" . time() . "',
+        commesion_vat='" . str_replace(",", "", $data['commesion_vat']) . "',
+        depositeamount_vat='" . str_replace(",", "", $data['depositeamount_vat']) . "',
+        formuid='" . mysql_real_escape_string($data['formuid']) . "'";
+
+    mysql_query($sql, $link);
+    $sanadId = mysql_insert_id();
+
+    // Insert into revenue table
+    $sql = "INSERT INTO eradat SET
+        idaqar='" . intval($data['idaqar']) . "',
+        idsubaqar='" . intval($data['idsubaqar']) . "',
+        mostagerid='" . $mostagerid . "',
+        mostagername='" . mysql_real_escape_string($data['mostagername']) . "',
+        recivername='" . $user_data['name'] . "',
+        amount='" . $payedamount . "',
+        paymentdate='" . time() . "',
+        pymentdesription='قيمة القسط الأول',
+        sanadrakam='" . $sanadId . "',
+        formuid='" . mysql_real_escape_string($data['formuid']) . "'";
+
+    mysql_query($sql, $link);
+
+    // Generate QR code for receipt
+    generateReceiptQR($sanadId, $data, $payedamount);
+
+    return $sanadId;
+}
+
+/**
+ * Generate QR code for contract
+ */
+function generateContractQR($contractId, $data, $startegar, $end3aqd, $depositeamount) {
+    $qr_path = qr_code_path('contracts.managed', "$contractId.png");
+    ensure_dir(dirname($qr_path));
+
+    require_once('../../../phpqrcode.php');
+    $barcodedata = "عقد إيجار رقم: $contractId\r\n" .
+                   "العميل: " . $data['mostagername'] . "\r\n" .
+                   "المبلغ: $depositeamount\r\n" .
+                   "العقار: " . $data['aqaraddress'] . "\r\n" .
+                   "بداية الايجار: " . date("d/m/Y", $startegar) . "\r\n" .
+                   "نهاية الايجار: " . date("d/m/Y", $end3aqd) . "\r\n" .
+                   "تاريخ الاصدار: " . date("d/m/Y");
+
+    $brcodetext =  $barcodedata;
+    QRcode::png($brcodetext, $qr_path, 'L', 2, 2);
+}
+
+/**
+ * Generate QR code for receipt
+ */
+function generateReceiptQR($sanadId, $data, $payedamount) {
+    $qr_path = qr_code_path('vouchers', "$sanadId.png");
+    ensure_dir(dirname($qr_path));
+
+    require_once('../../../phpqrcode.php');
+    $barcodedata = "سند قبض رقم: $sanadId\r\n" .
+                   "العميل: " . $data['mostagername'] . "\r\n" .
+                   "المبلغ: $payedamount\r\n" .
+                   "البيان: قيمة القسط الأول\r\n" .
+                   "تاريخ الدفع: " . date("d/m/Y") . "\r\n" .
+                   "تاريخ الاصدار: " . date("d/m/Y");
+
+    $brcodetext = $barcodedata;
+    QRcode::png($brcodetext, $qr_path, 'L', 2, 2);
+}
+
+/**
+ * Validate contract data
+ */
+function validateContract($data, $link) {
+    $response = ['success' => true, 'message' => '', 'errors' => []];
+
+    // Required fields validation
+    $required = ['idaqar', 'idsubaqar', 'st_date_', 'st_date0_', 'contractDuraion', 'depositeamount'];
+    foreach ($required as $field) {
+        if (empty($data[$field])) {
+            $response['errors'][$field] = 'هذا الحقل مطلوب';
+        }
+    }
+
+    if (!empty($response['errors'])) {
+        $response['success'] = false;
+        $response['message'] = 'يرجى تعبئة جميع الحقول المطلوبة';
+    }
+
+    return $response;
+}
+
+/**
+ * Get unit price
+ */
+function getUnitPrice($data, $link) {
+    $response = ['success' => false, 'price' => 0];
+
+    if (isset($data['idsubaqar'])) {
+        $sql = "SELECT price FROM amlakdetails WHERE idsubaqar='" . intval($data['idsubaqar']) . "' LIMIT 1";
+        $result = mysql_fetch_array(mysql_query($sql, $link));
+        if ($result) {
+            $response['success'] = true;
+            $response['price'] = $result['price'];
+        }
+    }
+
+    return $response;
+}
+
+/**
+ * Check for duplicate contract
+ */
+function checkDuplicateContract($data, $link) {
+    $response = ['success' => true, 'duplicate' => false];
+
+    if (isset($data['formuid'])) {
+        $sql = "SELECT COUNT(rakam3akdid) as dd FROM egar WHERE formuid='" . mysql_real_escape_string($data['formuid']) . "'";
+        $row = mysql_fetch_array(mysql_query($sql, $link));
+        if ($row['dd'] > 0) {
+            $response['duplicate'] = true;
+            $response['message'] = 'هذا العقد تم إنشاؤه مسبقاً';
+        }
+    }
+
+    return $response;
+}
+
+/**
+ * Convert date between Hijri and Gregorian
+ */
+function convertDate($data, $calendar) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    if (!isset($data['date']) || !isset($data['from_calendar']) || !isset($data['to_calendar'])) {
+        $response['message'] = 'Missing required parameters: date, from_calendar, to_calendar';
+        return $response;
+    }
+
+    try {
+        $timestamp = $calendar->dateToTimestamp($data['date'], $data['from_calendar']);
+        $convertedDate = $calendar->timestampToDate($timestamp, $data['to_calendar']);
+
+        $response['success'] = true;
+        $response['data'] = [
+            'original' => $data['date'],
+            'converted' => sprintf("%02d/%02d/%04d", $convertedDate['day'], $convertedDate['month'], $convertedDate['year']),
+            'from_calendar' => $data['from_calendar'],
+            'to_calendar' => $data['to_calendar']
+        ];
+    } catch (Exception $e) {
+        $response['message'] = 'Conversion error: ' . $e->getMessage();
+    }
+
+    return $response;
+}
+
+/**
+ * Calculate end date based on start date and duration
+ */
+function calculateEndDate($data, $calendar) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    if (!isset($data['start_date']) || !isset($data['duration_months']) || !isset($data['calendar_type'])) {
+        $response['message'] = 'Missing required parameters: start_date, duration_months, calendar_type';
+        return $response;
+    }
+
+    try {
+        $startTimestamp = $calendar->dateToTimestamp($data['start_date'], $data['calendar_type']);
+        $endTimestamp = $calendar->addMonths($startTimestamp, intval($data['duration_months']), $data['calendar_type']);
+        $endDate = $calendar->timestampToDate($endTimestamp, $data['calendar_type']);
+
+        $response['success'] = true;
+        $response['data'] = [
+            'start_date' => $data['start_date'],
+            'end_date' => sprintf("%02d/%02d/%04d", $endDate['day'], $endDate['month'], $endDate['year']),
+            'duration_months' => $data['duration_months'],
+            'calendar_type' => $data['calendar_type']
+        ];
+    } catch (Exception $e) {
+        $response['message'] = 'Calculation error: ' . $e->getMessage();
+    }
+
+    return $response;
+}
+
+/**
+ * Validate a date in specified calendar system
+ */
+function validateDate($data, $calendar) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    if (!isset($data['date']) || !isset($data['calendar_type'])) {
+        $response['message'] = 'Missing required parameters: date, calendar_type';
+        return $response;
+    }
+
+    try {
+        $parts = explode("/", $data['date']);
+        $day = intval($parts[0] ?? 0);
+        $month = intval($parts[1] ?? 0);
+        $year = intval($parts[2] ?? 0);
+
+        // Basic validation
+        if ($data['calendar_type'] == 'hijri') {
+            $isValid = ($month >= 1 && $month <= 12 && $day >= 1 && $day <= 30 && $year > 1300);
+        } else {
+            $isValid = checkdate($month, $day, $year);
+        }
+
+        if ($isValid) {
+            // Convert calendar type string to integer (0=Hijri, 1=Gregorian)
+            $calType = ($data['calendar_type'] == 'hijri') ? 0 : 1;
+            $timestamp = $calendar->dateToTimestamp($data['date'], $calType);
+            $response['success'] = true;
+            $response['data'] = [
+                'date' => $data['date'],
+                'calendar_type' => $data['calendar_type'],
+                'is_valid' => true,
+                'timestamp' => $timestamp
+            ];
+        } else {
+            $response['message'] = 'Invalid date';
+            $response['data'] = ['is_valid' => false];
+        }
+    } catch (Exception $e) {
+        $response['message'] = 'Validation error: ' . $e->getMessage();
+        $response['data'] = ['is_valid' => false];
+    }
+
+    return $response;
+}
+?>

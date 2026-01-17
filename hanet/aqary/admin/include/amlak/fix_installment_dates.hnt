@@ -1,0 +1,365 @@
+<?php
+/**
+ * Fix Corrupted Installment Dates
+ * Recalculates kastdate for installments with invalid timestamps
+ */
+
+$sc_title = "إصلاح تواريخ الأقساط";
+$sc_id = "211";
+include_once "../../../nocash.hnt";
+include_once "../../../connectdb.hnt";
+include_once "../../../header.hnt";
+include_once "CalendarManager.class.hnt";
+
+$calendar = new CalendarManager();
+$fixLog = [];
+$stats = [
+    'subproperties_checked' => 0,
+    'subproperties_fixed' => 0,
+    'installments_fixed' => 0,
+    'installments_default_date' => 0,
+    'errors' => 0
+];
+
+// Handle fix action
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['fix_action'])) {
+    // Find all contracts with corrupted installments (kastdate before year 2000)
+    $cutoffDate = strtotime('2000-01-01'); // Any date before 2000 is suspicious
+
+    $sql = "SELECT DISTINCT
+                aksat.idsubaqar,
+                aksat.egar_id,
+                amlakdetails.hnt_dll_type
+            FROM aksat
+            INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
+            WHERE aksat.kastdate > 0
+            AND aksat.kastdate < $cutoffDate
+            AND aksat.iscomplete = 0
+            AND aksat.egar_id IS NOT NULL
+            AND aksat.egar_id > 0";
+
+    $result = mysql_query($sql, $link);
+
+    while ($row = mysql_fetch_array($result)) {
+        $idsubaqar = $row['idsubaqar'];
+        $rakam3akdid = $row['egar_id'];
+        $calendarType = intval($row['hnt_dll_type'] ?? 1);
+
+        $stats['subproperties_checked']++;
+
+        // Get contract details
+        $contractSql = "SELECT st_date_, duration FROM egar WHERE rakam3akdid = '$rakam3akdid'";
+        $contractResult = mysql_query($contractSql, $link);
+        $contract = mysql_fetch_array($contractResult);
+
+        if (!$contract) {
+            // Contract not found - use default date of 1/1/2025
+            $defaultDate = strtotime('2025-01-01');
+
+            // Update all installments for this sub-property with default date
+            $updateSql = "UPDATE aksat
+                         SET kastdate = '$defaultDate'
+                         WHERE idsubaqar = '$idsubaqar'
+                         AND kastdate > 0
+                         AND kastdate < $cutoffDate
+                         AND iscomplete = 0";
+
+            if (mysql_query($updateSql, $link)) {
+                $affectedRows = mysql_affected_rows($link);
+                $stats['installments_default_date'] += $affectedRows;
+                $stats['subproperties_fixed']++;
+                $fixLog[] = "⚠ عقد غير موجود - تم تعيين التاريخ الافتراضي (1/1/2025): idsubaqar=$idsubaqar, rakam3akdid=$rakam3akdid ($affectedRows قسط)";
+            } else {
+                $fixLog[] = "✗ فشل تحديث الأقساط: idsubaqar=$idsubaqar";
+                $stats['errors']++;
+            }
+            continue;
+        }
+
+        // Parse contract start date
+        $startDate = $contract['st_date_'];
+        $duration = intval($contract['duration']);
+
+        if (!$startDate || !$duration) {
+            $fixLog[] = "✗ بيانات عقد ناقصة: rakam3akdid=$rakam3akdid";
+            $stats['errors']++;
+            continue;
+        }
+
+        // Convert start date to timestamp
+        $startTimestamp = $calendar->dateToTimestamp($startDate, $calendarType);
+
+        // Get all installments for this sub-property
+        $installmentsSql = "SELECT kastid, kastname FROM aksat
+                           WHERE idsubaqar = '$idsubaqar'
+                           AND iscomplete = 0
+                           AND kastdate > 0
+                           ORDER BY kastname";
+        $installmentsResult = mysql_query($installmentsSql, $link);
+
+        $fixedCount = 0;
+        while ($installment = mysql_fetch_array($installmentsResult)) {
+            $kastid = $installment['kastid'];
+            $kastname = intval($installment['kastname']);
+
+            // Calculate correct date: start_date + (installment_number - 1) * duration months
+            $monthsToAdd = $duration * ($kastname - 1);
+            $correctDate = $calendar->addMonths($startTimestamp, $monthsToAdd, $calendarType);
+
+            // Update the installment
+            $updateSql = "UPDATE aksat SET kastdate = '$correctDate' WHERE kastid = '$kastid'";
+            if (mysql_query($updateSql, $link)) {
+                $fixedCount++;
+            } else {
+                $fixLog[] = "✗ فشل تحديث القسط: kastid=$kastid";
+                $stats['errors']++;
+            }
+        }
+
+        if ($fixedCount > 0) {
+            $stats['installments_fixed'] += $fixedCount;
+            $stats['subproperties_fixed']++;
+            $fixLog[] = "✓ تم إصلاح $fixedCount قسط للوحدة: idsubaqar=$idsubaqar (العقد: $rakam3akdid)";
+        }
+    }
+}
+
+// Count corrupted installments
+$cutoffDate = strtotime('2000-01-01');
+$countSql = "SELECT COUNT(*) as total FROM aksat
+             WHERE kastdate > 0
+             AND kastdate < $cutoffDate
+             AND iscomplete = 0";
+$countResult = mysql_query($countSql, $link);
+$countRow = mysql_fetch_array($countResult);
+$corruptedCount = $countRow['total'];
+
+?>
+
+<link rel="stylesheet" href="<?= $urlh ?>/css/bootstrap-5.3.8-dist/css/bootstrap.rtl.min.css">
+<link rel="stylesheet" href="<?= $urlh ?>/css/bootstrap-icons-1.13.1/bootstrap-icons.min.css">
+<script src="<?= $urlh ?>/css/bootstrap-5.3.8-dist/js/bootstrap.bundle.min.js"></script>
+
+<style>
+    :root {
+        --primary-color: #667eea;
+        --danger-color: #dc3545;
+    }
+
+    .page-header {
+        background: linear-gradient(135deg, var(--primary-color) 0%, var(--danger-color) 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 15px;
+        margin-bottom: 2rem;
+    }
+
+    .stats-card {
+        background: white;
+        border-radius: 12px;
+        padding: 1.5rem;
+        text-align: center;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+        margin-bottom: 1rem;
+    }
+
+    .stats-value {
+        font-size: 2.5rem;
+        font-weight: 700;
+        color: var(--danger-color);
+    }
+
+    .fix-button {
+        background: linear-gradient(135deg, var(--primary-color) 0%, var(--danger-color) 100%);
+        border: none;
+        color: white;
+        padding: 1rem 2rem;
+        border-radius: 10px;
+        font-weight: 600;
+        width: 100%;
+    }
+
+    .log-item {
+        padding: 0.75rem;
+        margin-bottom: 0.5rem;
+        border-radius: 8px;
+        background: #f8f9fa;
+    }
+
+    .log-item.success {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .log-item.warning {
+        background: #d1ecf1;
+        color: #0c5460;
+    }
+
+    .log-item.error {
+        background: #f8d7da;
+        color: #721c24;
+    }
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-tools me-2"></i>إصلاح تواريخ الأقساط التالفة
+                </h1>
+                <p class="mb-0 opacity-75">Fix Corrupted Installment Dates</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='egarstatus.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value"><?= number_format($corruptedCount) ?></div>
+                <div class="text-muted">أقساط تحتاج إصلاح</div>
+                <small class="text-danger">تواريخ قبل سنة 2000</small>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value text-success"><?= number_format($stats['installments_fixed']) ?></div>
+                <div class="text-muted">أقساط محسوبة</div>
+                <small class="text-success">من تاريخ العقد</small>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value text-info"><?= number_format($stats['installments_default_date']) ?></div>
+                <div class="text-muted">تاريخ افتراضي</div>
+                <small class="text-info">1/1/2025</small>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value text-warning"><?= number_format($stats['errors']) ?></div>
+                <div class="text-muted">أخطاء</div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value text-primary"><?= number_format($stats['subproperties_fixed']) ?></div>
+                <div class="text-muted">وحدات تم إصلاحها</div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value text-secondary"><?= number_format($stats['subproperties_checked']) ?></div>
+                <div class="text-muted">وحدات تم فحصها</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Warning -->
+    <?php if ($corruptedCount > 0): ?>
+    <div class="alert alert-danger mb-4">
+        <h5><i class="bi bi-exclamation-triangle me-2"></i>تحذير</h5>
+        <p class="mb-0">
+            تم العثور على <strong><?= $corruptedCount ?></strong> قسط بتواريخ تالفة (قبل سنة 2000).
+            هذه الأقساط تم إنشاؤها بتواريخ خاطئة وتحتاج إلى إعادة حساب.
+        </p>
+    </div>
+
+    <!-- Fix Button -->
+    <div class="card mb-4">
+        <div class="card-body">
+            <h5 class="card-title">
+                <i class="bi bi-wrench me-2"></i>إصلاح التواريخ التالفة
+            </h5>
+            <p class="text-muted">
+                سيتم إعادة حساب تواريخ الأقساط بناءً على:
+                <br>• تاريخ بداية العقد + فترة السداد (إن وجد)
+                <br>• نوع التقويم (هجري/ميلادي)
+                <br>• التاريخ الافتراضي 1/1/2025 (للعقود المحذوفة)
+            </p>
+            <form method="POST" id="fixForm">
+                <input type="hidden" name="fix_action" value="1">
+                <button type="button" class="fix-button" onclick="confirmFix()">
+                    <i class="bi bi-tools me-2"></i>إصلاح التواريخ الآن
+                </button>
+            </form>
+        </div>
+    </div>
+    <?php else: ?>
+    <div class="alert alert-success">
+        <h5><i class="bi bi-check-circle me-2"></i>لا توجد مشاكل</h5>
+        <p class="mb-0">جميع الأقساط بتواريخ صحيحة!</p>
+    </div>
+    <?php endif; ?>
+
+    <!-- Results Log -->
+    <?php if (!empty($fixLog)): ?>
+    <div class="card mb-4">
+        <div class="card-body">
+            <h5 class="card-title">
+                <i class="bi bi-list-check me-2"></i>نتائج الإصلاح
+            </h5>
+            <div style="max-height: 400px; overflow-y: auto;">
+                <?php foreach ($fixLog as $log): ?>
+                    <?php
+                    $logClass = 'error';
+                    if (strpos($log, '✓') !== false) {
+                        $logClass = 'success';
+                    } elseif (strpos($log, '⚠') !== false) {
+                        $logClass = 'warning';
+                    }
+                    ?>
+                    <div class="log-item <?= $logClass ?>">
+                        <?= $log ?>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+    </div>
+
+    <!-- Default Date Info -->
+    <?php if ($stats['installments_default_date'] > 0): ?>
+    <div class="alert alert-info">
+        <h5><i class="bi bi-info-circle me-2"></i>ملاحظة: أقساط بتاريخ افتراضي</h5>
+        <p class="mb-2">
+            تم تعيين <strong><?= $stats['installments_default_date'] ?></strong> قسط بالتاريخ الافتراضي <strong>1/1/2025</strong>
+            لأن العقود المرتبطة بها غير موجودة في النظام.
+        </p>
+        <p class="mb-0">
+            يمكنك تعديل هذه التواريخ يدوياً لاحقاً حسب الحاجة.
+        </p>
+    </div>
+    <?php endif; ?>
+
+    <!-- Errors Warning -->
+    <?php if ($stats['errors'] > 0): ?>
+    <div class="alert alert-danger">
+        <h5><i class="bi bi-exclamation-triangle me-2"></i>أخطاء في التحديث</h5>
+        <p class="mb-0">
+            حدثت <strong><?= $stats['errors'] ?></strong> خطأ أثناء تحديث الأقساط. راجع السجل أعلاه للتفاصيل.
+        </p>
+    </div>
+    <?php endif; ?>
+    <?php endif; ?>
+</div>
+
+<script>
+function confirmFix() {
+    confirm('هل أنت متأكد من إصلاح جميع التواريخ التالفة؟ سيتم إعادة حساب التواريخ بناءً على تاريخ بداية العقد وفترة السداد.', 'تأكيد الإصلاح', function() {
+        // User confirmed - submit the form
+        document.getElementById('fixForm').submit();
+    }, function() {
+        // User cancelled - do nothing
+    });
+}
+</script>
+
+<?php require("../../../foter.hnt"); ?>

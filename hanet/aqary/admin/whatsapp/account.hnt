@@ -1,0 +1,479 @@
+<?php
+$pageTitle = 'إدارة الحساب';
+$sc_title = 'إدارة الحساب';
+$sc_id = "81";
+include_once "../../nocash.hnt";
+
+$canscroll = 0;
+if (isset($edit3kod) && $edit3kod) {
+    $canscroll = 0;
+}
+$showdhmltazkeer = 0;
+include_once "../../header.hnt";
+
+require_once('../include/whatsapp_init.hnt');
+
+$message = '';
+$messageType = '';
+$qrCode = '';
+$pairingCode = '';
+
+// Handle form submissions
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    $action = isset($_POST['action']) ? $_POST['action'] : '';
+
+    switch ($action) {
+        case 'get_qr':
+            $result = $whatsappAPI->getQRCode();
+            if ($result['success']) {
+                $qrCode = $result['qr_code'];
+                if (isset($result['qr_link'])) {
+                    $qr_link = file_get_contents($result['qr_link']);
+                }
+                $message = 'تم إنشاء رمز QR بنجاح. قم بمسحه من هاتفك';
+                $messageType = 'info';
+                wa_log_activity('login', 'تم طلب رمز QR للتسجيل');
+            } else {
+                $message = 'فشل الحصول على رمز QR: ' . $result['error'];
+                $messageType = 'danger';
+            }
+            break;
+
+        case 'get_pairing_code':
+            $phone = isset($_POST['phone']) ? trim($_POST['phone']) : '';
+            if (empty($phone)) {
+                $message = 'الرجاء إدخال رقم الهاتف';
+                $messageType = 'danger';
+            } else {
+                // Rate limiting: Check if user requested within last 60 seconds
+                $lastRequestTime = isset($_SESSION['last_pairing_code_request']) ? $_SESSION['last_pairing_code_request'] : 0;
+                $currentTime = time();
+                $timeDiff = $currentTime - $lastRequestTime;
+
+                if ($timeDiff < 60 && $lastRequestTime > 0) {
+                    // Too soon, ask to wait
+                    $remainingSeconds = 60 - $timeDiff;
+                    $message = sprintf('الرجاء الانتظار %d ثانية قبل طلب رمز جديد. هذا لتجنب الحظر من واتساب.', $remainingSeconds);
+                    $messageType = 'warning';
+                } else {
+                    // Allowed to make request
+                    $result = $whatsappAPI->loginWithCode($phone);
+                    if ($result['success']) {
+                        $pairingCode = $result['pairing_code'];
+                        $message = 'تم إنشاء رمز الإقران. أدخله في هاتفك';
+                        $messageType = 'success';
+                        // Update last request time
+                        $_SESSION['last_pairing_code_request'] = $currentTime;
+                        wa_log_activity('login', 'تم طلب رمز الإقران للهاتف: ' . $phone);
+                    } else {
+                        $message = 'فشل الحصول على رمز الإقران: ' . $result['error'];
+                        $messageType = 'danger';
+
+                        // Show debug information if available
+                        if (isset($result['debug_response'])) {
+                            $message .= '<br><br><strong>معلومات تقنية للدعم الفني:</strong><br>';
+                            $message .= '<pre style="background:#f8f9fa; padding:10px; border-radius:5px; font-size:12px; max-height:200px; overflow:auto;">';
+                            $message .= htmlspecialchars(json_encode($result['debug_response'], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+                            $message .= '</pre>';
+                        }
+
+                        // Log the API response for debugging
+                        $apiResponse = $whatsappAPI->getLastResponse();
+                        if ($apiResponse) {
+                            wa_log_activity('login_error', 'API Response: ' . json_encode($apiResponse));
+                        }
+                    }
+                }
+            }
+            break;
+
+        case 'logout':
+            $result = $whatsappAPI->logout();
+            if ($result['success']) {
+                wa_update_setting('account_connected', '0');
+                wa_update_setting('account_phone', '');
+                wa_update_setting('account_name', '');
+                $message = 'تم تسجيل الخروج بنجاح';
+                $messageType = 'success';
+                wa_log_activity('logout', 'تم تسجيل الخروج من الحساب');
+            } else {
+                $message = 'فشل تسجيل الخروج: ' . $result['error'];
+                $messageType = 'danger';
+            }
+            break;
+
+        case 'check_connection':
+            $result = $whatsappAPI->getUserInfo();
+            if ($result['success'] && isset($result['data'])) {
+                $userInfo = $result['data'];
+                wa_update_setting('account_connected', '1');
+                $accountPhone = isset($userInfo['phone']) ? str_replace('@s.whatsapp.net', '', $userInfo['phone']) : '';
+                wa_update_setting('account_phone', $accountPhone);
+                wa_update_setting('account_name', isset($userInfo['name']) ? $userInfo['name'] : '');
+                $message = 'الحساب متصل بنجاح';
+                $messageType = 'success';
+                wa_log_activity('login', 'تم التحقق من اتصال الحساب');
+            } else {
+                wa_update_setting('account_connected', '0');
+                $message = 'الحساب غير متصل. الرجاء تسجيل الدخول باستخدام رمز QR أو رمز الإقران';
+                $messageType = 'warning';
+            }
+            break;
+    }
+}
+
+// Get current account info
+$accountConnected = wa_is_account_connected();
+$accountPhone = wa_get_setting('account_phone', '');
+$accountName = wa_get_setting('account_name', '');
+
+// Try to get fresh user info if connected
+if ($accountConnected) {
+    $result = $whatsappAPI->getUserInfo();
+    if ($result['success'] && isset($result['data'])) {
+        $userInfo = $result['data'];
+        $accountPhone = isset($userInfo['phone']) ? str_replace('@s.whatsapp.net', '', $userInfo['phone']) : $accountPhone;
+        $accountName = isset($userInfo['name']) ? $userInfo['name'] : $accountName;
+    } else {
+        // If can't get user info, account is not really connected
+        $accountConnected = false;
+        wa_update_setting('account_connected', '0');
+    }
+}
+
+$pageTitle = 'إدارة الحساب';
+?>
+
+<div class="container-fluid mt-4">
+    <div class="row mb-4">
+        <div class="col">
+            <h2><i class="fab fa-whatsapp text-success"></i> <?php echo $pageTitle; ?></h2>
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="index.hnt">لوحة التحكم</a></li>
+                    <li class="breadcrumb-item active"><?php echo $pageTitle; ?></li>
+                </ol>
+            </nav>
+        </div>
+    </div>
+
+    <?php if ($message): ?>
+        <div class="alert alert-<?php echo $messageType; ?> alert-dismissible fade show" role="alert">
+            <?php echo $message; ?>
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+    <?php endif; ?>
+
+    <!-- Real-time Connection Indicator -->
+    <div class="row mb-3">
+        <div class="col-md-12">
+            <div id="connection-indicator" class="connection-indicator disconnected">
+                <i class="fa fa-circle-notch fa-spin"></i> جارِ الاتصال...
+            </div>
+        </div>
+    </div>
+
+    <!-- Device Status (Real-time) -->
+    <div class="row mb-4">
+        <div class="col-md-12">
+            <div id="device-status"></div>
+        </div>
+    </div>
+
+    <!-- Account Status -->
+    <div class="row mb-4">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header <?php echo $accountConnected ? 'bg-success' : 'bg-warning'; ?> text-white">
+                    <i class="fas fa-user-check"></i> حالة الحساب
+                    <span id="realtime-badge" class="badge bg-light text-dark float-end">
+                        <i class="fa fa-sync-alt fa-spin"></i> مباشر
+                    </span>
+                </div>
+                <div class="card-body">
+                    <?php if ($accountConnected): ?>
+                        <div class="row">
+                            <div class="col-md-8">
+                                <h5 id="connection-status"><i class="fas fa-check-circle text-success"></i> متصل</h5>
+                                <table class="table table-borderless">
+                                    <tr>
+                                        <td><strong>رقم الهاتف:</strong></td>
+                                        <td><?php echo wa_format_phone_display($accountPhone); ?></td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>الاسم:</strong></td>
+                                        <td><?php echo htmlspecialchars($accountName); ?></td>
+                                    </tr>
+                                </table>
+                            </div>
+                            <div class="col-md-4 text-end">
+                                <form method="post" style="display: inline;">
+                                    <input type="hidden" name="action" value="check_connection">
+                                    <button type="submit" class="btn btn-info mb-2">
+                                        <i class="fas fa-sync-alt"></i> تحديث الاتصال
+                                    </button>
+                                </form>
+                                <br>
+                                <form method="post" style="display: inline;">
+                                    <input type="hidden" name="action" value="logout">
+                                    <button type="submit" class="btn btn-danger" onclick="return confirm('هل أنت متأكد من تسجيل الخروج؟')">
+                                        <i class="fas fa-sign-out-alt"></i> تسجيل الخروج
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                    <?php else: ?>
+                        <div class="alert alert-warning">
+                            <i class="fas fa-exclamation-triangle"></i>
+                            <strong>غير متصل</strong> - يجب تسجيل الدخول لاستخدام خدمة WhatsApp
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <?php if (!$accountConnected): ?>
+        <!-- Login Options -->
+        <div class="row">
+            <!-- QR Code Login -->
+            <div class="col-md-6 mb-4">
+                <div class="card h-100">
+                    <div class="card-header bg-primary text-white">
+                        <i class="fas fa-qrcode"></i> تسجيل الدخول بواسطة رمز QR
+                    </div>
+                    <div class="card-body">
+                        <p>استخدم رمز QR للتسجيل بسرعة وسهولة من هاتفك</p>
+
+                        <form method="post">
+                            <input type="hidden" name="action" value="get_qr">
+                            <button type="submit" class="btn btn-primary btn-lg w-100">
+                                <i class="fas fa-qrcode"></i> إنشاء رمز QR
+                            </button>
+                        </form>
+
+                        <?php if (isset($qr_link) && $qr_link): ?>
+                            <div class="qr-code-container mt-3">
+                                <img src="data:image/png;base64,<?php echo base64_encode($qr_link); ?>" alt="QR Code" style="max-width: 300px; border: 3px solid #25d366; border-radius: 10px;">
+                                <p class="mt-3 text-muted">
+                                    <small>افتح واتساب > الإعدادات > الأجهزة المرتبطة > ربط جهاز</small>
+                                </p>
+                            </div>
+                        <?php endif; ?>
+
+                        <div class="alert alert-info mt-3">
+                            <i class="fas fa-info-circle"></i>
+                            <strong>خطوات التسجيل:</strong>
+                            <ol class="mb-0 mt-2">
+                                <li>اضغط على "إنشاء رمز QR"</li>
+                                <li>افتح واتساب على هاتفك</li>
+                                <li>اذهب إلى الإعدادات > الأجهزة المرتبطة</li>
+                                <li>اضغط على "ربط جهاز"</li>
+                                <li>امسح رمز QR المعروض</li>
+                            </ol>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pairing Code Login -->
+            <div class="col-md-6 mb-4">
+                <div class="card h-100">
+                    <div class="card-header bg-success text-white">
+                        <i class="fas fa-mobile-alt"></i> تسجيل الدخول برمز الإقران
+                    </div>
+                    <div class="card-body">
+                        <p>أدخل رقم هاتفك للحصول على رمز الإقران</p>
+
+                        <form method="post">
+                            <input type="hidden" name="action" value="get_pairing_code">
+                            <div class="mb-3">
+                                <label class="form-label">رقم الهاتف</label>
+                                <input type="text" name="phone" class="form-control form-control-lg"
+                                    placeholder="05xxxxxxxx" required>
+                                <small class="text-muted">أدخل رقم الهاتف بدون رمز الدولة</small>
+                            </div>
+                            <button type="submit" class="btn btn-success btn-lg w-100">
+                                <i class="fas fa-key"></i> الحصول على رمز الإقران
+                            </button>
+                        </form>
+
+                        <?php if ($pairingCode): ?>
+                            <div class="pairing-code" style="font-size: 2rem; font-weight: bold; color: #25d366; letter-spacing: 5px; text-align: center; padding: 20px; background: #f8f9fa; border-radius: 10px; margin: 20px 0;">
+                                <?php echo $pairingCode; ?>
+                            </div>
+                            <div class="alert alert-success">
+                                <i class="fas fa-check-circle"></i> أدخل هذا الرمز في هاتفك الآن
+                            </div>
+                        <?php endif; ?>
+
+                        <div class="alert alert-info mt-3">
+                            <i class="fas fa-info-circle"></i>
+                            <strong>خطوات التسجيل:</strong>
+                            <ol class="mb-0 mt-2">
+                                <li>أدخل رقم هاتفك</li>
+                                <li>اضغط على "الحصول على رمز الإقران"</li>
+                                <li>افتح واتساب على هاتفك</li>
+                                <li>اذهب إلى الإعدادات > الأجهزة المرتبطة</li>
+                                <li>اضغط على "ربط جهاز"</li>
+                                <li>اختر "ربط باستخدام رقم الهاتف"</li>
+                                <li>أدخل الرمز المعروض</li>
+                            </ol>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Important Notes -->
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card border-warning">
+                    <div class="card-header bg-warning text-dark">
+                        <i class="fas fa-exclamation-triangle"></i> ملاحظات هامة
+                    </div>
+                    <div class="card-body">
+                        <ul>
+                            <li>يجب أن يكون هاتفك متصلاً بالإنترنت ويستخدم نفس رقم الحساب المراد ربطه</li>
+                            <li>لا تشارك رمز QR أو رمز الإقران مع أي شخص حيث يمكنهم الوصول إلى حسابك</li>
+                            <li>تأكد من أن واتساب مثبت ومحدث على هاتفك قبل محاولة الربط</li>
+                            <li>إذا انتهت صلاحية رمز QR أو رمز الإقران، قم بإنشاء واحد جديد</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    <?php endif; ?>
+</div>
+
+<style>
+.connection-indicator {
+    padding: 10px 15px;
+    border-radius: 8px;
+    text-align: center;
+    font-weight: bold;
+    transition: all 0.3s;
+}
+
+.connection-indicator.connected {
+    background: #d4edda;
+    color: #155724;
+    border: 2px solid #c3e6cb;
+}
+
+.connection-indicator.disconnected {
+    background: #f8d7da;
+    color: #721c24;
+    border: 2px solid #f5c6cb;
+}
+
+.device-list {
+    list-style: none;
+    padding: 0;
+}
+
+.device-item {
+    padding: 12px;
+    margin: 8px 0;
+    background: #f8f9fa;
+    border-radius: 8px;
+    border-right: 4px solid #25d366;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.device-status-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.device-status-indicator.online {
+    background: #25d366;
+    box-shadow: 0 0 8px #25d366;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+.device-phone {
+    color: #6c757d;
+    font-size: 0.9em;
+    margin-right: auto;
+}
+</style>
+
+<script src="js/whatsapp_realtime.js"></script>
+<script>
+// Initialize real-time connection
+document.addEventListener('DOMContentLoaded', function() {
+    const whatsappRT = new WhatsAppRealtime({
+        proxyUrl: 'ws_proxy.php',
+
+        onDeviceUpdate: function(devices) {
+            console.log('📱 تحديث الأجهزة:', devices);
+            updateDeviceStatusUI(devices);
+
+            // Update connection status
+            const statusElement = document.getElementById('connection-status');
+            if (statusElement) {
+                if (devices.length > 0) {
+                    statusElement.innerHTML = '<i class="fas fa-check-circle text-success"></i> متصل';
+                } else {
+                    statusElement.innerHTML = '<i class="fas fa-times-circle text-danger"></i> غير متصل';
+                }
+            }
+        },
+
+        onConnectionChange: function(isConnected) {
+            console.log('🔌 حالة الاتصال:', isConnected ? 'متصل' : 'غير متصل');
+            updateConnectionIndicator(isConnected);
+
+            // Update real-time badge
+            const badge = document.getElementById('realtime-badge');
+            if (badge) {
+                if (isConnected) {
+                    badge.className = 'badge bg-success text-white float-end';
+                    badge.innerHTML = '<i class="fa fa-bolt"></i> مباشر';
+                } else {
+                    badge.className = 'badge bg-danger text-white float-end';
+                    badge.innerHTML = '<i class="fa fa-exclamation-triangle"></i> غير متصل';
+                }
+            }
+        },
+
+        onError: function(error) {
+            console.error('❌ خطأ:', error);
+        }
+    });
+
+    // Start real-time updates
+    whatsappRT.start();
+
+    // Also fetch once immediately
+    whatsappRT.fetchDevices(function(devices) {
+        console.log('الأجهزة الأولية:', devices);
+        updateDeviceStatusUI(devices);
+    });
+
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', function() {
+        whatsappRT.stop();
+    });
+});
+
+<?php if ($qrCode || $pairingCode): ?>
+// Auto check connection after login attempt
+setTimeout(function() {
+    console.log('🔄 التحقق من الاتصال بعد محاولة تسجيل الدخول...');
+    location.reload();
+}, 180000);
+<?php endif; ?>
+</script>
+
+<?php include_once "../../footer.hnt"; ?>

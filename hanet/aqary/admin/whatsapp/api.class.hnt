@@ -1,0 +1,1009 @@
+<?php
+
+/**
+ * WhatsApp API Class
+ * ====================================
+ * Class for communicating with WhatsApp service
+ * Based on working implementation from communicationActions.js
+ *
+ * @author WhatsApp Module
+ * @version 2.0
+ * @date 2025-10-19
+ */
+
+class WhatsAppAPI
+{
+    private $serviceUrl;
+    private $portNumber;
+    private $timeout = 30;
+    private $lastError = '';
+    private $lastResponse = null;
+    private $companyId;
+    private $password;
+
+    /**
+     * Constructor
+     * @param string $serviceUrl WhatsApp message server URL (use 'proxy' for application proxy, or direct URL like 'http://localhost:8010')
+     * @param string $portNumber WhatsApp port number for this instance (not used in direct mode)
+     * @param string $companyId Company ID for authentication
+     * @param string $password Password for authentication
+     */
+    public function __construct($serviceUrl = 'http://localhost:8010', $portNumber = '8010', $companyId = 'default', $password = '')
+    {
+        // If serviceUrl is 'proxy', use application proxy instead of direct connection
+        if ($serviceUrl === 'proxy') {
+            $this->serviceUrl = 'PROXY'; // Special marker
+        } else {
+            $this->serviceUrl = rtrim($serviceUrl, '/');
+        }
+
+        $this->portNumber = $portNumber;
+        $this->companyId = $companyId;
+        $this->password = $password;
+    }
+
+    /**
+     * Get Basic Auth header
+     * @return string
+     */
+    private function getAuthHeader()
+    {
+        $authString = $this->companyId . ':' . $this->password;
+        return 'Basic ' . base64_encode($authString);
+    }
+
+    /**
+     * Check if WhatsApp service is running and account is connected
+     * Uses WebSocket proxy to avoid exposing port 8010
+     * @return array
+     */
+    public function checkServiceStatus()
+    {
+        try {
+            // Use WebSocket proxy to check connection
+            $proxyUrl = dirname($_SERVER['SCRIPT_NAME']) . '/whatsapp/ws_proxy.php?action=check_connection';
+            $scheme = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http';
+            $host = $_SERVER['HTTP_HOST'];
+            $fullUrl = $scheme . '://' . $host . $proxyUrl;
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $fullUrl);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            //curl_close($ch);
+
+            if ($httpCode == 200 && $response) {
+                $result = json_decode($response, true);
+                if ($result && isset($result['success']) && $result['success']) {
+                    return array(
+                        'success' => true,
+                        'connected' => true,
+                        'data' => isset($result['data']) ? $result['data'] : array()
+                    );
+                }
+            }
+
+            return array('success' => true, 'connected' => false);
+        } catch (Exception $e) {
+            return array(
+                'success' => false,
+                'connected' => false,
+                'error' => $e->getMessage()
+            );
+        }
+    }
+
+    /**
+     * Get QR Code for login
+     * @return array
+     */
+    public function getQRCode()
+    {
+        try {
+            $response = $this->makeRequest('GET', "/app/login");
+
+            if ($response && isset($response['code'])) {
+                $result = array(
+                    'success' => true,
+                    'qr_code' => $response['code'],
+                    'message' => isset($response['message']) ? $response['message'] : 'تم الحصول على رمز QR'
+                );
+
+                // Add QR link if available
+                if (isset($response['results']['qr_link'])) {
+                    $result['qr_link'] = $response['results']['qr_link'];
+                } elseif (isset($response['qr_link'])) {
+                    $result['qr_link'] = $response['qr_link'];
+                }
+
+                return $result;
+            }
+
+            return array(
+                'success' => false,
+                'error' => 'فشل الحصول على رمز QR'
+            );
+        } catch (Exception $e) {
+            return array('success' => false, 'error' => $e->getMessage());
+        }
+    }
+
+    /**
+     * Login with pairing code
+     * @param string $phoneNumber Phone number
+     * @return array
+     */
+    public function loginWithCode($phoneNumber)
+    {
+        try {
+            // Clean and format phone number
+            $phone = $this->cleanPhoneNumber($phoneNumber);
+
+            // Convert Saudi local format (05xxxxxxxx) to international (9665xxxxxxxx)
+            if (substr($phone, 0, 2) === '05') {
+                $phone = '9665' . substr($phone, 2);
+            }
+
+            $response = $this->makeRequest('GET', "/app/login-with-code?phone=" . $phone);
+
+            if ($response) {
+                // Check for pairing code in different possible response structures
+                $pairingCode = null;
+
+                // v8 API returns it in results.pair_code
+                if (isset($response['results']['pair_code'])) {
+                    $pairingCode = $response['results']['pair_code'];
+                } elseif (isset($response['results']['pairing_code'])) {
+                    $pairingCode = $response['results']['pairing_code'];
+                } elseif (isset($response['results']['code'])) {
+                    $pairingCode = $response['results']['code'];
+                } elseif (isset($response['pair_code'])) {
+                    $pairingCode = $response['pair_code'];
+                } elseif (isset($response['pairing_code'])) {
+                    $pairingCode = $response['pairing_code'];
+                } elseif (isset($response['code']) && strtolower($response['code']) !== 'success') {
+                    // Only use 'code' field if it's not the status "success"
+                    $pairingCode = $response['code'];
+                }
+
+                if ($pairingCode) {
+                    return array(
+                        'success' => true,
+                        'pairing_code' => $pairingCode,
+                        'message' => isset($response['message']) ? $response['message'] : 'تم الحصول على رمز الإقران'
+                    );
+                }
+
+                // If pairing code not found, return detailed error with API response
+                $errorMsg = 'لم يتم العثور على رمز الإقران في الاستجابة';
+                if (isset($response['message'])) {
+                    $errorMsg = $response['message'];
+                } elseif (isset($response['error'])) {
+                    $errorMsg = $response['error'];
+                }
+
+                return array(
+                    'success' => false,
+                    'error' => $errorMsg,
+                    'debug_response' => $response
+                );
+            }
+
+            return array(
+                'success' => false,
+                'error' => 'لم يتم استلام استجابة من الخادم'
+            );
+        } catch (Exception $e) {
+            return array('success' => false, 'error' => $e->getMessage());
+        }
+    }
+
+    /**
+     * Logout from WhatsApp
+     * Uses WebSocket proxy to avoid exposing port 8010
+     * @return array
+     */
+    public function logout()
+    {
+        try {
+            // Use WebSocket proxy for logout
+            $proxyUrl = dirname($_SERVER['SCRIPT_NAME']) . '/whatsapp/ws_proxy.php';
+            $scheme = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http';
+            $host = $_SERVER['HTTP_HOST'];
+            $fullUrl = $scheme . '://' . $host . $proxyUrl;
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $fullUrl);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query(array(
+                'action' => 'logout',
+                'device' => $this->portNumber
+            )));
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            //curl_close($ch);
+
+            if ($httpCode == 200 && $response) {
+                $result = json_decode($response, true);
+                if ($result && isset($result['success']) && $result['success']) {
+                    return array(
+                        'success' => true,
+                        'message' => 'تم تسجيل الخروج بنجاح'
+                    );
+                }
+            }
+
+            return array(
+                'success' => false,
+                'error' => 'فشل تسجيل الخروج'
+            );
+        } catch (Exception $e) {
+            return array('success' => false, 'error' => $e->getMessage());
+        }
+    }
+
+    /**
+     * Get user information (check if connected)
+     * Uses WebSocket proxy via fetch_devices
+     * @return array
+     */
+    public function getUserInfo()
+    {
+        try {
+            // Use WebSocket proxy to fetch devices (which includes connection status)
+            $proxyUrl = dirname($_SERVER['SCRIPT_NAME']) . '/whatsapp/ws_proxy.php?action=fetch_devices';
+            $scheme = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http';
+            $host = $_SERVER['HTTP_HOST'];
+            $fullUrl = $scheme . '://' . $host . $proxyUrl;
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $fullUrl);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            //curl_close($ch);
+
+            if ($httpCode == 200 && $response) {
+                $result = json_decode($response, true);
+                if ($result && isset($result['success']) && $result['success']) {
+                    $data = isset($result['data']['result']) ? $result['data']['result'] : array();
+
+                    // Check if any device is connected
+                    if (!empty($data) && is_array($data)) {
+                        $device = $data[0]; // Get first device
+                        return array(
+                            'success' => true,
+                            'data' => array(
+                                'phone' => isset($device['device']) ? $device['device'] : '',
+                                'name' => isset($device['name']) ? $device['name'] : '',
+                                'pushname' => isset($device['pushname']) ? $device['pushname'] : '',
+                            )
+                        );
+                    }
+                }
+            }
+
+            // Not connected or no data
+            return array(
+                'success' => false,
+                'error' => 'الحساب غير متصل'
+            );
+        } catch (Exception $e) {
+            return array('success' => false, 'error' => $e->getMessage());
+        }
+    }
+
+    /**
+     * Send text message (adds to queue - NEVER sends directly)
+     * ALL messages MUST go through queue to respect 5-second delay and avoid WhatsApp blocking
+     * @param string $recipient Recipient phone number
+     * @param string $message Message text
+     * @param array $options Optional: priority, scheduled_time, recipient_name
+     * @return array
+     */
+    public function sendMessage($recipient, $message, $options = array())
+    {
+        global $db;
+
+        try {
+            // Clean phone number (remove non-numeric)
+            $phone = preg_replace('/[^0-9]/', '', $recipient);
+
+            // Remove leading zero
+            if (substr($phone, 0, 1) == '0') {
+                $phone = substr($phone, 1);
+            }
+
+            // Extract options
+            $priority = isset($options['priority']) ? (int)$options['priority'] : 5;
+            $scheduledTime = isset($options['scheduled_time']) ? $options['scheduled_time'] : null;
+            $recipientName = isset($options['recipient_name']) ? $options['recipient_name'] : null;
+
+            // Insert into queue
+            $query = "INSERT INTO whatsapp_queue
+                      (recipient, recipient_name, message_text, scheduled_time, status, priority, created_at)
+                      VALUES (?, ?, ?, ?, 'pending', ?, NOW())";
+
+            $stmt = mysqli_prepare($db, $query);
+
+            if (!$stmt) {
+                throw new Exception('فشل إعداد الاستعلام: ' . mysqli_error($db));
+            }
+
+            mysqli_stmt_bind_param($stmt, 'ssssi',
+                $phone, $recipientName, $message, $scheduledTime, $priority
+            );
+
+            if (!mysqli_stmt_execute($stmt)) {
+                throw new Exception('فشل حفظ الرسالة: ' . mysqli_stmt_error($stmt));
+            }
+
+            $queueId = mysqli_insert_id($db);
+            mysqli_stmt_close($stmt);
+
+            // Log
+            wa_log_activity('message_queued', sprintf(
+                'رسالة مضافة للطابور - المستلم: %s',
+                wa_format_phone_display($phone)
+            ));
+
+            return array(
+                'success' => true,
+                'queue_id' => $queueId,
+                'message' => 'تم إضافة الرسالة إلى قائمة الانتظار',
+                'note' => 'سيتم الإرسال تلقائياً مع تأخير 5 ثوانٍ بين الرسائل'
+            );
+
+        } catch (Exception $e) {
+            return array('success' => false, 'error' => $e->getMessage());
+        }
+    }
+
+    /**
+     * Send text message directly via HTTP (used ONLY by queue processor)
+     * WARNING: DO NOT call this from application code - use sendMessage() instead
+     * @param string $recipient Recipient phone number
+     * @param string $message Message text
+     * @return array
+     */
+    public function sendMessageDirect($recipient, $message)
+    {
+        try {
+            $phone = $this->formatPhoneNumber($recipient);
+
+            $data = array(
+                'phone' => $phone,
+                'message' => $message,
+                'is_forwarded' => false
+            );
+
+            $response = $this->makeRequest('POST', "/send/message", $data);
+
+            // Check response based on actual API structure
+            if ($response && (isset($response['code']) && strtolower($response['code']) == "success")) {
+                return array(
+                    'success' => true,
+                    'message_id' => isset($response['message']) ? $response['message'] : null,
+                    'data' => isset($response['message']) ? $response['message'] : $response,
+                    'message' => 'تم الإرسال بنجاح'
+                );
+            }
+
+            return array(
+                'success' => false,
+                'error' => isset($response['message']) ? $response['message'] : 'فشل الإرسال'
+            );
+        } catch (Exception $e) {
+            return array('success' => false, 'error' => $e->getMessage());
+        }
+    }
+
+    /**
+     * Send file (adds to queue - NEVER sends directly)
+     * ALL files MUST go through queue to respect 5-second delay and avoid WhatsApp blocking
+     * @param string $recipient Recipient phone number
+     * @param string $filePath Path to file
+     * @param string $caption File caption
+     * @param array $options Optional: priority, scheduled_time, recipient_name
+     * @return array
+     */
+    public function sendFile($recipient, $filePath, $caption = '', $options = array())
+    {
+        global $db;
+
+        try {
+            // Clean phone number (remove non-numeric)
+            $phone = preg_replace('/[^0-9]/', '', $recipient);
+
+            // Remove leading zero
+            if (substr($phone, 0, 1) == '0') {
+                $phone = substr($phone, 1);
+            }
+
+            if (!file_exists($filePath)) {
+                return array('success' => false, 'error' => 'الملف غير موجود: ' . $filePath);
+            }
+
+            // Extract options
+            $priority = isset($options['priority']) ? (int)$options['priority'] : 5;
+            $scheduledTime = isset($options['scheduled_time']) ? $options['scheduled_time'] : null;
+            $recipientName = isset($options['recipient_name']) ? $options['recipient_name'] : null;
+
+            // Detect file type
+            $extension = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+            $attachmentType = 'document'; // default
+            if (in_array($extension, array('jpg', 'jpeg', 'png', 'gif', 'webp'))) {
+                $attachmentType = 'image';
+            } elseif (in_array($extension, array('mp4', 'avi', 'mov', 'mkv'))) {
+                $attachmentType = 'video';
+            } elseif (in_array($extension, array('mp3', 'wav', 'ogg', 'm4a'))) {
+                $attachmentType = 'audio';
+            }
+
+            // Insert into queue
+            $query = "INSERT INTO whatsapp_queue
+                      (recipient, recipient_name, message_text, attachment_path, attachment_type,
+                       scheduled_time, status, priority, created_at)
+                      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, NOW())";
+
+            $stmt = mysqli_prepare($db, $query);
+
+            if (!$stmt) {
+                throw new Exception('فشل إعداد الاستعلام: ' . mysqli_error($db));
+            }
+
+            mysqli_stmt_bind_param($stmt, 'ssssssi',
+                $phone, $recipientName, $caption, $filePath, $attachmentType, $scheduledTime, $priority
+            );
+
+            if (!mysqli_stmt_execute($stmt)) {
+                throw new Exception('فشل حفظ الرسالة: ' . mysqli_stmt_error($stmt));
+            }
+
+            $queueId = mysqli_insert_id($db);
+            mysqli_stmt_close($stmt);
+
+            // Log
+            wa_log_activity('message_queued', sprintf(
+                'ملف مضاف للطابور - المستلم: %s',
+                wa_format_phone_display($phone)
+            ));
+
+            return array(
+                'success' => true,
+                'queue_id' => $queueId,
+                'message' => 'تم إضافة الملف إلى قائمة الانتظار',
+                'note' => 'سيتم الإرسال تلقائياً مع تأخير 5 ثوانٍ بين الرسائل'
+            );
+
+        } catch (Exception $e) {
+            return array('success' => false, 'error' => $e->getMessage());
+        }
+    }
+
+    /**
+     * Send file directly via HTTP (used ONLY by queue processor)
+     * WARNING: DO NOT call this from application code - use sendFile() instead
+     * @param string $recipient Recipient phone number
+     * @param string $filePath Path to file
+     * @param string $caption File caption
+     * @param bool $isForwarded Is forwarded message
+     * @return array
+     */
+    public function sendFileDirect($recipient, $filePath, $caption = '', $isForwarded = false)
+    {
+        try {
+            $phone = $this->formatPhoneNumber($recipient);
+
+            if (!file_exists($filePath)) {
+                return array('success' => false, 'error' => 'الملف غير موجود: ' . $filePath);
+            }
+
+            // Prepare multipart form data
+            $data = array(
+                'phone' => $phone,
+                'caption' => $caption,
+                'is_forwarded' => $isForwarded ? 'true' : 'false',
+                'file' => new CURLFile($filePath)
+            );
+
+            $response = $this->makeRequest('POST', "/send/file", $data, true);
+
+            // Check response based on actual API structure
+            if ($response && (isset($response['code']) && strtolower($response['code']) == "success")) {
+                return array(
+                    'success' => true,
+                    'message_id' => isset($response['message']) ? $response['message'] : null,
+                    'data' => isset($response['message']) ? $response['message'] : $response,
+                    'message' => 'تم إرسال الملف بنجاح'
+                );
+            }
+
+            return array(
+                'success' => false,
+                'error' => isset($response['message']) ? $response['message'] : 'فشل إرسال الملف'
+            );
+        } catch (Exception $e) {
+            return array('success' => false, 'error' => $e->getMessage());
+        }
+    }
+
+    /**
+     * Send image
+     * @param string $recipient Recipient phone number
+     * @param string $imagePath Path to image file
+     * @param string $caption Image caption
+     * @return array
+     */
+    public function sendImage($recipient, $imagePath, $caption = '')
+    {
+        return $this->sendFile($recipient, $imagePath, $caption);
+    }
+
+    /**
+     * Send video
+     * @param string $recipient Recipient phone number
+     * @param string $videoPath Path to video file
+     * @param string $caption Video caption
+     * @return array
+     */
+    public function sendVideo($recipient, $videoPath, $caption = '')
+    {
+        return $this->sendFile($recipient, $videoPath, $caption);
+    }
+
+    /**
+     * Send audio
+     * @param string $recipient Recipient phone number
+     * @param string $audioPath Path to audio file
+     * @return array
+     */
+    public function sendAudio($recipient, $audioPath)
+    {
+        return $this->sendFile($recipient, $audioPath, '');
+    }
+
+    /**
+     * Send contact
+     * @param string $recipient Recipient phone number
+     * @param string $contactPhone Contact phone number
+     * @param string $contactName Contact name
+     * @return array
+     */
+    public function sendContact($recipient, $contactPhone, $contactName)
+    {
+        try {
+            $phone = $this->formatPhoneNumber($recipient);
+            $contact = $this->formatPhoneNumber($contactPhone);
+
+            $data = array(
+                'phone' => $phone,
+                'contact_phone' => $contact,
+                'contact_name' => $contactName
+            );
+
+            $response = $this->makeRequest('POST', "/send/contact", $data);
+
+            if ($response && (isset($response['message_id']) || isset($response['success']))) {
+                return array(
+                    'success' => true,
+                    'message_id' => isset($response['message_id']) ? $response['message_id'] : null,
+                    'message' => 'تم إرسال جهة الاتصال بنجاح'
+                );
+            }
+
+            return array(
+                'success' => false,
+                'error' => isset($response['message']) ? $response['message'] : 'فشل إرسال جهة الاتصال'
+            );
+        } catch (Exception $e) {
+            return array('success' => false, 'error' => $e->getMessage());
+        }
+    }
+
+    /**
+     * Send location
+     * @param string $recipient Recipient phone number
+     * @param float $latitude Latitude
+     * @param float $longitude Longitude
+     * @return array
+     */
+    public function sendLocation($recipient, $latitude, $longitude)
+    {
+        try {
+            $phone = $this->formatPhoneNumber($recipient);
+
+            $data = array(
+                'phone' => $phone,
+                'latitude' => $latitude,
+                'longitude' => $longitude
+            );
+
+            $response = $this->makeRequest('POST', "/send/location", $data);
+
+            if ($response && (isset($response['message_id']) || isset($response['success']))) {
+                return array(
+                    'success' => true,
+                    'message_id' => isset($response['message_id']) ? $response['message_id'] : null,
+                    'message' => 'تم إرسال الموقع بنجاح'
+                );
+            }
+
+            return array(
+                'success' => false,
+                'error' => isset($response['message']) ? $response['message'] : 'فشل إرسال الموقع'
+            );
+        } catch (Exception $e) {
+            return array('success' => false, 'error' => $e->getMessage());
+        }
+    }
+
+    /**
+     * Clean phone number (remove non-numeric)
+     * @param string $phone Phone number
+     * @return string
+     */
+    private function cleanPhoneNumber($phone)
+    {
+        return preg_replace('/[^0-9]/', '', $phone);
+    }
+
+    /**
+     * Format phone number to WhatsApp format
+     * @param string $phone Phone number
+     * @return string Phone number with @s.whatsapp.net
+     */
+    private function formatPhoneNumber($phone)
+    {
+        // Remove all non-numeric characters
+        $phone = preg_replace('/[^0-9]/', '', $phone);
+
+        // If starts with 0, remove it and add country code
+        if (substr($phone, 0, 1) == '0') {
+            $phone = '966' . substr($phone, 1);
+        }
+
+        // If doesn't start with country code, add it (Saudi Arabia)
+        if (substr($phone, 0, 3) != '966' && substr($phone, 0, 1) != '+') {
+            $phone = '966' . $phone;
+        }
+
+        // Remove + if exists
+        $phone = str_replace('+', '', $phone);
+
+        // Add WhatsApp suffix
+        return $phone . '@s.whatsapp.net';
+    }
+
+    /**
+     * Make HTTP request to WhatsApp service
+     * @param string $method HTTP method (GET, POST)
+     * @param string $endpoint API endpoint
+     * @param array $data Request data
+     * @param bool $isMultipart Is multipart form data
+     * @return array|null
+     */
+    private function makeRequest($method, $endpoint, $data = array(), $isMultipart = false)
+    {
+        // Check if using proxy mode
+        if ($this->serviceUrl === 'PROXY') {
+            return $this->makeProxyRequest($method, $endpoint, $data, $isMultipart);
+        }
+
+        // Direct connection mode
+        $url = $this->serviceUrl . $endpoint;
+
+        $ch = curl_init();
+
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $this->timeout);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+
+        // Add authorization header if password is set
+        $headers = array();
+        if (!empty($this->password)) {
+            $headers[] = 'Authorization: ' . $this->getAuthHeader();
+        }
+
+        if ($method == 'POST') {
+            curl_setopt($ch, CURLOPT_POST, true);
+
+            if ($isMultipart) {
+                // For file uploads, let cURL set the content-type automatically
+                curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+            } else {
+                // For JSON data
+                curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+                $headers[] = 'Content-Type: application/json';
+            }
+        }
+
+        if (!empty($headers)) {
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        }
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+
+        //curl_close($ch);
+
+        if ($error) {
+            $this->lastError = $error;
+            throw new Exception('خطأ في الاتصال: ' . $error);
+        }
+
+        if ($httpCode >= 400) {
+            $this->lastError = 'HTTP Error: ' . $httpCode;
+            $errorBody = $response ? $response : 'لا توجد تفاصيل';
+            throw new Exception('خطأ في الخادم (' . $httpCode . '): ' . $errorBody);
+        }
+
+        $this->lastResponse = json_decode($response, true);
+        return $this->lastResponse;
+    }
+
+    /**
+     * Make request via application proxy
+     * @param string $method HTTP method
+     * @param string $endpoint API endpoint
+     * @param array $data Request data
+     * @param bool $isMultipart Is multipart form data
+     * @return array|null
+     */
+    private function makeProxyRequest($method, $endpoint, $data = array(), $isMultipart = false)
+    {
+        // Determine proxy URL (relative to current script)
+        $proxyUrl = dirname($_SERVER['SCRIPT_NAME']) . '/whatsapp/api_proxy.php';
+
+        // Build full URL
+        $scheme = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http';
+        $host = $_SERVER['HTTP_HOST'];
+        $fullProxyUrl = $scheme . '://' . $host . $proxyUrl;
+
+        // Encode endpoint
+        $encodedEndpoint = urlencode($endpoint);
+        $url = $fullProxyUrl . '?endpoint=' . $encodedEndpoint;
+
+        $ch = curl_init();
+
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $this->timeout);
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+
+        // Add authorization header if password is set
+        $headers = array();
+        if (!empty($this->password)) {
+            $headers[] = 'Authorization: ' . $this->getAuthHeader();
+        }
+
+        if ($method == 'POST' || $method == 'PUT') {
+            if ($isMultipart) {
+                // For file uploads
+                curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+            } else {
+                // For JSON data
+                curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+                $headers[] = 'Content-Type: application/json';
+            }
+        }
+
+        if (!empty($headers)) {
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        }
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+
+        //curl_close($ch);
+
+        if ($error) {
+            $this->lastError = $error;
+            throw new Exception('خطأ في الاتصال بالبروكسي: ' . $error);
+        }
+
+        if ($httpCode >= 400) {
+            $this->lastError = 'HTTP Error: ' . $httpCode;
+            $errorBody = $response ? $response : 'لا توجد تفاصيل';
+            throw new Exception('خطأ في البروكسي (' . $httpCode . '): ' . $errorBody);
+        }
+
+        $this->lastResponse = json_decode($response, true);
+        return $this->lastResponse;
+    }
+
+    /**
+     * Get last error message
+     * @return string
+     */
+    public function getLastError()
+    {
+        return $this->lastError;
+    }
+
+    /**
+     * Get last API response
+     * @return array|null
+     */
+    public function getLastResponse()
+    {
+        return $this->lastResponse;
+    }
+
+    /**
+     * Set port number
+     * @param string $portNumber Port number
+     */
+    public function setPortNumber($portNumber)
+    {
+        $this->portNumber = $portNumber;
+    }
+
+    /**
+     * Set credentials
+     * @param string $companyId Company ID
+     * @param string $password Password
+     */
+    public function setCredentials($companyId, $password)
+    {
+        $this->companyId = $companyId;
+        $this->password = $password;
+    }
+
+    /**
+     * Sync contacts from WhatsApp to masder table
+     * Fetches contacts from WhatsApp API and adds them to masder table if they don't exist
+     * @return array Result with success status, statistics, and any errors
+     */
+    public function syncContacts()
+    {
+        global $db;
+
+        try {
+            // Fetch contacts from WhatsApp API
+            $response = $this->makeRequest('GET', "/user/my/contacts");
+
+            if (!$response || !isset($response['code']) || strtolower($response['code']) != 'success') {
+                return array(
+                    'success' => false,
+                    'error' => 'فشل جلب جهات الاتصال من واتساب',
+                    'details' => isset($response['message']) ? $response['message'] : 'خطأ غير معروف'
+                );
+            }
+
+            // Check if we have contacts data
+            if (!isset($response['results']['data']) || !is_array($response['results']['data'])) {
+                return array(
+                    'success' => false,
+                    'error' => 'لا توجد جهات اتصال في الاستجابة'
+                );
+            }
+
+            $contacts = $response['results']['data'];
+            $stats = array(
+                'total' => count($contacts),
+                'added' => 0,
+                'skipped' => 0,
+                'errors' => 0
+            );
+
+            $errors = array();
+
+            // Process each contact
+            foreach ($contacts as $contact) {
+                // Extract JID and name
+                $jid = isset($contact['jid']) ? $contact['jid'] : '';
+                $name = isset($contact['name']) ? trim($contact['name']) : '';
+
+                // Skip if no JID
+                if (empty($jid)) {
+                    $stats['skipped']++;
+                    continue;
+                }
+
+                // Extract phone number from JID (remove @s.whatsapp.net)
+                $phone = str_replace('@s.whatsapp.net', '', $jid);
+
+                // Clean phone number: remove spaces and special characters
+                $phone = preg_replace('/[^0-9]/', '', $phone);
+
+                // Convert from international format (966...) to local format (05...)
+                if (substr($phone, 0, 3) == '966') {
+                    $phone = '0' . substr($phone, 3);
+                } elseif (substr($phone, 0, 1) != '0') {
+                    // If doesn't start with 966 or 0, add 0
+                    $phone = '0' . $phone;
+                }
+
+                // Skip if phone is invalid (less than 10 digits for Saudi numbers)
+                if (strlen($phone) < 10) {
+                    $stats['skipped']++;
+                    continue;
+                }
+
+                // Check if contact already exists in masder table
+                $checkStmt = $db->prepare("SELECT masderid FROM masder WHERE masderphone = ? LIMIT 1");
+                if (!$checkStmt) {
+                    $errors[] = 'فشل التحقق من جهة الاتصال: ' . $phone;
+                    $stats['errors']++;
+                    continue;
+                }
+
+                $checkStmt->bind_param("s", $phone);
+                $checkStmt->execute();
+                $checkResult = $checkStmt->get_result();
+
+                if ($checkResult->num_rows > 0) {
+                    // Contact already exists
+                    $stats['skipped']++;
+                    $checkStmt->close();
+                    continue;
+                }
+                $checkStmt->close();
+
+                // Insert new contact
+                $insertStmt = $db->prepare("
+                    INSERT INTO masder
+                    (masdername, masderphone, masdertel, masderfax, masderemail, masderaddress,
+                     maktab, mtype, mtemp, addationalinfo, formuid, userid)
+                    VALUES (?, ?, '', '', '', '', 0, 'whatsapp_sync', '', '', '', 0)
+                ");
+
+                if (!$insertStmt) {
+                    $errors[] = 'فشل إضافة جهة الاتصال: ' . $phone;
+                    $stats['errors']++;
+                    continue;
+                }
+
+                // Use name if available, otherwise use phone number
+                $contactName = !empty($name) ? $name : $phone;
+
+                $insertStmt->bind_param("ss", $contactName, $phone);
+
+                if ($insertStmt->execute()) {
+                    $stats['added']++;
+                } else {
+                    $errors[] = 'فشل حفظ جهة الاتصال: ' . $phone . ' - ' . $insertStmt->error;
+                    $stats['errors']++;
+                }
+
+                $insertStmt->close();
+            }
+
+            // Log activity
+            wa_log_activity('contacts_synced', sprintf(
+                'تمت مزامنة جهات الاتصال - الإجمالي: %d، المضاف: %d، المتخطى: %d، الأخطاء: %d',
+                $stats['total'],
+                $stats['added'],
+                $stats['skipped'],
+                $stats['errors']
+            ));
+
+            return array(
+                'success' => true,
+                'stats' => $stats,
+                'errors' => $errors,
+                'message' => sprintf(
+                    'تمت المزامنة بنجاح. تم إضافة %d من أصل %d جهة اتصال',
+                    $stats['added'],
+                    $stats['total']
+                )
+            );
+
+        } catch (Exception $e) {
+            return array(
+                'success' => false,
+                'error' => 'خطأ في المزامنة: ' . $e->getMessage()
+            );
+        }
+    }
+}

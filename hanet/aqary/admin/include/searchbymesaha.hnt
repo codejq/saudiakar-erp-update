@@ -1,0 +1,498 @@
+<?php
+/**
+ * Land Search by Area
+ * Search for lands by various area criteria
+ */
+
+$sc_title = "عرض الاراضي حسب مساحة معينة";
+$sc_id = "9";
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../nocash.hnt";
+    include_once "../../header.hnt";
+} else {
+    // For AJAX requests, include authentication
+    include_once "../../reqloginajax.hnt";
+}
+
+
+// Handle AJAX form submissions
+if ($is_ajax_request && isset($_POST['genericsql'])) {
+    $genericsql = $_POST['genericsql'];
+    $redirect_url = 'updateard.hnt?genericsql=' . urlencode($genericsql);
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'جاري تحميل النتائج...',
+        'redirect_url' => $redirect_url
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
+}
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.search-dashboard {
+    background: #f8f9fa;
+    min-height: 100vh;
+    padding: 2rem 0;
+}
+
+.page-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.search-options {
+    background: white;
+    border-radius: 8px;
+    padding: 1.5rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    margin-bottom: 2rem;
+}
+
+.option-button {
+    padding: 0.75rem 1rem;
+    border: 2px solid #e5e7eb;
+    border-radius: 8px;
+    background: white;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.option-button:hover {
+    border-color: #6366f1;
+    background: #eef2ff;
+}
+
+.option-button input[type="radio"] {
+    width: 18px;
+    height: 18px;
+}
+
+.option-button.active {
+    border-color: #6366f1;
+    background: #eef2ff;
+}
+
+.search-form {
+    display: none;
+    background: white;
+    border-radius: 8px;
+    padding: 2rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.search-form.active {
+    display: block;
+}
+
+@media (max-width: 768px) {
+    .option-button {
+        padding: 0.5rem 0.75rem;
+        font-size: 0.9rem;
+    }
+}
+</style>
+
+<div class="search-dashboard" dir="rtl">
+    <div class="container-fluid">
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>
+                <i class="bi bi-rulers"></i>
+                <?= $sc_title ?>
+            </h1>
+            <p class="mb-0 mt-2" style="opacity: 0.95; font-size: 0.95rem;">
+                البحث عن الأراضي حسب معايير المساحة المختلفة
+            </p>
+        </div>
+
+        <!-- Search Options -->
+        <div class="search-options">
+            <h5 class="mb-3">
+                <i class="bi bi-filter-circle text-indigo me-2"></i>
+                اختر نوع البحث
+            </h5>
+            <div class="row g-2">
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-0">
+                        <input type="radio" name="search-type" value="0">
+                        <span>بحث بالمساحة ± نسبة</span>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-1">
+                        <input type="radio" name="search-type" value="1">
+                        <span>بحث بمساحة محددة</span>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-2">
+                        <input type="radio" name="search-type" value="2">
+                        <span>بحث أكبر من مساحة</span>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-3">
+                        <input type="radio" name="search-type" value="3">
+                        <span>بحث أقل من مساحة</span>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-4">
+                        <input type="radio" name="search-type" value="4">
+                        <span>بحث بين مساحتين</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Form 0: Area ± Percentage -->
+        <div id="form-0" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-percent text-indigo me-2"></i>
+                بحث بالمساحة ± نسبة
+            </h4>
+            <form id="areaPercentForm">
+                <input type="hidden" name="genericsql">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">ابحث عن مساحة:</label>
+                        <input type="text"
+                               class="form-control form-control-lg"
+                               name="serchv"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               onkeyup="ValidateNumberKeyUp(this);"
+                               onblur="ValidateAndFormatNumber(this)"
+                               required>
+                        <small class="text-muted"><?= $lenghtunit ?>²</small>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">النسبة (%):</label>
+                        <input type="text"
+                               class="form-control form-control-lg"
+                               name="nesba"
+                               value="20"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               required>
+                        <small class="text-muted">%</small>
+                    </div>
+                </div>
+                <div class="d-grid gap-2 mt-4">
+                    <button type="submit" class="btn btn-primary btn-lg" id="searchBtn0">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 1: Exact Area -->
+        <div id="form-1" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-bullseye text-indigo me-2"></i>
+                بحث بمساحة محددة
+            </h4>
+            <form id="exactAreaForm">
+                <input type="hidden" name="genericsql">
+                <div class="mb-3">
+                    <label class="form-label">ابحث عن مساحة:</label>
+                    <input type="text"
+                           class="form-control form-control-lg"
+                           name="serchv"
+                           onkeypress="return ValidateNumberKeyPress(this, event);"
+                           onkeyup="ValidateNumberKeyUp(this);"
+                           onblur="ValidateAndFormatNumber(this)"
+                           required>
+                    <small class="text-muted"><?= $lenghtunit ?>²</small>
+                </div>
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-primary btn-lg" id="searchBtn1">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 2: Greater Than Area -->
+        <div id="form-2" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-arrow-up-circle text-indigo me-2"></i>
+                بحث أكبر من مساحة
+            </h4>
+            <form id="greaterAreaForm">
+                <input type="hidden" name="genericsql">
+                <div class="mb-3">
+                    <label class="form-label">ابحث عن مساحة أكبر من:</label>
+                    <input type="text"
+                           class="form-control form-control-lg"
+                           name="serchv"
+                           onkeypress="return ValidateNumberKeyPress(this, event);"
+                           onkeyup="ValidateNumberKeyUp(this);"
+                           onblur="ValidateAndFormatNumber(this)"
+                           required>
+                    <small class="text-muted"><?= $lenghtunit ?>²</small>
+                </div>
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-primary btn-lg" id="searchBtn2">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 3: Less Than Area -->
+        <div id="form-3" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-arrow-down-circle text-indigo me-2"></i>
+                بحث أقل من مساحة
+            </h4>
+            <form id="lessAreaForm">
+                <input type="hidden" name="genericsql">
+                <div class="mb-3">
+                    <label class="form-label">ابحث عن مساحة أقل من:</label>
+                    <input type="text"
+                           class="form-control form-control-lg"
+                           name="serchv"
+                           onkeypress="return ValidateNumberKeyPress(this, event);"
+                           onkeyup="ValidateNumberKeyUp(this);"
+                           onblur="ValidateAndFormatNumber(this)"
+                           required>
+                    <small class="text-muted"><?= $lenghtunit ?>²</small>
+                </div>
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-primary btn-lg" id="searchBtn3">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 4: Between Two Areas -->
+        <div id="form-4" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-arrows-expand text-indigo me-2"></i>
+                بحث بين مساحتين
+            </h4>
+            <form id="betweenAreaForm">
+                <input type="hidden" name="genericsql">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">المساحة الأولى:</label>
+                        <input type="text"
+                               class="form-control form-control-lg"
+                               name="serchv"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               onkeyup="ValidateNumberKeyUp(this);"
+                               onblur="ValidateAndFormatNumber(this)"
+                               required>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">المساحة الثانية:</label>
+                        <input type="text"
+                               class="form-control form-control-lg"
+                               name="serchv0"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               onkeyup="ValidateNumberKeyUp(this);"
+                               onblur="ValidateAndFormatNumber(this)"
+                               required>
+                    </div>
+                </div>
+                <small class="text-muted d-block mt-2"><?= $lenghtunit ?>²</small>
+                <div class="d-grid gap-2 mt-3">
+                    <button type="submit" class="btn btn-primary btn-lg" id="searchBtn4">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+    </div>
+</div>
+
+<script>
+/**
+ * Land Search by Area - Modern JavaScript
+ */
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Land Search by Area initialized');
+
+    // Get elements
+    const options = document.querySelectorAll('.option-button');
+    const forms = document.querySelectorAll('.search-form');
+
+    // Load saved search type from cookie
+    const savedType = getCookie('ardmes');
+    if (savedType) {
+        const optionId = savedType.replace('srch', '');
+        showForm(optionId);
+        const optionElement = document.getElementById(`option-${optionId}`);
+        if (optionElement) {
+            optionElement.querySelector('input').checked = true;
+        }
+    }
+
+    // Option selection handlers
+    options.forEach(option => {
+        option.addEventListener('click', function() {
+            const radio = this.querySelector('input[type="radio"]');
+            const value = radio.value;
+            showForm(value);
+            setCookie('ardmes', `srch${value}`, 20);
+        });
+    });
+
+    // Show form based on type
+    function showForm(type) {
+        // Reset all
+        options.forEach(opt => opt.classList.remove('active'));
+        forms.forEach(form => form.classList.remove('active'));
+
+        // Activate selected
+        const selectedOption = document.getElementById(`option-${type}`);
+        const selectedForm = document.getElementById(`form-${type}`);
+        if (selectedOption) selectedOption.classList.add('active');
+        if (selectedForm) selectedForm.classList.add('active');
+    }
+
+    // Setup AJAX for all forms
+    setupFormAjax('areaPercentForm', 'searchBtn0', (form) => {
+        const serchv0 = parseInt(form.serchv.value.replace(/,/gi, ''));
+        const nesba = parseFloat(form.nesba.value);
+        const serchv1 = serchv0 - (serchv0 * nesba / 100);
+        const serchv2 = serchv0 + (serchv0 * nesba / 100);
+        return ` where mesaha >= ${serchv1} and mesaha <= ${serchv2}`;
+    });
+
+    setupFormAjax('exactAreaForm', 'searchBtn1', (form) => {
+        const serchv0 = parseInt(form.serchv.value.replace(/,/gi, ''));
+        return ` where mesaha = ${serchv0}`;
+    });
+
+    setupFormAjax('greaterAreaForm', 'searchBtn2', (form) => {
+        const serchv0 = parseInt(form.serchv.value.replace(/,/gi, ''));
+        return ` where mesaha > ${serchv0}`;
+    });
+
+    setupFormAjax('lessAreaForm', 'searchBtn3', (form) => {
+        const serchv0 = parseInt(form.serchv.value.replace(/,/gi, ''));
+        return ` where mesaha < ${serchv0}`;
+    });
+
+    setupFormAjax('betweenAreaForm', 'searchBtn4', (form) => {
+        let serchv1 = parseInt(form.serchv.value.replace(/,/gi, ''));
+        let serchv2 = parseInt(form.serchv0.value.replace(/,/gi, ''));
+        if (serchv1 > serchv2) {
+            const temp = serchv1;
+            serchv1 = serchv2;
+            serchv2 = temp;
+        }
+        return ` where mesaha >= ${serchv1} and mesaha <= ${serchv2}`;
+    });
+
+    /**
+     * Setup AJAX form submission
+     */
+    function setupFormAjax(formId, buttonId, sqlGenerator) {
+        const form = document.getElementById(formId);
+        const button = document.getElementById(buttonId);
+
+        if (!form || !button) return;
+
+        form.addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            // Generate SQL
+            const genericsql = sqlGenerator(this);
+            this.genericsql.value = genericsql;
+
+            const formData = new FormData(this);
+            formData.append('ajax_submit', '1');
+
+            // Show loading state
+            button.disabled = true;
+            button.innerHTML = '<i class="bi bi-hourglass-split me-2"></i> جاري البحث...';
+
+            // Submit via AJAX
+            $.ajax({
+                url: window.location.pathname.split('/').pop(),
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                dataType: 'json',
+                success: function(response) {
+                    if (response.success && response.redirect_url) {
+                        window.location.href = response.redirect_url;
+                    } else {
+                        alert(response.error || 'حدث خطأ أثناء البحث');
+                        button.disabled = false;
+                        button.innerHTML = '<i class="bi bi-search me-2"></i> ابحـث';
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error('AJAX Error:', error);
+                    alert('حدث خطأ أثناء البحث. الرجاء المحاولة مرة أخرى.');
+                    button.disabled = false;
+                    button.innerHTML = '<i class="bi bi-search me-2"></i> ابحـث';
+                }
+            });
+
+            return false;
+        });
+    }
+
+    // Cookie functions
+    function setCookie(name, value, days) {
+        const expires = new Date();
+        expires.setTime(expires.getTime() + days * 24 * 60 * 60 * 1000);
+        document.cookie = name + '=' + value + ';expires=' + expires.toUTCString() + ';path=/';
+    }
+
+    function getCookie(name) {
+        const nameEQ = name + '=';
+        const ca = document.cookie.split(';');
+        for (let i = 0; i < ca.length; i++) {
+            let c = ca[i];
+            while (c.charAt(0) === ' ') c = c.substring(1, c.length);
+            if (c.indexOf(nameEQ) === 0) return c.substring(nameEQ.length, c.length);
+        }
+        return null;
+    }
+});
+</script>
+
+<?php
+} // Close if (!$is_ajax_request)
+require('../../foter.hnt');
+?>

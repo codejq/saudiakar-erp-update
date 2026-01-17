@@ -1,0 +1,101 @@
+<?
+header('Content-Type: application/json; charset=utf-8');
+require_once('iconv_cross.hnt');
+require_once('lib/storage/helpers.php');
+
+// Define application base path for URL generation
+if (!defined('APP_BASE_PATH')) {
+    define('APP_BASE_PATH', '/aqary');
+}
+
+if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+    // this is windows server
+    define('WKHTML_LIB', "wkhtmltopdf.exe");
+} else {
+    // or the 64 bit binary?
+    define('WKHTML_LIB', "wkhtmltopdf-i386");
+}
+
+// Ensure PDF reports directory exists
+$pdf_reports_dir = upload_path('documents.reports.pdf');
+ensure_dir($pdf_reports_dir);
+
+$reporturl = "admin/include/amlak/erad_report.hnt?idaqar=1&report=1";
+$reporturl = $_REQUEST['reportpath'] ?? $reporturl;
+if(strpos($reporturl , "?") === false){$reporturl = $reporturl."?";}
+$reporturl = $reporturl . "&username=" . ($_REQUEST['username'] ?? '') . "&password=" . ($_REQUEST['password'] ?? '');
+$pdf_file_name = date("d-m-Y-h-i-s")."_".rand(999,9999)."_".rand(999,9999).".pdf";
+
+// Get full file path for storage
+$pdf_file_path = upload_path('documents.reports.pdf', $pdf_file_name);
+$pdf_file_url = upload_url('documents.reports.pdf', $pdf_file_name);
+
+// Fix reporturl to include /aqary if it doesn't start with it
+if (strpos($reporturl, '/aqary/') !== 0 && strpos($reporturl, 'aqary/') !== 0) {
+    $reporturl = 'aqary/' . $reporturl;
+}
+
+// Build optimized wkhtmltopdf command with aggressive timeout settings
+$commandString = WKHTML_LIB .
+				" --enable-local-file-access" .
+				" --load-error-handling ignore" .
+				" --load-media-error-handling ignore" .
+				" --disable-smart-shrinking" .
+				" --disable-javascript" .  // Disable JS for faster rendering
+				" --no-stop-slow-scripts" .
+				" --no-images" . // Disable images for maximum speed
+				" --disable-plugins" . // Disable plugins
+				" --minimum-font-size 8" .
+				" -T 50mm" .
+				" --margin-left 15mm" .
+				" --margin-right 15mm" .
+				" --print-media-type" .
+				" --no-background" .
+				" \"http://localhost:" . $_SERVER['SERVER_PORT'] . "/" . $reporturl . "&cashforpdf=1\"" .
+				" \"$pdf_file_path\" 2>&1";
+
+$commandString = WKHTML_LIB . " " . " -T 50mm  --margin-left 15mm  --margin-right 15mm  --header-html \"http://localhost:"
+.$_SERVER['SERVER_PORT']."/aqary/report_header.hnt?cashforpdf=1\"  --footer-html \"http://localhost:"
+.$_SERVER['SERVER_PORT']."/aqary/reportfooter.hnt?cashforpdf=1\" --print-media-type --no-background  \"http://localhost:"
+.$_SERVER['SERVER_PORT']."/".$reporturl."\"   \"$pdf_file_path\" 2> output";
+// Set maximum execution time for PHP script (60 seconds)
+set_time_limit(60);
+
+// Execute command and capture output
+$output = [];
+$return_var = 0;
+exec($commandString, $output, $return_var);
+
+// Check if PDF was created successfully
+if (!file_exists($pdf_file_path) || filesize($pdf_file_path) == 0) {
+	// PDF generation failed
+	$error_details = [
+		'success' => false,
+		'error' => 'فشل في إنشاء ملف PDF',
+		'details' => [
+			'command' => $commandString,
+			'return_code' => $return_var,
+			'output' => implode("\n", $output),
+			'file_path' => $pdf_file_path,
+			'file_exists' => file_exists($pdf_file_path)
+		]
+	];
+	echo json_encode($error_details, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+	exit;
+}
+
+//print $out ? $out : join("", file("output"));
+if(empty($_REQUEST['mailto'])){
+	echo json_encode([
+		'success' => true,
+		'filename' => $pdf_file_url
+	], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+else{
+	$mailattachementarray[] = $pdf_file_path;
+	$directsend = true;
+	$_REQUEST['mailsubject'] = $_REQUEST['title'] ?? '';
+	$_REQUEST['mailbody'] =  $_REQUEST['mailbody'] ?? '';
+	include("sendmail.do.hnt");
+}
+

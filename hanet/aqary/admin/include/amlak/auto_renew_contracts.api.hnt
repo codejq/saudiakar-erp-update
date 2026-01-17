@@ -1,0 +1,279 @@
+<?php
+/**
+ * Auto-Renewal System for Contracts
+ *
+ * This script automatically extends contracts and generates new installments
+ * when contracts approach their end date. Designed to run as a daily cron job.
+ *
+ * Features:
+ * - Extends contract end date automatically
+ * - Generates installments for extended period
+ * - Works regardless of payment status
+ * - Logs all renewals to history
+ *
+ * Usage:
+ * - Daily cron: 0 2 * * * php /path/to/auto_renew_contracts.api.hnt
+ * - Manual: http://yoursite.com/admin/include/amlak/auto_renew_contracts.api.hnt?run=1
+ *
+ * @date 2025-12-04
+ */
+
+// Determine if running from CLI or browser
+$isCLI = (php_sapi_name() === 'cli');
+
+if (!$isCLI) {
+    // Browser execution
+    if (!isset($_REQUEST['run']) || $_REQUEST['run'] != '1') {
+        die('Please add ?run=1 to execute this script');
+    }
+    header('Content-Type: text/html; charset=utf-8');
+    echo '<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>نظام التجديد التلقائي</title>';
+    echo '<link rel="stylesheet" type="text/css" href="../../../fonts.css" media="all" />';
+    echo '<style>';
+    echo ':root {';
+    echo '    --primary-gradient: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);';
+    echo '    --secondary-gradient: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);';
+    echo '    --tertiary-gradient: linear-gradient(135deg, #29a0f0ff 0%, #146594ff 100%);';
+    echo '    --success-gradient: linear-gradient(135deg, #0a7047 0%, #0d9488 100%);';
+    echo '}';
+    echo 'body {';
+    echo '    direction: rtl;';
+    echo '    background: var(--secondary-gradient);';
+    echo '    font-family: \'F-DFont\', \'Segoe UI\', Tahoma, Geneva, Verdana, sans-serif;';
+    echo '    padding: 20px;';
+    echo '}';
+    echo '</style>';
+    echo '</head><body><pre>';
+}
+
+// Include required files
+require_once '../../../connectdb.hnt';
+require_once 'CalendarManager.class.hnt';
+require_once 'auto_renewal_config.hnt';
+require_once '../arabicTools.class.hnt';
+require_once '../uCal.class.hnt';
+
+echo "==============================================\n";
+echo "نظام التجديد التلقائي - بدء التشغيل\n";
+echo "==============================================\n";
+echo "الوقت: " . date('Y-m-d H:i:s') . "\n\n";
+
+$calendar = new CalendarManager();
+$dcal = new uCal();
+$now = time();
+
+// Load configuration from auto_renewal_config.hnt
+$renewalThresholdDays = RENEWAL_THRESHOLD_DAYS;
+$renewalPeriodMonths = RENEWAL_PERIOD_MONTHS;
+$installmentDuration = DEFAULT_INSTALLMENT_DURATION;
+
+$thresholdTimestamp = $now + ($renewalThresholdDays * 24 * 60 * 60);
+
+echo "الإعدادات:\n";
+echo "- حد التجديد: $renewalThresholdDays يوم قبل تاريخ الانتهاء\n";
+echo "- فترة التمديد: $renewalPeriodMonths شهر\n";
+echo "- مدة القسط: $installmentDuration شهر\n\n";
+
+// Find contracts that need renewal
+// Criteria: active, end date within threshold, not terminated/cancelled
+$sql = "SELECT e.*,
+        ad.idsubaqar, ad.price as unit_price
+        FROM egar e
+        LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
+        WHERE e.end3aqd <= $thresholdTimestamp
+        AND e.end3aqd >= $now
+        AND (e.status IS NULL OR e.status IN ('active', 'active_arrears'))
+        ORDER BY e.end3aqd ASC";
+
+$result = mysql_query($sql, $link);
+
+if (!$result) {
+    echo "خطأ: فشل في استعلام العقود\n";
+    echo "خطأ SQL: " . mysql_error($link) . "\n";
+    exit(1);
+}
+
+$contractCount = mysql_num_rows($result);
+echo "تم العثور على $contractCount عقد يحتاج للتجديد\n\n";
+
+if ($contractCount == 0) {
+    echo "لا توجد عقود تحتاج للتجديد في الوقت الحالي.\n";
+    if (!$isCLI) {
+        echo '</pre></body></html>';
+    }
+    exit(0);
+}
+
+$successCount = 0;
+$errorCount = 0;
+$errors = [];
+
+while ($contract = mysql_fetch_assoc($result)) {
+    $contractId = $contract['rakam3akdid'];
+    $oldEndDate = $contract['end3aqd'];
+    $calendarType = isset($contract['calendar_type']) ? intval($contract['calendar_type']) : 0;
+    $duration = isset($contract['duration']) ? intval($contract['duration']) : $installmentDuration;
+
+    echo "----------------------------------------\n";
+    echo "معالجة العقد رقم #$contractId\n";
+    echo "----------------------------------------\n";
+    echo "تاريخ الانتهاء الحالي: " . date('Y-m-d', $oldEndDate) . "\n";
+    echo "نوع التقويم: " . ($calendarType == 0 ? 'هجري' : 'ميلادي') . "\n";
+    echo "مدة القسط: $duration شهر\n";
+
+    try {
+        // Calculate new end date (extend by renewal period)
+        $newEndDate = $calendar->addMonths($oldEndDate, $renewalPeriodMonths, $calendarType);
+
+        echo "تاريخ الانتهاء الجديد: " . date('Y-m-d', $newEndDate) . "\n";
+
+        // Start transaction
+        mysql_query("START TRANSACTION", $link);
+
+        // Update contract end date
+        $updateSql = "UPDATE egar SET
+                      end3aqd = $newEndDate,
+                      updated_at = $now,
+                      updated_by_userid = 0
+                      WHERE rakam3akdid = $contractId";
+
+        if (!mysql_query($updateSql, $link)) {
+            throw new Exception("فشل في تحديث تاريخ انتهاء العقد: " . mysql_error($link));
+        }
+
+        echo "✓ تم تمديد تاريخ انتهاء العقد\n";
+
+        // Log to history
+        $historySql = "INSERT INTO egar_history SET
+                       rakam3akdid = $contractId,
+                       changed_by_userid = 0,
+                       changed_at = $now,
+                       change_type = 'auto_renewed',
+                       changes = 'تم تجديد العقد تلقائياً. تم تمديد تاريخ الانتهاء من " . date('Y-m-d', $oldEndDate) . " إلى " . date('Y-m-d', $newEndDate) . ". فترة التمديد: $renewalPeriodMonths شهر.'";
+
+        if (!mysql_query($historySql, $link)) {
+            // Non-critical error - don't rollback
+            echo "⚠ تحذير: فشل في تسجيل السجل: " . mysql_error($link) . "\n";
+        } else {
+            echo "✓ تم تسجيل السجل\n";
+        }
+
+        // Generate new installments for the extended period
+        echo "جاري إنشاء الأقساط للفترة الممتدة...\n";
+
+        // Get contract details for installment generation
+        $depositeamount = floatval($contract['depositeamount']);
+        $secondsa3e = floatval($contract['secondsa3e'] ?? 0);
+        $water = floatval($contract['water'] ?? 0);
+        $services = floatval($contract['services'] ?? 0);
+
+        // Get duration settings for fees
+        $secondsa3e_duration = intval($contract['secondsa3e_duration'] ?? 0);
+        $water_duration = intval($contract['water_duration'] ?? 0);
+        $services_duration = intval($contract['services_duration'] ?? 0);
+
+        // Calculate number of new installments
+        $numNewInstallments = ceil($renewalPeriodMonths / $duration);
+
+        // Find the last installment number
+        $lastKastQuery = "SELECT MAX(CAST(kastname AS UNSIGNED)) as last_kast
+                          FROM aksat
+                          WHERE egar_id = $contractId";
+        $lastKastResult = mysql_fetch_assoc(mysql_query($lastKastQuery, $link));
+        $lastKastNum = $lastKastResult['last_kast'] ? intval($lastKastResult['last_kast']) : 0;
+
+        echo "رقم آخر قسط: $lastKastNum\n";
+        echo "جاري إنشاء $numNewInstallments قسط جديد...\n";
+
+        $installmentsCreated = 0;
+
+        for ($i = 1; $i <= $numNewInstallments; $i++) {
+            $kastNum = $lastKastNum + $i;
+
+            // Calculate installment date
+            // Start from old end date, add duration for each installment
+            $monthsFromOldEnd = $duration * $i;
+            $kastdate = $calendar->addMonths($oldEndDate, $monthsFromOldEnd, $calendarType);
+
+            // Determine installment type and calculate values
+            // Using the same logic as generateInstallments in egar.api.hnt
+            // Check if this is a year start installment
+            if (($duration * ($kastNum - 1)) % 12 == 0 && $kastNum > 1) {
+                // Start of new year: includes annual commission and fees
+                $sa3e_value = $secondsa3e;
+                $water_value = $water;
+                $services_value = $services;
+            } else {
+                // Regular installment: includes only recurring fees
+                $sa3e_value = ($secondsa3e_duration ? $secondsa3e : 0);
+                $water_value = ($water_duration ? $water : 0);
+                $services_value = ($services_duration ? $services : 0);
+            }
+
+            $kastvalue = floatval($depositeamount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
+
+            // Insert new installment
+            $insertKastSql = "INSERT INTO aksat SET
+                             idsubaqar = " . intval($contract['idsubaqar']) . ",
+                             kastname = '$kastNum',
+                             kastvalue = $kastvalue,
+                             water = $water_value,
+                             sa3ee = $sa3e_value,
+                             services = $services_value,
+                             kastdate = $kastdate,
+                             iscomplete = 0,
+                             egar_id = $contractId,
+                             status = 'pending',
+                             amount_paid = 0,
+                             amount_remaining = $kastvalue,
+                             grace_period_days = 0,
+                             effective_due_date = $kastdate,
+                             created_at = $now,
+                             updated_at = $now";
+
+            if (!mysql_query($insertKastSql, $link)) {
+                throw new Exception("فشل في إنشاء القسط #$kastNum: " . mysql_error($link));
+            }
+
+            $installmentsCreated++;
+        }
+
+        echo "✓ تم إنشاء $installmentsCreated قسط جديد\n";
+
+        // Commit transaction
+        mysql_query("COMMIT", $link);
+
+        echo "✓ تم تجديد العقد #$contractId بنجاح\n\n";
+        $successCount++;
+
+    } catch (Exception $e) {
+        mysql_query("ROLLBACK", $link);
+        echo "✗ خطأ: " . $e->getMessage() . "\n\n";
+        $errorCount++;
+        $errors[] = "العقد #$contractId: " . $e->getMessage();
+    }
+}
+
+echo "==============================================\n";
+echo "ملخص التجديد التلقائي\n";
+echo "==============================================\n";
+echo "إجمالي العقود المعالجة: $contractCount\n";
+echo "تم التجديد بنجاح: $successCount\n";
+echo "الأخطاء: $errorCount\n";
+
+if ($errorCount > 0) {
+    echo "\nالأخطاء التي حدثت:\n";
+    foreach ($errors as $error) {
+        echo "  - $error\n";
+    }
+}
+
+echo "\n✓ اكتملت عملية التجديد التلقائي\n";
+echo "الوقت: " . date('Y-m-d H:i:s') . "\n";
+
+if (!$isCLI) {
+    echo '</pre></body></html>';
+}
+
+mysql_close($link);
+?>

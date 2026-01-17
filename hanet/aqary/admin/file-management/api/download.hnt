@@ -1,0 +1,125 @@
+<?php
+/**
+ * Download File API Endpoint
+ * Handles file downloads with access control and permission checking
+ * Integrated with legacy system
+ */
+
+// Include legacy system database connection
+require_once('../../../connectdb.hnt');
+
+// Mark as AJAX request for authentication
+$is_ajax_request = true;
+
+// Include authentication - will validate user session
+require_once('../../../reqloginajax.hnt');
+
+// Include config for centralized storage
+require_once('../config.php');
+
+// Include library classes
+require_once('../lib/DatabaseInstaller.class.php');
+require_once('../lib/FileHandler.class.php');
+require_once('../lib/SharingManager.class.php');
+
+// Validate database initialization
+try {
+    $installer = new DatabaseInstaller($link);
+    if (!$installer->tablesExist()) {
+        header('HTTP/1.0 503 Service Unavailable');
+        echo 'نظام الملفات غير مهيأ';
+        exit;
+    }
+} catch (Exception $e) {
+    header('HTTP/1.0 500 Internal Server Error');
+    echo 'خطأ في النظام';
+    exit;
+}
+
+// Validate user is authenticated
+if (!isset($_SESSION['useridv']) || empty($_SESSION['useridv'])) {
+    header('HTTP/1.0 401 Unauthorized');
+    echo 'غير مصرح';
+    exit;
+}
+
+// Validate request parameters
+if (!isset($_GET['file_id'])) {
+    header('HTTP/1.0 400 Bad Request');
+    echo 'معرف الملف مفقود';
+    exit;
+}
+
+try {
+    $file_id = intval($_GET['file_id']);
+    $userid = intval($_SESSION['useridv']);
+
+    // Get file from database using wrapper
+    $file_id = intval($file_id);
+    $sql = "SELECT * FROM file_management WHERE file_id = $file_id AND is_deleted = 0";
+    $result = mysql_query($sql, $link);
+
+    if (!$result) {
+        header('HTTP/1.0 500 Internal Server Error');
+        echo 'خطأ في قاعدة البيانات: ' . mysql_error($link);
+        exit;
+    }
+
+    if (mysql_num_rows($result) == 0) {
+        mysql_free_result($result);
+        header('HTTP/1.0 404 Not Found');
+        echo 'الملف غير موجود';
+        exit;
+    }
+
+    $file = mysql_fetch_assoc($result);
+    mysql_free_result($result);
+
+    // Check permissions using SharingManager
+    $sharing_manager = new SharingManager($link);
+    $can_download = $sharing_manager->canUserPerformAction($file_id, $userid, 'download');
+
+    if (!$can_download) {
+        header('HTTP/1.0 403 Forbidden');
+        echo 'ليس لديك صلاحية لتحميل هذا الملف';
+        exit;
+    }
+
+    // Construct file path using centralized storage
+    $file_path = UPLOAD_DIR . $file['stored_filename'];
+
+    // Check if file exists on disk
+    if (!file_exists($file_path)) {
+        header('HTTP/1.0 404 Not Found');
+        echo 'الملف غير موجود في التخزين';
+        exit;
+    }
+
+    // Log access
+    $ip_address = isset($_SERVER['REMOTE_ADDR']) ? mysql_real_escape_string($_SERVER['REMOTE_ADDR'], $link) : 'unknown';
+    $log_sql = "INSERT INTO file_access_log (file_id, userid, action, access_date, ip_address)
+                VALUES ($file_id, $userid, 'download', NOW(), '$ip_address')";
+    mysql_query($log_sql, $link);
+
+    // Update access count
+    $update_sql = "UPDATE file_management SET access_count = access_count + 1, last_accessed = NOW() WHERE file_id = $file_id";
+    mysql_query($update_sql, $link);
+
+    // Download file
+    header('Content-Description: File Transfer');
+    header('Content-Type: ' . $file['mime_type']);
+    header('Content-Disposition: attachment; filename="' . basename($file['original_filename']) . '"');
+    header('Expires: 0');
+    header('Cache-Control: must-revalidate');
+    header('Pragma: public');
+    header('Content-Length: ' . filesize($file_path));
+
+    readfile($file_path);
+    exit;
+
+} catch (Exception $e) {
+    error_log("Download API Error: " . $e->getMessage());
+    header('HTTP/1.0 500 Internal Server Error');
+    echo 'خطأ في النظام';
+}
+?>

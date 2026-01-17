@@ -1,0 +1,506 @@
+<?php
+/**
+ * Payments Module
+ * المدفوعات
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "المدفوعات";
+$sc_id = "205";
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
+    include_once "../../../../reqloginajax.hnt";
+}
+else {
+    include_once "../../../../nocash.hnt";
+include_once "../../../../connectdb.hnt";
+include_once "../../../../header.hnt";
+
+}
+
+include_once "../../includes/accounting_class.hnt";
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+
+// Handle AJAX actions
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $action = $_POST['ajax_action'];
+    $response = ['success' => false, 'message' => ''];
+
+    switch ($action) {
+        case 'record_payment':
+            $invoiceId = $_POST['invoice_id'];
+            $amount = $_POST['amount'];
+            $paymentMethod = $_POST['payment_method'];
+            $paymentDate = $_POST['payment_date'];
+            $notes = $_POST['notes'] ?? '';
+
+            // Get invoice
+            $invoiceQuery = "SELECT * FROM acc_invoices WHERE invoice_id = ?";
+            $stmt = $db->prepare($invoiceQuery);
+            $stmt->bind_param('i', $invoiceId);
+            $stmt->execute();
+            $invoice = $stmt->get_result()->fetch_assoc();
+
+            if (!$invoice) {
+                $response['message'] = 'الفاتورة غير موجودة';
+                echo json_encode($response, JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+
+            // Create journal entry for payment
+            $entryData = [
+                'entry_date' => $paymentDate,
+                'entry_type' => 'payment',
+                'reference_type' => 'invoice',
+                'reference_id' => $invoiceId,
+                'description' => "دفعة للفاتورة {$invoice['invoice_number']} - {$invoice['customer_name']}",
+                'status' => 'posted'
+            ];
+
+            // Determine cash/bank account based on payment method
+            $cashAccountId = 2; // Default to cash account (1111)
+            if ($paymentMethod == 'bank_transfer') {
+                $cashAccountId = 3; // Bank account (1112)
+            }
+
+            $lines = [
+                [
+                    'account_id' => $cashAccountId,
+                    'description' => "استلام دفعة - {$invoice['customer_name']}",
+                    'debit_amount' => $amount,
+                    'credit_amount' => 0
+                ],
+                [
+                    'account_id' => 4, // Accounts Receivable (1121)
+                    'description' => "تسديد فاتورة {$invoice['invoice_number']}",
+                    'debit_amount' => 0,
+                    'credit_amount' => $amount
+                ]
+            ];
+
+            $result = $accountingManager->createJournalEntry($entryData, $lines);
+
+            if ($result['success']) {
+                // Update invoice payment status
+                $paidAmount = $invoice['paid_amount'] + $amount;
+                $paymentStatus = ($paidAmount >= $invoice['total_amount']) ? 'paid' : 'partial';
+
+                $updateQuery = "UPDATE acc_invoices SET paid_amount = ?, payment_status = ? WHERE invoice_id = ?";
+                $stmt = $db->prepare($updateQuery);
+                $stmt->bind_param('dsi', $paidAmount, $paymentStatus, $invoiceId);
+                $stmt->execute();
+
+                $response['success'] = true;
+                $response['message'] = 'تم تسجيل الدفعة بنجاح';
+            } else {
+                $response['message'] = 'فشل في تسجيل الدفعة';
+            }
+            break;
+    }
+
+    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// Get recent payments (from journal entries)
+$paymentsQuery = "
+    SELECT je.*, inv.invoice_number, inv.customer_name, inv.total_amount
+    FROM acc_journal_entries je
+    LEFT JOIN acc_invoices inv ON je.reference_id = inv.invoice_id AND je.reference_type = 'invoice'
+    WHERE je.entry_type = 'payment'
+    ORDER BY je.entry_date DESC, je.entry_id DESC
+    LIMIT 50
+";
+$paymentsResult = $db->query($paymentsQuery);
+$payments = [];
+if ($paymentsResult) {
+    while ($row = $paymentsResult->fetch_assoc()) {
+        $payments[] = $row;
+    }
+}
+
+// Get unpaid/partial invoices
+$unpaidQuery = "SELECT * FROM acc_invoices WHERE payment_status IN ('unpaid', 'partial') ORDER BY invoice_date DESC";
+$unpaidResult = $db->query($unpaidQuery);
+$unpaidInvoices = [];
+if ($unpaidResult) {
+    while ($row = $unpaidResult->fetch_assoc()) {
+        $unpaidInvoices[] = $row;
+    }
+}
+?>
+
+
+<style>
+:root {
+    --primary-color: #667eea;
+    --secondary-color: #764ba2;
+}
+
+.page-header {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    padding: 2rem;
+    border-radius: 15px;
+    margin-bottom: 2rem;
+}
+
+.payment-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    transition: all 0.3s ease;
+}
+
+.payment-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.12);
+}
+
+.invoice-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    border-right: 4px solid #ffc107;
+}
+
+.btn-record-payment {
+    background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+    border: none;
+    color: white;
+    padding: 0.75rem 1.5rem;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+.stats-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    text-align: center;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.stats-value {
+    font-size: 2rem;
+    font-weight: bold;
+    color: var(--primary-color);
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-cash-coin me-2"></i>المدفوعات
+                </h1>
+                <p class="mb-0 opacity-75">Payments</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-record-payment btn-lg ms-2" onclick="showQuickPaymentModal()">
+                    <i class="bi bi-plus-circle me-2"></i>تسجيل دفعة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Statistics -->
+    <div class="row g-3 mb-4">
+        <?php
+        $totalPayments = count($payments);
+        $totalPaid = array_sum(array_column($payments, 'total_debit'));
+        $unpaidCount = count($unpaidInvoices);
+        $unpaidAmount = array_sum(array_column($unpaidInvoices, 'total_amount')) - array_sum(array_column($unpaidInvoices, 'paid_amount'));
+        ?>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value"><?php echo $totalPayments; ?></div>
+                <div class="text-muted">إجمالي المدفوعات</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value text-success"><?php echo number_format($totalPaid, 2); ?></div>
+                <div class="text-muted">المبلغ المحصل (ر.س)</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value text-warning"><?php echo $unpaidCount; ?></div>
+                <div class="text-muted">فواتير معلقة</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value text-danger"><?php echo number_format($unpaidAmount, 2); ?></div>
+                <div class="text-muted">المبلغ المستحق (ر.س)</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <!-- Unpaid Invoices -->
+        <div class="col-md-6">
+            <h5 class="mb-3"><i class="bi bi-exclamation-triangle text-warning me-2"></i>فواتير معلقة</h5>
+            <?php if (empty($unpaidInvoices)): ?>
+            <div class="alert alert-success">
+                <i class="bi bi-check-circle me-2"></i>
+                لا توجد فواتير معلقة. جميع الفواتير مدفوعة!
+            </div>
+            <?php else: ?>
+            <?php foreach ($unpaidInvoices as $invoice): ?>
+            <div class="invoice-card">
+                <div class="d-flex justify-content-between align-items-start mb-2">
+                    <div>
+                        <strong><?php echo $invoice['invoice_number']; ?></strong><br>
+                        <small class="text-muted"><?php echo $invoice['customer_name']; ?></small>
+                    </div>
+                    <div class="text-end">
+                        <div class="h5 mb-0 text-danger">
+                            <?php echo number_format($invoice['total_amount'] - $invoice['paid_amount'], 2); ?> ر.س
+                        </div>
+                        <small class="text-muted">المبلغ المستحق</small>
+                    </div>
+                </div>
+                <div class="d-flex justify-content-between align-items-center">
+                    <small class="text-muted">
+                        <i class="bi bi-calendar me-1"></i><?php echo $invoice['invoice_date']; ?>
+                    </small>
+                    <button class="btn btn-sm btn-record-payment" onclick="showPaymentModal(<?php echo $invoice['invoice_id']; ?>, '<?php echo $invoice['invoice_number']; ?>', <?php echo $invoice['total_amount'] - $invoice['paid_amount']; ?>)">
+                        <i class="bi bi-cash me-1"></i>تسجيل دفعة
+                    </button>
+                </div>
+            </div>
+            <?php endforeach; ?>
+            <?php endif; ?>
+        </div>
+
+        <!-- Recent Payments -->
+        <div class="col-md-6">
+            <h5 class="mb-3"><i class="bi bi-clock-history me-2"></i>آخر المدفوعات</h5>
+            <?php if (empty($payments)): ?>
+            <div class="alert alert-info">
+                <i class="bi bi-info-circle me-2"></i>
+                لا توجد مدفوعات مسجلة بعد.
+            </div>
+            <?php else: ?>
+            <?php foreach ($payments as $payment): ?>
+            <div class="payment-card">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                        <strong><?php echo $payment['entry_number']; ?></strong><br>
+                        <small class="text-muted"><?php echo $payment['description']; ?></small>
+                    </div>
+                    <div class="text-end">
+                        <div class="h5 mb-0 text-success">
+                            <?php echo number_format($payment['total_debit'], 2); ?> ر.س
+                        </div>
+                        <small class="text-muted">
+                            <i class="bi bi-calendar me-1"></i><?php echo $payment['entry_date']; ?>
+                        </small>
+                    </div>
+                </div>
+            </div>
+            <?php endforeach; ?>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<!-- Payment Modal -->
+<div class="modal fade" id="paymentModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header" style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); color: white;">
+                <h5 class="modal-title">
+                    <i class="bi bi-cash-coin me-2"></i>تسجيل دفعة
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="paymentForm">
+                    <input type="hidden" name="invoice_id" id="payment_invoice_id">
+
+                    <div class="mb-3" id="invoice_select_div">
+                        <label class="form-label">اختر الفاتورة *</label>
+                        <select class="form-select" id="invoice_select" onchange="selectInvoice()">
+                            <option value="">-- اختر فاتورة --</option>
+                            <?php foreach ($unpaidInvoices as $inv): ?>
+                            <option value="<?php echo $inv['invoice_id']; ?>"
+                                    data-number="<?php echo $inv['invoice_number']; ?>"
+                                    data-due="<?php echo $inv['total_amount'] - $inv['paid_amount']; ?>">
+                                <?php echo $inv['invoice_number']; ?> - <?php echo $inv['customer_name']; ?>
+                                (<?php echo number_format($inv['total_amount'] - $inv['paid_amount'], 2); ?> ر.س)
+                            </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">رقم الفاتورة</label>
+                        <input type="text" class="form-control" id="payment_invoice_number" readonly>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">المبلغ المستحق</label>
+                        <input type="text" class="form-control" id="payment_due_amount" readonly>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">المبلغ المدفوع *</label>
+                        <input type="number" step="0.01" class="form-control" name="amount" id="payment_amount" required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">طريقة الدفع *</label>
+                        <select class="form-select" name="payment_method" required>
+                            <option value="cash">نقداً</option>
+                            <option value="bank_transfer">تحويل بنكي</option>
+                            <option value="credit_card">بطاقة ائتمان</option>
+                            <option value="cheque">شيك</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">تاريخ الدفع *</label>
+                        <input type="date" class="form-control" name="payment_date" value="<?php echo date('Y-m-d'); ?>" required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">ملاحظات</label>
+                        <textarea class="form-control" name="notes" rows="2"></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-success" onclick="submitPayment()">
+                    <i class="bi bi-check-circle me-2"></i>تسجيل الدفعة
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Result Modal -->
+<div class="modal fade" id="resultModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header" id="resultModalHeader">
+                <h5 class="modal-title text-white" id="resultModalTitle"></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p id="resultModalMessage"></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إغلاق</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+
+<script>
+function showQuickPaymentModal() {
+    // Show invoice selector, clear form
+    document.getElementById('invoice_select_div').style.display = 'block';
+    document.getElementById('invoice_select').value = '';
+    document.getElementById('payment_invoice_id').value = '';
+    document.getElementById('payment_invoice_number').value = '';
+    document.getElementById('payment_due_amount').value = '';
+    document.getElementById('payment_amount').value = '';
+
+    const modal = new bootstrap.Modal(document.getElementById('paymentModal'));
+    modal.show();
+}
+
+function selectInvoice() {
+    const select = document.getElementById('invoice_select');
+    const option = select.options[select.selectedIndex];
+
+    if (option.value) {
+        const invoiceId = option.value;
+        const invoiceNumber = option.getAttribute('data-number');
+        const dueAmount = parseFloat(option.getAttribute('data-due'));
+
+        document.getElementById('payment_invoice_id').value = invoiceId;
+        document.getElementById('payment_invoice_number').value = invoiceNumber;
+        document.getElementById('payment_due_amount').value = dueAmount.toFixed(2) + ' ر.س';
+        document.getElementById('payment_amount').value = dueAmount.toFixed(2);
+    }
+}
+
+function showPaymentModal(invoiceId, invoiceNumber, dueAmount) {
+    // Hide invoice selector when called from invoice card
+    document.getElementById('invoice_select_div').style.display = 'none';
+
+    document.getElementById('payment_invoice_id').value = invoiceId;
+    document.getElementById('payment_invoice_number').value = invoiceNumber;
+    document.getElementById('payment_due_amount').value = dueAmount.toFixed(2) + ' ر.س';
+    document.getElementById('payment_amount').value = dueAmount.toFixed(2);
+
+    const modal = new bootstrap.Modal(document.getElementById('paymentModal'));
+    modal.show();
+}
+
+function submitPayment() {
+    const form = document.getElementById('paymentForm');
+    const formData = new FormData(form);
+    formData.append('ajax_action', 'record_payment');
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        const modal = bootstrap.Modal.getInstance(document.getElementById('paymentModal'));
+        modal.hide();
+
+        showResultModal(data.success, data.message);
+
+        if (data.success) {
+            setTimeout(() => location.reload(), 1500);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showResultModal(false, 'حدث خطأ أثناء تسجيل الدفعة');
+    });
+}
+
+function showResultModal(success, message) {
+    const modal = new bootstrap.Modal(document.getElementById('resultModal'));
+    const header = document.getElementById('resultModalHeader');
+    const title = document.getElementById('resultModalTitle');
+    const messageEl = document.getElementById('resultModalMessage');
+
+    if (success) {
+        header.style.background = 'linear-gradient(135deg, #28a745, #20c997)';
+        title.innerHTML = '<i class="bi bi-check-circle me-2"></i>نجحت العملية';
+    } else {
+        header.style.background = 'linear-gradient(135deg, #dc3545, #c82333)';
+        title.innerHTML = '<i class="bi bi-x-circle me-2"></i>فشلت العملية';
+    }
+
+    messageEl.textContent = message;
+    modal.show();
+}
+</script>
+
+<?php require("../../../../foter.hnt"); ?>

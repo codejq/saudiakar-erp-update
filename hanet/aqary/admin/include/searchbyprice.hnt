@@ -1,0 +1,512 @@
+<?php
+/**
+ * Land Search by Price
+ * Search for lands by various price criteria
+ */
+
+$sc_title = "عرض الاراضي حسب سعر معين";
+$sc_id = "8";
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../nocash.hnt";
+    include_once "../../header.hnt";
+} else {
+    // For AJAX requests, include authentication
+    include_once "../../reqloginajax.hnt";
+}
+
+
+
+// Handle AJAX form submissions
+if ($is_ajax_request && isset($_POST['genericsql'])) {
+    $genericsql = $_POST['genericsql'];
+    $redirect_url = 'updateard.hnt?genericsql=' . urlencode($genericsql);
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'جاري تحميل النتائج...',
+        'redirect_url' => $redirect_url
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
+}
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.search-dashboard {
+    background: #f8f9fa;
+    min-height: 100vh;
+    padding: 2rem 0;
+}
+
+.page-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.search-options {
+    background: white;
+    border-radius: 8px;
+    padding: 1.5rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    margin-bottom: 2rem;
+}
+
+.option-button {
+    padding: 0.75rem 1rem;
+    border: 2px solid #e5e7eb;
+    border-radius: 8px;
+    background: white;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.option-button:hover {
+    border-color: #10b981;
+    background: #ecfdf5;
+}
+
+.option-button input[type="radio"] {
+    width: 18px;
+    height: 18px;
+}
+
+.option-button.active {
+    border-color: #10b981;
+    background: #ecfdf5;
+}
+
+.search-form {
+    display: none;
+    background: white;
+    border-radius: 8px;
+    padding: 2rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.search-form.active {
+    display: block;
+}
+
+.alert-info {
+    background: #fef3c7;
+    border-left: 4px solid #f59e0b;
+    padding: 1rem;
+    border-radius: 6px;
+    margin-bottom: 1.5rem;
+}
+
+@media (max-width: 768px) {
+    .option-button {
+        padding: 0.5rem 0.75rem;
+        font-size: 0.9rem;
+    }
+}
+</style>
+
+<div class="search-dashboard" dir="rtl">
+    <div class="container-fluid">
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>
+                <i class="bi bi-currency-dollar"></i>
+                <?= $sc_title ?>
+            </h1>
+            <p class="mb-0 mt-2" style="opacity: 0.95; font-size: 0.95rem;">
+                البحث عن الأراضي حسب معايير السعر المختلفة
+            </p>
+        </div>
+
+        <!-- Search Options -->
+        <div class="search-options">
+            <h5 class="mb-3">
+                <i class="bi bi-filter-circle text-success me-2"></i>
+                اختر نوع البحث
+            </h5>
+            <div class="row g-2">
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-0">
+                        <input type="radio" name="search-type" value="0">
+                        <span>بحث بالسعر ± نسبة</span>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-1">
+                        <input type="radio" name="search-type" value="1">
+                        <span>بحث بسعر محدد</span>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-2">
+                        <input type="radio" name="search-type" value="2">
+                        <span>بحث أكبر من سعر</span>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-3">
+                        <input type="radio" name="search-type" value="3">
+                        <span>بحث أقل من سعر</span>
+                    </label>
+                </div>
+                <div class="col-lg-4 col-md-6">
+                    <label class="option-button" id="option-4">
+                        <input type="radio" name="search-type" value="4">
+                        <span>بحث بين سعرين</span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="alert-info mt-3">
+                <strong><i class="bi bi-info-circle me-2"></i>ملحوظة:</strong>
+                البحث يتم فى سعر السوم وسعر الحد
+            </div>
+        </div>
+
+        <!-- Form 0: Price ± Percentage -->
+        <div id="form-0" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-percent text-success me-2"></i>
+                بحث بالسعر ± نسبة
+            </h4>
+            <form id="pricePercentForm">
+                <input type="hidden" name="genericsql">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">ابحث عن سعر:</label>
+                        <input type="text"
+                               class="form-control form-control-lg"
+                               name="serchv"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               onkeyup="ValidateNumberKeyUp(this);"
+                               onblur="ValidateAndFormatNumber(this)"
+                               required>
+                        <small class="text-muted"><?= $myomla ?></small>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">النسبة (%):</label>
+                        <input type="text"
+                               class="form-control form-control-lg"
+                               name="nesba"
+                               value="20"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               required>
+                        <small class="text-muted">%</small>
+                    </div>
+                </div>
+                <div class="d-grid gap-2 mt-4">
+                    <button type="submit" class="btn btn-success btn-lg" id="searchBtn0">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 1: Exact Price -->
+        <div id="form-1" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-currency-exchange text-success me-2"></i>
+                بحث بسعر محدد
+            </h4>
+            <form id="exactPriceForm">
+                <input type="hidden" name="genericsql">
+                <div class="mb-3">
+                    <label class="form-label">ابحث عن سعر:</label>
+                    <input type="text"
+                           class="form-control form-control-lg"
+                           name="serchv"
+                           onkeypress="return ValidateNumberKeyPress(this, event);"
+                           onkeyup="ValidateNumberKeyUp(this);"
+                           onblur="ValidateAndFormatNumber(this)"
+                           required>
+                    <small class="text-muted"><?= $myomla ?></small>
+                </div>
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-success btn-lg" id="searchBtn1">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 2: Greater Than Price -->
+        <div id="form-2" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-arrow-up-circle text-success me-2"></i>
+                بحث أكبر من سعر
+            </h4>
+            <form id="greaterPriceForm">
+                <input type="hidden" name="genericsql">
+                <div class="mb-3">
+                    <label class="form-label">ابحث عن سعر أكبر من:</label>
+                    <input type="text"
+                           class="form-control form-control-lg"
+                           name="serchv"
+                           onkeypress="return ValidateNumberKeyPress(this, event);"
+                           onkeyup="ValidateNumberKeyUp(this);"
+                           onblur="ValidateAndFormatNumber(this)"
+                           required>
+                    <small class="text-muted"><?= $myomla ?></small>
+                </div>
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-success btn-lg" id="searchBtn2">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 3: Less Than Price -->
+        <div id="form-3" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-arrow-down-circle text-success me-2"></i>
+                بحث أقل من سعر
+            </h4>
+            <form id="lessPriceForm">
+                <input type="hidden" name="genericsql">
+                <div class="mb-3">
+                    <label class="form-label">ابحث عن سعر أقل من:</label>
+                    <input type="text"
+                           class="form-control form-control-lg"
+                           name="serchv"
+                           onkeypress="return ValidateNumberKeyPress(this, event);"
+                           onkeyup="ValidateNumberKeyUp(this);"
+                           onblur="ValidateAndFormatNumber(this)"
+                           required>
+                    <small class="text-muted"><?= $myomla ?></small>
+                </div>
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-success btn-lg" id="searchBtn3">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Form 4: Between Two Prices -->
+        <div id="form-4" class="search-form">
+            <h4 class="mb-4">
+                <i class="bi bi-arrows-expand text-success me-2"></i>
+                بحث بين سعرين
+            </h4>
+            <form id="betweenPriceForm">
+                <input type="hidden" name="genericsql">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">السعر الأول:</label>
+                        <input type="text"
+                               class="form-control form-control-lg"
+                               name="serchv"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               onkeyup="ValidateNumberKeyUp(this);"
+                               onblur="ValidateAndFormatNumber(this)"
+                               required>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">السعر الثاني:</label>
+                        <input type="text"
+                               class="form-control form-control-lg"
+                               name="serchv0"
+                               onkeypress="return ValidateNumberKeyPress(this, event);"
+                               onkeyup="ValidateNumberKeyUp(this);"
+                               onblur="ValidateAndFormatNumber(this)"
+                               required>
+                    </div>
+                </div>
+                <small class="text-muted d-block mt-2"><?= $myomla ?></small>
+                <div class="d-grid gap-2 mt-3">
+                    <button type="submit" class="btn btn-success btn-lg" id="searchBtn4">
+                        <i class="bi bi-search me-2"></i>
+                        ابحـث
+                    </button>
+                </div>
+            </form>
+        </div>
+
+    </div>
+</div>
+
+<script>
+/**
+ * Land Search by Price - Modern JavaScript
+ */
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Land Search by Price initialized');
+
+    // Get elements
+    const options = document.querySelectorAll('.option-button');
+    const forms = document.querySelectorAll('.search-form');
+
+    // Load saved search type from cookie
+    const savedType = getCookie('ardpric');
+    if (savedType) {
+        const optionId = savedType.replace('srch', '');
+        showForm(optionId);
+        const optionElement = document.getElementById(`option-${optionId}`);
+        if (optionElement) {
+            optionElement.querySelector('input').checked = true;
+        }
+    }
+
+    // Option selection handlers
+    options.forEach(option => {
+        option.addEventListener('click', function() {
+            const radio = this.querySelector('input[type="radio"]');
+            const value = radio.value;
+            showForm(value);
+            setCookie('ardpric', `srch${value}`, 20);
+        });
+    });
+
+    // Show form based on type
+    function showForm(type) {
+        // Reset all
+        options.forEach(opt => opt.classList.remove('active'));
+        forms.forEach(form => form.classList.remove('active'));
+
+        // Activate selected
+        const selectedOption = document.getElementById(`option-${type}`);
+        const selectedForm = document.getElementById(`form-${type}`);
+        if (selectedOption) selectedOption.classList.add('active');
+        if (selectedForm) selectedForm.classList.add('active');
+    }
+
+    // Setup AJAX for all forms
+    setupFormAjax('pricePercentForm', 'searchBtn0', (form) => {
+        const serchv0 = parseInt(form.serchv.value.replace(/,/gi, ''));
+        const nesba = parseFloat(form.nesba.value);
+        const serchv1 = serchv0 - (serchv0 * nesba / 100);
+        const serchv2 = serchv0 + (serchv0 * nesba / 100);
+        return ` where (price >= ${serchv1} and price <= ${serchv2}) or (pricesom >= ${serchv1} and pricesom <= ${serchv2})`;
+    });
+
+    setupFormAjax('exactPriceForm', 'searchBtn1', (form) => {
+        const serchv0 = parseInt(form.serchv.value.replace(/,/gi, ''));
+        return ` where price = ${serchv0}`;
+    });
+
+    setupFormAjax('greaterPriceForm', 'searchBtn2', (form) => {
+        const serchv0 = parseInt(form.serchv.value.replace(/,/gi, ''));
+        return ` where price > ${serchv0} or pricesom > ${serchv0}`;
+    });
+
+    setupFormAjax('lessPriceForm', 'searchBtn3', (form) => {
+        const serchv0 = parseInt(form.serchv.value.replace(/,/gi, ''));
+        return ` where price < ${serchv0} or pricesom < ${serchv0}`;
+    });
+
+    setupFormAjax('betweenPriceForm', 'searchBtn4', (form) => {
+        let serchv1 = parseInt(form.serchv.value.replace(/,/gi, ''));
+        let serchv2 = parseInt(form.serchv0.value.replace(/,/gi, ''));
+        if (serchv1 > serchv2) {
+            const temp = serchv1;
+            serchv1 = serchv2;
+            serchv2 = temp;
+        }
+        return ` where (price >= ${serchv1} and price <= ${serchv2}) or (pricesom >= ${serchv1} and pricesom <= ${serchv2})`;
+    });
+
+    /**
+     * Setup AJAX form submission
+     */
+    function setupFormAjax(formId, buttonId, sqlGenerator) {
+        const form = document.getElementById(formId);
+        const button = document.getElementById(buttonId);
+
+        if (!form || !button) return;
+
+        form.addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            // Generate SQL
+            const genericsql = sqlGenerator(this);
+            this.genericsql.value = genericsql;
+
+            const formData = new FormData(this);
+            formData.append('ajax_submit', '1');
+
+            // Show loading state
+            button.disabled = true;
+            button.innerHTML = '<i class="bi bi-hourglass-split me-2"></i> جاري البحث...';
+
+            // Submit via AJAX
+            $.ajax({
+                url: window.location.pathname.split('/').pop(),
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                dataType: 'json',
+                success: function(response) {
+                    if (response.success && response.redirect_url) {
+                        window.location.href = response.redirect_url;
+                    } else {
+                        alert(response.error || 'حدث خطأ أثناء البحث');
+                        button.disabled = false;
+                        button.innerHTML = '<i class="bi bi-search me-2"></i> ابحـث';
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error('AJAX Error:', error);
+                    alert('حدث خطأ أثناء البحث. الرجاء المحاولة مرة أخرى.');
+                    button.disabled = false;
+                    button.innerHTML = '<i class="bi bi-search me-2"></i> ابحـث';
+                }
+            });
+
+            return false;
+        });
+    }
+
+    // Cookie functions
+    function setCookie(name, value, days) {
+        const expires = new Date();
+        expires.setTime(expires.getTime() + days * 24 * 60 * 60 * 1000);
+        document.cookie = name + '=' + value + ';expires=' + expires.toUTCString() + ';path=/';
+    }
+
+    function getCookie(name) {
+        const nameEQ = name + '=';
+        const ca = document.cookie.split(';');
+        for (let i = 0; i < ca.length; i++) {
+            let c = ca[i];
+            while (c.charAt(0) === ' ') c = c.substring(1, c.length);
+            if (c.indexOf(nameEQ) === 0) return c.substring(nameEQ.length, c.length);
+        }
+        return null;
+    }
+});
+</script>
+
+<?php
+} // Close if (!$is_ajax_request)
+require('../../foter.hnt');
+?>

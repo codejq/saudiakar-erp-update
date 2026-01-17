@@ -1,0 +1,194 @@
+<?php
+/**
+ * List Files API Endpoint
+ * Returns paginated list of user's files with statistics and filtering
+ * Integrated with legacy system - Using project standard wrapper
+ */
+
+// Include legacy system database connection
+require_once('../../../connectdb.hnt');
+
+// Mark as AJAX request for authentication
+$is_ajax_request = true;
+
+// Include authentication - will validate user session
+require_once('../../../reqloginajax.hnt');
+
+// Set JSON response header
+header('Content-Type: application/json; charset=utf-8');
+
+// Include library classes
+require_once('../lib/DatabaseInstaller.class.php');
+require_once('../lib/FileHandler.class.php');
+
+// Validate database initialization
+try {
+    $installer = new DatabaseInstaller($link);
+    if (!$installer->tablesExist()) {
+        http_response_code(503);
+        echo json_encode([
+            'success' => false,
+            'message' => 'نظام الملفات غير مهيأ. يرجى زيارة الصفحة الرئيسية أولاً.',
+            'redirect' => '../index.hnt'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode(['success' => false, 'message' => 'خطأ في التحقق من النظام'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+// Validate user is authenticated
+if (!isset($_SESSION['useridv']) || empty($_SESSION['useridv'])) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+try {
+    $userid = intval($_SESSION['useridv']);
+
+    // Get filter and sort parameters
+    $category = isset($_GET['category']) && $_GET['category'] != 'all' ? mysql_real_escape_string(trim($_GET['category']), $link) : null;
+    $sort_by = isset($_GET['sort_by']) ? trim($_GET['sort_by']) : 'created_date';
+    $sort_order = isset($_GET['sort_order']) ? trim($_GET['sort_order']) : 'DESC';
+    $page = isset($_GET['page']) ? intval($_GET['page']) : 1;
+    $limit = isset($_GET['limit']) ? intval($_GET['limit']) : 20;
+    $offset = ($page - 1) * $limit;
+
+    // Ensure limit is reasonable
+    if ($limit > 100) $limit = 100;
+    if ($limit < 1) $limit = 20;
+    if ($page < 1) $page = 1;
+
+    // Validate sort parameters
+    $valid_sorts = ['original_filename', 'created_date', 'file_size', 'access_count'];
+    if (!in_array($sort_by, $valid_sorts)) {
+        $sort_by = 'created_date';
+    }
+
+    if ($sort_order != 'ASC' && $sort_order != 'DESC') {
+        $sort_order = 'DESC';
+    }
+
+    // Build query to get user's own files using wrapper
+    $query = "SELECT * FROM file_management WHERE owner_userid = $userid AND is_deleted = 0";
+    $count_query = "SELECT COUNT(*) as total FROM file_management WHERE owner_userid = $userid AND is_deleted = 0";
+
+    if ($category) {
+        $query .= " AND category = '$category'";
+        $count_query .= " AND category = '$category'";
+    }
+
+    $query .= " ORDER BY $sort_by $sort_order LIMIT $limit OFFSET $offset";
+
+    // Execute main query
+    $result = mysql_query($query, $link);
+    if (!$result) {
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => 'خطأ في قاعدة البيانات: ' . mysql_error($link)], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    $files = [];
+    $total_size = 0;
+
+    while ($file = mysql_fetch_assoc($result)) {
+        $files[] = [
+            'file_id' => intval($file['file_id']),
+            'filename' => $file['original_filename'],
+            'file_size' => intval($file['file_size']),
+            'file_size_formatted' => formatFileSize($file['file_size']),
+            'category' => $file['category'],
+            'description' => $file['description'],
+            'created_date' => $file['created_date'],
+            'created_date_formatted' => formatDate($file['created_date']),
+            'access_count' => intval($file['access_count']),
+            'file_type' => $file['file_type']
+        ];
+        $total_size += intval($file['file_size']);
+    }
+    mysql_free_result($result);
+
+    // Get total count
+    $count_result = mysql_query($count_query, $link);
+    if ($count_result) {
+        $count_row = mysql_fetch_assoc($count_result);
+        $total = intval($count_row['total']);
+        mysql_free_result($count_result);
+    } else {
+        $total = 0;
+    }
+
+    // Get statistics
+    $stats_query = "SELECT COUNT(*) as total_files, SUM(file_size) as total_size, COUNT(DISTINCT category) as total_categories
+                    FROM file_management WHERE owner_userid = $userid AND is_deleted = 0";
+    $stats_result = mysql_query($stats_query, $link);
+    if ($stats_result) {
+        $stats = mysql_fetch_assoc($stats_result);
+        mysql_free_result($stats_result);
+    } else {
+        $stats = ['total_files' => 0, 'total_size' => 0, 'total_categories' => 0];
+    }
+
+    // Get shared files count
+    $shared_query = "SELECT COUNT(DISTINCT file_id) as shared_count FROM file_sharing WHERE shared_by_userid = $userid AND is_active = 1";
+    $shared_result = mysql_query($shared_query, $link);
+    if ($shared_result) {
+        $shared = mysql_fetch_assoc($shared_result);
+        mysql_free_result($shared_result);
+    } else {
+        $shared = ['shared_count' => 0];
+    }
+
+    http_response_code(200);
+    echo json_encode([
+        'success' => true,
+        'files' => $files,
+        'pagination' => [
+            'page' => $page,
+            'limit' => $limit,
+            'total' => $total,
+            'pages' => ceil($total / $limit)
+        ],
+        'statistics' => [
+            'total_files' => intval($stats['total_files'] ?? 0),
+            'total_size' => intval($stats['total_size'] ?? 0),
+            'total_size_formatted' => formatFileSize($stats['total_size'] ?? 0),
+            'shared_files' => intval($shared['shared_count'] ?? 0)
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+} catch (Exception $e) {
+    error_log("List API Error: " . $e->getMessage());
+    http_response_code(500);
+    echo json_encode(['success' => false, 'message' => 'خطأ في النظام'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+function formatFileSize($bytes) {
+    if ($bytes == 0) return '0 B';
+
+    $k = 1024;
+    $sizes = ['B', 'KB', 'MB', 'GB'];
+    $i = floor(log($bytes, $k));
+
+    return round($bytes / pow($k, $i), 2) . ' ' . $sizes[$i];
+}
+
+function formatDate($date) {
+    $time = strtotime($date);
+    $now = time();
+    $diff = $now - $time;
+
+    if ($diff < 3600) {
+        return 'منذ ' . intval($diff / 60) . ' دقيقة';
+    } elseif ($diff < 86400) {
+        return 'منذ ' . intval($diff / 3600) . ' ساعة';
+    } elseif ($diff < 604800) {
+        return 'منذ ' . intval($diff / 86400) . ' أيام';
+    } else {
+        return date('Y-m-d', $time);
+    }
+}
+?>

@@ -1,0 +1,547 @@
+<?php
+/**
+ * Text-to-Speech Feature
+ *
+ * Uses Speechify API - FREE TIER: 50,000 characters/month
+ * - Supports 50+ languages including Arabic and English
+ * - 1,000+ high-quality AI voices
+ * - Low latency (300ms)
+ * - Simple HTTP POST API
+ *
+ * Get your free API key:
+ * 1. Sign up at https://speechify.com/api/
+ * 2. Get API key from dashboard
+ * 3. Add to admin/ai/config/api_keys.hnt as 'speechify_api_key'
+ *
+ * API Documentation: https://docs.sws.speechify.com/
+ */
+
+// Enable error reporting and output buffering
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+ini_set('log_errors', 1);
+ob_start();
+
+// Set JSON content type first
+header('Content-Type: application/json; charset=utf-8');
+
+// Wrap everything in try-catch to catch fatal errors
+try {
+    // Check if required files exist
+    $connectdb_path = __DIR__ . '/../../../connectdb.hnt';
+    $reqlogin_path = __DIR__ . '/../../../reqloginajax.hnt';
+    $api_config_path = __DIR__ . '/../config/api_config.hnt';
+
+    if (!file_exists($connectdb_path)) {
+        throw new Exception('connectdb.hnt not found at: ' . $connectdb_path);
+    }
+
+    if (!file_exists($api_config_path)) {
+        throw new Exception('api_config.hnt not found at: ' . $api_config_path);
+    }
+
+    require_once($connectdb_path);
+
+    // Don't require reqloginajax for now to avoid session issues
+    // require_once($reqlogin_path);
+
+    require_once($api_config_path);
+
+    // Include storage helpers
+    require_once(__DIR__ . '/../../../lib/storage/helpers.php');
+
+    // Define application base path for URL generation
+    if (!defined('APP_BASE_PATH')) {
+        define('APP_BASE_PATH', '/aqary');
+    }
+
+    // Check if session is started and user is logged in
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start();
+    }
+
+    if (!isset($_SESSION['useridv']) || empty($_SESSION['useridv'])) {
+        throw new Exception('User not logged in. Session useridv not set.');
+    }
+
+} catch (Exception $e) {
+    ob_end_clean();
+    echo json_encode([
+        'success' => false,
+        'error' => 'Initialization error: ' . $e->getMessage(),
+        'file' => basename(__FILE__),
+        'line' => $e->getLine()
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// Get action
+$action = $_POST['action'] ?? $_GET['action'] ?? '';
+$user_id = $_SESSION['useridv'];
+
+try {
+    switch ($action) {
+        case 'generate':
+            handleGenerate($user_id, $ai_config);
+            break;
+
+        case 'gallery':
+            handleGallery($user_id);
+            break;
+
+        case 'delete':
+            handleDelete($user_id);
+            break;
+
+        default:
+            ob_end_clean();
+            echo json_encode([
+                'success' => false,
+                'error' => 'Invalid action. Received: ' . ($action ?: 'empty'),
+                'available_actions' => ['generate', 'gallery', 'delete']
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            break;
+    }
+} catch (Exception $e) {
+    ob_end_clean();
+    echo json_encode([
+        'success' => false,
+        'error' => $e->getMessage(),
+        'trace' => $e->getTraceAsString()
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+} catch (Error $e) {
+    ob_end_clean();
+    echo json_encode([
+        'success' => false,
+        'error' => 'PHP Error: ' . $e->getMessage(),
+        'file' => $e->getFile(),
+        'line' => $e->getLine()
+    ], JSON_UNESCAPED_UNICODE);
+}
+
+/**
+ * Handle TTS generation request
+ */
+function handleGenerate($user_id, $ai_config) {
+    global $db;
+
+    $text = trim($_POST['text'] ?? '');
+    $language = $_POST['language'] ?? 'eng'; // eng or ara
+    $gender = $_POST['gender'] ?? 'male';
+    $speed = floatval($_POST['speed'] ?? 1.0);
+
+    // Validate input
+    if (empty($text)) {
+        ob_end_clean();
+        echo json_encode([
+            'success' => false,
+            'error' => 'النص مطلوب'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        return;
+    }
+
+    if (strlen($text) > 5000) {
+        ob_end_clean();
+        echo json_encode([
+            'success' => false,
+            'error' => 'النص طويل جداً. الحد الأقصى 5000 حرف'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        return;
+    }
+
+    // Check Speechify API key
+    $api_key = $ai_config['speechify_api_key'] ?? '';
+    if (empty($api_key)) {
+        ob_end_clean();
+        echo json_encode([
+            'success' => false,
+            'error' => 'Speechify API key not configured. Get your free key at https://speechify.com/api/'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        return;
+    }
+
+    $start_time = microtime(true);
+
+    try {
+        // Generate audio using Speechify API
+        // Returns the file path where audio was saved
+        $temp_file_path = generateTTSAudio($text, $language, $gender, $speed, $api_key);
+
+        if (!$temp_file_path || !file_exists($temp_file_path)) {
+            throw new Exception('فشل في توليد الصوت');
+        }
+
+        // Rename to final filename and get file info
+        $file_info = finalizeAudioFile($temp_file_path, $user_id, $language, $gender);
+
+        if (!$file_info) {
+            throw new Exception('فشل في حفظ الملف الصوتي');
+        }
+
+        $end_time = microtime(true);
+        $response_time = round(($end_time - $start_time) * 1000);
+
+        // Save to database
+        $sql = "INSERT INTO ai_generated_content
+                (userid, entity_type, original_text, generated_text, response_time, created_date)
+                VALUES (?, 'audio_generated', ?, ?, ?, NOW())";
+
+        $stmt = $db->prepare($sql);
+
+        if ($stmt === false) {
+            throw new Exception('فشل في تحضير استعلام قاعدة البيانات: ' . $db->error . ' | SQL: ' . $sql);
+        }
+
+        $stmt->bind_param("issi",
+            $user_id,
+            $text,
+            $file_info['relative_path'],
+            $response_time
+        );
+
+        if (!$stmt->execute()) {
+            throw new Exception('فشل في حفظ السجل في قاعدة البيانات: ' . $stmt->error);
+        }
+
+        $content_id = $db->insert_id;
+
+        // Log usage
+        logAIUsage($user_id, 'text_to_speech', $text, $file_info['relative_path'], $response_time);
+
+        ob_end_clean();
+        echo json_encode([
+            'success' => true,
+            'audio_url' => $file_info['relative_path'],
+            'filename' => $file_info['filename'],
+            'file_size' => $file_info['file_size'],
+            'duration' => $file_info['duration'] ?? null,
+            'response_time' => $response_time,
+            'content_id' => $content_id
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    } catch (Exception $e) {
+        ob_end_clean();
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage()
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
+}
+
+/**
+ * Handle gallery request
+ */
+function handleGallery($user_id) {
+    global $db;
+
+    try {
+        $sql = "SELECT content_id, original_text, generated_text as audio_url, response_time, created_date
+                FROM ai_generated_content
+                WHERE userid = ? AND entity_type = 'audio_generated'
+                ORDER BY created_date DESC LIMIT 50";
+
+        $stmt = $db->prepare($sql);
+
+        if ($stmt === false) {
+            throw new Exception('فشل في تحضير استعلام قاعدة البيانات: ' . $db->error);
+        }
+
+        $stmt->bind_param("i", $user_id);
+        $stmt->execute();
+        $result = $stmt->get_result();
+
+        $audios = [];
+        while ($row = $result->fetch_assoc()) {
+            // Get file size
+            $filename = basename($row['audio_url']);
+            $file_path = upload_path('ai.audio', $filename);
+            $file_size = file_exists($file_path) ? filesize($file_path) : 0;
+
+            $audios[] = [
+                'id' => $row['content_id'],
+                'text' => mb_substr($row['original_text'], 0, 100) . (mb_strlen($row['original_text']) > 100 ? '...' : ''),
+                'full_text' => $row['original_text'],
+                'audio_url' => $row['audio_url'],
+                'file_size' => formatFileSize($file_size),
+                'response_time' => $row['response_time'],
+                'created_date' => $row['created_date']
+            ];
+        }
+
+        ob_end_clean();
+        echo json_encode([
+            'success' => true,
+            'audios' => $audios
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    } catch (Exception $e) {
+        ob_end_clean();
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage(),
+            'file' => 'text_to_speech.hnt',
+            'function' => 'handleGallery'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
+}
+
+/**
+ * Handle delete request
+ */
+function handleDelete($user_id) {
+    global $db;
+
+    try {
+        $content_id = intval($_POST['content_id'] ?? 0);
+
+        if ($content_id <= 0) {
+            throw new Exception('معرف المحتوى غير صالح');
+        }
+
+        // Get audio path and verify ownership
+        $sql = "SELECT generated_text FROM ai_generated_content
+                WHERE content_id = ? AND userid = ? AND entity_type = 'audio_generated'";
+
+        $stmt = $db->prepare($sql);
+
+        if ($stmt === false) {
+            throw new Exception('فشل في تحضير استعلام قاعدة البيانات: ' . $db->error);
+        }
+
+        $stmt->bind_param("ii", $content_id, $user_id);
+        $stmt->execute();
+        $result = $stmt->get_result();
+
+        if ($result->num_rows === 0) {
+            throw new Exception('الملف الصوتي غير موجود أو ليس لديك صلاحية لحذفه');
+        }
+
+        $row = $result->fetch_assoc();
+        $audio_path = $row['generated_text'];
+
+        // Delete from database
+        $delete_sql = "DELETE FROM ai_generated_content
+                       WHERE content_id = ? AND userid = ?";
+
+        $delete_stmt = $db->prepare($delete_sql);
+
+        if ($delete_stmt === false) {
+            throw new Exception('فشل في تحضير استعلام قاعدة البيانات: ' . $db->error);
+        }
+
+        $delete_stmt->bind_param("ii", $content_id, $user_id);
+
+        if (!$delete_stmt->execute()) {
+            throw new Exception('فشل في حذف السجل من قاعدة البيانات');
+        }
+
+        // Delete physical file
+        $filename = basename($audio_path);
+        $file_path = upload_path('ai.audio', $filename);
+        if (file_exists($file_path)) {
+            @unlink($file_path);
+        }
+
+        ob_end_clean();
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم حذف الملف الصوتي بنجاح'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    } catch (Exception $e) {
+        ob_end_clean();
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage(),
+            'file' => 'text_to_speech.hnt',
+            'function' => 'handleDelete'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
+}
+
+/**
+ * Generate TTS audio using Speechify API
+ * Free tier: 50,000 characters/month
+ * Supports 50+ languages with 1,000+ voices
+ */
+function generateTTSAudio($text, $language, $gender, $speed, $api_key) {
+    // Speechify API endpoint
+    $api_url = 'https://api.sws.speechify.com/v1/audio/speech';
+
+    // Map language codes to Speechify format
+    $language_codes = [
+        'ara' => 'ar',  // Arabic
+        'eng' => 'en'   // English
+    ];
+
+    $lang_code = $language_codes[$language] ?? 'en';
+
+    // Select model based on language
+    // simba-english: Optimized for English
+    // simba-multilingual: Supports 50+ languages including Arabic
+    $model = ($language === 'ara') ? 'simba-multilingual' : 'simba-english';
+
+    // Select voice based on language and gender
+    // Verified Speechify voice IDs from API
+    $voices = [
+        'ara' => [
+            'male' => 'ismail',    // Arabic male voice (ar-AE)
+            'female' => 'aicha'    // Arabic female voice (ar-AE)
+        ],
+        'eng' => [
+            'male' => 'george',    // English male voice (en-US)
+            'female' => 'lisa'     // English female voice (en-US)
+        ]
+    ];
+
+    $voice_id = $voices[$language][$gender] ?? 'george';
+
+    // Build request payload
+    // Required: input (text), voice_id (voice identifier), model (simba model)
+    // Optional: language (ISO-639-1), speed, audio_format
+    $payload = [
+        'input' => $text,
+        'voice_id' => $voice_id,
+        'model' => $model,
+        'language' => $lang_code,
+        'audio_format' => 'mp3'
+    ];
+
+    // Add optional parameters
+    if ($speed != 1.0) {
+        $payload['speed'] = $speed;
+    }
+
+    // Make HTTP POST request using cURL
+    $ch = curl_init($api_url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => json_encode($payload),
+        CURLOPT_HTTPHEADER => [
+            'Authorization: Bearer ' . $api_key,
+            'Content-Type: application/json'
+        ],
+        CURLOPT_TIMEOUT => 120,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => 0
+    ]);
+
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_error = curl_error($ch);
+    //curl_close($ch);
+
+    // Handle errors
+    if ($curl_error) {
+        throw new Exception('خطأ في الاتصال: ' . $curl_error);
+    }
+
+    if ($http_code !== 200) {
+        $error_data = json_decode($response, true);
+        $error_details = [
+            'file' => 'text_to_speech.hnt',
+            'function' => 'generateTTSAudio',
+            'tts_engine' => 'Speechify API',
+            'model' => $model,
+            'voice_id' => $voice_id,
+            'language' => $lang_code,
+            'http_code' => $http_code,
+            'api_error' => $error_data['error'] ?? $error_data['message'] ?? 'Unknown error',
+            'full_response' => $response,
+            'note' => 'Make sure Speechify API key is configured. Get free key at https://speechify.com/api/'
+        ];
+
+        throw new Exception('فشل في توليد الصوت: ' . json_encode($error_details, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
+    }
+
+    // Decode JSON response
+    $response_data = json_decode($response, true);
+
+    if (!$response_data || !isset($response_data['audio_data'])) {
+        throw new Exception('فشل في فك تشفير استجابة API. الاستجابة: ' . substr($response, 0, 200));
+    }
+
+    // Decode base64 audio data
+    $audio_binary = base64_decode($response_data['audio_data']);
+
+    if ($audio_binary === false || empty($audio_binary)) {
+        throw new Exception('فشل في فك تشفير البيانات الصوتية من base64');
+    }
+
+    // Save audio binary to temporary file
+    $temp_filename = 'ai_audio_temp_' . time() . '_' . bin2hex(random_bytes(4)) . '.mp3';
+
+    // Use centralized storage
+    $output_path = upload_path('ai.audio', $temp_filename);
+
+    // Write decoded audio data to file
+    $bytes_written = file_put_contents($output_path, $audio_binary);
+
+    if ($bytes_written === false || !file_exists($output_path)) {
+        throw new Exception('فشل في حفظ الملف الصوتي');
+    }
+
+    return $output_path;
+}
+
+/**
+ * Finalize audio file - rename temp file to final filename
+ */
+function finalizeAudioFile($temp_file_path, $user_id, $language, $gender) {
+    // Generate final filename
+    $filename = 'ai_audio_' . $user_id . '_' . time() . '_' . bin2hex(random_bytes(4)) . '.mp3';
+
+    // Use centralized storage
+    $file_path = upload_path('ai.audio', $filename);
+    $relative_path = upload_url('ai.audio', $filename);
+
+    // Rename temp file to final filename
+    if (!rename($temp_file_path, $file_path)) {
+        // If rename fails, try copy and delete
+        if (copy($temp_file_path, $file_path)) {
+            @unlink($temp_file_path);
+        } else {
+            return false;
+        }
+    }
+
+    $file_size = filesize($file_path);
+
+    return [
+        'filename' => $filename,
+        'file_path' => $file_path,
+        'relative_path' => $relative_path,
+        'file_size' => $file_size
+    ];
+}
+
+/**
+ * Format file size
+ */
+function formatFileSize($bytes) {
+    if ($bytes >= 1048576) {
+        return number_format($bytes / 1048576, 2) . ' MB';
+    } elseif ($bytes >= 1024) {
+        return number_format($bytes / 1024, 2) . ' KB';
+    } else {
+        return $bytes . ' bytes';
+    }
+}
+
+/**
+ * Log AI usage
+ */
+function logAIUsage($user_id, $feature, $input, $output, $response_time) {
+    global $db;
+
+    $sql = "INSERT INTO ai_logs
+            (userid, feature, input_text, output_text, response_time, created_date)
+            VALUES (?, ?, ?, ?, ?, NOW())";
+
+    $stmt = $db->prepare($sql);
+    if ($stmt) {
+        $stmt->bind_param("isssi", $user_id, $feature, $input, $output, $response_time);
+        $stmt->execute();
+    }
+}

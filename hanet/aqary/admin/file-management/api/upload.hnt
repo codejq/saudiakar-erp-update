@@ -1,0 +1,161 @@
+<?php
+/**
+ * File Upload API Endpoint
+ * Integrated with legacy real estate system
+ * Requires authentication via legacy system
+ */
+
+// Include legacy system database connection
+require_once('../../../connectdb.hnt');
+
+// Mark as AJAX request for authentication
+$is_ajax_request = true;
+
+// Include authentication - will validate user session
+require_once('../../../reqloginajax.hnt');
+
+// Set JSON response header
+header('Content-Type: application/json; charset=utf-8');
+
+// Include config for centralized storage
+require_once('../config.php');
+
+// Include library classes
+require_once('../lib/DatabaseInstaller.class.php');
+require_once('../lib/FileHandler.class.php');
+
+// Validate database initialization
+try {
+    $installer = new DatabaseInstaller($link);
+    if (!$installer->tablesExist()) {
+        http_response_code(503);
+        echo json_encode([
+            'success' => false,
+            'message' => 'نظام الملفات غير مهيأ. يرجى زيارة الصفحة الرئيسية أولاً.',
+            'redirect' => '../index.hnt'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode(['success' => false, 'message' => 'خطأ في التحقق من النظام'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+// Validate user is authenticated (from reqloginajax.hnt)
+if (!isset($_SESSION['useridv']) || empty($_SESSION['useridv'])) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+// Validate request parameters
+if (!isset($_FILES['file']) || !isset($_POST['category'])) {
+    http_response_code(400);
+    echo json_encode(['success' => false, 'message' => 'بيانات غير صحيحة'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+try {
+    // Get authenticated user from legacy session
+    $userid = intval($_SESSION['useridv']);
+    $username = isset($_SESSION['usernamev']) ? $_SESSION['usernamev'] : 'Unknown';
+
+    // File and upload configuration
+    $file = $_FILES['file'];
+    $category = isset($_POST['category']) ? trim($_POST['category']) : 'Personal';
+    $description = isset($_POST['description']) ? trim($_POST['description']) : '';
+    $max_file_size = 100 * 1024 * 1024; // 100MB
+    $upload_dir = UPLOAD_DIR;
+
+    // Create upload directory if it doesn't exist (using centralized storage)
+    ensure_dir($upload_dir);
+
+    // Validate file using FileHandler
+    $file_handler = new FileHandler($link);
+    $validation = $file_handler->validateFile($file);
+    if (!$validation['valid']) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => $validation['error']], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($file['size'] > $max_file_size) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => 'حجم الملف أكبر من الحد المسموح (100 MB)'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    // Generate unique filename
+    $original_filename = $file['name'];
+    $file_ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+    $new_filename = md5(time() . $original_filename) . '.' . $file_ext;
+    $file_path = $upload_dir . $new_filename;
+
+    // Move uploaded file
+    if (!move_uploaded_file($file['tmp_name'], $file_path)) {
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => 'فشل نقل الملف إلى الخادم'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    // Get MIME type
+    $mime_type = 'application/octet-stream';
+    if (function_exists('finfo_file')) {
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        $detected_mime = finfo_file($finfo, $file_path);
+        // Note: finfo_close() removed - auto-freed in PHP 8.5
+        if ($detected_mime) {
+            $mime_type = $detected_mime;
+        }
+    }
+
+    // Get file size
+    $file_size = filesize($file_path);
+
+    // Insert into database using wrapper
+    $original_filename_escaped = mysql_real_escape_string($original_filename, $link);
+    $new_filename_escaped = mysql_real_escape_string($new_filename, $link);
+    $file_ext_escaped = mysql_real_escape_string($file_ext, $link);
+    $mime_type_escaped = mysql_real_escape_string($mime_type, $link);
+    $category_escaped = mysql_real_escape_string($category, $link);
+    $description_escaped = mysql_real_escape_string($description, $link);
+
+    $sql = "INSERT INTO file_management
+            (owner_userid, original_filename, stored_filename, file_type, mime_type, file_size,
+             category, description, created_date, modified_date)
+            VALUES ($userid, '$original_filename_escaped', '$new_filename_escaped', '$file_ext_escaped',
+                    '$mime_type_escaped', $file_size, '$category_escaped', '$description_escaped', NOW(), NOW())";
+
+    $result = mysql_query($sql, $link);
+    if (!$result) {
+        unlink($file_path); // Clean up uploaded file
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => 'خطأ في قاعدة البيانات: ' . mysql_error($link)], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    $file_id = mysql_insert_id($link);
+
+    // Log the upload action
+    $ip_address = isset($_SERVER['REMOTE_ADDR']) ? mysql_real_escape_string($_SERVER['REMOTE_ADDR'], $link) : 'unknown';
+    $log_sql = "INSERT INTO file_access_log (file_id, userid, action, access_date, ip_address)
+                VALUES ($file_id, $userid, 'upload', NOW(), '$ip_address')";
+    mysql_query($log_sql, $link);
+
+    http_response_code(200);
+    echo json_encode([
+        'success' => true,
+        'message' => 'تم تحميل الملف بنجاح',
+        'file_id' => $file_id,
+        'file_name' => $original_filename,
+        'file_size' => FileHandler::formatFileSize($file_size),
+        'category' => $category
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+} catch (Exception $e) {
+    error_log("Upload Error: " . $e->getMessage());
+    http_response_code(500);
+    echo json_encode(['success' => false, 'message' => 'خطأ في نظام الملفات'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+?>

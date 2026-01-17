@@ -1,0 +1,977 @@
+<?php
+// Set page variables
+$sc_title = "استعراض العمائر";
+$sc_id = "16";
+
+// Handle document/Excel export requests
+if (isset($_REQUEST['godoc']) && $_REQUEST['godoc'] == 1) {
+    header("Content-type: application/force-download");
+    header("Content-Disposition: attachment; filename=report.doc");
+} elseif (isset($_REQUEST['goxls']) && $_REQUEST['goxls'] == 1) {
+    header("Content-type: application/force-download");
+    header("Content-Disposition: attachment; filename=report.xls");
+} else {
+    include_once "../../../nocash.hnt";
+}
+
+// Include authentication (handles permissions automatically)
+include_once "../../../header.hnt";
+
+// Define application base path for URL generation
+if (!defined('APP_BASE_PATH')) {
+    define('APP_BASE_PATH', '/aqary');
+}
+
+// Extract request variables
+extract($_REQUEST);
+
+// Initialize search and filter variables to prevent undefined warnings
+$serchdate = isset($serchdate) ? $serchdate : '';
+$serchdatex = isset($serchdatex) ? $serchdatex : '';
+$mobasher = isset($mobasher) ? $mobasher : '';
+$searchbyprice = isset($searchbyprice) ? $searchbyprice : '';
+$searchbydakhl = isset($searchbydakhl) ? $searchbydakhl : '';
+$searchbyadwar = isset($searchbyadwar) ? $searchbyadwar : '';
+$searchbymesaha = isset($searchbymesaha) ? $searchbymesaha : '';
+$searchbycondition = isset($searchbycondition) ? $searchbycondition : '';
+$searchbymasder = isset($searchbymasder) ? $searchbymasder : '';
+$searchgeneral = isset($searchgeneral) ? $searchgeneral : '';
+$searchbyloha = isset($searchbyloha) ? $searchbyloha : '';
+$searchbyid = isset($searchbyid) ? $searchbyid : '';
+$faxgenerat = isset($faxgenerat) ? $faxgenerat : '';
+$genericsearch = isset($genericsearch) ? $genericsearch : '';
+$genericsql = isset($genericsql) ? $genericsql : '';
+$statusx = isset($statusx) ? $statusx : '';
+$servername = isset($servername) ? $servername : '';
+$page = isset($page) ? intval($page) : 1;
+
+// Initialize other commonly used variables
+$showmasdersql = isset($showmasdersql) ? $showmasdersql : '';
+$mokhatatid = isset($mokhatatid) ? $mokhatatid : '';
+$showmasder = isset($showmasder) ? $showmasder : '';
+$price = isset($price) ? $price : 0;
+$smallprice = isset($smallprice) ? $smallprice : 0;
+$dakhl = isset($dakhl) ? $dakhl : 0;
+$smalldakhl = isset($smalldakhl) ? $smalldakhl : 0;
+$adwarnum = isset($adwarnum) ? $adwarnum : 0;
+$smalladwarnum = isset($smalladwarnum) ? $smalladwarnum : 0;
+$mesaha = isset($mesaha) ? $mesaha : 0;
+$smallmesaha = isset($smallmesaha) ? $smallmesaha : 0;
+$nomesaha = isset($nomesaha) ? $nomesaha : '';
+$noprice = isset($noprice) ? $noprice : '';
+$nomobasher = isset($nomobasher) ? $nomobasher : '';
+$nosom = isset($nosom) ? $nosom : '';
+$noemaratype = isset($noemaratype) ? $noemaratype : '';
+$mobasherx = isset($mobasherx) ? $mobasherx : '';
+$som = isset($som) ? $som : '';
+$emaratype = isset($emaratype) ? $emaratype : '';
+$masderid = isset($masderid) ? $masderid : '';
+$search = isset($search) ? $search : '';
+$en_date = isset($en_date) ? $en_date : '';
+$id = isset($id) ? $id : '';
+$st_date = isset($st_date) ? $st_date : '';
+$st_month = isset($st_month) ? $st_month : '';
+$st_year = isset($st_year) ? $st_year : '';
+$en_month = isset($en_month) ? $en_month : '';
+$en_year = isset($en_year) ? $en_year : '';
+$genericfield = isset($genericfield) ? $genericfield : '';
+$genericoperation = isset($genericoperation) ? $genericoperation : '';
+$genericvalue = isset($genericvalue) ? $genericvalue : '';
+$rowperpage = isset($rowperpage) ? intval($rowperpage) : 20;
+$chngereportid = isset($chngereportid) ? $chngereportid : '';
+
+// Include Arabic tools for date conversion
+require '../arabicTools.class.hnt';
+
+// Disable scroll for certain contexts
+$canscroll = 1;
+
+
+
+// Handle report type change
+if (isset($chngereportid) && $chngereportid) {
+    $dql = "DELETE FROM userreport WHERE reporttype='emara' AND userid='" . intval($_SESSION['useridv']) . "'";
+    mysql_query($dql, $link);
+
+    $dql = "INSERT INTO userreport SET
+            userid='" . intval($_SESSION['useridv']) . "',
+            reportid='" . intval($chngereportid) . "',
+            reporttype='emara'";
+    mysql_query($dql, $link);
+}
+
+// Handle rows per page setting
+if (isset($rowperpage) && $rowperpage) {
+    $fpwrite = fopen("rowperpage", "w+");
+    fwrite($fpwrite, intval($rowperpage));
+    fclose($fpwrite);
+}
+
+$rowperpage_data = @file("rowperpage");
+$rowperpage = isset($rowperpage_data[0]) ? intval($rowperpage_data[0]) : 20;
+
+
+
+?>
+<script type="text/javascript">
+/**
+ * Modern Grid Row Click Handler
+ * Shows action buttons when row is clicked
+ */
+$(document).ready(function() {
+    $(".gridrow").click(function(e) {
+        // Don't trigger if clicking on a link
+        if ($(e.target).is('a') || $(e.target).closest('a').length > 0) {
+            return;
+        }
+
+        var src = $(this).attr('id');
+        src = src.split('-');
+        src = src[1];
+
+        var htmldata = `
+            <div class="p-3">
+                <div class="d-flex flex-wrap gap-2 justify-content-center">
+                    <a href='addemara.hnt?editid=${src}' class='btn btn-sm btn-primary <?= "policy_" . $sc_id . "_edits" ?>' target='_blank'>
+                        <i class='bi bi-pencil me-1'></i>تعديل البيانات
+                    </a>
+                    <a href='viewemara.hnt?id=${src}&nosendata=1' class='btn btn-sm btn-info' target='_blank'>
+                        <i class='bi bi-eye me-1'></i>وثيقة للعميل
+                    </a>
+                    <a href='viewemara.hnt?id=${src}' class='btn btn-sm btn-secondary' target='_blank'>
+                        <i class='bi bi-file-text me-1'></i>وثيقة للمكتب
+                    </a>
+                    <a href='/aqary/admin/offers/add_offer.php?emaraid=${src}' class='btn btn-sm btn-success' target='_blank'>
+                        <i class='bi bi-share me-1'></i>نشر للشبكة
+                    </a>
+                    <a href='/aqary/admin/offers/add_offer.php?sendtomysite=1&emaraid=${src}' class='btn btn-sm btn-primary' target='_blank'>
+                        <i class='bi bi-globe me-1'></i>نشر لموقعي
+                    </a>
+                    <a href='#' onclick="printURL('/aqary/admin/include/emara/viewemara.hnt?id=${src}'); return false;" class='btn btn-sm btn-warning'>
+                        <i class='bi bi-printer me-1'></i>طباعة
+                    </a>
+                    <a href='/aqary/sendmail.hnt?emaraid=${src}' class='btn btn-sm btn-info' target='_blank'>
+                        <i class='bi bi-envelope me-1'></i>بريد
+                    </a>
+                    <a href='#' onclick="shellme('faxer.exe','http://<?= $_SERVER['SERVER_ADDR'] . ":" . $_SERVER['SERVER_PORT']; ?>/aqary/admin/include/emara/viewemara.hnt?id=${src}'); return false;" class='btn btn-sm btn-secondary'>
+                        <i class='bi bi-fax me-1'></i>فاكس
+                    </a>
+                    <a href='/aqary/sendsms.hnt?emaraid=${src}' class='btn btn-sm btn-success' target='_blank'>
+                        <i class='bi bi-phone me-1'></i>رسالة جوال
+                    </a>
+                </div>
+            </div>
+        `;
+
+        if ($("#gridcontrol-" + src).html() == "" || $("#gridcontrol-" + src).html() === undefined) {
+            $("#gridcontrol-" + src).html(htmldata);
+        }
+
+        $("#grid-" + src).slideToggle(200);
+        $("#gridcontrol-" + src).slideToggle(200);
+    });
+});
+</script>
+
+
+<?php
+// Build search conditions
+$showmasdersql = "";
+
+if (isset($mokhatatid) && $mokhatatid) {
+    $showmasdersql = " WHERE mokhatatid='" . addslashes($mokhatatid) . "' ";
+}
+
+if (isset($showmasder) && $showmasder) {
+    $showmasdersql = " WHERE masderid='" . intval($showmasder) . "' ";
+}
+
+if (isset($searchbymalekid) && $searchbymalekid) {
+    $searchbymalekid = intval($searchbymalekid);
+    $showmasdersql = " WHERE malekid='" . $searchbymalekid . "' ";
+}
+
+
+
+if($serchdate)
+{
+$mytime=mktime(0,0,0,date('m'),date('d'),date('y'));
+$mytime=$mytime-($serchdate*24*60*60);
+
+
+
+
+$showmasdersql=" where  st_date < '$mytime' ";
+
+}
+
+if($serchdatex)
+{
+$mytime=mktime(0,0,0,date('m'),date('d'),date('y'));
+$mytime=$mytime-($serchdatex*24*60*60);
+
+
+
+
+$showmasdersql=" where  st_date > '$mytime' ";
+
+}
+
+
+IF(($mobasher==1 or $mobasher==0)  and  isset($mobasher))
+{
+
+	if($mobasher==1){$mobasher="مباشر";
+	$showmasdersql=" where  mobasher = 'مباشر' or  mobasher ='1'  ";
+
+		}
+	elseif($mobasher==0){
+		$showmasdersql=" where  mobasher = 'غير مباشر' or  mobasher ='0'  ";}
+
+
+}
+
+if($searchbyprice)
+{
+$price=$price+1;
+$showmasdersql=" where ( price >'$smallprice' and price < '$price') or ( pricesom >'$smallprice' and pricesom < '$price') ";
+}
+
+
+if($searchbydakhl)
+{
+$dakhl=$dakhl+1;
+$showmasdersql=" where ( dakhl >$smalldakhl  and  dakhl < $dakhl ) ";
+}
+
+
+
+
+if($searchbyadwar)
+{
+$adwarnum=$adwarnum+1;
+$showmasdersql=" where  (adwarnum >'$smalladwarnum' and  adwarnum < '$adwarnum') ";
+}
+
+if($searchbymesaha)
+{
+$mesaha=$mesaha+1;
+$showmasdersql=" where  (mesaha >'$smallmesaha' and  mesaha < '$mesaha')  ";
+}
+
+
+
+
+if($searchbycondition)
+{
+$showmasdersql="where 1 ";
+
+if(!$nomesaha==1){
+$showmasdersql.=" and (mesaha >'$smallmesaha' and  mesaha < '$mesaha') ";}
+if(!$noprice==1){
+$showmasdersql.=" and  (price >'$smallprice' and price < '$price') ";}
+if(!$nomobasher==1){
+$showmasdersql.=" and  mobasher = '$mobasherx' ";}
+if(!$nosom==1){
+$showmasdersql.=" and  som = '$som' ";}
+if(!$noemaratype==1){
+$showmasdersql.=" and emaratype='$emaratype'";}
+if($mokhatatid){
+$showmasdersql.=" and mokhatatid='$mokhatatid'";}
+
+}
+
+
+if($searchbymasder)
+{
+
+$showmasdersql=" where masderid='$masderid'";
+}
+
+if($searchgeneral)
+{
+
+$search=trim($search);
+
+$showmasdersql=" where masderid like '%$search%'
+
+     or mokhatatid like '%$search%'
+     or  emararakam like '%$search%'
+     or  adwarnum like '%$search%'
+     or  price like '%$search%'
+     or  som like '%$search%'
+     or  masderid like '%$search%'
+     or  emaratype like '%$search%'
+     or  st_date like '%$search%'
+     or  en_date like '%$search%'
+     or  hay like '%$search%'
+     or  note like '%$search%'
+     or  mobasher like '%$search%'
+     or  mesaha  like '%$search%'";
+
+}
+
+if($searchbyloha)
+{
+$showmasdersql=" where  en_date ='".$en_date."' ";
+}
+
+if($searchbyid)
+{
+$showmasdersql=" where  emaraid ='".$id."' ";
+}
+
+
+
+if($faxgenerat)
+{
+$hejriDate=$st_date."/".$st_month."/".$st_year;
+$mynewdateg=ArabicTools::dateHejri2Geo($hejriDate);
+$gdate=explode("-", $mynewdateg);
+$st_date=$gdate[0];
+$st_month=$gdate[1];
+$st_year=$gdate[2];
+
+$hejriDate=$en_date."/".$en_month."/".$en_year;
+$mynewdateg=ArabicTools::dateHejri2Geo($hejriDate);
+$gdate=explode("-", $mynewdateg);
+$en_date=$gdate[0];
+$en_month=$gdate[1];
+$en_year=$gdate[2];
+
+
+$stdate=mktime(0,0,0,$st_month,$st_date,$st_year);
+$endate=mktime(0,0,0,$en_month,$en_date,$en_year);
+
+
+$showmasdersql=" where  st_date > '$stdate' and st_date < '$endate' ";
+
+}
+
+
+if($genericsearch)
+{
+
+$showmasdersql=" where  $genericfield  $genericoperation  '".$genericvalue."'  ";
+	if($genericoperation=="like"){
+	$showmasdersql=" where  $genericfield  like  '%".$genericvalue."%'  ";
+	}
+
+}
+
+if($genericsql)
+{
+
+$showmasdersql="    $genericsql  ";
+
+
+}
+
+
+if($showmasdersql){$showmasdersql=$showmasdersql." and statusx!='3' ";}
+else{$showmasdersql= " where  statusx!='3' ";}
+
+
+if($statusx){
+
+$showmasdersql= " where  statusx='".$statusx."'";}
+$showmasdersql=str_replace("'3' and statusx!=","",$showmasdersql);
+$showmasdersql=str_replace("'3'  and statusx!=","",$showmasdersql);
+
+
+$sql="select count(emaraid) from emara $showmasdersql ";
+$rownum=mysql_query($sql,$link);
+$row=mysql_fetch_array($rownum);
+$rownum=is_array($row) && isset($row[0]) ? $row[0] : 0;
+
+if(!$rowperpage){$rowperpage=20;}
+$pagenum=ceil($rownum/$rowperpage);
+$xi=1;
+if($pagenum==1)
+{
+$xi=2;
+}
+
+$urltarget="$servername/aqary/admin/include/emara/updatemara.hnt?page=$page&showmasdersql=".urlencode("$showmasdersql");
+$urltarget_report="$servername/aqary/admin/include/emara/updatemara_report.hnt?page=$page&showmasdersql=".urlencode("$showmasdersql");
+
+
+?>
+
+<style>
+/* Modern Table Styling - Following PROJECT_GUIDE Colors */
+#myTable thead {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%) !important;
+    color: white !important;
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 100 !important;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.15) !important;
+}
+
+#myTable thead th {
+    background: transparent !important;
+    color: white !important;
+    font-weight: 600 !important;
+    padding: 15px 10px !important;
+    border: none !important;
+    vertical-align: middle !important;
+}
+
+/* Table Row Hover Effect */
+#myTable tbody tr {
+    transition: all 0.2s ease-in-out !important;
+    cursor: pointer !important;
+}
+
+#myTable tbody tr:hover {
+    background-color: #e8f4f8 !important;
+    transform: translateY(-2px) !important;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
+}
+
+/* Table Striping */
+#myTable tbody tr:nth-child(even) {
+    background-color: #f8f9fa !important;
+}
+
+#myTable tbody tr:nth-child(odd) {
+    background-color: #ffffff !important;
+}
+
+/* Context Menu Styling */
+#contextlayer {
+    background: white;
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    padding: 0.5rem 0;
+}
+
+#contextlayer a {
+    display: block;
+    padding: 0.5rem 1rem;
+    color: #495057;
+    text-decoration: none;
+    transition: all 0.2s;
+}
+
+#contextlayer a:hover {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+}
+
+/* Status Color Coding */
+.status-reserved {
+    background-color: #FFF3CD !important;
+}
+
+.status-sold {
+    background-color: #F8D7DA !important;
+}
+
+.status-deleted {
+    background-color: #F0B5AE !important;
+}
+</style>
+
+<div class="container-fluid screenonly" dir="rtl">
+    <!-- Controls Section -->
+    <div class="card mb-3 shadow-sm border-0">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-building me-2"></i>
+                <?= $sc_title ?>
+            </h4>
+        </div>
+        <div class="card-body">
+            <div class="row align-items-center g-3">
+                <!-- Export Buttons -->
+                <div class="col-auto">
+                    <a href="<?= $urltarget_report ?>&godoc=1" class="btn btn-sm btn-outline-primary me-2" title="تصدير Word">
+                        <i class="bi bi-file-earmark-word me-1"></i> Word
+                    </a>
+                    <a href="<?= $urltarget_report ?>&goxls=1" class="btn btn-sm btn-outline-success me-2" title="تصدير Excel">
+                        <i class="bi bi-file-earmark-excel me-1"></i> Excel
+                    </a>
+                    <a href="<?= $urltarget_report; ?>" target="_blank" class="btn btn-sm btn-outline-info me-2" title="تقرير">
+                        <i class="bi bi-file-earmark-text me-1"></i> تقرير
+                    </a>
+                </div>
+
+                <!-- Record Count -->
+                <div class="col-auto">
+                    <span class="badge" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%); font-size: 1rem;">
+                        <i class="bi bi-list-ul me-1"></i>
+                        عدد العمائر: <?= number_format($rownum); ?>
+                    </span>
+                </div>
+
+                <!-- Rows Per Page -->
+                <div class="col-auto">
+                    <label class="form-label mb-0 me-2">عدد النتائج:</label>
+                    <select class="form-select form-select-sm d-inline-block w-auto"
+                            onchange="window.location.href='<?= $urltarget ?>&rowperpage='+this.value">
+                        <option value="<?= $rowperpage; ?>"><?= $rowperpage; ?></option>
+                        <option value="10">10</option>
+                        <option value="20">20</option>
+                        <option value="30">30</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                        <option value="200">200</option>
+                        <option value="300">300</option>
+                        <option value="500">500</option>
+                    </select>
+                </div>
+
+                <?php
+                // Get user's custom report settings
+                $custsql = "SELECT custumreport.* FROM `custumreport`, `userreport`
+                            WHERE custumreport.reporttype='emara'
+                            AND custumreport.id=userreport.reportid
+                            AND userreport.userid='" . intval($_SESSION['useridv']) . "'";
+                $custresult = mysql_query($custsql, $link);
+                $custfiled = mysql_fetch_array($custresult);
+
+                // Handle column sorting
+                if (isset($reportorderby) && $reportorderby) {
+                    $reportdaesc = ($custfiled['reportdaesc'] == 'desc') ? 'asc' : 'desc';
+                    $sqlupdate = "UPDATE custumreport SET
+                                  reportorderby='" . addslashes($reportorderby) . "',
+                                  reportdaesc='" . addslashes($reportdaesc) . "'
+                                  WHERE id='" . intval($custfiled['id']) . "'";
+                    mysql_query($sqlupdate, $link);
+
+                    // Reload settings
+                    $custresult = mysql_query($custsql, $link);
+                    $custfiled = mysql_fetch_array($custresult);
+                }
+
+                $orderthisby = isset($custfiled['reportorderby']) ? $custfiled['reportorderby'] : '';
+                $arrangethisby = isset($custfiled['reportdaesc']) ? $custfiled['reportdaesc'] : '';
+
+                // Get all available reports
+                $sql = "SELECT custumreport.* FROM `custumreport` WHERE custumreport.reporttype='emara'";
+                $result_reports = mysql_query($sql, $link);
+                ?>
+
+                <!-- Report Selection -->
+                <div class="col-auto">
+                    <label class="form-label mb-0 me-2">شكل التقرير:</label>
+                    <select class="form-select form-select-sm d-inline-block w-auto"
+                            onchange="window.location.href='updatemara.hnt?chngereportid='+this.value;">
+                        <option>اختر شكل التقرير</option>
+                        <?php while ($row_report = mysql_fetch_array($result_reports)) {
+                            $csel = (isset($custfiled['id']) && $custfiled['id'] == $row_report['id']) ? " selected " : "";
+                            echo "<option " . $csel . " value='" . $row_report['id'] . "'>" . htmlspecialchars($row_report['reportname'], ENT_QUOTES, 'UTF-8') . "</option>";
+                        } ?>
+                    </select>
+                </div>
+
+                <!-- Create Custom Report Button -->
+                <div class="col-auto">
+                    <button type="button" class="btn btn-sm btn-success"
+                            onclick="window.location.href='../../custumreport.hnt?viewreport=emara';">
+                        <i class="bi bi-plus-circle me-1"></i> انشاء تقرير مخصص
+                    </button>
+                </div>
+
+                <!-- Fast Preview Delay -->
+                <div class="col-auto">
+                    <label class="form-label mb-0 me-2">المعاينة السريعة:</label>
+                    <select name="fastpreviewdelay" class="form-select form-select-sm d-inline-block w-auto"
+                            onchange="ajaxmysql('update user set fastpreviewdelay=' + this.value + ' where userid=<?= $_SESSION['useridv']; ?> limit 1 ');"
+                            title="المدة التي يتم عرض المعاينة السريعة بعدها بالثانية">
+                        <?php
+                        if (!isset($user_data['fastpreviewdelay']) || !$user_data['fastpreviewdelay']) {
+                            mysql_query('ALTER TABLE user ADD fastpreviewdelay INT(5) DEFAULT 5 NOT NULL');
+                            $user_data['fastpreviewdelay'] = 3;
+                            echo "<option value='3'>3</option>";
+                        } else {
+                            echo "<option value='" . $user_data['fastpreviewdelay'] . "'>" . $user_data['fastpreviewdelay'] . "</option>";
+                        }
+                        ?>
+                        <option value="1">1</option>
+                        <option value="2">2</option>
+                        <option value="3">3</option>
+                        <option value="5">5</option>
+                        <option value="10">10</option>
+                        <option value="3000">إيقاف</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pagination -->
+    <?php if ($pagenum > 1) { ?>
+        <div class="mb-3">
+            <nav aria-label="Pagination">
+                <ul class="pagination pagination-sm justify-content-center flex-wrap">
+                    <?php
+                    $page = isset($page) ? intval($page) : 1;
+                    $xi = 1;
+                    while ($xi <= $pagenum) {
+                        $activeClass = ($page == $xi) ? 'active' : '';
+                        if (($xi > ($page - 4) && $xi < ($page + 4)) ||
+                            $xi == 1 || $xi == $pagenum || $xi < 4 || $xi > ($pagenum - 4)) {
+                            echo "<li class='page-item $activeClass'>";
+                            echo "<a class='page-link' href='updatemara.hnt?page=$xi&showmasdersql=" . urlencode($showmasdersql) . "'>$xi</a>";
+                            echo "</li>";
+                        } elseif ($xi == ($page - 4) || $xi == ($page + 4)) {
+                            echo "<li class='page-item disabled'><span class='page-link'>...</span></li>";
+                        }
+                        $xi++;
+                    }
+                    ?>
+                </ul>
+            </nav>
+        </div>
+    <?php } ?>
+
+    <?php
+    // Get program manager ID
+    $programmanger_result = mysql_fetch_array(mysql_query("SELECT MIN(userid) AS dd FROM user LIMIT 1", $link));
+    $programmanger = is_array($programmanger_result) && isset($programmanger_result[0]) ? $programmanger_result[0] : 0;
+
+    // Calculate limit for pagination
+    $page = isset($page) ? intval($page) : 1;
+    $limit = ($page - 1) * $rowperpage;
+    $limit = $limit . "," . $rowperpage;
+    if ($page == 1 || $page == '') {
+        $page = 1;
+        $limit = $rowperpage;
+    }
+
+    // Prepare SQL for data retrieval
+    $myorderby = " emaraid DESC ";
+    if (isset($custfiled['reportorderby']) && $custfiled['reportorderby'] && isset($custfiled['reportdaesc']) && $custfiled['reportdaesc']) {
+        $myorderby = " " . $custfiled['reportorderby'] . " " . $custfiled['reportdaesc'] . " ";
+    }
+
+    // Store the original custfiled string for later use
+    $custfiled = isset($custfiled['sqlfeilds']) ? stripslashes($custfiled['sqlfeilds']) : '';
+    if (!$custfiled) {
+        $custfiled = "emaraid as 'الرقم بالبرنامج', mokhatatid as 'المخطط', emararakam as 'رقم العمارة', block as 'الشارع الرئيسي', share3 as 'الشارع الفرعي', price as 'السعر حد', masderid as 'المصدر', note as 'ملاحظات'";
+    }
+
+    $custfiled = str_replace("mokhatatid", "emara.mokhatatid", $custfiled);
+
+    $sql = "SELECT emaraid, $custfiled FROM emara $showmasdersql ORDER BY $myorderby LIMIT $limit";
+    $result = mysql_query($sql, $link);
+
+
+?>
+
+    <!-- JavaScript Functions -->
+    <script>
+    function orderpageby(field) {
+        let url = window.location.href;
+        url = url.split("&reportorderby")[0];
+        if (url.indexOf('?') == -1) {
+            url += '?';
+        }
+        url = url + "&reportorderby=" + field;
+        window.location.href = url;
+    }
+
+    function gototmasder(masderid) {
+        if (document.getElementById('rnumber2') && document.getElementById('rnumber2').value == '_blank') {
+            window.open('../masder.hnt?masderid=' + masderid);
+        } else {
+            window.location.href = '../masder.hnt?masderid=' + masderid;
+        }
+        return false;
+    }
+    </script>
+
+    <!-- Data Table -->
+    <div class="card shadow-sm border-0">
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-sm mb-0 align-middle" id="myTable">
+                    <thead>
+                        <tr class="text-center">
+                            <th class="py-3 border-0">م</th>
+                            <?php
+                            // Parse column headers - convert $custfiled to array for display
+                            $custfiled = str_replace(" as ", "", $custfiled);
+                            $custfiled = str_replace(",", "", $custfiled);
+                            $custfiled = explode("'", $custfiled);
+
+                            for ($i = 0; $i < count($custfiled) - 1; $i = $i + 2) {
+                                $fcolor = "#ffffff";
+                                $thisop = "&#9660;";
+
+                                if (trim($orderthisby) == trim($custfiled[$i])) {
+                                    $fcolor = "#ffc107";
+                                    $thisop = (trim($arrangethisby) == "desc") ? "&#9660;" : "&#9650;";
+                                }
+
+                                echo "<th class='py-3 border-0'>" . $custfiled[$i + 1] . " ";
+                                echo "<a href=\"javascript:orderpageby('" . trim($custfiled[$i]) . "');\" style='color: white; text-decoration: none;'>";
+                                echo "<span style=\"font-size:12px;color:$fcolor\">$thisop</span></a></th>";
+                            }
+                            ?>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php
+                        $counx = $rowperpage * ($page - 1);
+                        while ($row = mysql_fetch_array($result)) {
+                            $counx++;
+
+                            // Status color coding
+                            $rowClass = "";
+                            if (isset($row['الحالة'])) {
+                                if ($row['الحالة'] == "1") {
+                                    $rowClass = "status-reserved";
+                                    $row['الحالة'] = "محجوزة";
+                                } elseif ($row['الحالة'] == "2") {
+                                    $rowClass = "status-sold";
+                                    $row['الحالة'] = "مباعة";
+                                } elseif ($row['الحالة'] == "3") {
+                                    $rowClass = "status-deleted";
+                                    $row['الحالة'] = "محذوفة";
+                                }
+                            }
+                            ?>
+
+                            <tr class='gridrow <?= $rowClass ?>' id='row-<?= intval($row['emaraid']); ?>'
+                                style='cursor:pointer;'
+                                onmouseover="this.style.backgroundColor='#f2f2f2';
+                                    var obje=this;
+                                    var hrefe='readtipemara.hnt?id=<?= intval($row['emaraid']); ?>';
+                                    xmtime=setTimeout(function() { if(typeof showmsgbox === 'function') showmsgbox(obje,hrefe,currentMousePos.y,currentMousePos.x); }, <?= intval($user_data['fastpreviewdelay'] * 1000); ?>);"
+                                onmouseout="clearTimeout(xmtime); this.style.backgroundColor='';">
+
+                                <td class="text-center"><?= $counx; ?></td>
+
+                                <?php
+
+
+
+//--------------mokhatat name start-----------//
+$row['المخطط'] = isset($row['المخطط']) ? $row['المخطط'] : 0;
+$sqlk="select mokhatatname from mokhatat where mokhatatid='".$row['المخطط']."'";
+$resk=mysql_query($sqlk,$link);
+$resk=mysql_fetch_array($resk);
+$mokhatatpicp_path = upload_path('mokhatat.images', $row['المخطط'].".pdf");
+$mokhatatpicj_path = upload_path('mokhatat.images', $row['المخطط'].".jpg");
+$moklink="";
+
+if(file_exists($mokhatatpicp_path))
+{
+$mokhatatpicp_url = upload_url('mokhatat.images', $row['المخطط'].".pdf");
+$moklink="<a href=#   onclick=\"showModalDialog('../../picview.hnt?myx=".urlencode($mokhatatpicp_url)."&hex=embed%20'  ,'سبحان','resizable: yes; help: no; status:no; scroll: no;');return false;\"  >";
+}
+elseif(file_exists($mokhatatpicj_path))
+{
+$mokhatatpicj_url = upload_url('mokhatat.images', $row['mokhatatid'].".jpg");
+$moklink="<a href=#   onclick=\"showModalDialog('../../picview.hnt?myx=".urlencode($mokhatatpicj_url)."'  ,'سبحان','resizable: yes; help: no; status:no; scroll: no;');return false;\"  >";
+}
+
+// Safe array access with isset check
+$mokhatatname = (is_array($resk) && isset($resk[0])) ? $resk[0] : '';
+$row['المخطط']=$moklink.$mokhatatname."</a>";
+//-------------mokhtata name end -------------//
+
+
+// Format date with isset check
+if(isset($row['التاريخ'])) {
+    if($hnt_dll || $hnt_supper_dll ==5){
+        $row['التاريخ']=date("d-m-Y",$row['التاريخ']);
+    }else{
+        $row['التاريخ']=ArabicTools::arabicDate('hj:d/m/Y', $row['التاريخ']);
+    }
+}
+
+// Replace 0 with × for various fields (with isset checks)
+if(isset($row['البيع للعمارة'])) $row['البيع للعمارة']=str_replace("0","×",$row['البيع للعمارة']);
+if(isset($row['على الشور'])) $row['على الشور']=str_replace("0","×",$row['على الشور']);
+if(isset($row['مدارس'])) $row['مدارس']=str_replace("0","×",$row['مدارس']);
+if(isset($row['مباشر ام لا'])) $row['مباشر ام لا']=str_replace("0","×",$row['مباشر ام لا']);
+if(isset($row['سفلت'])) $row['سفلت']=str_replace("0","×",$row['سفلت']);
+if(isset($row['كهرباء'])) $row['كهرباء']=str_replace("0","×",$row['كهرباء']);
+if(isset($row['مياه'])) $row['مياه']=str_replace("0","×",$row['مياه']);
+if(isset($row['مستشفى'])) $row['مستشفى']=str_replace("0","×",$row['مستشفى']);
+if(isset($row['تطل على ساحة'])) $row['تطل على ساحة']=str_replace("0","×",$row['تطل على ساحة']);
+if(isset($row['جوار مسجد'])) $row['جوار مسجد']=str_replace("0","×",$row['جوار مسجد']);
+if(isset($row['جوار شركات'])) $row['جوار شركات']=str_replace("0","×",$row['جوار شركات']);
+if(isset($row['جوار مزرعة'])) $row['جوار مزرعة']=str_replace("0","×",$row['جوار مزرعة']);
+if(isset($row['هاتف'])) $row['هاتف']=str_replace("0","×",$row['هاتف']);
+if(isset($row['البيع بالقطعة'])) $row['البيع بالقطعة']=str_replace("0","×",$row['البيع بالقطعة']);
+if(isset($row['البيع بالمتر المربع'])) $row['البيع بالمتر المربع']=str_replace("0","×",$row['البيع بالمتر المربع']);
+if(isset($row['علي الشور'])) $row['علي الشور']=str_replace("0","×",$row['علي الشور']);
+if(isset($row['قابل للتفاوض'])) $row['قابل للتفاوض']=str_replace("0","×",$row['قابل للتفاوض']);
+
+// Replace 1 with checkmark for various fields (with isset checks)
+if(isset($row['البيع للعمارة'])) $row['البيع للعمارة']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['البيع للعمارة']);
+if(isset($row['على الشور'])) $row['على الشور']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['على الشور']);
+if(isset($row['سفلت'])) $row['سفلت']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['سفلت']);
+if(isset($row['كهرباء'])) $row['كهرباء']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['كهرباء']);
+if(isset($row['مياه'])) $row['مياه']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['مياه']);
+if(isset($row['مدارس'])) $row['مدارس']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['مدارس']);
+if(isset($row['مباشر ام لا'])) $row['مباشر ام لا']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['مباشر ام لا']);
+if(isset($row['مستشفى'])) $row['مستشفى']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['مستشفى']);
+if(isset($row['تطل على ساحة'])) $row['تطل على ساحة']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['تطل على ساحة']);
+if(isset($row['جوار مسجد'])) $row['جوار مسجد']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['جوار مسجد']);
+if(isset($row['جوار شركات'])) $row['جوار شركات']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['جوار شركات']);
+if(isset($row['جوار مزرعة'])) $row['جوار مزرعة']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['جوار مزرعة']);
+if(isset($row['هاتف'])) $row['هاتف']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['هاتف']);
+if(isset($row['البيع بالقطعة'])) $row['البيع بالقطعة']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['البيع بالقطعة']);
+if(isset($row['البيع بالمتر المربع'])) $row['البيع بالمتر المربع']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['البيع بالمتر المربع']);
+if(isset($row['علي الشور'])) $row['علي الشور']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['علي الشور']);
+if(isset($row['قابل للتفاوض'])) $row['قابل للتفاوض']=str_replace("1","<font style='font-family:Wingdings 2;'>P</font>",$row['قابل للتفاوض']);
+
+//-------------preper hedod ---------------------//
+
+$hedod=explode(";",$row['الحدود']);
+$hedod0=trim($hedod[0]);
+$hedod1=trim($hedod[1]);
+$hedod2=trim($hedod[2]);
+$hedod3=trim($hedod[3]);
+$row['الحدود']="";
+if($hedod0){$row['الحدود'].=$hedod0." شمال ";}
+if($hedod1){$row['الحدود'].=$hedod1." جنوب";}
+if($hedod2){$row['الحدود'].=$hedod2." شرق ";}
+if($hedod3){$row['الحدود'].=$hedod3." غرب ";}
+
+
+//----------------end--------------------------//
+
+
+//-------------start masder show-------------------//
+
+// Get virtual masder with isset check
+$virtualmsder = '';
+if(isset($row['مُدخل البيانات'])) {
+    $virtualmsder_result = mysql_fetch_array(mysql_query("select name from user where userid='" . addslashes($row['مُدخل البيانات']) . "'", $link));
+    $virtualmsder = isset($virtualmsder_result[0]) ? $virtualmsder_result[0] : '';
+}
+
+// Get reversed by user with isset check
+$reversedby = '';
+if(isset($row['محجوزة عن طريق'])) {
+    $reversedby_result = mysql_fetch_array(mysql_query("select name from user where userid='" . addslashes($row['محجوزة عن طريق']) . "'", $link));
+    $reversedby = isset($reversedby_result[0]) ? $reversedby_result[0] : '';
+}
+if(isset($row['محجوزة عن طريق'])) {
+    $row['محجوزة عن طريق'] = $reversedby;
+}
+
+// Check masder permissions
+$custummerid = isset($row['custummerid']) ? $row['custummerid'] : '';
+if(($_SESSION['seemasderv']) and ($_SESSION['useridv'] == $custummerid) or ($allprevilage) or ($_SESSION['seeothermasder'])) {
+
+    if(isset($row['المصدر'])) {
+        $sqlk = "select masdername from masder where masderid='" . addslashes($row['المصدر']) . "'";
+        $resk = mysql_query($sqlk, $link);
+        $resk = mysql_fetch_array($resk);
+
+        $masder_name = isset($resk[0]) ? $resk[0] : '';
+        $row['المصدر'] = "<a href=\"#\" onclick=\"gototmasder(" . $row['المصدر'] . ");\" title=\" عرض بيانات المصدر\">$masder_name</a>";
+
+        if(!$masder_name) {
+            $row['المصدر'] .= "</a> خاصتنا <a>";
+        }
+    }
+} else {
+    // Print user name instead if the user has no permission to see masder
+    if(isset($row['المصدر'])) $row['المصدر'] = "-$virtualmsder";
+    if(isset($row['اسم المالك'])) $row['اسم المالك'] = "-$virtualmsder";
+    if(isset($row['جوال المالك'])) $row['جوال المالك'] = "-$virtualmsder";
+    if(isset($row['هاتف منزل المالك'])) $row['هاتف منزل المالك'] = "-$virtualmsder";
+    if(isset($row['هاتف عمل المالك'])) $row['هاتف عمل المالك'] = "-$virtualmsder";
+}
+if(isset($row['مُدخل البيانات'])) {
+    $row['مُدخل البيانات'] = $virtualmsder;
+}
+
+//---------------end masder show -------------------//
+
+
+for($i=0;$i<count($custfiled)-1;$i=$i+2){
+$xdc=$custfiled[$i+1];
+?>
+
+<td align=center><?=$row[$xdc];?></td>
+
+<?
+}
+
+                                ?>
+                            </tr>
+
+                            <!-- Expandable row for actions -->
+                            <tr class='screenonly' style='border:0px;display:none;background-color:#fefefe' id='grid-<?= intval($row['emaraid']); ?>'>
+                                <td colspan='50'>
+                                    <div style='display:none' id='gridcontrol-<?= intval($row['emaraid']); ?>'></div>
+                                </td>
+                            </tr>
+
+                        <?php } ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+<!-- End container-fluid -->
+
+
+
+
+<!-- Footer -->
+<div class="container-fluid">
+    <div class="text-center text-muted pb-4">
+        <?= isset($bayanaddress) ? $bayanaddress : '' ?>
+        <?= isset($bayanemail) ? $bayanemail : '' ?>
+        <br>
+        هـــــــــــاتف : <?= isset($bayantel) ? $bayantel : '' ?>
+        فاكـــــــــــس : <?= isset($bayanfax) ? $bayanfax : '' ?>
+    </div>
+</div>
+
+<!-- Context Menu Layer -->
+<div dir="rtl"
+     style="display:none; overflow:auto; background-color:#ffffff; border:1px solid #dee2e6; border-radius:8px; width:200px; position:absolute; z-index:1000; left:460px; top:40px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);"
+     onmouseover="document.getElementById('contextlayer').style.display='block'; return false;"
+     onmouseout="document.getElementById('contextlayer').style.display='none'; return false;"
+     id="contextlayer">
+
+    <a href='#' onclick="gotolink('addemara.hnt?editid='+document.getElementById('idtr').value); return false;"
+       class='<?= "policy_" . $sc_id . "_edits" ?>'>
+        <i class='bi bi-pencil me-2'></i>تعديل البيانات
+    </a>
+    <a href='#' onclick="gotolink('viewemara.hnt?id='+document.getElementById('idtr').value+'&nosendata=1'); return false;">
+        <i class='bi bi-eye me-2'></i>وثيقة للعميل
+    </a>
+    <a href='#' onclick="gotolink('viewemara.hnt?id='+document.getElementById('idtr').value); return false;">
+        <i class='bi bi-file-text me-2'></i>وثيقة للمكتب
+    </a>
+    <hr style="margin: 0.5rem 0;">
+    <a href='#' onclick="gotolink('/aqary/admin/offers/add_offer.php?emaraid='+document.getElementById('idtr').value); return false;">
+        <i class='bi bi-share me-2'></i>نشر للشبكة العقارية
+    </a>
+    <a href='#' onclick="gotolink('/aqary/admin/offers/add_offer.php?sendtomysite=1&emaraid='+document.getElementById('idtr').value); return false;">
+        <i class='bi bi-globe me-2'></i>نشر لموقعي
+    </a>
+    <hr style="margin: 0.5rem 0;">
+    <a href='#' onclick="printURL('/aqary/admin/include/emara/viewemara.hnt?id='+document.getElementById('idtr').value); return false;">
+        <i class='bi bi-printer me-2'></i>طباعة التفاصيل
+    </a>
+    <hr style="margin: 0.5rem 0;">
+    <a href='#' onclick="gotolink('/aqary/sendmail.hnt?emaraid='+document.getElementById('idtr').value); return false;">
+        <i class='bi bi-envelope me-2'></i>ارسال بالبريد
+    </a>
+    <a href='#' onclick="shellme('faxer.exe','http://<?= $_SERVER['SERVER_ADDR'] . ":" . $_SERVER['SERVER_PORT']; ?>/aqary/admin/include/emara/viewemara.hnt?id='+document.getElementById('idtr').value);">
+        <i class='bi bi-fax me-2'></i>ارسال بالفاكس
+    </a>
+    <a href='#' onclick="gotolink('/aqary/sendsms.hnt?emaraid='+document.getElementById('idtr').value); return false;">
+        <i class='bi bi-phone me-2'></i>رسالة جوال
+    </a>
+    <input type="hidden" name="idtr" id="idtr">
+</div>
+
+<?require('../../../foter.hnt');?>
