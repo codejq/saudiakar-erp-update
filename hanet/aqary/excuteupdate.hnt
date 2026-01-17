@@ -52,20 +52,34 @@ if (file_exists($lockFile)) {
 // Create lock file
 file_put_contents($lockFile, date('Y-m-d H:i:s'));
 
-// Execute the batch file in background
-$command = 'start /B cmd /c "' . realpath($batchFile) . '"';
-pclose(popen($command, 'r'));
+// Execute the batch file and wait for completion
+// Using cmd /c without 'start /B' to run synchronously
+$command = 'cmd /c "' . realpath($batchFile) . '" 2>&1';
+$output = [];
+$returnCode = 0;
 
-// Write current day to scheduler file after batch execution
-// This ensures consistent format (01-31) regardless of how update was triggered
-$currentDay = date('d'); // Current day with leading zero (01-31)
-file_put_contents($batLockFile, $currentDay);
+exec($command, $output, $returnCode);
 
-// Return success
-header('Content-Type: application/json; charset=utf-8');
-echo json_encode([
-    'success' => true,
-    'message' => 'تم بدء عملية التحديث بنجاح'
-], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+// Remove lock file after execution
+@unlink($lockFile);
+
+// Check if execution was successful
+if ($returnCode === 0) {
+    // Return success
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => true,
+        'message' => 'تم تحديث النظام بنجاح'
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+} else {
+    // Return error with output
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => false,
+        'message' => 'فشل تحديث النظام',
+        'error' => implode("\n", $output),
+        'return_code' => $returnCode
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
 exit();
 ?>
