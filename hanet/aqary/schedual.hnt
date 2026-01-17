@@ -4,14 +4,71 @@
 //to run bat file with out gui  use command 
 //system($_SERVER['DOCUMENT_ROOT']."/aqary/registerall.bat 2>&1",$output) ;
 
-function execInBackground($cmd) { 
-	// this will run script and don't wait for the result 
-    if (substr(php_uname(), 0, 7) == "Windows"){ 
-        pclose(popen("start /B ". $cmd, "r"));  
-    } 
-    else { 
-        exec($cmd . " > /dev/null &");   
-    } 
+function execInBackground($cmd, $timeout = 600) {
+	// Execute command and wait for completion with timeout (default 10 minutes)
+    $startTime = time();
+
+    if (substr(php_uname(), 0, 7) == "Windows") {
+        // Windows: Use proc_open to monitor process with timeout
+        $descriptorspec = [
+            0 => ["pipe", "r"],  // stdin
+            1 => ["pipe", "w"],  // stdout
+            2 => ["pipe", "w"]   // stderr
+        ];
+
+        $process = proc_open($cmd, $descriptorspec, $pipes);
+
+        if (is_resource($process)) {
+            // Close stdin
+            fclose($pipes[0]);
+
+            // Set non-blocking mode on stdout and stderr
+            stream_set_blocking($pipes[1], false);
+            stream_set_blocking($pipes[2], false);
+
+            // Wait for process to complete or timeout
+            while (true) {
+                $status = proc_get_status($process);
+
+                // Check if process is still running
+                if (!$status['running']) {
+                    // Process completed
+                    fclose($pipes[1]);
+                    fclose($pipes[2]);
+                    proc_close($process);
+
+                    return $status['exitcode'] === 0;
+                }
+
+                // Check timeout
+                if ((time() - $startTime) > $timeout) {
+                    // Timeout reached, terminate process
+                    proc_terminate($process);
+
+                    fclose($pipes[1]);
+                    fclose($pipes[2]);
+                    proc_close($process);
+
+                    return false; // Timeout
+                }
+
+                // Sleep briefly to avoid CPU spinning
+                usleep(100000); // 0.1 seconds
+            }
+        }
+
+        return false;
+    } else {
+        // Linux: Use timeout command
+        $timeoutCmd = "timeout {$timeout}s {$cmd}";
+        $returnCode = 0;
+        $output = [];
+
+        exec($timeoutCmd, $output, $returnCode);
+
+        // Return code 124 means timeout in Linux timeout command
+        return $returnCode === 0;
+    }
 }
 
 
