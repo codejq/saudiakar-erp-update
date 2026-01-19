@@ -738,7 +738,23 @@ function alert(message, title, callback) {
     }
   };
 
+  // Check if other modals are already open and set z-index before showing
+  const openModals = document.querySelectorAll('.modal.show');
+  if (openModals.length > 0) {
+    // Other modals are open, set higher z-index
+    modalElement.style.cssText = 'z-index: 9999 !important;';
+  }
+
   modal.show();
+
+  // After modal is shown, ensure backdrop also has correct z-index
+  setTimeout(function() {
+    const backdrops = document.querySelectorAll('.modal-backdrop');
+    if (backdrops.length > 1 && openModals.length > 0) {
+      // Set the last backdrop (belongs to alert) to be just below the alert modal
+      backdrops[backdrops.length - 1].style.cssText = 'z-index: 9998 !important;';
+    }
+  }, 100);
 }
 
 /**

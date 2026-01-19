@@ -48,13 +48,14 @@ $sql = "SELECT ad.*, a.*, e.*, m.mostagername
 $result = mysql_query($sql, $link);
 $property = mysql_fetch_assoc($result);
 
+
 if (!$property) {
     echo "<div class='alert alert-danger'>لم يتم العثور على العقار</div>";
     exit;
 }
 
 $contractId = $property['rakam3akdid'];
-$calendarType = isset($property['calendar_type']) ? intval($property['calendar_type']) : 0;
+$calendarType = isset($property['hnt_dll_type']) ? intval($property['hnt_dll_type']) : 0;
 
 ?>
 
@@ -202,11 +203,13 @@ $calendarType = isset($property['calendar_type']) ? intval($property['calendar_t
                 <div class="card-body">
                     <div class="row">
                         <div class="col-md-3">
-                            <p class="mb-1"><strong>رقم العقد:</strong> <?= $property['rakam3akd'] ?></p>
+                            <p class="mb-1"><strong>رقم العقد:</strong > <span style="color: #007bff"><?= $property['rakam3akd'] ?></span>
+                        &nbsp;&nbsp;&nbsp;&nbsp; <?= displaysubtype($property['aqarsubtype']) . " رقم " . $property['rakam']; ?>
+                        </p>
                             <p class="mb-0"><strong>المستأجر:</strong> <?= htmlspecialchars($property['mostagername']) ?></p>
                         </div>
                         <div class="col-md-3">
-                            <p class="mb-1"><strong>العقار:</strong> <?= htmlspecialchars($property['aqaraddress']) ?></p>
+                            <p class="mb-1"><strong>العقار:</strong> <?= htmlspecialchars($property['aqarname']) ?></p>
                             <p class="mb-0"><strong>قيمة القسط:</strong> <?= number_format($property['depositeamount'], 2) ?> ريال</p>
                         </div>
                         <div class="col-md-3">
@@ -522,7 +525,10 @@ $calendarType = isset($property['calendar_type']) ? intval($property['calendar_t
 
                     <div class="mb-3">
                         <label class="form-label">تاريخ الدفع</label>
-                        <input type="text" class="form-control" id="payment_date" name="payment_date" value="<?= date('d/m/Y') ?>">
+                        <div class="input-group">
+                            <input type="text" class="form-control datepicker-input" id="payment_date" name="payment_date" value="<?= date('d/m/Y') ?>" placeholder="dd/mm/yyyy" autocomplete="off">
+                            <span class="input-group-text"><i class="bi bi-calendar3"></i></span>
+                        </div>
                     </div>
 
                     <div class="mb-3">
@@ -546,7 +552,7 @@ $calendarType = isset($property['calendar_type']) ? intval($property['calendar_t
                     </div>
 
                     <div class="form-check mb-3">
-                        <input type="checkbox" class="form-check-input" id="create_receipt" name="create_receipt" checked>
+                        <input type="checkbox" class="form-check-input" id="create_receipt" name="create_receipt" value="1" checked>
                         <label class="form-check-label" for="create_receipt">
                             إنشاء سند قبض تلقائي
                         </label>
@@ -587,7 +593,10 @@ $calendarType = isset($property['calendar_type']) ? intval($property['calendar_t
                         </div>
                         <div class="col-md-6 mb-3">
                             <label class="form-label">تاريخ الاستحقاق</label>
-                            <input type="text" class="form-control" id="edit_kastdate" name="kastdate">
+                            <div class="input-group">
+                                <input type="text" class="form-control datepicker-input" id="edit_kastdate" name="kastdate" placeholder="dd/mm/yyyy" autocomplete="off">
+                                <span class="input-group-text"><i class="bi bi-calendar3"></i></span>
+                            </div>
                         </div>
                     </div>
 
@@ -690,7 +699,10 @@ $calendarType = isset($property['calendar_type']) ? intval($property['calendar_t
                         </div>
                         <div class="col-md-6 mb-3">
                             <label class="form-label">تاريخ الاستحقاق <span class="text-danger">*</span></label>
-                            <input type="text" class="form-control" name="kastdate" required placeholder="dd/mm/yyyy">
+                            <div class="input-group">
+                                <input type="text" class="form-control datepicker-input" id="add_kastdate" name="kastdate" required placeholder="dd/mm/yyyy" autocomplete="off">
+                                <span class="input-group-text"><i class="bi bi-calendar3"></i></span>
+                            </div>
                             <small class="text-muted">صيغة التاريخ: يوم/شهر/سنة</small>
                         </div>
                     </div>
@@ -758,7 +770,10 @@ $calendarType = isset($property['calendar_type']) ? intval($property['calendar_t
 
                     <div class="mb-3">
                         <label class="form-label">تاريخ الدفع</label>
-                        <input type="text" class="form-control" name="payment_date" value="<?= date('d/m/Y') ?>">
+                        <div class="input-group">
+                            <input type="text" class="form-control datepicker-input" id="bulk_payment_date" name="payment_date" value="<?= date('d/m/Y') ?>" placeholder="dd/mm/yyyy" autocomplete="off">
+                            <span class="input-group-text"><i class="bi bi-calendar3"></i></span>
+                        </div>
                     </div>
 
                     <div class="mb-3">
@@ -808,6 +823,111 @@ $calendarType = isset($property['calendar_type']) ? intval($property['calendar_t
     const addInstallmentModal = new bootstrap.Modal(document.getElementById('addInstallmentModal'));
     const bulkPaymentModal = new bootstrap.Modal(document.getElementById('bulkPaymentModal'));
 
+    // Initialize datepicker on page load
+    $(document).ready(function() {
+        // Check if datepicker library is loaded
+        if (typeof $.fn.datepicker === 'undefined') {
+            console.error('ERROR: Bootstrap Datepicker library is not loaded!');
+            alert('خطأ: مكتبة التقويم غير محملة');
+            return;
+        }
+
+        console.log('Datepicker library loaded successfully');
+
+        // Get calendar type from contract (0 = Hijri, 1 = Gregorian)
+        var calendarType = <?= $calendarType ?>;
+        var isHijri = (calendarType === 0);
+        var calType = isHijri ? 'hijri' : 'gregorian';
+
+        console.log('Initializing datepickers - calType:', calType, 'isHijri:', isHijri);
+
+        // Function to initialize datepickers
+        function initDatepickers(context, forceReinit) {
+            context = context || document;
+            forceReinit = forceReinit || false;
+
+            var inputs = $(context).find('.datepicker-input');
+            console.log('Found', inputs.length, 'datepicker inputs in context, forceReinit:', forceReinit);
+
+            // Set calendartype data attribute on all datepicker inputs BEFORE initialization
+            inputs.each(function(index) {
+                var $input = $(this);
+                var inputId = $input.attr('id') || 'unnamed-' + index;
+                var currentValue = $input.val(); // Store current value
+
+                console.log('Processing input:', inputId, 'Already initialized:', !!$input.data('datepicker'), 'Value:', currentValue);
+
+                // If forcing reinit or not initialized, set up datepicker
+                if (forceReinit || !$input.data('datepicker')) {
+                    // Destroy existing datepicker if it exists
+                    if ($input.data('datepicker')) {
+                        console.log('Destroying existing datepicker for:', inputId);
+                        $input.datepicker('destroy');
+                    }
+
+                    $input.data('calendartype', calType);
+
+                    try {
+                        // Find the modal container if inside a modal
+                        var $modalBody = $input.closest('.modal-body');
+                        var container = $modalBody.length > 0 ? $modalBody[0] : 'body';
+                        console.log('Container for', inputId, ':', container === 'body' ? 'body' : 'modal-body');
+
+                        // Initialize Bootstrap Datepicker with Hijri/Gregorian support
+                        $input.datepicker({
+                            format: 'dd/mm/yyyy',
+                            language: 'ar',
+                            rtl: true,
+                            autoclose: true,
+                            todayHighlight: true,
+                            calendarType: calType,
+                            orientation: 'bottom auto',
+                            weekStart: isHijri ? 6 : 0,
+                            container: container,
+                            zIndexOffset: 1060  // Ensure it appears above modal backdrop (1050)
+                        });
+
+                        // Restore value after initialization
+                        if (currentValue) {
+                            $input.val(currentValue);
+                        }
+
+                        console.log('✓ Initialized datepicker for:', inputId);
+                    } catch (e) {
+                        console.error('✗ Error initializing datepicker for:', inputId, e);
+                    }
+                }
+            });
+
+            // Make calendar icons clickable
+            $(context).find('.input-group-text').off('click.datepicker').on('click.datepicker', function(e) {
+                e.preventDefault();
+                var $icon = $(this);
+                var $input = $icon.siblings('.datepicker-input');
+
+                if ($input.length === 0) {
+                    $input = $icon.prev('.datepicker-input');
+                }
+
+                console.log('Icon clicked - found input:', $input.length, 'id:', $input.attr('id'));
+
+                if ($input.length && $input.hasClass('datepicker-input')) {
+                    $input.focus();
+                    $input.datepicker('show');
+                }
+            });
+        }
+
+        // Initialize datepickers on page load
+        initDatepickers();
+
+        // Reinitialize datepickers when modals are shown
+        $('#editModal, #paymentModal, #addInstallmentModal, #bulkPaymentModal').on('shown.bs.modal', function() {
+            console.log('Modal shown:', this.id, '- forcing reinitialization');
+            initDatepickers(this, true); // Force reinitialize for modal inputs
+        });
+    });
+
     // Show payment modal
     function showPaymentModal(kastid) {
         // Load installment data
@@ -839,12 +959,33 @@ $calendarType = isset($property['calendar_type']) ? intval($property['calendar_t
             data: formData,
             success: function(response) {
                 if (response.success) {
-                    showToast('success', 'تم تسجيل الدفعة بنجاح');
                     paymentModal.hide();
-                    location.reload();
+
+                    // Show success message with receipt link if created
+                    if (response.data && response.data.sanad_id) {
+                        const sanadId = response.data.sanad_id;
+                        showAlert(
+                            response.message,
+                            'نجح',
+                            function() {
+                                // After closing alert, ask if user wants to print receipt
+                                if (confirm('هل تريد عرض سند القبض رقم ' + sanadId + ' للطباعة؟')) {
+                                    window.open('selectprintform.hnt?formtype=recivevoucher&id=' + sanadId, '_blank');
+                                }
+                                location.reload();
+                            }
+                        );
+                    } else {
+                        showToast('success', response.message);
+                        location.reload();
+                    }
                 } else {
                     showToast('error', response.message);
                 }
+            },
+            error: function(xhr, status, error) {
+                console.error('AJAX Error:', {xhr: xhr, status: status, error: error});
+                showToast('error', 'فشل الاتصال بالخادم: ' + error);
             }
         });
     }
@@ -863,12 +1004,12 @@ $calendarType = isset($property['calendar_type']) ? intval($property['calendar_t
                     const inst = response.data;
                     $('#edit_kastid').val(kastid);
                     $('#edit_kastname').val(inst.kastname);
-                    $('#edit_kastdate').val(inst.kastdate_formatted);
+                    $('#edit_kastdate').val(inst.kastdate_input); // Use dd/mm/yyyy format for datepicker
                     $('#edit_kastvalue').val(inst.kastvalue);
                     $('#edit_water').val(inst.water);
                     $('#edit_sa3ee').val(inst.sa3ee);
                     $('#edit_services').val(inst.services);
-                    $('#edit_status').val(inst.status);
+                    $('#edit_status').val(inst.status).trigger('change');
                     $('#edit_late_fee').val(inst.late_fee);
                     editModal.show();
                 }
@@ -880,17 +1021,24 @@ $calendarType = isset($property['calendar_type']) ? intval($property['calendar_t
     function submitEdit() {
         const formData = $('#editForm').serialize();
         $.ajax({
-            url: 'installments.api.hnt',
+            url: 'installments.api.hnt?_t=' + Date.now(), // Add timestamp to prevent caching
             method: 'POST',
             data: formData,
+            cache: false,
             success: function(response) {
+                console.log('API Response:', response); // Log full response for debugging
                 if (response.success) {
                     showToast('success', 'تم تحديث القسط بنجاح');
                     editModal.hide();
                     location.reload();
                 } else {
+                    console.error('API Error:', response); // Log error details
                     showToast('error', response.message);
                 }
+            },
+            error: function(xhr, status, error) {
+                console.error('AJAX Error:', {xhr: xhr, status: status, error: error, responseText: xhr.responseText});
+                showToast('error', 'فشل الاتصال بالخادم: ' + error);
             }
         });
     }

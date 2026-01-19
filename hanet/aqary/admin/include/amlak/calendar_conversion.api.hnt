@@ -1,0 +1,290 @@
+<?php
+/**
+ * Calendar Conversion API
+ * Converts dates between Hijri and Gregorian calendars
+ *
+ * @version 1.0
+ * @date 2025-12-04
+ */
+
+header('Content-Type: application/json; charset=utf-8');
+header('Access-Control-Allow-Origin: *');
+
+require_once('../../../reqloginajax.hnt');
+require_once(__DIR__ . '/CalendarManager.class.hnt');
+
+$action = isset($_REQUEST['action']) ? $_REQUEST['action'] : '';
+$response = ['success' => false, 'message' => '', 'data' => null];
+
+try {
+    $calendar = new CalendarManager();
+
+    switch ($action) {
+        case 'convert_date':
+            $response = convertDate($_REQUEST, $calendar);
+            break;
+
+        case 'convert_dates':
+            $response = convertDates($_REQUEST, $calendar);
+            break;
+
+        case 'validate_date':
+            $response = validateDate($_REQUEST, $calendar);
+            break;
+
+        case 'get_month_name':
+            $response = getMonthName($_REQUEST, $calendar);
+            break;
+
+        case 'calculate_date_range':
+            $response = calculateDateRange($_REQUEST, $calendar);
+            break;
+
+        case 'format_date':
+            $response = formatDate($_REQUEST, $calendar);
+            break;
+
+        default:
+            $response['message'] = 'عملية غير صالحة';
+    }
+} catch (Exception $e) {
+    $response['success'] = false;
+    $response['message'] = 'خطأ: ' . $e->getMessage();
+}
+
+echo json_encode($response, JSON_UNESCAPED_UNICODE);
+exit;
+
+/**
+ * Convert single date between calendars
+ */
+function convertDate($data, $calendar) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    if (!isset($data['date']) || !isset($data['from_calendar']) || !isset($data['to_calendar'])) {
+        $response['message'] = 'البيانات المطلوبة ناقصة';
+        return $response;
+    }
+
+    $dateString = $data['date'];
+    $fromCalendar = intval($data['from_calendar']);
+    $toCalendar = intval($data['to_calendar']);
+
+    // Validate input date
+    if (!$calendar->isValidDate($dateString, $fromCalendar)) {
+        $response['message'] = 'التاريخ غير صحيح';
+        return $response;
+    }
+
+    // Convert
+    $convertedDate = $calendar->convertDate($dateString, $fromCalendar, $toCalendar);
+
+    $response['success'] = true;
+    $response['data'] = [
+        'original_date' => $dateString,
+        'converted_date' => $convertedDate,
+        'from_calendar' => $fromCalendar == 0 ? 'hijri' : 'gregorian',
+        'to_calendar' => $toCalendar == 0 ? 'hijri' : 'gregorian'
+    ];
+
+    return $response;
+}
+
+/**
+ * Convert multiple dates at once
+ */
+function convertDates($data, $calendar) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    if (!isset($data['dates']) || !isset($data['from_calendar']) || !isset($data['to_calendar'])) {
+        $response['message'] = 'البيانات المطلوبة ناقصة';
+        return $response;
+    }
+
+    $dates = $data['dates'];
+    $fromCalendar = intval($data['from_calendar']);
+    $toCalendar = intval($data['to_calendar']);
+
+    $converted = [];
+
+    // Handle both array and single date
+    if (!is_array($dates)) {
+        $dates = [$dates];
+    }
+
+    foreach ($dates as $key => $dateString) {
+        if (empty($dateString)) {
+            $converted[$key] = '';
+            continue;
+        }
+
+        if ($calendar->isValidDate($dateString, $fromCalendar)) {
+            $converted[$key] = $calendar->convertDate($dateString, $fromCalendar, $toCalendar);
+        } else {
+            $converted[$key] = $dateString; // Keep original if invalid
+        }
+    }
+
+    $response['success'] = true;
+    $response['converted'] = $converted;
+
+    return $response;
+}
+
+/**
+ * Validate a date
+ */
+function validateDate($data, $calendar) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    if (!isset($data['date']) || !isset($data['calendar_type'])) {
+        $response['message'] = 'البيانات المطلوبة ناقصة';
+        return $response;
+    }
+
+    $dateString = $data['date'];
+    $calendarType = intval($data['calendar_type']);
+
+    $isValid = $calendar->isValidDate($dateString, $calendarType);
+
+    $response['success'] = true;
+    $response['data'] = [
+        'date' => $dateString,
+        'calendar_type' => $calendarType == 0 ? 'hijri' : 'gregorian',
+        'is_valid' => $isValid
+    ];
+
+    if ($isValid) {
+        // Also return timestamp
+        $timestamp = $calendar->dateToTimestamp($dateString, $calendarType);
+        $response['data']['timestamp'] = $timestamp;
+        $response['data']['formatted'] = $calendar->formatDateForDisplay($timestamp, $calendarType);
+    } else {
+        $response['message'] = 'التاريخ غير صحيح';
+    }
+
+    return $response;
+}
+
+/**
+ * Get month name
+ */
+function getMonthName($data, $calendar) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    if (!isset($data['month']) || !isset($data['calendar_type'])) {
+        $response['message'] = 'البيانات المطلوبة ناقصة';
+        return $response;
+    }
+
+    $month = intval($data['month']);
+    $calendarType = intval($data['calendar_type']);
+
+    if ($month < 1 || $month > 12) {
+        $response['message'] = 'رقم الشهر غير صحيح';
+        return $response;
+    }
+
+    $monthName = $calendar->getMonthName($month, $calendarType);
+
+    $response['success'] = true;
+    $response['data'] = [
+        'month' => $month,
+        'month_name' => $monthName,
+        'calendar_type' => $calendarType == 0 ? 'hijri' : 'gregorian'
+    ];
+
+    return $response;
+}
+
+/**
+ * Calculate date range
+ */
+function calculateDateRange($data, $calendar) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    if (!isset($data['start_date']) || !isset($data['duration_months']) || !isset($data['calendar_type'])) {
+        $response['message'] = 'البيانات المطلوبة ناقصة';
+        return $response;
+    }
+
+    $startDate = $data['start_date'];
+    $durationMonths = intval($data['duration_months']);
+    $calendarType = intval($data['calendar_type']);
+
+    // Validate start date
+    if (!$calendar->isValidDate($startDate, $calendarType)) {
+        $response['message'] = 'تاريخ البداية غير صحيح';
+        return $response;
+    }
+
+    // Convert to timestamp
+    $startTimestamp = $calendar->dateToTimestamp($startDate, $calendarType);
+
+    // Calculate end date
+    $endTimestamp = $calendar->calculateEndDate($startTimestamp, $durationMonths, $calendarType);
+
+    // Format dates
+    $endDate = $calendar->timestampToDate($endTimestamp, $calendarType);
+
+    $response['success'] = true;
+    $response['data'] = [
+        'start_date' => $startDate,
+        'end_date' => $endDate,
+        'duration_months' => $durationMonths,
+        'calendar_type' => $calendarType == 0 ? 'hijri' : 'gregorian',
+        'start_timestamp' => $startTimestamp,
+        'end_timestamp' => $endTimestamp,
+        'start_formatted' => $calendar->formatDateForDisplay($startTimestamp, $calendarType),
+        'end_formatted' => $calendar->formatDateForDisplay($endTimestamp, $calendarType)
+    ];
+
+    // Also provide in other calendar
+    $otherCalendar = $calendarType == 0 ? 1 : 0;
+    $response['data']['other_calendar'] = [
+        'start_date' => $calendar->timestampToDate($startTimestamp, $otherCalendar),
+        'end_date' => $calendar->timestampToDate($endTimestamp, $otherCalendar),
+        'start_formatted' => $calendar->formatDateForDisplay($startTimestamp, $otherCalendar),
+        'end_formatted' => $calendar->formatDateForDisplay($endTimestamp, $otherCalendar)
+    ];
+
+    return $response;
+}
+
+/**
+ * Format date for display
+ */
+function formatDate($data, $calendar) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    if (!isset($data['date']) || !isset($data['calendar_type'])) {
+        $response['message'] = 'البيانات المطلوبة ناقصة';
+        return $response;
+    }
+
+    $dateString = $data['date'];
+    $calendarType = intval($data['calendar_type']);
+    $includeDayName = isset($data['include_day_name']) ? (bool)$data['include_day_name'] : false;
+
+    // Validate date
+    if (!$calendar->isValidDate($dateString, $calendarType)) {
+        $response['message'] = 'التاريخ غير صحيح';
+        return $response;
+    }
+
+    // Convert to timestamp
+    $timestamp = $calendar->dateToTimestamp($dateString, $calendarType);
+
+    // Format
+    $formatted = $calendar->formatDateForDisplay($timestamp, $calendarType, $includeDayName);
+
+    $response['success'] = true;
+    $response['data'] = [
+        'date' => $dateString,
+        'formatted' => $formatted,
+        'timestamp' => $timestamp,
+        'calendar_type' => $calendarType == 0 ? 'hijri' : 'gregorian'
+    ];
+
+    return $response;
+}

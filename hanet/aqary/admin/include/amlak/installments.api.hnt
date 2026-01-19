@@ -10,17 +10,36 @@
  * - get_payment_history
  * - calculate_late_fees
  *
- * @version 1.0
- * @date 2025-12-04
+ * @version 2.0-debug
+ * @date 2025-01-18
  */
 
-// Set response type to JSON
+define('API_VERSION', '2.0-debug-' . filemtime(__FILE__));
+
+// Suppress deprecation warnings for clean JSON output
+error_reporting(E_ERROR | E_PARSE);
+ini_set('display_errors', '0');
+
+// Aggressive cache clearing
+if (function_exists('opcache_invalidate')) {
+    opcache_invalidate(__FILE__, true);
+}
+if (function_exists('opcache_reset')) {
+    @opcache_reset();
+}
+
+// Set response type to JSON and prevent caching
 header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-cache, no-store, must-revalidate');
+header('Pragma: no-cache');
+header('Expires: 0');
 
 // Include required files
 include_once "../../../reqloginajax.hnt";
 include_once "../../../connectdb.hnt";
+include_once "../../../data.hnt";
 require_once 'CalendarManager.class.hnt';
+require_once '../../../lib/storage/helpers.php';
 
 // Initialize
 $calendar = new CalendarManager();
@@ -28,14 +47,43 @@ $calendar = new CalendarManager();
 // Initialize user data from session
 $user_data = isset($_SESSION['user_data']) ? $_SESSION['user_data'] : ['name' => 'Unknown', 'userid' => 1];
 
-// Get action
-$action = isset($_REQUEST['action']) ? $_REQUEST['action'] : '';
+// Get action and trim whitespace
+$action = isset($_REQUEST['action']) ? trim($_REQUEST['action']) : '';
+
+
 
 // Response array
 $response = ['success' => false, 'message' => '', 'data' => null];
 
+// Check if action is provided
+if (empty($action)) {
+    $response['message'] = 'لم يتم تحديد العملية المطلوبة (action parameter is missing)';
+    $response['data'] = [
+        'error' => 'No action specified',
+        'available_actions' => ['get_installment', 'record_payment', 'update_installment', 'cancel_installment', 'get_payment_history', 'calculate_late_fees', 'add_installment', 'mark_all_paid', 'bulk_payment']
+    ];
+    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 try {
     switch ($action) {
+        case 'debug_info':
+            // Special debug endpoint
+            $response['success'] = true;
+            $response['message'] = 'Debug information';
+            $response['data'] = [
+                'api_version' => API_VERSION,
+                'file_path' => __FILE__,
+                'file_mtime' => date('Y-m-d H:i:s', filemtime(__FILE__)),
+                'current_time' => date('Y-m-d H:i:s'),
+                'received_action' => $action,
+                'all_params' => array_keys($_REQUEST),
+                'php_version' => PHP_VERSION,
+                'opcache_enabled' => function_exists('opcache_get_status') ? opcache_get_status() : 'Not available'
+            ];
+            break;
+
         case 'get_installment':
             $response = getInstallment($_REQUEST, $link, $calendar);
             break;
@@ -73,12 +121,33 @@ try {
             break;
 
         default:
-            $response['message'] = 'Invalid action';
+            $validActions = ['get_installment', 'record_payment', 'update_installment', 'cancel_installment', 'get_payment_history', 'calculate_late_fees', 'add_installment', 'mark_all_paid', 'bulk_payment'];
+            $response['message'] = 'عملية غير صالحة: "' . htmlspecialchars($action) . '"';
+            $response['data'] = [
+                'received_action' => $action,
+                'action_length' => strlen($action),
+                'action_bytes' => bin2hex($action),
+                'valid_actions' => $validActions,
+                'hint' => 'العمليات المتاحة: ' . implode(', ', $validActions),
+                'all_request_keys' => array_keys($_REQUEST)
+            ];
     }
 } catch (Exception $e) {
     $response['success'] = false;
-    $response['message'] = 'Error: ' . $e->getMessage();
+    $response['message'] = 'خطأ: ' . $e->getMessage();
+    $response['data'] = [
+        'error_type' => 'exception',
+        'action_attempted' => $action,
+        'file' => basename($e->getFile()),
+        'line' => $e->getLine()
+    ];
 }
+
+// Add API version to all responses for debugging
+$response['_api_version'] = API_VERSION;
+$response['_timestamp'] = time();
+
+
 
 // Output JSON response
 echo json_encode($response, JSON_UNESCAPED_UNICODE);
@@ -101,8 +170,11 @@ function getInstallment($data, $link, $calendar) {
     if ($row = mysql_fetch_assoc($result)) {
         $calendarType = isset($row['calendar_type']) ? intval($row['calendar_type']) : 0;
 
-        // Format date for display
+        // Format date for display (Arabic text format)
         $row['kastdate_formatted'] = $calendar->formatDateForDisplay($row['kastdate'], $calendarType);
+
+        // Format date for datepicker input (dd/mm/yyyy format)
+        $row['kastdate_input'] = date('d/m/Y', $row['kastdate']);
 
         // Calculate total and remaining amounts
         $totalAmount = $row['kastvalue'] +
@@ -185,12 +257,29 @@ function recordPayment($data, $link, $user_data) {
             $paymentTimestamp = mktime(0, 0, 0, $month, $day, $year);
         }
 
-        // Update installment
+        // Get old payment tracking fields for compatibility with sanad.hnt system
+        $oldDof3at = isset($installment['dof3at']) ? floatval($installment['dof3at']) : 0;
+        $oldDof3atTafsel = isset($installment['dof3at_tafsel']) ? $installment['dof3at_tafsel'] : '';
+
+        // Calculate new dof3at (old system field)
+        $newDof3at = $oldDof3at + $amount;
+
+        // Build dof3at_tafsel (payment breakdown like in sanad.hnt)
+        $newDof3atTafsel = trim($oldDof3atTafsel);
+        if ($newDof3atTafsel) {
+            $newDof3atTafsel .= ' + ' . $amount;
+        } else {
+            $newDof3atTafsel = (string)$amount;
+        }
+
+        // Update installment (update BOTH old and new payment tracking fields)
         $sql = "UPDATE aksat SET
                 status = '$newStatus',
                 amount_paid = '$newAmountPaid',
                 amount_remaining = '$newAmountRemaining',
                 paid_date = '$paymentTimestamp',
+                dof3at = '$newDof3at',
+                dof3at_tafsel = '$newDof3atTafsel',
                 iscomplete = " . ($newStatus == 'paid' ? 1 : 0) . ",
                 updated_at = " . time() . "
                 WHERE kastid = '$kastid'";
@@ -213,37 +302,134 @@ function recordPayment($data, $link, $user_data) {
         mysql_query($sql, $link);
         $paymentHistoryId = mysql_insert_id();
 
-        // Create receipt if requested
+        // Create receipt if requested (following sanad_process.hnt approach)
+        $sanadId = null;
         if ($createReceipt) {
-            // Get contract and tenant info
-            $sql = "SELECT e.*, m.mostagername, m.mostagertel
+            // Get contract, tenant and property info
+            $sql = "SELECT e.*, m.mostagername, m.mostagerid, m.mostagervatnumber,
+                           ad.idaqar, ad.idsubaqar, a.aqarname
                     FROM egar e
                     LEFT JOIN mostagereen m ON e.mostagerid = m.mostagerid
+                    LEFT JOIN amlakdetails ad ON e.rakam3akdid = ad.rakam3akdid
+                    LEFT JOIN amlak a ON ad.idaqar = a.idaqar
                     WHERE e.rakam3akdid = " . $installment['egar_id'];
             $contractResult = mysql_query($sql, $link);
             $contract = mysql_fetch_assoc($contractResult);
 
             if ($contract) {
-                // Create sanad (receipt)
+                // Check if this is the first payment or a subsequent payment
+                // Only record fees (water, sa3ee, services) on FIRST payment
+                $mysa3ee = $installment['sa3ee'];
+                $mywater = $installment['water'];
+                $myservices = $installment['services'];
+
+                // If there was previous payment (oldDof3at > 0), don't include fees again
+                if ($oldDof3at > 0) {
+                    $mysa3ee = 0;
+                    $mywater = 0;
+                    $myservices = 0;
+                }
+
+                // Calculate VAT
+                $commesion_vat = 0;
+                $rentValue = $installment['kastvalue'] - $installment['water'] - $installment['sa3ee'] - $installment['services'];
+                $depositeamount_vat = 0;
+
+                if (isset($contract["vat_type"])) {
+                    if ($contract["vat_type"] == 1) {
+                        $commesion_vat = number_format(($mysa3ee * 0.15), 2, '.', '');
+                    }
+                    if ($contract["vat_type"] == 2) {
+                        $commesion_vat = number_format(($mysa3ee * 0.15), 2, '.', '');
+                        $depositeamount_vat = number_format(($rentValue * 0.15), 2, '.', '');
+                    }
+                }
+                $total_vat = $commesion_vat + $depositeamount_vat;
+
+                // Generate unique form ID
                 $formuid = str_replace('.', '', microtime() . rand(11111, 99999));
+
+                // Payment method mapping
+                $nakda = 1; // Default to cash
+                if ($paymentMethod == 'bank_transfer') $nakda = 2;
+                elseif ($paymentMethod == 'check') $nakda = 3;
+                elseif ($paymentMethod == 'online') $nakda = 4;
+
+                // Build payment description
+                $mybyan = 'دفعة قسط إيجار - قسط رقم ' . $installment['kastname'];
+                if (!empty($notes)) {
+                    $mybyan .= ' - ' . $notes;
+                }
+
+                // Get period (full date format dd/mm/yyyy)
+                $period = date('d/m/Y', $paymentTimestamp);
+
+                // Insert revenue record (eradat table) - only include fees on first payment
+                $sql = "INSERT INTO eradat SET
+                        idaqar='" . $contract['idaqar'] . "',
+                        idsubaqar='" . $contract['idsubaqar'] . "',
+                        mostagername='" . mysql_real_escape_string($contract['mostagername']) . "',
+                        mostagerid='" . $contract['mostagerid'] . "',
+                        recivername='" . mysql_real_escape_string($user_data['name'] ?? 'Admin') . "',
+                        amount='$amount',
+                        paymentdate='$paymentTimestamp',
+                        pymentdesription='" . mysql_real_escape_string($mybyan) . "',
+                        sanadrakam='0',
+                        kastid='$kastid',
+                        mysa3ee='$mysa3ee',
+                        mywater='$mywater',
+                        services='$myservices',
+                        formuid='$formuid'";
+
+                mysql_query($sql, $link);
+
+                // Insert receipt voucher (sanad table - following sanad_process.hnt structure)
                 $sql = "INSERT INTO sanad SET
-                        sanadno = (SELECT IFNULL(MAX(sanadno), 0) + 1 FROM sanad s2 WHERE s2.sanadtype = 'eradat'),
-                        sanadtype = 'eradat',
-                        sanadamount = '$amount',
-                        sanaddatemelady = '$paymentTimestamp',
-                        sanaddatehegry = '$paymentTimestamp',
-                        mostagerid = " . $contract['mostagerid'] . ",
-                        rakam3akdid = " . $installment['egar_id'] . ",
-                        kastid = '$kastid',
-                        sanaddesc = 'دفعة قسط إيجار - قسط رقم " . $installment['kastname'] . "',
-                        userid = " . ($user_data['userid'] ?? 1) . ",
-                        formuid = '$formuid'";
+                        period='$period',
+                        mostagerid='" . $contract['mostagerid'] . "',
+                        mostagername='" . mysql_real_escape_string($contract['mostagername']) . "',
+                        depositeamount='$amount',
+                        recivername='" . mysql_real_escape_string($user_data['name'] ?? 'Admin') . "',
+                        mybyan='" . mysql_real_escape_string($mybyan) . "',
+                        sanadrakam='0',
+                        idaqar='" . $contract['idaqar'] . "',
+                        idsubaqar='" . $contract['idsubaqar'] . "',
+                        sanaddate='$paymentTimestamp',
+                        cheqnumber='" . mysql_real_escape_string($referenceNumber) . "',
+                        cheqon='',
+                        cheqdate1='',
+                        attachedimages='',
+                        kastid='$kastid',
+                        commesion_vat='$commesion_vat',
+                        depositeamount_vat='$total_vat',
+                        payment_type='$nakda',
+                        notes='" . addslashes($notes) . "',
+                        formuid='$formuid'";
 
                 mysql_query($sql, $link);
                 $sanadId = mysql_insert_id();
 
-                // Update payment history with sanad ID
-                mysql_query("UPDATE aksat_payment_history SET sanad_id = '$sanadId' WHERE payment_history_id = '$paymentHistoryId'", $link);
+                // Update sanadrakam with the auto-generated ID
+                if ($sanadId > 0) {
+                    mysql_query("UPDATE eradat SET sanadrakam = '$sanadId' WHERE formuid = '$formuid'", $link);
+                    mysql_query("UPDATE sanad SET sanadrakam = '$sanadId' WHERE formuid = '$formuid'", $link);
+
+                    // Generate QR code for receipt
+                    $qr_path = qr_path('vouchers.receive', "$sanadId.png");
+                    ensure_dir(dirname($qr_path));
+
+                    require_once('../../../phpqrcode.php');
+                    global $vat_number;
+                    $vat_number = isset($vat_number) ? $vat_number : '';
+                    $barcodedata = "سند قبض رقم : $sanadId \r\n العميل: " . $contract['mostagername'] . "  \r\n  المبلغ : $amount
+                        \r\n الضريبة : $total_vat \r\n الرقم الضريبي : $vat_number
+                        \r\n البيان : $mybyan \r\n تاريخ الدفع  :   " . date("d/m/Y", $paymentTimestamp) . " \r\n تاريخ الاصدار : " . date("d/m/Y") . "
+                    ";
+                    QRcode::png($barcodedata, $qr_path, 'L', 2, 2);
+
+                    // Update payment history with sanad ID
+                    mysql_query("UPDATE aksat_payment_history SET sanad_id = '$sanadId' WHERE payment_history_id = '$paymentHistoryId'", $link);
+                }
             }
         }
 
@@ -254,12 +440,13 @@ function recordPayment($data, $link, $user_data) {
         mysql_query("COMMIT", $link);
 
         $response['success'] = true;
-        $response['message'] = 'تم تسجيل الدفعة بنجاح';
+        $response['message'] = 'تم تسجيل الدفعة بنجاح' . ($sanadId ? ' وتم إنشاء سند القبض رقم ' . $sanadId : '');
         $response['data'] = [
             'new_amount_paid' => $newAmountPaid,
             'new_amount_remaining' => $newAmountRemaining,
             'new_status' => $newStatus,
-            'payment_history_id' => $paymentHistoryId
+            'payment_history_id' => $paymentHistoryId,
+            'sanad_id' => $sanadId
         ];
 
     } catch (Exception $e) {
@@ -333,11 +520,10 @@ function updateInstallment($data, $link, $calendar, $user_data) {
             throw new Exception('فشل تحديث القسط: ' . mysql_error($link));
         }
 
-        // Log to history (if contract_lifecycle.api.hnt is available)
-        if (file_exists('contract_lifecycle.api.hnt')) {
-            require_once 'contract_lifecycle.api.hnt';
-            logInstallmentChange($kastid, 'updated', $oldValues, $data, $user_data, $link);
-        }
+        // Log to history - using local function defined in this file
+        // Note: contract_lifecycle.api.hnt cannot be required as it's a standalone API endpoint
+        // that calls exit() at the end, which would terminate this script
+        logInstallmentChange($kastid, 'updated', $oldValues, $data, $user_data, $link);
 
         // Commit transaction
         mysql_query("COMMIT", $link);
@@ -592,8 +778,14 @@ function addInstallment($data, $link, $user_data, $calendar) {
         $services = isset($data['services']) ? floatval($data['services']) : 0;
         $kastdate = isset($data['kastdate']) ? $data['kastdate'] : date('d/m/Y');
 
-        if (!$egarId || !$kastname || $kastvalue <= 0) {
-            throw new Exception('بيانات غير مكتملة');
+        if (!$egarId) {
+            throw new Exception('معرف العقد مطلوب (egar_id)');
+        }
+        if (!$kastname || trim($kastname) == '') {
+            throw new Exception('اسم القسط مطلوب (kastname)');
+        }
+        if ($kastvalue <= 0) {
+            throw new Exception('قيمة القسط يجب أن تكون أكبر من صفر (kastvalue)');
         }
 
         // Get contract to determine calendar type
@@ -730,8 +922,11 @@ function bulkPayment($data, $link, $user_data) {
         $paymentMethod = isset($data['payment_method']) ? mysql_real_escape_string($data['payment_method']) : 'cash';
         $referenceNumber = isset($data['reference_number']) ? mysql_real_escape_string($data['reference_number']) : '';
 
-        if (!$egarId || $amount <= 0) {
-            throw new Exception('بيانات غير صحيحة');
+        if (!$egarId) {
+            throw new Exception('معرف العقد مطلوب (egar_id)');
+        }
+        if ($amount <= 0) {
+            throw new Exception('المبلغ يجب أن يكون أكبر من صفر (amount)');
         }
 
         $now = time();
