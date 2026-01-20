@@ -1,0 +1,601 @@
+<?php
+/**
+ * Factory Reset - Real Estate Management System
+ * Resets all data in the real estate management module
+ * WARNING: This operation is irreversible
+ */
+
+$sc_title = "مسح وتصفير إدارة الأملاك";
+$sc_id = "55";
+
+// Check if this is an AJAX request
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+if ($is_ajax_request) {
+    include_once "../../../reqloginajax.hnt";
+} else {
+    include_once "../../../nocash.hnt";
+    $_SERVER['HTTP_REFERER'] = "reports.hnt";
+    include_once "../../../header.hnt";
+}
+
+// Process backup-only request
+if (isset($_POST['backup_only']) && $_POST['backup_only'] == '1') {
+    $batchFile = '../../../mysqldump.bat';
+    $backupSuccess = false;
+    $backupMessage = '';
+
+    if (file_exists($batchFile)) {
+        // Execute the batch file and wait for completion
+        $command = 'cmd /c "' . realpath($batchFile) . '" 2>&1';
+        $output = [];
+        $returnCode = 0;
+
+        exec($command, $output, $returnCode);
+
+        if ($returnCode === 0) {
+            $backupSuccess = true;
+            $backupMessage = 'تم إنشاء نسخة احتياطية من قاعدة البيانات بنجاح في ' . date('Y-m-d H:i:s');
+        } else {
+            $backupMessage = 'فشل إنشاء النسخة الاحتياطية: ' . implode(' ', $output);
+        }
+    } else {
+        $backupMessage = 'خطأ: لم يتم العثور على ملف النسخ الاحتياطي (mysqldump.bat)';
+    }
+
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => $backupSuccess,
+            'message' => $backupMessage,
+            'type' => $backupSuccess ? 'success' : 'error'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+}
+
+// Process factory reset request
+if (isset($_POST['codeamlak']) && isset($_POST['formuid'])) {
+    $codeamlak = isset($_POST['codeamlak']) ? trim($_POST['codeamlak']) : '';
+    $formuid = isset($_POST['formuid']) ? addslashes($_POST['formuid']) : '';
+
+    // Validate security code
+    if ($codeamlak !== '45470700127202441') {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'message' => 'الكود الذي أدخلته غير صحيح. لن يتم تغيير إدارة الأملاك إلا باستخدام الكود الصحيح الموجود بالأعلى.',
+                'type' => 'error'
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            exit;
+        } else {
+            $error_message = "الكود الذي أدخلته غير صحيح";
+        }
+    } else {
+        // Execute backup before truncating
+        $batchFile = '../../../mysqldump.bat';
+        $backupSuccess = false;
+        $backupMessage = '';
+
+        if (file_exists($batchFile)) {
+            // Execute the batch file and wait for completion
+            $command = 'cmd /c "' . realpath($batchFile) . '" 2>&1';
+            $output = [];
+            $returnCode = 0;
+
+            exec($command, $output, $returnCode);
+
+            if ($returnCode === 0) {
+                $backupSuccess = true;
+                $backupMessage = 'تم إنشاء نسخة احتياطية من قاعدة البيانات بنجاح';
+            } else {
+                $backupMessage = 'فشل إنشاء النسخة الاحتياطية: ' . implode(' ', $output);
+
+                if ($is_ajax_request) {
+                    header('Content-Type: application/json; charset=utf-8');
+                    echo json_encode([
+                        'success' => false,
+                        'message' => $backupMessage,
+                        'type' => 'error'
+                    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    exit;
+                }
+            }
+        } else {
+            $backupMessage = 'تحذير: لم يتم العثور على ملف النسخ الاحتياطي';
+        }
+
+        // Proceed with truncating tables only if backup succeeded or file doesn't exist
+        if ($backupSuccess || !file_exists($batchFile)) {
+            $tables = [
+                'amlakowner',
+                'aksat',
+                'amlak',
+                'amlakdetails',
+                'egar',
+                'eradat',
+                'masrofat',
+                'masrofattakweed',
+                'mostagereen',
+                'motab3a',
+                'sanad',
+                'sanadsarf'
+            ];
+
+            $truncateSuccess = true;
+            $failedTables = [];
+
+            foreach ($tables as $table) {
+                $sql = "TRUNCATE TABLE $table";
+                $result = @mysql_query($sql, $link);
+
+                if (!$result) {
+                    $truncateSuccess = false;
+                    $failedTables[] = $table;
+                }
+            }
+
+            if ($truncateSuccess) {
+                $successMessage = 'تم إرجاع إدارة الأملاك الخاصة بك إلى حالة المصنع بنجاح';
+
+                if ($is_ajax_request) {
+                    header('Content-Type: application/json; charset=utf-8');
+                    echo json_encode([
+                        'success' => true,
+                        'message' => $successMessage,
+                        'backupMessage' => $backupMessage,
+                        'type' => 'success'
+                    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    exit;
+                }
+            } else {
+                $errorMessage = 'فشل في مسح بعض الجداول: ' . implode(', ', $failedTables);
+
+                if ($is_ajax_request) {
+                    header('Content-Type: application/json; charset=utf-8');
+                    echo json_encode([
+                        'success' => false,
+                        'message' => $errorMessage,
+                        'type' => 'error'
+                    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    exit;
+                }
+            }
+        }
+    }
+}
+
+// Only render HTML if not AJAX request
+if ($is_ajax_request) {
+    exit;
+}
+?>
+
+<div class="container-fluid px-4 py-4">
+    <div class="row justify-content-center">
+        <div class="col-12 col-lg-10 col-xl-8">
+            <!-- Warning Card -->
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header text-white" style="background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%);">
+                    <h4 class="mb-0">
+                        <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                        <?= $sc_title ?>
+                    </h4>
+                </div>
+                <div class="card-body p-4">
+                    <!-- Success Message -->
+                    <?php if (isset($successMessage)): ?>
+                    <div class="d-flex justify-content-center mb-4">
+                        <div class="alert alert-success text-center" role="alert" style="max-width: 600px;">
+                            <div class="d-flex flex-column align-items-center">
+                                <i class="bi bi-check-circle-fill fs-1 mb-3" style="color: #198754;"></i>
+                                <div>
+                                    <strong><?= $successMessage ?></strong>
+                                    <?php if (isset($backupMessage)): ?>
+                                    <br><small class="text-muted"><?= $backupMessage ?></small>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="text-center">
+                        <button class="btn btn-primary" onclick="window.location.href='reports.hnt'">
+                            <i class="bi bi-arrow-right-circle me-2"></i>
+                            العودة إلى التقارير
+                        </button>
+                    </div>
+                    <?php else: ?>
+
+                    <!-- Error Message -->
+                    <?php if (isset($error_message)): ?>
+                    <div class="alert alert-danger d-flex align-items-center mb-4" role="alert">
+                        <i class="bi bi-x-circle-fill me-3 fs-4"></i>
+                        <div><?= $error_message ?></div>
+                    </div>
+                    <?php endif; ?>
+
+                    <!-- Warning Message -->
+                    <div class="alert alert-warning border-0 mb-4" role="alert">
+                        <div class="d-flex align-items-start">
+                            <i class="bi bi-exclamation-triangle-fill me-3 fs-3 text-warning"></i>
+                            <div>
+                                <h5 class="alert-heading mb-3">السلام عليكم ورحمة الله وبركاته</h5>
+                                <p class="mb-3" style="line-height: 1.8;">
+                                    إن استخدام هذه الخاصية سوف يزيل <strong>جميع المعلومات</strong> من إدارة الأملاك
+                                    بما فيها <strong>السندات والمستخدمين والعقود والإيجارات</strong>.
+                                </p>
+                                <hr>
+                                <p class="mb-0 text-danger fw-bold">
+                                    <i class="bi bi-shield-fill-exclamation me-2"></i>
+                                    هذه العملية لا يمكن التراجع عنها!
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Information Cards -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-6">
+                            <div class="card border-info">
+                                <div class="card-body">
+                                    <h6 class="card-title text-info">
+                                        <i class="bi bi-database-fill-down me-2"></i>
+                                        النسخ الاحتياطي
+                                    </h6>
+                                    <p class="card-text small mb-0">
+                                        سيتم تلقائياً إنشاء نسخة احتياطية من قاعدة البيانات قبل البدء بعملية المسح
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card border-danger">
+                                <div class="card-body">
+                                    <h6 class="card-title text-danger">
+                                        <i class="bi bi-trash-fill me-2"></i>
+                                        الجداول المتأثرة
+                                    </h6>
+                                    <p class="card-text small mb-0">
+                                        سيتم مسح 12 جدول في قاعدة البيانات (الأملاك، العقود، السندات، المستأجرين، وغيرها)
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Reset Form -->
+                    <form id="resetForm" method="post" action="?">
+                        <input type="hidden" name="formuid" id="formuid" value="<?= str_replace('.', '', microtime() . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)) ?>">
+
+                        <div class="card bg-light border-0 mb-4">
+                            <div class="card-body text-center py-4">
+                                <p class="mb-3">
+                                    <i class="bi bi-key-fill me-2"></i>
+                                    إذا كنت ترغب بالاستمرار، قم بنقل الرقم الموجود في الأسفل إلى داخل المربع واضغط على زر المسح
+                                </p>
+
+                                <div class="mb-3">
+                                    <label for="codeamlak" class="form-label fw-bold">
+                                        <i class="bi bi-shield-lock-fill me-2"></i>
+                                        أدخل رمز التأكيد
+                                    </label>
+                                    <input type="text"
+                                           class="form-control form-control-lg text-center"
+                                           id="codeamlak"
+                                           name="codeamlak"
+                                           placeholder="أدخل الرمز هنا"
+                                           required
+                                           autocomplete="off">
+                                </div>
+
+                                <div class="alert alert-dark d-inline-block mb-0" role="alert">
+                                    <strong>رمز التأكيد هو:</strong>
+                                    <h3 class="mb-0 mt-2 font-monospace">45470700127202441</h3>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Action Buttons -->
+                        <div class="d-flex justify-content-center gap-3 flex-wrap">
+                            <button type="button" class="btn btn-info btn-lg" id="backupBtn">
+                                <i class="bi bi-database-fill-down me-2"></i>
+                                إنشاء نسخة احتياطية فقط
+                            </button>
+                            <button type="submit" class="btn btn-danger btn-lg" id="resetBtn">
+                                <i class="bi bi-trash-fill me-2"></i>
+                                مسح جميع مدخلات إدارة الأملاك والبدء من جديد
+                            </button>
+                            <button type="button" class="btn btn-secondary btn-lg" onclick="window.location.href='reports.hnt'">
+                                <i class="bi bi-x-circle me-2"></i>
+                                إلغاء الأمر
+                            </button>
+                        </div>
+                    </form>
+                    <?php endif; ?>
+                </div>
+            </div>
+
+            <!-- Help Section -->
+            <div class="card border-0 bg-light">
+                <div class="card-body">
+                    <h6 class="text-muted mb-3">
+                        <i class="bi bi-info-circle-fill me-2"></i>
+                        معلومات إضافية
+                    </h6>
+                    <ul class="list-unstyled small text-muted mb-0">
+                        <li class="mb-2">
+                            <i class="bi bi-check2-circle me-2"></i>
+                            سيتم إنشاء نسخة احتياطية تلقائياً قبل البدء بعملية المسح
+                        </li>
+                        <li class="mb-2">
+                            <i class="bi bi-check2-circle me-2"></i>
+                            يمكنك استعادة البيانات من النسخة الاحتياطية في أي وقت
+                        </li>
+                        <li class="mb-0">
+                            <i class="bi bi-check2-circle me-2"></i>
+                            لن يؤثر هذا الإجراء على بقية أقسام النظام
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Confirmation Modal -->
+<div class="modal fade" id="confirmModal" tabindex="-1" aria-labelledby="confirmModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white">
+                <h5 class="modal-title" id="confirmModalLabel">
+                    <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                    تحذير نهائي
+                </h5>
+            </div>
+            <div class="modal-body text-center py-4">
+                <i class="bi bi-exclamation-octagon text-danger" style="font-size: 4rem;"></i>
+                <h5 class="mt-3 mb-3">هذه آخر فرصة لك للتراجع عن هذا القرار</h5>
+                <p class="text-muted mb-0">
+                    إذا كنت لا تعلم ماذا تفعل، اضغط على "إلغاء الأمر"
+                </p>
+            </div>
+            <div class="modal-footer justify-content-center">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                    <i class="bi bi-x-circle me-2"></i>
+                    إلغاء الأمر
+                </button>
+                <button type="button" class="btn btn-danger" id="confirmResetBtn">
+                    <i class="bi bi-trash-fill me-2"></i>
+                    متأكد، قم بالمسح
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Loading Overlay -->
+<div id="loadingOverlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999;">
+    <div class="d-flex justify-content-center align-items-center h-100">
+        <div class="text-center text-white">
+            <div class="spinner-border mb-3" style="width: 4rem; height: 4rem;" role="status">
+                <span class="visually-hidden">جاري التحميل...</span>
+            </div>
+            <h4 id="loadingMessage">جاري إنشاء النسخة الاحتياطية...</h4>
+            <p id="loadingSubtext" class="text-white-50">الرجاء الانتظار، لا تغلق هذه الصفحة</p>
+        </div>
+    </div>
+</div>
+
+<style>
+/* Custom Styles */
+.card {
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.card-header {
+    border-bottom: none;
+    padding: 1.25rem 1.5rem;
+}
+
+.btn-lg {
+    padding: 0.75rem 2rem;
+    font-size: 1rem;
+    border-radius: 8px;
+    font-weight: 600;
+}
+
+.form-control-lg {
+    border-radius: 8px;
+    font-size: 1.25rem;
+    padding: 0.75rem 1rem;
+}
+
+.alert {
+    border-radius: 10px;
+}
+
+.font-monospace {
+    font-family: 'Courier New', monospace;
+    letter-spacing: 2px;
+}
+
+/* RTL Adjustments */
+[dir="rtl"] .me-2 {
+    margin-right: 0 !important;
+    margin-left: 0.5rem !important;
+}
+
+[dir="rtl"] .me-3 {
+    margin-right: 0 !important;
+    margin-left: 1rem !important;
+}
+
+[dir="rtl"] .ms-2 {
+    margin-left: 0 !important;
+    margin-right: 0.5rem !important;
+}
+</style>
+
+<script>
+$(document).ready(function() {
+    let confirmModal;
+
+    // Initialize Bootstrap modal
+    if (typeof bootstrap !== 'undefined') {
+        confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
+    }
+
+    // Form submission handler
+    $('#resetForm').on('submit', function(e) {
+        e.preventDefault();
+
+        // Validate code first
+        const codeValue = $('#codeamlak').val().trim();
+        if (codeValue !== '45470700127202441') {
+            showBootstrapNotification('الكود الذي أدخلته غير صحيح', 'error');
+            return false;
+        }
+
+        // Show confirmation modal
+        if (confirmModal) {
+            confirmModal.show();
+        } else {
+            // Fallback to browser confirm
+            if (confirm('هذه آخر فرصة لك للتراجع عن هذا القرار. إذا كنت لا تعلم ماذا تفعل اضغط إلغاء الأمر')) {
+                submitForm();
+            }
+        }
+
+        return false;
+    });
+
+    // Confirm button in modal
+    $('#confirmResetBtn').on('click', function() {
+        if (confirmModal) {
+            confirmModal.hide();
+        }
+        submitForm();
+    });
+
+    // Backup only button handler
+    $('#backupBtn').on('click', function() {
+        // Show loading overlay
+        $('#loadingOverlay').fadeIn();
+        $('#loadingMessage').text('جاري إنشاء النسخة الاحتياطية...');
+        $('#loadingSubtext').text('الرجاء الانتظار، لا تغلق هذه الصفحة');
+
+        $.ajax({
+            url: 'restoreallamlaktabel.hnt',
+            type: 'POST',
+            data: {
+                backup_only: '1',
+                ajax_submit: '1'
+            },
+            dataType: 'json',
+            timeout: 120000, // 2 minutes timeout
+            success: function(response) {
+                $('#loadingOverlay').fadeOut();
+
+                if (response.success) {
+                    showBootstrapNotification(response.message, 'success', 6000);
+                } else {
+                    showBootstrapNotification(response.message, 'error', 8000);
+                }
+            },
+            error: function(xhr, status, error) {
+                $('#loadingOverlay').fadeOut();
+
+                let errorMessage = 'حدث خطأ أثناء إنشاء النسخة الاحتياطية';
+                if (status === 'timeout') {
+                    errorMessage = 'انتهت مهلة الانتظار. الرجاء المحاولة مرة أخرى';
+                } else if (xhr.responseText) {
+                    try {
+                        const response = JSON.parse(xhr.responseText);
+                        errorMessage = response.message || errorMessage;
+                    } catch (e) {
+                        // Keep default error message
+                    }
+                }
+
+                showBootstrapNotification(errorMessage, 'error', 8000);
+            }
+        });
+    });
+
+    // Submit form via AJAX
+    function submitForm() {
+        // Show loading overlay
+        $('#loadingOverlay').fadeIn();
+        $('#loadingMessage').text('جاري إنشاء النسخة الاحتياطية...');
+
+        const formData = $('#resetForm').serialize() + '&ajax_submit=1';
+
+        $.ajax({
+            url: 'restoreallamlaktabel.hnt',
+            type: 'POST',
+            data: formData,
+            dataType: 'json',
+            timeout: 120000, // 2 minutes timeout for backup
+            success: function(response) {
+                $('#loadingOverlay').fadeOut();
+
+                if (response.success) {
+                    // Show success message
+                    let message = response.message;
+                    if (response.backupMessage) {
+                        message += '<br><small class="text-muted">' + response.backupMessage + '</small>';
+                    }
+
+                    showBootstrapNotification(message, 'success', 5000);
+
+                    // Reload page after 3 seconds
+                    setTimeout(function() {
+                        window.location.href = 'reports.hnt';
+                    }, 3000);
+                } else {
+                    showBootstrapNotification(response.message, 'error', 8000);
+                }
+            },
+            error: function(xhr, status, error) {
+                $('#loadingOverlay').fadeOut();
+
+                let errorMessage = 'حدث خطأ أثناء تنفيذ العملية';
+                if (status === 'timeout') {
+                    errorMessage = 'انتهت مهلة الانتظار. الرجاء المحاولة مرة أخرى';
+                } else if (xhr.responseText) {
+                    try {
+                        const response = JSON.parse(xhr.responseText);
+                        errorMessage = response.message || errorMessage;
+                    } catch (e) {
+                        // Keep default error message
+                    }
+                }
+
+                showBootstrapNotification(errorMessage, 'error', 8000);
+            },
+            xhr: function() {
+                const xhr = new window.XMLHttpRequest();
+
+                // Update loading message after backup phase
+                setTimeout(function() {
+                    if ($('#loadingOverlay').is(':visible')) {
+                        $('#loadingMessage').text('جاري مسح البيانات...');
+                        $('#loadingSubtext').text('تتم الآن عملية المسح الكامل');
+                    }
+                }, 5000);
+
+                return xhr;
+            }
+        });
+    }
+
+    // Auto-focus on code input
+    $('#codeamlak').focus();
+});
+</script>
+
+<?php if (!$is_ajax_request && !isset($successMessage)): ?>
+<?php include_once "../../../footer.hnt"; ?>
+<?php endif; ?>

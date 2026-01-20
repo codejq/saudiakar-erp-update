@@ -1,236 +1,651 @@
 <?php
-$sc_title = "استعادة النسخ الاحتياطي";
+/**
+ * Database Backup & Restore Management
+ * Allows creating backups and restoring from SQL backup files
+ * Requires admin privileges and password for restore operations
+ */
+
+$sc_title = "النسخ الاحتياطي واستعادة قاعدة البيانات";
 $sc_id = "69";
 $showdhmltazkeer = 1;
 
-include_once "../nocash.hnt";
-include_once "../header.hnt";
+// Check if this is an AJAX request
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
 
-function flush_buffers() {
-    ob_end_flush();
-    ob_flush();
-    flush();
-    ob_start();
-}
-
-// Check admin permissions
-$sql = "SELECT userid AS dd FROM user WHERE username='admin'";
-$row = mysql_fetch_array(mysql_query($sql, $link));
-if (!isset($row['dd']) || $row['dd'] != $_SESSION['useridv']) {
-    echo "<script>";
-    echo "if (typeof showBootstrapNotification === 'function') {";
-    echo "    showBootstrapNotification('danger', 'ليس لديك صلاحية مدير النظام. قم بالدخول باسم admin');";
-    echo "} else {";
-    echo "    alert('ليس لديك صلاحية مدير النظام. قم بالدخول باسم admin');";
-    echo "}";
-    echo "</script>";
-    exit();
+if ($is_ajax_request) {
+    include_once "../reqloginajax.hnt";
+} else {
+    include_once "../nocash.hnt";
+    include_once "../header.hnt";
 }
 
 
-// Function to copy directory recursively
-function dircopy($srcdir, $dstdir, $verbose = false, $restd = false) {
-    $num = 0;
-    if (!is_dir($dstdir)) mkdir($dstdir);
-    if ($curdir = opendir($srcdir)) {
-        while ($file = readdir($curdir)) {
-            flush_buffers();
-            if ($file != '.' && $file != '..') {
-                $srcfile = $srcdir . '\\' . $file;
-                $dstfile = $dstdir . '\\' . $file;
-                if (is_file($srcfile)) {
-                    if (is_file($dstfile)) {
-                        $ow = filemtime($srcfile) - filemtime($dstfile);
-                    } else {
-                        $ow = 1;
+
+// Process backup creation request
+if (isset($_POST['create_backup']) && $_POST['create_backup'] == '1') {
+    $batchFile = '../mysqldump.bat';
+    $backupSuccess = false;
+    $backupMessage = '';
+
+    if (file_exists($batchFile)) {
+        // Execute the batch file and wait for completion
+        $command = 'cmd /c "' . realpath($batchFile) . '" 2>&1';
+        $output = [];
+        $returnCode = 0;
+
+        exec($command, $output, $returnCode);
+
+        if ($returnCode === 0) {
+            $backupSuccess = true;
+            $backupMessage = 'تم إنشاء نسخة احتياطية من قاعدة البيانات بنجاح في ' . date('Y-m-d H:i:s');
+        } else {
+            $backupMessage = 'فشل إنشاء النسخة الاحتياطية: ' . implode(' ', $output);
+        }
+    } else {
+        $backupMessage = 'خطأ: لم يتم العثور على ملف النسخ الاحتياطي (mysqldump.bat)';
+    }
+
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => $backupSuccess,
+            'message' => $backupMessage,
+            'type' => $backupSuccess ? 'success' : 'error'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+}
+
+// Process restore request
+if (isset($_POST['restore_backup']) && $_POST['restore_backup'] == '1') {
+    $restorePassword = isset($_POST['restore_password']) ? trim($_POST['restore_password']) : '';
+    $backupFile = isset($_POST['backup_file']) ? $_POST['backup_file'] : '';
+
+    // Validate restore password
+    if ($restorePassword !== '2255') {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'message' => 'كلمة مرور الاستعادة غير صحيحة. لن يتم استعادة قاعدة البيانات إلا بكلمة المرور الصحيحة.',
+                'type' => 'error'
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            exit;
+        } else {
+            $error_message = "كلمة مرور الاستعادة غير صحيحة";
+        }
+    } else {
+        // Validate backup file
+        $backupPath = 'c:/aqary-backup/sqldump/' . basename($backupFile);
+
+        if (!file_exists($backupPath)) {
+            if ($is_ajax_request) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'خطأ: ملف النسخة الاحتياطية غير موجود',
+                    'type' => 'error'
+                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                exit;
+            }
+        } else {
+            // Extract SQL file from ZIP if needed
+            $sqlFile = '';
+            $tempSqlFile = false;
+
+            if (pathinfo($backupPath, PATHINFO_EXTENSION) === 'zip') {
+                // Extract ZIP file
+                $zipCommand = 'unzip -p "' . realpath($backupPath) . '" 2>&1';
+                $tempSqlFile = true;
+                $tempSqlPath = sys_get_temp_dir() . '/' . uniqid('restore_') . '.sql';
+
+                // Extract to temp file
+                $extractCommand = 'cmd /c "unzip -p "' . realpath($backupPath) . '" > "' . $tempSqlPath . '" 2>&1"';
+                exec($extractCommand, $extractOutput, $extractReturn);
+
+                if ($extractReturn === 0 && file_exists($tempSqlPath)) {
+                    $sqlFile = $tempSqlPath;
+                } else {
+                    if ($is_ajax_request) {
+                        header('Content-Type: application/json; charset=utf-8');
+                        echo json_encode([
+                            'success' => false,
+                            'message' => 'فشل في استخراج ملف النسخة الاحتياطية',
+                            'type' => 'error'
+                        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                        exit;
                     }
-                    if ($ow > 0 || $restd) {
-                        if ($verbose) {
-                            echo "<div class='restore-log'><i class='bi bi-arrow-right text-success'></i> نسخ: " . basename($srcfile) . "</div>";
-                        }
-                        if (copy($srcfile, $dstfile)) {
-                            touch($dstfile, filemtime($srcfile));
-                            $num++;
-                        } else {
-                            echo "<div class='restore-log text-danger'><i class='bi bi-x-circle'></i> خطأ في نسخ: $srcfile</div>";
-                        }
+                }
+            } else {
+                $sqlFile = $backupPath;
+            }
+
+            if ($sqlFile && file_exists($sqlFile)) {
+                // Restore database using mysql command
+                $mysqlCommand = 'mysql.exe --user=root --password=1 --port=3329 --host=127.0.0.1 aqary_utf < "' . $sqlFile . '" 2>&1';
+                $restoreOutput = [];
+                $restoreReturn = 0;
+
+                exec($mysqlCommand, $restoreOutput, $restoreReturn);
+
+                // Clean up temp file
+                if ($tempSqlFile && file_exists($sqlFile)) {
+                    unlink($sqlFile);
+                }
+
+                if ($restoreReturn === 0) {
+                    $successMessage = 'تم استعادة قاعدة البيانات بنجاح من النسخة الاحتياطية';
+
+                    if ($is_ajax_request) {
+                        header('Content-Type: application/json; charset=utf-8');
+                        echo json_encode([
+                            'success' => true,
+                            'message' => $successMessage,
+                            'type' => 'success'
+                        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                        exit;
                     }
-                } else if (is_dir($srcfile)) {
-                    $num += dircopy($srcfile, $dstfile, $verbose, $restd);
+                } else {
+                    $errorMessage = 'فشل في استعادة قاعدة البيانات: ' . implode(' ', $restoreOutput);
+
+                    if ($is_ajax_request) {
+                        header('Content-Type: application/json; charset=utf-8');
+                        echo json_encode([
+                            'success' => false,
+                            'message' => $errorMessage,
+                            'type' => 'error'
+                        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                        exit;
+                    }
                 }
             }
         }
-        closedir($curdir);
     }
-    return $num;
 }
 
-// Handle restore operation
-$restoring = false;
-$restore_complete = false;
-if (isset($_GET['restdate']) && $_GET['restdate']) {
-    $restdate = $_GET['restdate'];
-    $restoring = true;
-    flush_buffers();
+// Only render HTML if not AJAX request
+if ($is_ajax_request) {
+    exit;
 }
 ?>
 
-<style>
-.backup-item {
-    background: #f8f9fa;
-    padding: 1rem;
-    border-radius: 6px;
-    margin-bottom: 0.75rem;
-    border-left: 4px solid #0891b2;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
-.backup-item:hover {
-    background: #e9ecef;
-}
-.restore-log {
-    padding: 0.5rem;
-    border-bottom: 1px solid #dee2e6;
-    font-size: 0.9rem;
-}
-#restoreLog {
-    max-height: 500px;
-    overflow-y: auto;
-    background: #f8f9fa;
-    border-radius: 6px;
-    padding: 1rem;
-}
-</style>
+<div class="container-fluid px-4 py-4">
+    <div class="row justify-content-center">
+        <div class="col-12 col-lg-10">
 
-<div class="container-fluid py-3">
-    <div class="row">
-        <div class="col-lg-8">
-            <div class="card shadow-sm border-0">
+            <!-- Success Message -->
+            <?php if (isset($successMessage)): ?>
+            <div class="d-flex justify-content-center mb-4">
+                <div class="alert alert-success text-center" role="alert" style="max-width: 600px;">
+                    <div class="d-flex flex-column align-items-center">
+                        <i class="bi bi-check-circle-fill fs-1 mb-3" style="color: #198754;"></i>
+                        <div>
+                            <strong><?= $successMessage ?></strong>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="text-center mb-4">
+                <button class="btn btn-primary" onclick="window.location.href='copydatabase.hnt'">
+                    <i class="bi bi-arrow-clockwise me-2"></i>
+                    العودة إلى القائمة
+                </button>
+            </div>
+            <?php endif; ?>
+
+            <!-- Error Message -->
+            <?php if (isset($error_message)): ?>
+            <div class="alert alert-danger d-flex align-items-center mb-4" role="alert">
+                <i class="bi bi-x-circle-fill me-3 fs-4"></i>
+                <div><?= $error_message ?></div>
+            </div>
+            <?php endif; ?>
+
+            <?php if (!isset($successMessage)): ?>
+            <!-- Backup Actions Card -->
+            <div class="card shadow-sm border-0 mb-4">
                 <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
                     <h4 class="mb-0">
-                        <i class="bi bi-database-fill-down me-2"></i>
-                        استعادة النسخ الاحتياطي
+                        <i class="bi bi-database-fill-gear me-2"></i>
+                        إدارة النسخ الاحتياطي
                     </h4>
                 </div>
-                <div class="card-body p-4" dir="rtl">
-                    <?php if (!$restoring): ?>
-                        <div class="alert alert-warning mb-4" role="alert">
-                            <i class="bi bi-exclamation-triangle me-2"></i>
-                            <strong>تحذير:</strong> سيتم استبدال البيانات الحالية بالكامل بالنسخة الاحتياطية المحددة.
-                        </div>
-
-                        <h5 class="mb-3">النسخ الاحتياطية المتوفرة:</h5>
-
-                        <div id="backupList">
-                            <?php
-                            flush_buffers();
-                            $files = glob('c:/aqary-backup/_.*', GLOB_ONLYDIR);
-                            array_multisort(array_map('filemtime', $files), SORT_NUMERIC, SORT_DESC, $files);
-
-                            if (count($files) > 0) {
-                                foreach ($files as $file) {
-                                    $filename = str_replace("c:/aqary-backup/", "", $file);
-                                    $filedate = filemtime($file);
-                                    echo "<div class='backup-item'>";
-                                    echo "<div>";
-                                    echo "<i class='bi bi-folder-fill text-primary me-2'></i>";
-                                    echo "<strong>" . htmlspecialchars($filename) . "</strong>";
-                                    echo "<br><small class='text-muted'>" . date('Y-m-d H:i:s', $filedate) . "</small>";
-                                    echo "</div>";
-                                    echo "<button type='button' class='btn btn-sm btn-outline-success restore-btn' data-backup='" . htmlspecialchars($filename) . "'>";
-                                    echo "<i class='bi bi-arrow-clockwise me-1'></i>استرجاع";
-                                    echo "</button>";
-                                    echo "</div>";
-                                }
-                            } else {
-                                echo "<div class='alert alert-info'>";
-                                echo "<i class='bi bi-info-circle me-2'></i>";
-                                echo "لا توجد نسخ احتياطية متوفرة";
-                                echo "</div>";
-                            }
-                            ?>
-                        </div>
-                    <?php else: ?>
-                        <div class="alert alert-info mb-4" role="alert">
-                            <i class="bi bi-hourglass-split me-2"></i>
-                            جاري استرجاع البيانات... الرجاء الانتظار (قد تستغرق العملية عدة دقائق)
-                        </div>
-
-                        <div class="progress mb-3" style="height: 25px;">
-                            <div class="progress-bar progress-bar-striped progress-bar-animated bg-success" role="progressbar" style="width: 100%">
-                                <span>جاري الاسترجاع...</span>
+                <div class="card-body p-4">
+                    <div class="row g-4">
+                        <div class="col-md-6">
+                            <div class="card border-success h-100">
+                                <div class="card-body text-center p-4">
+                                    <i class="bi bi-database-fill-down text-success mb-3" style="font-size: 3rem;"></i>
+                                    <h5 class="card-title">إنشاء نسخة احتياطية</h5>
+                                    <p class="card-text text-muted">
+                                        إنشاء نسخة احتياطية كاملة من قاعدة البيانات الحالية
+                                    </p>
+                                    <button type="button" class="btn btn-success btn-lg" id="createBackupBtn">
+                                        <i class="bi bi-database-fill-down me-2"></i>
+                                        إنشاء نسخة احتياطية الآن
+                                    </button>
+                                </div>
                             </div>
                         </div>
-
-                        <h5 class="mb-3">سجل العملية:</h5>
-                        <div id="restoreLog">
-                            <?php
-                            echo "<div class='restore-log'><i class='bi bi-stop-circle text-warning'></i> إيقاف خدمة MySQL...</div>";
-                            flush_buffers();
-                            system('net stop "hanet-mysql"');
-
-                            echo "<div class='restore-log'><i class='bi bi-folder-symlink text-info'></i> بدء نسخ الملفات من: $restdate</div>";
-                            flush_buffers();
-
-                            $x = dircopy("c:/aqary-backup/" . $restdate, "..\..\..\aso\mysql5\data\aqary", true, $restdate);
-                            flush_buffers();
-
-                            if ($x) {
-                                echo "<div class='restore-log text-success'><i class='bi bi-check-circle'></i> تم نسخ $x ملف بنجاح</div>";
-                            }
-
-                            echo "<div class='restore-log'><i class='bi bi-play-circle text-success'></i> إعادة تشغيل خدمة MySQL...</div>";
-                            flush_buffers();
-                            system('net start "hanet-mysql"');
-
-                            echo "<div class='restore-log text-success'><strong><i class='bi bi-check-circle-fill'></i> اكتملت عملية الاسترجاع بنجاح!</strong></div>";
-                            flush_buffers();
-
-                            $restore_complete = true;
-                            @ob_end_clean();
-                            while (@ob_end_flush());
-                            ?>
-                        </div>
-
-                        <?php if ($restore_complete): ?>
-                            <div class="alert alert-success mt-3" role="alert">
-                                <i class="bi bi-check-circle me-2"></i>
-                                تم استرجاع البيانات بنجاح! يمكنك الآن <a href="copydatabase.hnt" class="alert-link">العودة للقائمة</a>
+                        <div class="col-md-6">
+                            <div class="card border-warning h-100">
+                                <div class="card-body text-center p-4">
+                                    <i class="bi bi-database-fill-up text-warning mb-3" style="font-size: 3rem;"></i>
+                                    <h5 class="card-title">استعادة من نسخة احتياطية</h5>
+                                    <p class="card-text text-muted">
+                                        استعادة قاعدة البيانات من نسخة احتياطية سابقة
+                                    </p>
+                                    <button type="button" class="btn btn-warning btn-lg" onclick="document.getElementById('restoreSection').scrollIntoView({behavior: 'smooth'})">
+                                        <i class="bi bi-arrow-down-circle me-2"></i>
+                                        عرض النسخ الاحتياطية
+                                    </button>
+                                </div>
                             </div>
-                        <?php endif; ?>
-                    <?php endif; ?>
+                        </div>
+                    </div>
                 </div>
+            </div>
+
+            <!-- Restore Section -->
+            <div class="card shadow-sm border-0" id="restoreSection">
+                <div class="card-header text-white" style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);">
+                    <h4 class="mb-0">
+                        <i class="bi bi-database-fill-up me-2"></i>
+                        استعادة قاعدة البيانات
+                    </h4>
+                </div>
+                <div class="card-body p-4">
+                    <!-- Warning Alert -->
+                    <div class="alert alert-danger border-0 mb-4" role="alert">
+                        <div class="d-flex align-items-start">
+                            <i class="bi bi-exclamation-triangle-fill me-3 fs-3 text-danger"></i>
+                            <div>
+                                <h5 class="alert-heading mb-3">تحذير هام</h5>
+                                <ul class="mb-0">
+                                    <li class="mb-2">سيتم <strong>استبدال جميع البيانات الحالية</strong> بالبيانات من النسخة الاحتياطية المحددة</li>
+                                    <li class="mb-2">هذه العملية <strong>لا يمكن التراجع عنها</strong></li>
+                                    <li class="mb-2">يُنصح بإنشاء نسخة احتياطية جديدة قبل الاستعادة</li>
+                                    <li>تتطلب هذه العملية <strong>كلمة مرور خاصة</strong> للحماية من الاستعادة العرضية</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+
+                    <h5 class="mb-3">
+                        <i class="bi bi-folder-fill me-2"></i>
+                        النسخ الاحتياطية المتوفرة
+                    </h5>
+
+                    <div id="backupList">
+                        <?php
+                        $backupDir = 'c:/aqary-backup/sqldump';
+                        $files = [];
+
+                        if (is_dir($backupDir)) {
+                            $files = glob($backupDir . '/*.sql.zip');
+                            if (!$files) {
+                                $files = glob($backupDir . '/*.sql');
+                            }
+                            if (!$files) {
+                                $files = [];
+                            }
+
+                            // Sort by modification time, newest first
+                            usort($files, function($a, $b) {
+                                return filemtime($b) - filemtime($a);
+                            });
+                        }
+
+                        if (count($files) > 0):
+                            foreach ($files as $file):
+                                $filename = basename($file);
+                                $filedate = filemtime($file);
+                                $filesize = filesize($file);
+                                $filesizeMB = round($filesize / 1024 / 1024, 2);
+                        ?>
+                        <div class="card mb-3 backup-item">
+                            <div class="card-body">
+                                <div class="row align-items-center">
+                                    <div class="col-md-8">
+                                        <h6 class="mb-2">
+                                            <i class="bi bi-file-earmark-zip-fill text-primary me-2"></i>
+                                            <strong><?= htmlspecialchars($filename) ?></strong>
+                                        </h6>
+                                        <div class="text-muted small">
+                                            <i class="bi bi-calendar-event me-1"></i>
+                                            <?= date('Y-m-d H:i:s', $filedate) ?>
+                                            <span class="mx-2">|</span>
+                                            <i class="bi bi-hdd me-1"></i>
+                                            <?= $filesizeMB ?> MB
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4 text-end mt-3 mt-md-0">
+                                        <button type="button"
+                                                class="btn btn-outline-warning restore-btn"
+                                                data-backup="<?= htmlspecialchars($filename) ?>">
+                                            <i class="bi bi-arrow-clockwise me-1"></i>
+                                            استعادة
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <?php
+                            endforeach;
+                        else:
+                        ?>
+                        <div class="alert alert-info" role="alert">
+                            <i class="bi bi-info-circle-fill me-2"></i>
+                            لا توجد نسخ احتياطية متوفرة. قم بإنشاء نسخة احتياطية أولاً.
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<!-- Restore Password Modal -->
+<div class="modal fade" id="restorePasswordModal" tabindex="-1" aria-labelledby="restorePasswordModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header bg-warning text-dark">
+                <h5 class="modal-title" id="restorePasswordModalLabel">
+                    <i class="bi bi-shield-lock-fill me-2"></i>
+                    تأكيد استعادة قاعدة البيانات
+                </h5>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-warning" role="alert">
+                    <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                    أنت على وشك استبدال جميع البيانات الحالية
+                </div>
+
+                <form id="restoreForm">
+                    <input type="hidden" name="backup_file" id="backupFileInput">
+
+                    <div class="mb-3">
+                        <label for="restorePassword" class="form-label fw-bold">
+                            <i class="bi bi-key-fill me-2"></i>
+                            أدخل كلمة مرور الاستعادة
+                        </label>
+                        <input type="password"
+                               class="form-control form-control-lg text-center"
+                               id="restorePassword"
+                               name="restore_password"
+                               placeholder="أدخل كلمة المرور"
+                               required
+                               autocomplete="off">
+                        <div class="form-text text-center mt-2">
+                            <i class="bi bi-info-circle me-1"></i>
+                            كلمة المرور مطلوبة للحماية من الاستعادة العرضية
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <strong>النسخة الاحتياطية:</strong>
+                        <div id="selectedBackupName" class="text-primary"></div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer justify-content-center">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                    <i class="bi bi-x-circle me-2"></i>
+                    إلغاء
+                </button>
+                <button type="button" class="btn btn-warning" id="confirmRestoreBtn">
+                    <i class="bi bi-arrow-clockwise me-2"></i>
+                    تأكيد الاستعادة
+                </button>
             </div>
         </div>
     </div>
 </div>
 
+<!-- Loading Overlay -->
+<div id="loadingOverlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999;">
+    <div class="d-flex justify-content-center align-items-center h-100">
+        <div class="text-center text-white">
+            <div class="spinner-border mb-3" style="width: 4rem; height: 4rem;" role="status">
+                <span class="visually-hidden">جاري التحميل...</span>
+            </div>
+            <h4 id="loadingMessage">جاري المعالجة...</h4>
+            <p id="loadingSubtext" class="text-white-50">الرجاء الانتظار، لا تغلق هذه الصفحة</p>
+        </div>
+    </div>
+</div>
+
+<style>
+/* Custom Styles */
+.card {
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.card-header {
+    border-bottom: none;
+    padding: 1.25rem 1.5rem;
+}
+
+.backup-item {
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.backup-item:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.btn-lg {
+    padding: 0.75rem 2rem;
+    font-size: 1rem;
+    border-radius: 8px;
+    font-weight: 600;
+}
+
+.form-control-lg {
+    border-radius: 8px;
+    font-size: 1.25rem;
+    padding: 0.75rem 1rem;
+}
+
+.alert {
+    border-radius: 10px;
+}
+
+/* RTL Adjustments */
+[dir="rtl"] .me-2 {
+    margin-right: 0 !important;
+    margin-left: 0.5rem !important;
+}
+
+[dir="rtl"] .me-3 {
+    margin-right: 0 !important;
+    margin-left: 1rem !important;
+}
+
+[dir="rtl"] .ms-2 {
+    margin-left: 0 !important;
+    margin-right: 0.5rem !important;
+}
+
+.text-end {
+    text-align: left !important;
+}
+
+[dir="rtl"] .text-end {
+    text-align: right !important;
+}
+</style>
+
 <script>
 $(document).ready(function() {
-    $('.restore-btn').on('click', function() {
-        const backupName = $(this).data('backup');
+    let restorePasswordModal;
+    let currentBackupFile = '';
 
-        if (typeof confirm === 'function') {
-            confirm(
-                'سيتم مسح البيانات الموجودة حاليا واسترجاع البيانات من النسخة: ' + backupName + '. هل أنت متأكد؟',
-                'تحذير',
-                'copydatabase.hnt?restdate=' + encodeURIComponent(backupName)
-            );
+    // Initialize Bootstrap modal
+    if (typeof bootstrap !== 'undefined') {
+        restorePasswordModal = new bootstrap.Modal(document.getElementById('restorePasswordModal'));
+    }
+
+    // Create backup button handler
+    $('#createBackupBtn').on('click', function() {
+        confirm(
+            'هل تريد إنشاء نسخة احتياطية جديدة من قاعدة البيانات؟',
+            'تأكيد إنشاء النسخة الاحتياطية',
+            function() {
+                // Show loading overlay
+                $('#loadingOverlay').fadeIn();
+                $('#loadingMessage').text('جاري إنشاء النسخة الاحتياطية...');
+                $('#loadingSubtext').text('قد تستغرق هذه العملية عدة دقائق');
+
+                $.ajax({
+                    url: 'copydatabase.hnt',
+                    type: 'POST',
+                    data: {
+                        create_backup: '1',
+                        ajax_submit: '1'
+                    },
+                    dataType: 'json',
+                    timeout: 300000, // 5 minutes timeout
+                    success: function(response) {
+                        $('#loadingOverlay').fadeOut();
+
+                        if (response.success) {
+                            showBootstrapNotification(response.message, 'success', 6000);
+
+                            // Reload page after 2 seconds to show new backup
+                            setTimeout(function() {
+                                window.location.reload();
+                            }, 2000);
+                        } else {
+                            showBootstrapNotification(response.message, 'error', 8000);
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        $('#loadingOverlay').fadeOut();
+
+                        let errorMessage = 'حدث خطأ أثناء إنشاء النسخة الاحتياطية';
+                        if (status === 'timeout') {
+                            errorMessage = 'انتهت مهلة الانتظار. الرجاء المحاولة مرة أخرى';
+                        } else if (xhr.responseText) {
+                            try {
+                                const response = JSON.parse(xhr.responseText);
+                                errorMessage = response.message || errorMessage;
+                            } catch (e) {
+                                // Keep default error message
+                            }
+                        }
+
+                        showBootstrapNotification(errorMessage, 'error', 8000);
+                    }
+                });
+            }
+        );
+    });
+
+    // Restore button handler
+    $('.restore-btn').on('click', function() {
+        const backupFile = $(this).data('backup');
+        currentBackupFile = backupFile;
+
+        $('#backupFileInput').val(backupFile);
+        $('#selectedBackupName').text(backupFile);
+        $('#restorePassword').val('');
+
+        if (restorePasswordModal) {
+            restorePasswordModal.show();
         } else {
-            if (window.confirm('سيتم مسح البيانات الموجودة حاليا واسترجاع البيانات من النسخة: ' + backupName + '. هل أنت متأكد؟')) {
-                window.location.href = 'copydatabase.hnt?restdate=' + encodeURIComponent(backupName);
+            // Fallback
+            const password = prompt('أدخل كلمة مرور الاستعادة للمتابعة:');
+            if (password) {
+                performRestore(backupFile, password);
             }
         }
     });
 
-    // Auto-scroll restore log
-    const restoreLog = document.getElementById('restoreLog');
-    if (restoreLog) {
-        setInterval(function() {
-            restoreLog.scrollTop = restoreLog.scrollHeight;
-        }, 350);
+    // Confirm restore button
+    $('#confirmRestoreBtn').on('click', function() {
+        const password = $('#restorePassword').val().trim();
+
+        if (!password) {
+            showBootstrapNotification('الرجاء إدخال كلمة مرور الاستعادة', 'error');
+            return;
+        }
+
+        if (restorePasswordModal) {
+            restorePasswordModal.hide();
+        }
+
+        performRestore(currentBackupFile, password);
+    });
+
+    // Perform restore function
+    function performRestore(backupFile, password) {
+        // Show loading overlay
+        $('#loadingOverlay').fadeIn();
+        $('#loadingMessage').text('جاري استعادة قاعدة البيانات...');
+        $('#loadingSubtext').text('قد تستغرق هذه العملية عدة دقائق. الرجاء عدم إغلاق الصفحة');
+
+        $.ajax({
+            url: 'copydatabase.hnt',
+            type: 'POST',
+            data: {
+                restore_backup: '1',
+                backup_file: backupFile,
+                restore_password: password,
+                ajax_submit: '1'
+            },
+            dataType: 'json',
+            timeout: 600000, // 10 minutes timeout for restore
+            success: function(response) {
+                $('#loadingOverlay').fadeOut();
+
+                if (response.success) {
+                    showBootstrapNotification(response.message, 'success', 8000);
+
+                    // Reload page after 3 seconds
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 3000);
+                } else {
+                    showBootstrapNotification(response.message, 'error', 10000);
+                }
+            },
+            error: function(xhr, status, error) {
+                $('#loadingOverlay').fadeOut();
+
+                let errorMessage = 'حدث خطأ أثناء استعادة قاعدة البيانات';
+                if (status === 'timeout') {
+                    errorMessage = 'انتهت مهلة الانتظار. قد تكون العملية لا تزال قيد التنفيذ';
+                } else if (xhr.responseText) {
+                    try {
+                        const response = JSON.parse(xhr.responseText);
+                        errorMessage = response.message || errorMessage;
+                    } catch (e) {
+                        // Keep default error message
+                    }
+                }
+
+                showBootstrapNotification(errorMessage, 'error', 10000);
+            }
+        });
     }
+
+    // Handle modal password input on Enter key
+    $('#restorePassword').on('keypress', function(e) {
+        if (e.which === 13) {
+            e.preventDefault();
+            $('#confirmRestoreBtn').click();
+        }
+    });
+
+    // Auto-focus password field when modal opens
+    $('#restorePasswordModal').on('shown.bs.modal', function() {
+        $('#restorePassword').focus();
+    });
 });
 </script>
 
