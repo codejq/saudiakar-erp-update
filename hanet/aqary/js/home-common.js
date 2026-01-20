@@ -653,28 +653,40 @@ function activateselect(tag, x, masterElement) {
   }
 }
 
-$(document).ready(function () {
-  window.old_print = window.print;
-  window.print = function () {
-    try {
-      var OLECMDID = 7;
-      /* OLECMDID values:
-       * 6 - print
-       * 7 - print preview
-       * 1 - open window
-       * 4 - Save As
-       */
-      var PROMPT = 1; // 2 DONTPROMPTUSER
-      var WebBrowser =
-        '<OBJECT ID="WebBrowser1"  name="WebBrowser1" WIDTH=0 HEIGHT=0 CLASSID="CLSID:8856F961-340A-11D0-A96B-00C04FD705A2"></OBJECT>';
-      document.body.insertAdjacentHTML("beforeEnd", WebBrowser);
-      WebBrowser1.ExecWB(OLECMDID, PROMPT);
-      WebBrowser1.outerHTML = "";
-    } catch (err) {
-      window.old_print();
-    }
-  };
-});
+// Patch window.print with IIFE to capture native function in closure
+(function() {
+  // Only run once
+  if (window.__print_patched) {
+    return;
+  }
+  window.__print_patched = true;
+
+  // Capture the REAL native print function in a closure variable
+  var nativePrint = window.print;
+
+  $(document).ready(function () {
+    window.print = function () {
+      try {
+        var OLECMDID = 7;
+        /* OLECMDID values:
+         * 6 - print
+         * 7 - print preview
+         * 1 - open window
+         * 4 - Save As
+         */
+        var PROMPT = 1; // 2 DONTPROMPTUSER
+        var WebBrowser =
+          '<OBJECT ID="WebBrowser1"  name="WebBrowser1" WIDTH=0 HEIGHT=0 CLASSID="CLSID:8856F961-340A-11D0-A96B-00C04FD705A2"></OBJECT>';
+        document.body.insertAdjacentHTML("beforeEnd", WebBrowser);
+        WebBrowser1.ExecWB(OLECMDID, PROMPT);
+        WebBrowser1.outerHTML = "";
+      } catch (err) {
+        // Call the native print function from closure
+        nativePrint.call(window);
+      }
+    };
+  });
+})();
 
 // ============================================
 // Bootstrap 5 Modal Alert and Confirm Overrides
@@ -1427,12 +1439,13 @@ function convertEnterToTab(event) {
   // Get the target element
   const target = event.target || event.srcElement;
 
-  // Allow Enter key in textarea
-  if (target.type === "textarea") {
+  // Allow Enter key in textarea and other elements where it should work normally
+  if (target.type === "textarea" || target.tagName === "TEXTAREA" ||
+      target.tagName === "DIV" || target.tagName === "TD" || target.tagName === "TABLE") {
     return;
   }
 
-  // Convert Enter key (13) to Tab key (9)
+  // Prevent Enter from submitting forms - move to next field instead
   if (event.keyCode === 13 || event.key === "Enter") {
     event.preventDefault();
     event.stopPropagation();
