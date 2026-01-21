@@ -12,9 +12,11 @@ function checkdotnetobj() {
       return;
     }
   } catch (err) {
-    document.getElementById("lunc").classid =
-      "clsid:9910BEE9-58ED-4636-A852-DF89C76A9384";
-    document.getElementById("lunc").CODEBASE = "\\aqary\\lunc.cab";
+    var luncElement = document.getElementById("lunc");
+    if (luncElement) {
+      luncElement.classid = "clsid:9910BEE9-58ED-4636-A852-DF89C76A9384";
+      luncElement.CODEBASE = "\\aqary\\lunc.cab";
+    }
   }
 }
 
@@ -638,7 +640,12 @@ function settitle(id, c1) {
 }
 
 function gotorefere() {
-  window.location.href = "<?= $_SERVER[HTTP_REFERER] ?>";
+  // Use document.referrer if available, otherwise go back in history
+  if (document.referrer && document.referrer !== '') {
+    window.location.href = document.referrer;
+  } else {
+    window.history.back();
+  }
 }
 
 function activateselect(tag, x, masterElement) {
@@ -1064,6 +1071,7 @@ $(document).ready(function () {
   }, 5000);
 });
 
+/*
 $(function () {
   $(".pdfbtn").click(function (event) {
     var pdfbtn = $(this);
@@ -1086,6 +1094,7 @@ $(function () {
       });
   });
 });
+*/
 
 // ============================================
 // URL and Navigation Functions

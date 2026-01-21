@@ -23,7 +23,7 @@ $page = isset($page) ? intval($page) : 1;
 $passcode = isset($passcode) ? $passcode : "2255";
 
 // Authentication
-if (!$cashforpdf) {
+if (!$cashforpdf ) {
 	include_once "reqlogin.hnt";
 }
 
@@ -124,17 +124,27 @@ if ($allprevilage && isset($_SESSION)) {
 					return;
 				}
 			} catch (err) {
-				document.getElementById('lunc').classid = "clsid:9910BEE9-58ED-4636-A852-DF89C76A9384";
-				document.getElementById('lunc').CODEBASE = "\\aqary\\lunc.cab";
+				console.log(err);
 			}
 		}
 
 		checkdotnetobj();
 
+		function getCookie(name) {
+			var value = "; " + document.cookie;
+			var parts = value.split("; " + name + "=");
+			if (parts.length == 2) return parts.pop().split(";").shift();
+			return "";
+		}
+
 		function openInWord() {
 			document.getElementById('myP').contentEditable = 'false';
 			try {
-				shellme('winword.exe', '<?php echo "http://" . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI']; ?>&username=<?= $user_data['username']; ?>&password=<?= $user_data['password'] ?>');
+				var username = getCookie('username');
+				var password = getCookie('password');
+				var currentUrl = window.location.protocol + '//' + window.location.host + window.location.pathname + window.location.search;
+				var fullUrl = currentUrl + '&username=' + username + '&password=' + password;
+				shellme('winword.exe', fullUrl);
 			} catch (e) {
 				exportHTML('word');
 			}
@@ -143,7 +153,11 @@ if ($allprevilage && isset($_SESSION)) {
 		function openInExcel() {
 			document.getElementById('myP').contentEditable = 'false';
 			try {
-				shellme('excel.exe', '<?php echo "http://" . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI']; ?>&username=<?= $user_data['username']; ?>&password=<?= $user_data['password'] ?>');
+				var username = getCookie('username');
+				var password = getCookie('password');
+				var currentUrl = window.location.protocol + '//' + window.location.host + window.location.pathname + window.location.search;
+				var fullUrl = currentUrl + '&username=' + username + '&password=' + password;
+				shellme('excel.exe', fullUrl);
 			} catch (e) {
 				exportHTML('excel');
 			}
@@ -347,29 +361,61 @@ if ($allprevilage && isset($_SESSION)) {
 
 		$(function() {
 			$(".pdfbtn").on("click", function(event) {
+				event.preventDefault();
+				event.stopPropagation();
+
 				var pdfbtn = $(this);
-				pdfbtn.attr("src", "/aqary/admin/images/loadingsmall.gif");
+
+				// Prevent multiple clicks
+				if (pdfbtn.prop('disabled') || pdfbtn.data('processing')) {
+					return false;
+				}
+
+				var icon = pdfbtn.find('i');
+
+				// Show loading spinner
+				icon.removeClass('fa-file-pdf').addClass('fa-spinner fa-spin');
+				pdfbtn.prop('disabled', true);
+				pdfbtn.data('processing', true);
+				var username = getCookie('username');
+				var password = getCookie('password');
+
 				$.getJSON("/aqary/report.generator.hnt", {
 						reportpath: pdfbtn.attr("reportpath"),
-						username: "<?= $_SESSION['usernamev'] ?>",
-						password: "<?= $_SESSION['passwordv'] ?>"
+						username: username,
+						password: password
 					})
 					.done(function(data) {
 						if (data.success && data.filename) {
+							// Only redirect on actual success
 							window.location.href = data.filename;
 						} else if (data.error) {
+							// Show error and restore button
 							alert('خطأ في إنشاء PDF: ' + data.error +
 								(data.details && data.details.output ? '\n\nالتفاصيل:\n' + data.details.output : ''));
 							console.error('PDF Generation Error:', data.details);
+							// Restore icon
+							icon.removeClass('fa-spinner fa-spin').addClass('fa-file-pdf');
+							pdfbtn.prop('disabled', false);
+							pdfbtn.data('processing', false);
+							pdfbtn.data('processing', false);
+						} else {
+							// Unknown response format
+							alert('خطأ: استجابة غير متوقعة من الخادم');
+							icon.removeClass('fa-spinner fa-spin').addClass('fa-file-pdf');
+							pdfbtn.prop('disabled', false);
+							pdfbtn.data('processing', false);
 						}
 					})
 					.fail(function(jqXHR, textStatus, errorThrown) {
 						alert('خطأ في الاتصال بخادم PDF\n' + textStatus + ': ' + errorThrown);
 						console.error('AJAX Error:', textStatus, errorThrown);
-					})
-					.always(function() {
-						pdfbtn.attr("src", "/aqary/admin/images/pdf.png");
+						// Restore icon
+						icon.removeClass('fa-spinner fa-spin').addClass('fa-file-pdf');
+						pdfbtn.prop('disabled', false);
+						pdfbtn.data('processing', false);
 					});
+				return false;
 			});
 		});
 
@@ -377,11 +423,11 @@ if ($allprevilage && isset($_SESSION)) {
 			$(".sharebtn").on("click", function(event) {
 				var sharebtn = $(this);
 				sharebtn.attr("src", "/aqary/admin/images/loadingsmall.gif");
-
+				var userid = getCookie('userid');
 				$.post("/aqary/social-media/createimage.php", {
 						twitText: $("#reportpagedata").html(),
 						tweettitle: ' بسم الله',
-						userid: "<?= $_SESSION['useridv'] ?>",
+						userid: userid,
 						mailreadydata: $("#smstxtbody").val()
 					})
 					.done(function(data) {
@@ -566,9 +612,10 @@ if ($allprevilage && isset($_SESSION)) {
 
 		function openvbs(url) {
 
-
+				var username = getCookie('username');
+				var password = getCookie('password');
 			try {
-				url = url + "&username=<?= $usernamev; ?>&password=<?= $passwordv; ?>";
+				url = url + `&username=${username}&password=${password}`;
 				if (window.external.isdotnet()) {
 					showProgress();
 					setTimeout("hideProgress()", 40000);
