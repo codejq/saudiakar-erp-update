@@ -51,6 +51,11 @@ echo [5/6] Calling weekly financial report...
 echo [5/6] %time% - Weekly financial report >> "%LOG_FILE%"
 "%~dp0../tools/curl/curl.exe" "http://127.0.0.1:9009/aqary/admin/reports/weekly_financial_report.hnt?auto=1"
 
+
+echo [6/6] Calling Backup...
+echo [6/6] %time% - Calling Backup >> "%LOG_FILE%"
+"%~dp0../tools/curl/curl.exe" "http://127.0.0.1:9009/aqary/schedual.hnt"
+
 echo [6/6] Calling system update...
 echo [6/6] %time% - System update >> "%LOG_FILE%"
 "%~dp0../tools/curl/curl.exe" "http://127.0.0.1:9009/aqary/excuteupdate.hnt"
