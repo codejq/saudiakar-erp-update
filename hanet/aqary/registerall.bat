@@ -24,8 +24,7 @@ echo %day%> scheduler.txt
 
 #md5chekupdater.exe
 
-start /B tools\curl\curl.exe  "http://www.saudiakar.net/heartbeat.php"
-start /B tools\curl\curl.exe  "http://www.saudiakar.net/heartbeat.php"
+
 
 
 cd /d %0\..
@@ -34,15 +33,15 @@ cd /d %0\..
 
 set drive=%1
 
-mkdir 'C:\saduiakar.backup-erp
-mkdir 'C:\saduiakar.backup-erp
+mkdir C:\saduiakar.backup-erp
+mkdir C:\saduiakar.backup-erp
 mkdir d:\saduiakar.backup-erp
 mkdir d:\saduiakar.backup-erp
 mkdir e:\saduiakar.backup-erp
 mkdir e:\saduiakar.backup-erp
 
 
-IF (%1)==()  set drive='C:\saduiakar.backup-erp
+IF (%1)==()  set drive=C:\saduiakar.backup-erp
 
 cd ..
 cd ..
@@ -121,7 +120,7 @@ for /f "tokens=1-4 delims=/ " %%i in ("%date%") do (
 set datestr=%day%-%month%-%year%
 echo datestr is %datestr%
 
-set drive=../../aso/Apache24/mariadb/data/aqary
+set drive=../../aso/Apache24/mariadb/data
 
 mkdir C:\aqary
 mkdir d:\aqary
@@ -144,7 +143,7 @@ IF NOT EXIST "e:\aqary" GOTO NOEDIR3
 	Robocopy "%drive%"  e:\aqary\%datestr%  /FFT /E /zb /r:5 /w:5
 :NOEDIR3
 
-cd /d %0\..
+exit /b 0
 
 
- 
+
