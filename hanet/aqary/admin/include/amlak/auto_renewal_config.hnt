@@ -1,0 +1,408 @@
+<?php
+/**
+ * Auto-Renewal System Configuration
+ *
+ * Centralized configuration file for contract auto-renewal and
+ * upfront installment generation settings.
+ *
+ * @date 2025-12-05
+ */
+
+// ==================================================================
+// UPFRONT INSTALLMENT GENERATION SETTINGS
+// ==================================================================
+
+/**
+ * Number of months to generate installments upfront when creating contracts
+ *
+ * This determines how far ahead you can see unpaid installments,
+ * which allows tracking how many months behind each tenant is.
+ *
+ * Options:
+ * - 12 = 1 year ahead (minimum recommended)
+ * - 24 = 2 years ahead (default, recommended)
+ * - 36 = 3 years ahead (maximum visibility)
+ * - 48 = 4 years ahead (for very long-term tracking)
+ *
+ * Impact: Higher values mean more database records but better visibility.
+ *
+ * Example: If tenant hasn't paid in 18 months:
+ * - With 12: Can only see they're behind up to 12 months
+ * - With 24: Can see full 18 months of arrears
+ * - With 36: Can see up to 36 months of arrears
+ */
+define('INSTALLMENT_MONTHS_UPFRONT', 0);
+
+// ==================================================================
+// INSTALLMENT EXTENSION SETTINGS (NEW STRATEGY)
+// ==================================================================
+
+/**
+ * Threshold in days to trigger automatic installment generation
+ *
+ * When the last installment is within this many days, the system
+ * automatically generates more installments (equal to contract duration).
+ *
+ * This runs via:
+ * 1. Daily scheduled service (auto_add_installments.api.hnt)
+ * 2. When last installment is paid (backup trigger)
+ *
+ * Options:
+ * - 60 = Add more installments when 60 days from last one (default, 2 months)
+ * - 90 = Add more installments when 90 days from last one (3 months)
+ * - 30 = Add more installments when 30 days from last one (1 month)
+ *
+ * Note: This does NOT change contract end date (end3aqd).
+ * It only extends installments_extended_to field.
+ */
+define('INSTALLMENT_GENERATION_THRESHOLD_DAYS', 60);
+
+/**
+ * Number of months of installments to add when threshold is reached
+ *
+ * When approaching the last installment, how many months of new
+ * installments should be generated?
+ *
+ * Options:
+ * - null = Use contract duration (default, recommended)
+ * - 12 = Always add 12 months
+ * - 24 = Always add 24 months
+ *
+ * Recommendation: null (uses contract's own duration field)
+ * Example: If contract is monthly (duration=1), adds 12 installments
+ *          If contract is quarterly (duration=3), adds 4 installments
+ */
+define('INSTALLMENT_GENERATION_PERIOD_MONTHS', null);
+
+/**
+ * Should installments be added when user pays the last one?
+ *
+ * This is a backup trigger in case the daily service doesn't run.
+ * When user registers payment for the last installment, system
+ * checks if more installments are needed and adds them.
+ *
+ * true = Add installments on last payment (default, recommended)
+ * false = Only rely on daily service
+ */
+define('AUTO_ADD_ON_LAST_PAYMENT', true);
+
+// ==================================================================
+// FIXED PAYMENT DAY SETTINGS (CALENDAR HANDLING)
+// ==================================================================
+
+/**
+ * Maximum allowed day of month for Hijri calendar
+ *
+ * Hijri months have variable lengths (29 or 30 days).
+ * To avoid issues, we restrict payment day to maximum 29.
+ *
+ * This ensures every month can have that day (not all months have day 30).
+ *
+ * Value: 29 (do not change)
+ *
+ * Example:
+ * - If user selects day 30, system warns and suggests day 29
+ * - All installments use day 29, which exists in every Hijri month
+ */
+define('MAX_HIJRI_DAY', 29);
+
+/**
+ * Maximum allowed day of month for Gregorian calendar
+ *
+ * NOTE: This constant is defined but NOT enforced.
+ * Gregorian calendar contracts can use any day (1-31).
+ *
+ * The system allows days 29, 30, 31 for Gregorian contracts.
+ * If payment day is 29, 30, or 31, and the month doesn't have that day
+ * (e.g., Feb 30), the system will adjust to the last day of that month.
+ *
+ * Value: 28 (reference only, not enforced in validation)
+ */
+define('MAX_GREGORIAN_DAY', 28);
+
+// ==================================================================
+// AUTO-RENEWAL SETTINGS
+// ==================================================================
+
+/**
+ * Days before contract end date to trigger auto-renewal
+ *
+ * The system checks daily for contracts approaching end date.
+ * When a contract's end date is within this many days, it will
+ * be automatically renewed.
+ *
+ * Options:
+ * - 30 = Start renewal 1 month before (default)
+ * - 60 = Start renewal 2 months before
+ * - 90 = Start renewal 3 months before
+ * - 7 = Start renewal 1 week before (not recommended, too short)
+ *
+ * Recommendation: 30 days provides good buffer time
+ */
+define('RENEWAL_THRESHOLD_DAYS', 30);
+
+/**
+ * Number of months to extend contract when auto-renewing
+ *
+ * When a contract approaches its end date, it will be automatically
+ * extended by this many months.
+ *
+ * Options:
+ * - 12 = Extend by 1 year (default, typical contract period)
+ * - 24 = Extend by 2 years
+ * - 6 = Extend by 6 months (for short-term adjustments)
+ * - 3 = Extend by 3 months (for quarterly renewals)
+ *
+ * Recommendation: Match your typical contract duration (usually 12 months)
+ */
+define('RENEWAL_PERIOD_MONTHS', 12);
+
+/**
+ * Default installment duration in months
+ *
+ * Used by auto-renewal when contract doesn't specify duration.
+ * Most contracts have this in their 'duration' field, but this
+ * provides a fallback.
+ *
+ * Options:
+ * - 1 = Monthly installments (most common)
+ * - 3 = Quarterly installments
+ * - 6 = Semi-annual installments
+ * - 12 = Annual installments
+ *
+ * Note: Individual contracts can override this via their 'duration' field
+ */
+define('DEFAULT_INSTALLMENT_DURATION', 1);
+
+// ==================================================================
+// AUTO-RENEWAL BEHAVIOR
+// ==================================================================
+
+/**
+ * Should auto-renewal run even if tenant has unpaid installments?
+ *
+ * true = Always renew (default, matches your workflow)
+ * false = Only renew if tenant is up-to-date on payments
+ *
+ * Your workflow: Contracts continue even if tenant is behind on payments.
+ * The contract is only terminated when user manually clicks "إنهاء العقد".
+ */
+define('RENEW_DESPITE_ARREARS', true);
+
+/**
+ * Maximum months a tenant can be behind before requiring manual review
+ *
+ * If set to a number, contracts where tenant is behind by this many
+ * months will not auto-renew and will require manual review.
+ *
+ * Options:
+ * - 0 or false = No limit (always auto-renew regardless, default)
+ * - 6 = Stop auto-renewal if 6 months behind
+ * - 12 = Stop auto-renewal if 1 year behind
+ *
+ * Recommendation: Leave at 0 (false) to match your workflow where
+ * renewals continue regardless of payment status.
+ */
+define('MAX_MONTHS_ARREARS_FOR_AUTO_RENEWAL', 0);
+
+// ==================================================================
+// STATUS FILTERING
+// ==================================================================
+
+/**
+ * Contract statuses that should be auto-renewed
+ *
+ * Only contracts with these statuses will be considered for auto-renewal.
+ *
+ * Valid statuses:
+ * - 'active' = Currently active contracts
+ * - 'active_arrears' = Active but tenant is behind on payments
+ * - 'expiring_soon' = Within 30 days of expiry
+ *
+ * Excluded automatically:
+ * - 'terminated' = Manually ended by user
+ * - 'cancelled' = Cancelled before activation
+ * - 'expired' = Past end date
+ * - 'renewed' = Superseded by new contract
+ */
+define('AUTO_RENEWAL_STATUSES', ['active', 'active_arrears']);
+
+// ==================================================================
+// LOGGING AND NOTIFICATIONS
+// ==================================================================
+
+/**
+ * Should system log all auto-renewals to egar_history table?
+ *
+ * true = Log all renewals (default, recommended for audit trail)
+ * false = Skip logging (not recommended)
+ */
+define('LOG_AUTO_RENEWALS', true);
+
+/**
+ * Email notification when contracts are auto-renewed
+ *
+ * Options:
+ * - '' (empty) = No email notifications (default)
+ * - 'admin@yoursite.com' = Send summary email to this address
+ * - 'admin@yoursite.com,manager@yoursite.com' = Multiple recipients
+ *
+ * Note: Requires PHP mail() function or SMTP configuration
+ */
+define('AUTO_RENEWAL_NOTIFICATION_EMAIL', '');
+
+// ==================================================================
+// ADVANCED SETTINGS
+// ==================================================================
+
+/**
+ * Grace period (in days) for installment payments
+ *
+ * Number of days after due date before installment is considered overdue.
+ *
+ * Options:
+ * - 0 = No grace period (due date is strict)
+ * - 5 = 5 day grace period (default)
+ * - 7 = 1 week grace period
+ * - 15 = 2 week grace period
+ *
+ * This affects when installments turn red in the monitoring screen.
+ */
+define('INSTALLMENT_GRACE_PERIOD_DAYS', 5);
+
+/**
+ * Should system automatically update contract status based on payments?
+ *
+ * true = Auto-update status (active → active_arrears when late)
+ * false = Status remains as set manually
+ *
+ * Recommendation: true for automatic status management
+ */
+define('AUTO_UPDATE_CONTRACT_STATUS', true);
+
+// ==================================================================
+// CONFIGURATION VALIDATION
+// ==================================================================
+
+
+
+if (RENEWAL_THRESHOLD_DAYS < 7) {
+    trigger_error(
+        'RENEWAL_THRESHOLD_DAYS should be at least 7 days to allow proper processing time',
+        E_USER_WARNING
+    );
+}
+
+if (RENEWAL_PERIOD_MONTHS < 1) {
+    trigger_error(
+        'RENEWAL_PERIOD_MONTHS must be at least 1 month',
+        E_USER_ERROR
+    );
+}
+
+// ==================================================================
+// HELPER FUNCTIONS
+// ==================================================================
+
+/**
+ * Get configuration value with fallback
+ *
+ * @param string $key Configuration key name
+ * @param mixed $default Default value if not defined
+ * @return mixed Configuration value
+ */
+function getAutoRenewalConfig($key, $default = null) {
+    $constantName = 'AUTO_RENEWAL_' . strtoupper($key);
+    if (defined($constantName)) {
+        return constant($constantName);
+    }
+    return $default;
+}
+
+/**
+ * Display current configuration (for admin panel)
+ *
+ * @return string HTML table of configuration
+ */
+function displayAutoRenewalConfig() {
+    $config = [
+        'Upfront Installment Months' => INSTALLMENT_MONTHS_UPFRONT,
+        'Installment Generation Threshold (days)' => INSTALLMENT_GENERATION_THRESHOLD_DAYS,
+        'Installment Generation Period (months)' => INSTALLMENT_GENERATION_PERIOD_MONTHS ?: 'Use contract duration',
+        'Auto-Add on Last Payment' => AUTO_ADD_ON_LAST_PAYMENT ? 'Yes' : 'No',
+        'Max Hijri Day' => MAX_HIJRI_DAY,
+        'Max Gregorian Day' => MAX_GREGORIAN_DAY . ' (not enforced)',
+        'Renewal Threshold (days)' => RENEWAL_THRESHOLD_DAYS,
+        'Renewal Period (months)' => RENEWAL_PERIOD_MONTHS,
+        'Default Installment Duration (months)' => DEFAULT_INSTALLMENT_DURATION,
+        'Renew Despite Arrears' => RENEW_DESPITE_ARREARS ? 'Yes' : 'No',
+        'Max Months Arrears' => MAX_MONTHS_ARREARS_FOR_AUTO_RENEWAL ?: 'No limit',
+        'Auto-Renewal Statuses' => implode(', ', AUTO_RENEWAL_STATUSES),
+        'Log Renewals' => LOG_AUTO_RENEWALS ? 'Yes' : 'No',
+        'Notification Email' => AUTO_RENEWAL_NOTIFICATION_EMAIL ?: 'None',
+        'Grace Period (days)' => INSTALLMENT_GRACE_PERIOD_DAYS,
+        'Auto-Update Status' => AUTO_UPDATE_CONTRACT_STATUS ? 'Yes' : 'No',
+    ];
+
+    $html = '<table class="table table-bordered">';
+    $html .= '<thead><tr><th>Setting</th><th>Value</th></tr></thead>';
+    $html .= '<tbody>';
+    foreach ($config as $key => $value) {
+        $html .= '<tr><td>' . htmlspecialchars($key) . '</td><td>' . htmlspecialchars($value) . '</td></tr>';
+    }
+    $html .= '</tbody></table>';
+
+    return $html;
+}
+
+// ==================================================================
+// USAGE EXAMPLES
+// ==================================================================
+
+/*
+
+Example 1: Use in egar.api.hnt (installment generation)
+-------------------------------------------------------
+
+require_once 'auto_renewal_config.hnt';
+
+$monthsToGenerate = INSTALLMENT_MONTHS_UPFRONT;
+$numInstallments = ceil(max($monthsToGenerate, $contractMonths) / $duration);
+
+
+Example 2: Use in auto_renew_contracts.api.hnt
+----------------------------------------------
+
+require_once 'auto_renewal_config.hnt';
+
+$renewalThresholdDays = RENEWAL_THRESHOLD_DAYS;
+$renewalPeriodMonths = RENEWAL_PERIOD_MONTHS;
+$installmentDuration = DEFAULT_INSTALLMENT_DURATION;
+
+
+Example 3: Display config in admin panel
+----------------------------------------
+
+require_once 'auto_renewal_config.hnt';
+
+echo '<h3>Auto-Renewal Configuration</h3>';
+echo displayAutoRenewalConfig();
+
+
+Example 4: Check if should auto-renew contract with arrears
+-----------------------------------------------------------
+
+require_once 'auto_renewal_config.hnt';
+
+if (RENEW_DESPITE_ARREARS) {
+    // Renew regardless of payment status
+    renewContract($contractId);
+} else {
+    // Check arrears first
+    if ($monthsBehind <= MAX_MONTHS_ARREARS_FOR_AUTO_RENEWAL) {
+        renewContract($contractId);
+    }
+}
+
+*/
+?>

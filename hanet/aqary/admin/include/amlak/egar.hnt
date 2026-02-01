@@ -1,0 +1,1543 @@
+<?php
+// Set page variables
+$sc_title = "تحرير عقد إيجار جديد";
+$sc_id = "42";
+
+// Extract POST variables early for processing
+extract($_REQUEST);
+
+// Override calendar type if specified in URL (user preference overrides global setting)
+if (isset($_REQUEST['hnt_dll'])) {
+    $hnt_dll = intval($_REQUEST['hnt_dll']);
+}
+
+// Set calendar type selection variables for dropdown
+$selhihiri = '';
+$selmelady = '';
+if (isset($hnt_dll)) {
+    if ($hnt_dll == 0) {
+        $selhihiri = 'selected';
+    } else {
+        $selmelady = 'selected';
+    }
+} else {
+    // Default to Gregorian if not set
+    $selmelady = 'selected';
+    $hnt_dll = 1;
+}
+
+// Check if this is an AJAX form submission - handle it BEFORE any HTML output
+if (isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1') {
+    $is_ajax_request = true;
+} else {
+    $is_ajax_request = false;
+}
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+} else {
+    // Always include authentication and database
+    include_once "../../../reqloginajax.hnt";
+}
+
+require_once '../arabicTools.class.hnt';
+require_once '../uCal.class.hnt';
+include_once "amlakfunctions.hnt";
+
+// Database schema updates
+@mysql_query("ALTER TABLE amlak ADD externalid int(11) NOT NULL ", $link);
+@mysql_query("ALTER TABLE amlak ADD externaltype varchar(50) NOT NULL ", $link);
+@mysql_query("ALTER TABLE amlakdetails ADD externalid int(11) NOT NULL ", $link);
+@mysql_query("ALTER TABLE amlakdetails ADD externaltype varchar(50) NOT NULL ", $link);
+@mysql_query("ALTER TABLE mostagereen ADD mostagervatnumber varchar(100) NOT NULL ", $link);
+
+// Get property ID from unit details
+if (!isset($idaqar) || !$idaqar) {
+    if (isset($_REQUEST['idsubaqar']) && $_REQUEST['idsubaqar']) {
+        $idaqar = mysql_fetch_array(mysql_query("select idaqar from  amlakdetails where idsubaqar='" . intval($_REQUEST['idsubaqar']) . "' ", $link));
+        $idaqar = $idaqar['idaqar'];
+    }
+}
+
+// Get external ID if exists
+$externalid = null;
+if (isset($_REQUEST['idsubaqar']) && $_REQUEST['idsubaqar']) {
+    $ext_result = mysql_fetch_array(mysql_query("select externalid from  amlakdetails where idsubaqar='" . intval($_REQUEST['idsubaqar']) . "' ", $link));
+    $externalid = isset($ext_result['externalid']) ? $ext_result['externalid'] : null;
+}
+?>
+<style>
+    .section-header {
+        background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+        color: white;
+        padding: 0.75rem 1rem;
+        border-radius: 6px;
+        margin-bottom: 1.5rem;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 1.1rem;
+    }
+
+    .form-label {
+        font-size: 0.875rem;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+        color: #495057;
+        text-align: right;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .required-mark {
+        color: #dc3545;
+    }
+
+    .form-control,
+    .form-select {
+        font-size: 0.875rem;
+        text-align: right;
+        direction: rtl;
+    }
+
+    .inline-buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+    }
+
+    .inline-buttons button,
+    .inline-buttons a {
+        flex: 0 1 auto;
+    }
+</style>
+
+<script>
+    function calculaterent() {
+        var x = floatval(document.getElementById('annualprice').value);
+        var p = floatval(document.getElementById('duration').value);
+        document.getElementById('depositeamount').value = floatval((x / 12) * p);
+    }
+
+    function calculateEndDate() {
+        let startDate = document.getElementById('st_date_').value.split('/');
+        if (startDate.length !== 3) return;
+
+        startDate[1] = parseInt(startDate[1]) + parseInt(document.getElementById('contractDuraion').value);
+        startDate[2] = parseInt(startDate[2]) + parseInt(parseInt(document.getElementById('contractDuraion').value) / 12);
+
+        if (document.getElementById('correct_old_dates').value > 0) {
+            if (startDate[2] < new Date().getFullYear()) {
+                startDate[2] = new Date().getFullYear();
+            }
+        }
+
+        let newDate = startDate[0] + '/' + startDate[1] + '/' + startDate[2];
+        document.getElementById('st_date0_').value = newDate;
+    }
+</script>
+
+<?php
+// Load tenant data if updating
+$mos = array();
+if (isset($mostagerid) && $mostagerid) {
+    $sqlmo = "select * from mostagereen where mostagerid='" . intval($mostagerid) . "' ";
+    $mos_result = mysql_query($sqlmo, $link);
+    $mos = mysql_fetch_array($mos_result);
+}
+
+// Get annual price for the unit
+$anprice = 0;
+if (isset($idsubaqar) && $idsubaqar) {
+    $anprice_query = "select price from amlakdetails where idsubaqar='" . intval($idsubaqar) . "' limit 1 ";
+    $anprice_result = mysql_fetch_array(mysql_query($anprice_query, $link));
+    $anprice = isset($anprice_result['price']) ? $anprice_result['price'] : 0;
+}
+
+// Get next contract number
+$contract_number_query = "select max(rakam3akdid) as xd from egar ";
+$contract_number_result = mysql_fetch_array(mysql_query($contract_number_query, $link));
+$next_contract_number = (isset($contract_number_result['xd']) ? $contract_number_result['xd'] : 0) + 1;
+
+// Get current year for date validation
+$next_year_number = date('Y');
+
+// Only render if NOT AJAX request
+if (!$is_ajax_request) {
+?>
+
+
+    <div class="container-fluid py-3">
+        <div class="card shadow-sm border-0">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+                <h4 class="mb-0">
+                    <i class="bi bi-file-earmark-contract me-2"></i>
+                    <?= $sc_title ?>
+                </h4>
+            </div>
+            <div class="card-body p-4">
+                <form name="form" id="mainform" method="post" class="vertical" dir="rtl">
+                    <input type='hidden' name="action" value="create_contract">
+                    <input type='hidden' name="formuid" id="formuid"
+                        value="<?= str_replace('.', '', microtime() . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+                    <input type="hidden" name="PHPSESSID" value="<?= $PHPSESSID; ?>">
+                    <input type="hidden" name="addmostager" value="1">
+                    <input type="hidden" name="searchgeneral" value="1">
+                    <input type="hidden" name="usernamev" value="<?= isset($_SESSION['usernamev']) ? $_SESSION['usernamev'] : '' ?>">
+                    <input type="hidden" name="useridv" value="<?= isset($_SESSION['useridv']) ? $_SESSION['useridv'] : '' ?>">
+                    <input type="hidden" name="poasswordv" value="<?= isset($_SESSION['passwordv']) ? $_SESSION['passwordv'] : '' ?>">
+                    <input type="hidden" name="idsubaqar" value="<?= isset($idsubaqar) ? $idsubaqar : '' ?>">
+                    <input type="hidden" name="idaqar" id="idaqar_hidden" value="<?= isset($idaqar) ? $idaqar : '' ?>">
+                    <input type="hidden" name="mostagerid" value="<?= isset($mostagerid) ? $mostagerid : '' ?>">
+                    <input type="hidden" name="myfile" id="myfile" value="">
+
+
+
+                    <!-- Two Column Layout -->
+                    <div class="row g-4">
+                        <!-- Left Column -->
+                        <div class="col-md-6">
+                            <!-- Property Information Section -->
+                            <div class="section-header">
+                                <i class="bi bi-house-fill"></i>
+                                <span>معلومات العقار والعقد</span>
+                            </div>
+
+                            <div class="row g-4 mb-4">
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-building text-info me-1"></i>اختر العقار <span class="required-mark">*</span></label>
+                                    <select name="idaqar" id="idaqar" class="form-select" required onchange="handlePropertyChange(this)">
+                                        <option value="">-- اختر العقار --</option>
+                                        <?php
+                                        $sql = "select idaqar, aqarname, aqaraddress from amlak order by aqarname";
+                                        $result = mysql_query($sql, $link);
+                                        while ($row = mysql_fetch_array($result)) {
+                                            $selected = (isset($idaqar) && $row['idaqar'] == $idaqar) ? " selected" : "";
+                                            echo "<option value='{$row['idaqar']}' rel='{$row['aqaraddress']}' {$selected}>{$row['aqarname']}</option>";
+                                        }
+                                        ?>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-door-open text-success me-1"></i>اختر الوحدة <span class="required-mark">*</span></label>
+                                    <select name="idsubaqar" id="idsubaqar" class="form-select" required onchange="handleUnitChange()">
+                                        <option value="">-- اختر الوحدة --</option>
+                                        <?php
+                                        if (isset($idaqar) && $idaqar) {
+                                            $sql = "select amlakdetails.idsubaqar, Concat(aqarsubtype.aqarsubtypename,' - ',amlakdetails.rakam) from amlakdetails, aqarsubtype
+                                    where amlakdetails.aqarsubtype=aqarsubtype.aqarsubtype and amlakdetails.mostagerid=0 and amlakdetails.idaqar='" . intval($idaqar) . "'";
+                                            $result = mysql_query($sql, $link);
+                                            while ($row = mysql_fetch_array($result)) {
+                                                $selected = (isset($idsubaqar) && $row['idsubaqar'] == $idsubaqar) ? " selected" : "";
+                                                echo "<option value='{$row['idsubaqar']}' {$selected}>{$row[1]}</option>";
+                                            }
+                                        }
+                                        ?>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-hash text-primary me-1"></i>رقم العقد <span class="required-mark">*</span></label>
+                                    <input type="text" name="rakam3akd" id="vrakam3akdid" class="form-control" value="<?= $next_contract_number ?>" required
+                                        onblur="document.checkrakam3akd.location.href='checkrakam3akd.hnt?rakam3akdid='+this.value;">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-map text-danger me-1"></i>عنوان العقار</label>
+                                    <input type="text" name="aqaraddress" id="aqaraddress" class="form-control" readonly>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-file-text text-warning me-1"></i>غرض الإيجار</label>
+                                    <input type="text" name="aqartype" class="form-control" value="للسكن" onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-lightning text-success me-1"></i>رقم عداد الكهرباء</label>
+                                    <input type="text" name="elect" class="form-control" onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-speedometer me-1"></i>قراءة عداد الكهرباء</label>
+                                    <input type="text" name="elect_reading" class="form-control" onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-image text-info me-1"></i>صورة المستأجر</label>
+                                    <input type="file" name="fil" class="form-control" onChange="myfile.value=this.value;xx.src=this.value;xx.width=50;xx.height=60;">
+                                </div>
+                            </div>
+
+
+                            <!-- Guarantor Information -->
+                            <div class="section-header">
+                                <i class="bi bi-shield-check"></i>
+                                <span>بيانات الضامن</span>
+                            </div>
+
+                            <div class="row g-4 mb-4">
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-person text-primary me-1"></i>اسم الضامن</label>
+                                    <input type="text" name="kafelname" class="form-control" value="<?= isset($mos['kafelname']) ? $mos['kafelname'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-telephone text-success me-1"></i>هاتف الضامن</label>
+                                    <input type="tel" name="kafelphone" class="form-control" value="<?= isset($mos['kafelphone']) ? $mos['kafelphone'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-geo-alt text-danger me-1"></i>عنوان الضامن</label>
+                                    <input type="text" name="kafeladdress" class="form-control" value="<?= isset($mos['kafeladdress']) ? $mos['kafeladdress'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Right Column -->
+                        <div class="col-md-6">
+                            <!-- Tenant Personal Information -->
+                            <div class="section-header">
+                                <i class="bi bi-person-vcard"></i>
+                                <span>معلومات المستأجر الشخصية</span>
+                            </div>
+
+                            <div class="row g-4 mb-4">
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-person-check text-primary me-1"></i>اختر اسم المستأجر</label>
+                                    <input type="hidden" name="mostagerid" id="mostagerid" value="<?= isset($mostagerid) ? $mostagerid : '' ?>">
+                                    <select name="mysite" id="mysite" class="form-select" onchange="loadTenantData(this.value);">
+                                        <option value="0">-- مستأجر جديد --</option>
+                                        <?php
+                                        $sql = "select mostagerid, mostagername from mostagereen order by mostagername";
+                                        $result = mysql_query($sql, $link);
+                                        while ($row = mysql_fetch_array($result)) {
+                                            $selected = (isset($mostagerid) && $mostagerid == $row['mostagerid']) ? " selected" : "";
+                                            echo "<option value='{$row['mostagerid']}' {$selected}>{$row['mostagername']}</option>";
+                                        }
+                                        ?>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-person-fill text-primary me-1"></i>اسم المستأجر <span class="required-mark">*</span></label>
+                                    <input type="text" name="mostagername" class="form-control" required value="<?= isset($mos['mostagername']) ? $mos['mostagername'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-receipt text-info me-1"></i>الرقم الضريبي</label>
+                                    <input type="text" name="mostagervatnumber" class="form-control" value="<?= isset($mos['mostagervatnumber']) ? $mos['mostagervatnumber'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-card-heading text-success me-1"></i>رقم الهوية/الإقامة</label>
+                                    <input type="text" name="mostageridnumber" class="form-control" value="<?= isset($mos['mostageridnumber']) ? $mos['mostageridnumber'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-geo-alt text-danger me-1"></i>مصدرها</label>
+                                    <input type="text" name="mostageridplace" class="form-control" value="<?= isset($mos['mostageridplace']) ? $mos['mostageridplace'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-calendar text-warning me-1"></i>تاريخ الهوية</label>
+                                    <input type="text" name="mostageriddate" class="form-control" value="<?= isset($mos['mostageriddate']) ? $mos['mostageriddate'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-tag text-info me-1"></i>نوع الهوية</label>
+                                    <input type="text" name="mostageridtype" class="form-control" value="<?= isset($mos['mostageridtype']) ? $mos['mostageridtype'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-telephone text-success me-1"></i>هاتف المستأجر</label>
+                                    <input type="tel" name="mostagertel" class="form-control" value="<?= isset($mos['mostagertel']) ? $mos['mostagertel'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-person-check text-primary me-1"></i>يمثله في العقد</label>
+                                    <input type="text" name="mostageragent" class="form-control" value="<?= isset($mos['mostageragent']) && $mos['mostageragent'] ? $mos['mostageragent'] : 'نفسه' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-envelope-fill text-danger me-1"></i>البريد الإلكتروني</label>
+                                    <input type="email" name="mostageremail" class="form-control" value="<?= isset($mos['mostageremail']) ? $mos['mostageremail'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-briefcase text-success me-1"></i>العمل</label>
+                                    <input type="text" name="work" class="form-control" value="<?= isset($mos['work']) ? $mos['work'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-geo-alt text-warning me-1"></i>عنوان العمل</label>
+                                    <input type="text" name="workaddress" class="form-control" value="<?= isset($mos['workaddress']) ? $mos['workaddress'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                                <div class="col-md-12">
+                                    <label class="form-label"><i class="bi bi-flag text-danger me-1"></i>جنسية المستأجر</label>
+                                    <input type="text" name="mostagergensia" class="form-control" value="<?= isset($mos['mostagergensia']) ? $mos['mostagergensia'] : '' ?>"
+                                        onkeyup="createCookie(this.name +'coc', this.value, 1);">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row g-4 mb-4">
+                        <div class="col-md-6">
+                            <!-- Rental Financial Information -->
+                            <div class="section-header">
+                                <i class="bi bi-currency-dollar"></i>
+                                <span>معلومات الإيجار والمبالغ المالية</span>
+                            </div>
+
+                            <div class="row g-4 mb-4">
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-credit-card text-primary me-1"></i>الإيجار السنوي <span class="required-mark">*</span></label>
+                                    <input type="text" name="annualprice" id="annualprice" class="form-control" required
+                                        value="<?= $anprice; ?>"
+                                        onkeypress="return ValidateNumberKeyPress(this, event);"
+                                        onkeyup="ValidateNumberKeyUp(this);calculaterent();createCookie(this.name +'coc', this.value, 1);"
+                                        onBlur="ValidateAndFormatNumber(this);calculaterent();">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-calendar-event text-info me-1"></i>الإيجار يدفع كل <span class="required-mark">*</span></label>
+                                    <select name="duration" id="duration" class="form-select" required onchange="calculaterent();">
+                                        <option value="1">شهر</option>
+                                        <option value="2">شهرين</option>
+                                        <option value="3">3 أشهر</option>
+                                        <option value="4">4 أشهر</option>
+                                        <option value="5">5 أشهر</option>
+                                        <option value="6" selected>6 أشهر</option>
+                                        <option value="7">7 أشهر</option>
+                                        <option value="8">8 أشهر</option>
+                                        <option value="9">9 أشهر</option>
+                                        <option value="10">10 أشهر</option>
+                                        <option value="11">11 شهر</option>
+                                        <option value="12">12 شهر</option>
+                                        <option value="24">سنتين</option>
+                                        <option value="36">ثلاث سنوات</option>
+                                        <option value="48">أربع سنوات</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-shield-check text-success me-1"></i>مبلغ التأمين</label>
+                                    <input type="text" name="tamen" id="tamen" class="form-control"
+                                        onkeypress="return ValidateNumberKeyPress(this, event);"
+                                        onkeyup="ValidateNumberKeyUp(this);createCookie(this.name +'coc', this.value, 1);sumofamout();"
+                                        onBlur="ValidateAndFormatNumber(this);sumofamout();">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-percent text-warning me-1"></i>قيمة القسط <span class="required-mark">*</span></label>
+                                    <input type="text" name="depositeamount" id="depositeamount" class="form-control" required
+                                        onKeyPress="return ValidateNumberKeyPress(this, event);"
+                                        onkeyup="ValidateNumberKeyUp(this);createCookie(this.name +'coc', this.value, 1);sumofamout();"
+                                        onBlur="ValidateAndFormatNumber(this);sumofamout();">
+                                </div>
+
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-percent text-primary me-1"></i>العمولة الفورية</label>
+                                    <input type="text" name="fristsa3e" id="fristsa3e" class="form-control"
+                                        onkeypress="return ValidateNumberKeyPress(this, event);"
+                                        onkeyup="ValidateNumberKeyUp(this);createCookie(this.name +'coc', this.value, 1);sumofamout();"
+                                        onBlur="ValidateAndFormatNumber(this);sumofamout();">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-percent text-info me-1"></i>العمولة السنوية</label>
+                                    <input type="text" name="secondsa3e" class="form-control"
+                                        onkeypress="return ValidateNumberKeyPress(this, event);"
+                                        onkeyup="ValidateNumberKeyUp(this);createCookie(this.name +'coc', this.value, 1);sumofamout();"
+                                        onBlur="ValidateAndFormatNumber(this);sumofamout();">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-clock text-muted me-1"></i>موعد دفع العمولة السنوية</label>
+                                    <select name="secondsa3e_duration" class="form-select" onchange="sumofamout();">
+                                        <option value="0">عند التجديد</option>
+                                        <option value="1">مع كل قسط</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-droplet text-primary me-1"></i>رسوم المياه</label>
+                                    <input type="text" name="water" id="water" class="form-control"
+                                        onkeypress="return ValidateNumberKeyPress(this, event);"
+                                        onkeyup="ValidateNumberKeyUp(this);createCookie(this.name +'coc', this.value, 1);sumofamout();"
+                                        onBlur="ValidateAndFormatNumber(this);sumofamout();">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-clock text-muted me-1"></i>موعد دفع المياه</label>
+                                    <select name="water_duration" class="form-select" onchange="sumofamout();">
+                                        <option value="0">مع أول قسط فقط</option>
+                                        <option value="1">مع كل قسط</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-tools text-success me-1"></i>رسوم الخدمات</label>
+                                    <input type="text" name="services" id="services" class="form-control"
+                                        onkeypress="return ValidateNumberKeyPress(this, event);"
+                                        onkeyup="ValidateNumberKeyUp(this);createCookie(this.name +'coc', this.value, 1);sumofamout();"
+                                        onBlur="ValidateAndFormatNumber(this);sumofamout();">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-clock text-muted me-1"></i>موعد دفع الخدمات</label>
+                                    <select name="services_duration" class="form-select" onchange="sumofamout();">
+                                        <option value="0">مع أول قسط فقط</option>
+                                        <option value="1">مع كل قسط</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-md-6">
+                            <!-- Contract Duration and Dates -->
+                            <div class="section-header">
+                                <i class="bi bi-calendar2-range"></i>
+                                <span>مدة وتواريخ العقد</span>
+                            </div>
+
+                            <div class="row g-4 mb-4">
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-calendar text-danger me-1"></i>مدة العقد بالأشهر <span class="required-mark">*</span></label>
+                                    <input type="number" name="contractDuraion" id="contractDuraion" class="form-control" required
+                                        value="12" min="1" max="120">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label">
+                                        <i class="bi bi-globe text-info me-1"></i>نوع التقويم
+                                        <span id="calendarBadge" class="badge <?= (isset($hnt_dll) && $hnt_dll == 0) ? 'bg-success' : 'bg-primary' ?> ms-2">
+                                            <?= (isset($hnt_dll) && $hnt_dll == 0) ? '🌙 هجري' : '📅 ميلادي' ?>
+                                        </span>
+                                    </label>
+                                    <select id="datetypeselector" class="form-select" onchange="changeCalendarType(this.value);">
+                                        <option value="0" <?= $selhihiri ?>>🌙 هجري</option>
+                                        <option value="1" <?= $selmelady ?>>📅 ميلادي</option>
+                                    </select>
+                                    <small class="form-text text-muted">
+                                        <i class="bi bi-info-circle me-1"></i>
+                                        سيتم تحديث التقويم في جميع حقول التاريخ (القيمة الحالية: <span id="calendarTypeValue"><?= $hnt_dll ?></span>)
+                                    </small>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-clock-history text-warning me-1"></i>معالجة التواريخ</label>
+                                    <select id="correct_old_dates" name="correct_old_dates" class="form-select">
+                                        <option value="1">معالجة التاريخ القديم</option>
+                                        <option value="0">بدون معالجة</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-file-earmark-text text-success me-1"></i>تاريخ توقيع العقد</label>
+                                    <div class="input-group">
+                                        <input type="text" name="st_datex_" id="st_datex_" class="form-control datepicker-input" placeholder="dd/mm/yyyy" autocomplete="off">
+                                        <span class="input-group-text"><i class="bi bi-calendar3"></i></span>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-play-circle text-info me-1"></i>بداية العقد <span class="required-mark">*</span></label>
+                                    <div class="input-group">
+                                        <input type="text" name="st_date_" id="st_date_" class="form-control datepicker-input" placeholder="dd/mm/yyyy" required autocomplete="off">
+                                        <span class="input-group-text"><i class="bi bi-calendar3"></i></span>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-stop-circle text-danger me-1"></i>نهاية العقد <span class="required-mark">*</span></label>
+                                    <div class="input-group">
+                                        <input type="text" name="st_date0_" id="st_date0_" class="form-control datepicker-input" placeholder="dd/mm/yyyy" required autocomplete="off" value="<?= isset($next_year_today) ? $next_year_today : '' ?>">
+                                        <span class="input-group-text"><i class="bi bi-calendar3"></i></span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <?php
+                    // Hidden field for calendar type
+                    if (isset($_REQUEST['hnt_dll'])) {
+                        echo "<input type='hidden' name='hnt_dll' value='" . intval($_REQUEST['hnt_dll']) . "'>";
+                    }
+                    ?>
+
+                    <!-- Tax and Payment Summary -->
+                    <div class="section-header">
+                        <i class="bi bi-receipt"></i>
+                        <span>الضريبة وملخص الدفع</span>
+                    </div>
+
+                    <div class="row g-4 mb-4">
+                        <div class="col-md-3">
+                            <label class="form-label"><i class="bi bi-percent text-primary me-1"></i>نوع الضريبة <span class="required-mark">*</span></label>
+                            <select id="vat_type" name="vat_type" class="form-select" required>
+                                <option value="0">لا تنطبق عليه الضريبة</option>
+                                <option value="1">سكني - ضريبة مبيعات 15% على العمولة فقط</option>
+                                <option value="2">تجاري - ضريبة مبيعات 15% على الإيجار والعمولة</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label"><i class="bi bi-percent text-info me-1"></i>الضريبة على العمولة</label>
+                            <input type="text" id="commesion_vat" name="commesion_vat" class="form-control" readonly value="0">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label"><i class="bi bi-percent text-warning me-1"></i>الضريبة على الإيجار</label>
+                            <input type="text" id="depositeamount_vat" name="depositeamount_vat" class="form-control" readonly value="0">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label"><i class="bi bi-percent text-success me-1"></i>إجمالي الضريبة</label>
+                            <input type="text" id="total_vat" name="total_vat" class="form-control" readonly value="0">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label"><i class="bi bi-cash-coin text-danger me-1"></i>الإجمالي المطلوب بعد الضريبة <span class="required-mark">*</span></label>
+                            <input type="text" id="total_amound_width_vat" name="total_amound_width_vat" class="form-control" readonly value="0">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label"><i class="bi bi-check-circle text-success me-1"></i>المبلغ المدفوع فعليًا <span class="required-mark">*</span></label>
+                            <input type="text" id="payedamount" name="payedamount" class="form-control" required value=""
+                                onkeypress="return ValidateNumberKeyPress(this, event);"
+                                onkeydown="disableautocalc();"
+                                onkeyup="ValidateNumberKeyUp(this);createCookie(this.name +'coc', this.value, 1);"
+                                onBlur="ValidateAndFormatNumber(this)">
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label"><i class="bi bi-file-earmark-text text-primary me-1"></i>نموذج شروط العقد</label>
+                            <select class="form-select" id="contractTemplateSelector" onchange="loadContractTemplate()">
+                                <option value="">-- اختر نموذج شروط العقد --</option>
+                                <?php
+                                // Get contract templates from 3akd directory
+                                $template_path = __DIR__ . '/';
+                                $templates = glob($template_path . '*.contratotemplate');
+                                if ($templates && count($templates) > 0) {
+                                    $first_template = true;
+                                    foreach ($templates as $template_file) {
+                                        $template_name = basename($template_file, '.contratotemplate');
+                                        if (empty(trim($template_name))) continue;
+                                        $selected = $first_template ? ' selected' : '';
+                                        echo '<option value="' . htmlspecialchars(basename($template_file)) . '"' . $selected . '>' . htmlspecialchars($template_name) . '</option>';
+                                        $first_template = false;
+                                    }
+                                }
+                                ?>
+                            </select>
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label"><i class="bi bi-chat-dots text-info me-1"></i>شروط إضافية وملحوظات</label>
+                            <textarea name="notes" id="contractNotes" class="form-control" rows="4" style="resize: vertical; min-height: 150px;"></textarea>
+                        </div>
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-12 d-flex flex-wrap gap-2 justify-content-end">
+                            <button type="submit" id="submitBtn" class="btn btn-success btn-lg">
+                                <i class="bi bi-check-circle me-2"></i>
+                                <span id="submitBtnText">إضافة المستأجر</span>
+                                <span id="submitBtnSpinner" class="spinner-border spinner-border-sm ms-2 d-none" role="status"></span>
+                            </button>
+                            <a href="/aqary/admin/include/amlak/3akd.hnt" target="_blank" class="btn btn-info btn-lg">
+                                <i class="bi bi-pencil-square me-2"></i>
+                                تغيير شروط العقد
+                            </a>
+                            <button type="button" class="btn btn-warning btn-lg"
+                                onclick="gotolink('/aqary/admin/include/amlak/bblaklist/index.hnt');return false;">
+                                <i class="bi bi-exclamation-circle me-2"></i>
+                                القائمة السوداء
+                            </button>
+                            <button type="button" class="btn btn-danger btn-lg"
+                                onclick="window.location.href='/aqary/admin/amlak.hnt';">
+                                <i class="bi bi-x-circle me-2"></i>
+                                إلغاء
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Alert Container -->
+                    <div id="alertContainer" class="mt-3"></div>
+                </form>
+            </div>
+        </div>
+
+        <script>
+            $(function() {
+                $("#commentForm").validate();
+                $('#aqaraddress').val($('option:selected', $('#idaqar')).attr('rel'));
+            });
+        </script>
+
+        <?php
+        if (isset($mostagerid) && $mostagerid) {
+            //##########disable user control - editing existing tenant ###################//
+        ?>
+            <script language="javascript">
+                document.form.mostagername.contentEditable = "false";
+                document.form.mostagertel.contentEditable = "false";
+                document.form.work.contentEditable = "false";
+                document.form.workaddress.contentEditable = "false";
+                document.form.mostageridnumber.contentEditable = "false";
+                document.form.mostagergensia.contentEditable = "false";
+                document.form.kafelname.contentEditable = "false";
+                document.form.kafelphone.contentEditable = "false";
+                document.form.kafeladdress.contentEditable = "false";
+                document.form.mostageridplace.contentEditable = "false";
+                document.form.mostageriddate.contentEditable = "false";
+                document.form.mostageridtype.contentEditable = "false";
+                document.form.mostageragent.contentEditable = "false";
+                document.form.mostageremail.contentEditable = "false";
+
+
+
+                document.form.mostagername.style.color = "#990000";
+                document.form.mostagertel.style.color = "#990000";
+                document.form.work.style.color = "#990000";
+                document.form.workaddress.style.color = "#990000";
+                document.form.mostageridnumber.style.color = "#990000";
+                document.form.mostagergensia.style.color = "#990000";
+                document.form.kafelname.style.color = "#990000";
+                document.form.kafelphone.style.color = "#990000";
+                document.form.kafeladdress.style.color = "#990000";
+                document.form.mostageridplace.style.color = "#990000";
+                document.form.mostageriddate.style.color = "#990000";
+                document.form.mostageridtype.style.color = "#990000";
+                document.form.mostageragent.style.color = "#990000";
+                document.form.mostageremail.style.color = "#990000";
+
+
+
+                document.form.mostagername.style.background = "#ffffcc";
+                document.form.mostagertel.style.background = "#ffffcc";
+                document.form.work.style.background = "#ffffcc";
+                document.form.workaddress.style.background = "#ffffcc";
+                document.form.mostageridnumber.style.background = "#ffffcc";
+                document.form.mostagergensia.style.background = "#ffffcc";
+                document.form.kafelname.style.background = "#ffffcc";
+                document.form.kafelphone.style.background = "#ffffcc";
+                document.form.kafeladdress.style.background = "#ffffcc";
+                document.form.mostageridplace.style.background = "#ffffcc";
+                document.form.mostageriddate.style.background = "#ffffcc";
+                document.form.mostageridtype.style.background = "#ffffcc";
+                document.form.mostageragent.style.background = "#ffffcc";
+                document.form.mostageremail.style.background = "#ffffcc";
+
+
+
+                document.form.tamen.value = readCookie("tamencoc");
+                document.form.payedamount.value = readCookie("payedamountcoc");
+                document.form.depositeamount.value = readCookie("depositeamountcoc");
+                document.form.fristsa3e.value = readCookie("fristsa3ecoc");
+                document.form.secondsa3e.value = readCookie("secondsa3ecoc");
+                document.form.water.value = readCookie("watercoc");
+                document.form.kafelname.value = readCookie("kafelnamecoc");
+                document.form.kafelphone.value = readCookie("kafelphonecoc");
+                document.form.kafeladdress.value = readCookie("kafeladdresscoc");
+                document.form.elect.value = readCookie("electcoc");
+                document.form.elect_reading.value = readCookie("elect_readingcoc");
+                document.form.services.value = readCookie("servicescoc");
+            </script>
+        <?php
+            //×××××××××××××××× End disabled section for editing existing tenant ××××××××××××××××××××××//
+        } else {
+            // New tenant form - load saved form values from cookies
+        ?>
+            <script language="javascript">
+                document.form.mostagername.value = readCookie("mostagernamecoc");
+
+                document.form.mostagertel.value = readCookie("mostagertelcoc");
+                document.form.work.value = readCookie("workcoc");
+                document.form.workaddress.value = readCookie("workaddresscoc");
+                document.form.mostageridnumber.value = readCookie("mostageridnumbercoc");
+                document.form.mostagergensia.value = readCookie("mostagergensiacoc");
+                document.form.kafelname.value = readCookie("kafelnamecoc");
+                document.form.kafelphone.value = readCookie("kafelphonecoc");
+                document.form.kafeladdress.value = readCookie("kafeladdresscoc");
+                document.form.mostageridplace.value = readCookie("mostageridplacecoc");
+                document.form.mostageriddate.value = readCookie("mostageriddatecoc");
+                document.form.mostageridtype.value = readCookie("mostageridtypecoc");
+                document.form.mostageragent.value = readCookie("mostageragentcoc");
+                if (!readCookie("mostageragentcoc")) {
+                    document.form.mostageragent.value = ' نفسه ';
+                }
+                document.form.mostageremail.value = readCookie("mostageremailcoc");
+
+
+
+                document.form.tamen.value = readCookie("tamencoc");
+                document.form.payedamount.value = readCookie("payedamountcoc");
+                document.form.depositeamount.value = readCookie("depositeamountcoc");
+                document.form.fristsa3e.value = readCookie("fristsa3ecoc");
+                document.form.secondsa3e.value = readCookie("secondsa3ecoc");
+                document.form.water.value = readCookie("watercoc");
+                document.form.kafelname.value = readCookie("kafelnamecoc");
+                document.form.kafelphone.value = readCookie("kafelphonecoc");
+                document.form.kafeladdress.value = readCookie("kafeladdresscoc");
+                document.form.elect.value = readCookie("electcoc");
+                document.form.elect_reading.value = readCookie("elect_readingcoc");
+                document.form.services.value = readCookie("servicescoc");
+            </script>
+        <?php
+        } // End if/else for mostagerid
+        ?>
+
+        <script>
+            var autocalc = true;
+
+            function disableautocalc() {
+                autocalc = false;
+            }
+
+            $(function() {
+                $("input,select").on('click keyup keypress blur change mousemove', function(e) {
+                    // e.type is the type of event fired
+                    vatcalc();
+                    sumofamout();
+                });
+                vatcalc();
+                sumofamout();
+            });
+
+
+            function vatcalc() {
+                var vatValue = 0;
+                $("#commesion_vat").val(0);
+                $("#depositeamount_vat").val(0);
+                if ($("#vat_type").val() == 0) {
+
+                }
+
+                if ($("#vat_type").val() == 1 || $("#vat_type").val() == 2) {
+                    $("#commesion_vat").val(floatval(floatval($("#fristsa3e").val()) * 0.15));
+                }
+
+                if ($("#vat_type").val() == 2) {
+                    $("#depositeamount_vat").val(floatval(floatval($("#depositeamount").val()) * 0.15));
+                    //intval($("#fristsa3e").val() * 0.05) + intval($("#payedamount").val() * 0.05);
+                }
+
+                $("#total_vat").val(floatval(floatval($("#depositeamount_vat").val()) + floatval($("#commesion_vat").val())));
+
+                $("#total_amound_width_vat").val(floatval(floatval($("#tamen").val()) + floatval($("#depositeamount_vat").val()) +
+                    floatval($("#commesion_vat").val()) + floatval($("#depositeamount").val()) + floatval($("#services").val()) + floatval($("#water").val()) + floatval($("#fristsa3e").val())));
+            }
+
+
+            function sumofamout() {
+                if (!autocalc) {
+                    return;
+                }
+                a = document.form.depositeamount.value;
+                b = document.form.fristsa3e.value;
+                c = document.form.water.value;
+                d = document.form.tamen.value;
+                e = document.form.services.value;
+                f = document.form.secondsa3e.value;
+
+
+                a = floatval(a.replace(/,/g, ""));
+                b = floatval(b.replace(/,/g, ""));
+                c = floatval(c.replace(/,/g, ""));
+                d = floatval(d.replace(/,/g, ""));
+                e = floatval(e.replace(/,/g, ""));
+                f = floatval(f.replace(/,/g, ""));
+                if (isNaN(a)) {
+                    a = 0;
+                }
+                if (isNaN(b)) {
+                    b = 0;
+                }
+                if (isNaN(c)) {
+                    c = 0;
+                }
+                if (isNaN(d)) {
+                    d = 0;
+                }
+                if (isNaN(e)) {
+                    e = 0;
+                }
+                if (isNaN(f)) {
+                    f = 0;
+                }
+
+                document.form.payedamount.value = floatval(a + b + c + d + e + floatval($("#total_vat").val()));
+
+
+            }
+
+            function removeallcookies() {
+
+                eraseCookie("mostagernamecoc");
+                eraseCookie("mostagertelcoc");
+                eraseCookie("workcoc");
+                eraseCookie("workaddresscoc");
+                eraseCookie("mostageridnumbercoc");
+                eraseCookie("mostagergensiacoc");
+                eraseCookie("kafelnamecoc");
+                eraseCookie("kafelphonecoc");
+                eraseCookie("kafeladdresscoc");
+                eraseCookie("mostageridplacecoc");
+                eraseCookie("mostageriddatecoc");
+                eraseCookie("mostageridtypecoc");
+                eraseCookie("mostageragentcoc");
+                eraseCookie("mostageremailcoc");
+                eraseCookie("tamencoc");
+                eraseCookie("payedamountcoc");
+                eraseCookie("depositeamountcoc");
+                eraseCookie("fristsa3ecoc");
+                eraseCookie("secondsa3ecoc");
+                eraseCookie("watercoc");
+                eraseCookie("kafelnamecoc");
+                eraseCookie("kafelphonecoc");
+                eraseCookie("kafeladdresscoc");
+                eraseCookie("electcoc");
+                eraseCookie("elect_readingcoc");
+                eraseCookie("servicescoc");
+
+            }
+        </script>
+
+        </form>
+
+
+
+
+    </div>
+
+    <script language="javascript">
+        calculaterent();
+
+        function handlePropertyChange(selectElement) {
+            // Update address field
+            $('#aqaraddress').val($('option:selected', selectElement).attr('rel'));
+
+            // Clear the rent field when building changes
+            $('#annualprice').val('');
+
+            // Reset the units dropdown
+            $('#idsubaqar').html('<option value="">-- اختر الوحدة --</option>');
+
+            // If no building selected, return
+            if (!selectElement.value) {
+                return;
+            }
+
+            // Build SQL query for units
+            var sql = "select amlakdetails.idsubaqar, Concat(aqarsubtype.aqarsubtypename,' - ',amlakdetails.rakam) " +
+                "from amlakdetails,aqarsubtype " +
+                "where amlakdetails.aqarsubtype=aqarsubtype.aqarsubtype " +
+                "and amlakdetails.mostagerid=0 " +
+                "and amlakdetails.idaqar='" + selectElement.value + "'";
+
+            // Fill the units dropdown
+            ajaxfillcombox(document.getElementById('idsubaqar'), sql);
+        }
+
+        function handleUnitChange() {
+            var idsubaqar = $('#idsubaqar').val();
+
+            // If no unit selected, clear the rent field
+            if (!idsubaqar) {
+                $('#annualprice').val('');
+                calculaterent();
+                return;
+            }
+
+            // Show loading state (optional)
+            console.log('Loading unit data for ID:', idsubaqar);
+
+            // Make AJAX call to fetch unit data
+            $.ajax({
+                url: 'egar_get_unit.hnt',
+                type: 'GET',
+                data: { idsubaqar: idsubaqar },
+                dataType: 'json',
+                success: function(response) {
+                    if (response.success && response.data) {
+                        var unit = response.data;
+
+                        // Populate the annual price field
+                        $('#annualprice').val(unit.price);
+
+                        // Trigger rent calculation
+                        calculaterent();
+
+                        // Trigger cookie update
+                        createCookie('annualpricecoc', unit.price, 1);
+
+                        console.log('Unit data loaded successfully. Price:', unit.price);
+                    } else {
+                        console.error('Failed to load unit data:', response.error);
+                        if (response.error) {
+                            alert('فشل تحميل بيانات الوحدة: ' + response.error);
+                        }
+                        // Clear the price field on error
+                        $('#annualprice').val('');
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error('AJAX Error:', error);
+                    alert('حدث خطأ في تحميل بيانات الوحدة. يرجى المحاولة مرة أخرى.');
+                    // Clear the price field on error
+                    $('#annualprice').val('');
+                }
+            });
+        }
+
+        function calculatEndDate() {
+            // Get start date value
+            let startDateValue = $("#st_date_").val();
+            if (!startDateValue) return;
+
+            let startDate = startDateValue.split('/');
+            if (startDate.length !== 3) return;
+
+            console.log('Start Date:', startDate);
+
+            // Calculate new month and year
+            let day = parseInt(startDate[0]);
+            let month = parseInt(startDate[1]) + parseInt($('#contractDuraion').val());
+            //let year = parseInt(startDate[2]) + Math.floor(parseInt($('#contractDuraion').val()) / 12);
+            let year = parseInt(startDate[2]) ;
+
+            // Handle month overflow (12 months in both calendars)
+            while (month > 12) {
+                month -= 12;
+                year += 1;
+            }
+
+            // Correct old dates if needed
+            // Read current calendar type from the dropdown, fallback to initial PHP value
+            var currentCalendarType = $("#datetypeselector").val();
+            if (currentCalendarType === undefined || currentCalendarType === null) {
+                // Fallback to initial PHP value if dropdown not yet initialized
+                currentCalendarType = '<?= (isset($hnt_dll) ? intval($hnt_dll) : 1) ?>';
+            }
+            var isHijri = (currentCalendarType == '0' || currentCalendarType === 0);
+            console.log('Current calendar type:', isHijri ? 'Hijri' : 'Gregorian', '(value:', currentCalendarType, ')');
+
+            if ($("#correct_old_dates").val() > 0) {
+                console.log('Correcting old dates');
+                var currentYear = <?= $next_year_number; ?>;
+
+                // For Hijri, convert current Gregorian year to Hijri
+                if (isHijri) {
+                    var today = new Date();
+                    var hijriToday = GregorianToHijri(today.getDate(), today.getMonth() + 1, today.getFullYear());
+                    currentYear = hijriToday.year;
+                }
+
+                if (year < currentYear) {
+                    year = currentYear;
+                }
+            }
+
+            // Format new date
+            let newDate = `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}/${year}`;
+            console.log('New End Date:', newDate, isHijri ? '(Hijri)' : '(Gregorian)');
+
+            // Set the value directly
+            $("#st_date0_").val(newDate);
+        }
+
+
+        // Hijri to Gregorian conversion functions
+        function HijriToGregorian(hDay, hMonth, hYear) {
+            var jd = parseInt((11 * hYear + 3) / 30) + 354 * hYear + 30 * hMonth - parseInt((hMonth - 1) / 2) + hDay + 1948440 - 385;
+            var l = jd + 68569;
+            var n = parseInt((4 * l) / 146097);
+            l = l - parseInt((146097 * n + 3) / 4);
+            var i = parseInt((4000 * (l + 1)) / 1461001);
+            l = l - parseInt((1461 * i) / 4) + 31;
+            var j = parseInt((80 * l) / 2447);
+            var gDay = l - parseInt((2447 * j) / 80);
+            l = parseInt(j / 11);
+            var gMonth = j + 2 - 12 * l;
+            var gYear = 100 * (n - 49) + i + l;
+            return {
+                day: gDay,
+                month: gMonth,
+                year: gYear
+            };
+        }
+
+        function GregorianToHijri(gDay, gMonth, gYear) {
+            var jd = parseInt((1461 * (gYear + 4800 + parseInt((gMonth - 14) / 12))) / 4) +
+                parseInt((367 * (gMonth - 2 - 12 * (parseInt((gMonth - 14) / 12)))) / 12) -
+                parseInt((3 * (parseInt((gYear + 4900 + parseInt((gMonth - 14) / 12)) / 100))) / 4) +
+                gDay - 32075;
+            var l = jd - 1948440 + 10632;
+            var n = parseInt((l - 1) / 10631);
+            l = l - 10631 * n + 354;
+            var j = (parseInt((10985 - l) / 5316)) * (parseInt((50 * l) / 17719)) +
+                (parseInt(l / 5670)) * (parseInt((43 * l) / 15238));
+            l = l - (parseInt((30 - j) / 15)) * (parseInt((17719 * j) / 50)) -
+                (parseInt(j / 16)) * (parseInt((15238 * j) / 43)) + 29;
+            var hMonth = parseInt((24 * l) / 709);
+            var hDay = l - parseInt((709 * hMonth) / 24);
+            var hYear = 30 * n + j - 30;
+            return {
+                day: hDay,
+                month: hMonth,
+                year: hYear
+            };
+        }
+
+        $(document).ready(function() {
+            $("#mainform").validate();
+
+            // Check if Hijri calendar is selected
+            var isHijri = <?= (isset($hnt_dll) && $hnt_dll == 0) ? 'true' : 'false' ?>;
+            var calType = isHijri ? 'hijri' : 'gregorian';
+            console.log('Calendar Type:', isHijri ? 'Hijri' : 'Gregorian');
+
+            // Set calendartype data attribute on all datepicker inputs BEFORE initialization
+            // This is required because the plugin checks data attribute first
+            $('.datepicker-input').each(function() {
+                $(this).data('calendartype', calType);
+            });
+
+            // Initialize Bootstrap Datepicker with Hijri/Gregorian support
+            $('.datepicker-input').datepicker({
+                format: 'dd/mm/yyyy',
+                language: 'ar',
+                rtl: true,
+                autoclose: true,
+                todayHighlight: true,
+                calendarType: calType,
+                orientation: 'bottom auto',
+                weekStart: isHijri ? 6 : 0
+            }).on('changeDate', function(e) {
+                if (this.id === 'st_date_') {
+                    calculatEndDate();
+                }
+            });
+
+            // Make calendar icons clickable
+            $('.input-group-text').on('click', function() {
+                var input = $(this).prev('input');
+                input.focus();
+                input.datepicker('show');
+            });
+
+            // Calculate end date on changes
+            $('#contractDuraion').on('keyup change', function(e) {
+                calculatEndDate();
+            });
+            $('#correct_old_dates').on('change', function(e) {
+                calculatEndDate();
+            });
+
+            // AJAX Form Submission
+            $('#mainform').on('submit', function(e) {
+                e.preventDefault();
+
+                // Validate required fields
+                if (!$('#mainform')[0].checkValidity()) {
+                    $('#mainform')[0].reportValidity();
+                    return false;
+                }
+
+                // Show loading state
+                $('#submitBtn').prop('disabled', true);
+                $('#submitBtnSpinner').removeClass('d-none');
+                $('#submitBtnText').text('جاري الحفظ...');
+                $('#alertContainer').html('');
+
+                // Update hidden idaqar field
+                $('#idaqar_hidden').val($('#idaqar').val());
+
+                // Serialize form data
+                var formData = $(this).serialize();
+
+                // Submit via AJAX
+                $.ajax({
+                    url: 'egar.api.hnt',
+                    type: 'POST',
+                    data: formData,
+                    dataType: 'json',
+                    success: function(response) {
+                        if (response.success) {
+                            // Show success message
+                            $('#alertContainer').html(
+                                '<div class="alert alert-success alert-dismissible fade show" role="alert">' +
+                                '<i class="bi bi-check-circle me-2"></i>' +
+                                '<strong>نجح!</strong> ' + response.message +
+                                '<br><small>رقم العقد: ' + response.data.contract_id + '</small>' +
+                                '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+                                '</div>'
+                            );
+
+                            // Clear cookies
+                            removeallcookies();
+
+                            // Redirect after 2 seconds
+                            setTimeout(function() {
+                                window.location.href = '/aqary/admin/amlak.hnt';
+                            }, 2000);
+                        } else {
+                            // Show error message
+                            $('#alertContainer').html(
+                                '<div class="alert alert-danger alert-dismissible fade show" role="alert">' +
+                                '<i class="bi bi-exclamation-triangle me-2"></i>' +
+                                '<strong>خطأ!</strong> ' + response.message +
+                                '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+                                '</div>'
+                            );
+
+                            // Reset button
+                            $('#submitBtn').prop('disabled', false);
+                            $('#submitBtnSpinner').addClass('d-none');
+                            $('#submitBtnText').text('إضافة المستأجر');
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        console.error('AJAX Error:', error);
+                        $('#alertContainer').html(
+                            '<div class="alert alert-danger alert-dismissible fade show" role="alert">' +
+                            '<i class="bi bi-exclamation-triangle me-2"></i>' +
+                            '<strong>خطأ!</strong> حدث خطأ في الاتصال بالخادم. يرجى المحاولة مرة أخرى.' +
+                            '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+                            '</div>'
+                        );
+
+                        // Reset button
+                        $('#submitBtn').prop('disabled', false);
+                        $('#submitBtnSpinner').addClass('d-none');
+                        $('#submitBtnText').text('إضافة المستأجر');
+                    }
+                });
+
+                return false;
+            });
+        });
+
+        // Load contract template function
+        function loadContractTemplate() {
+            const selector = document.getElementById('contractTemplateSelector');
+            const templateFile = selector.value;
+            const notesTextarea = document.getElementById('contractNotes');
+
+            if (!templateFile) {
+                return;
+            }
+
+            // Show loading state
+            notesTextarea.disabled = true;
+            notesTextarea.value = 'جاري التحميل...';
+
+            // Load template content via AJAX
+            $.post('/aqary/admin/include/amlak/' + templateFile, {
+                userid: '<?= $_SESSION['useridv'] ?? '' ?>'
+            })
+            .done(function(data) {
+                notesTextarea.value = data;
+            })
+            .fail(function() {
+                alert('فشل تحميل النموذج. الرجاء المحاولة مرة أخرى.');
+                notesTextarea.value = '';
+            })
+            .always(function() {
+                notesTextarea.disabled = false;
+            });
+        }
+
+        // Auto-load first template on page load
+        $(document).ready(function() {
+            const selector = document.getElementById('contractTemplateSelector');
+            if (selector && selector.value) {
+                loadContractTemplate();
+            }
+        });
+
+        // Load tenant data via AJAX
+        function loadTenantData(tenantId) {
+            // If "new tenant" is selected, clear all fields
+            if (tenantId == '0' || tenantId == '') {
+                clearTenantFields();
+                $('#mostagerid').val('');
+                return;
+            }
+
+            // Show loading state (optional - can add a spinner if needed)
+            console.log('Loading tenant data for ID:', tenantId);
+
+            // Make AJAX call to fetch tenant data
+            $.ajax({
+                url: 'egar_get_tenant.hnt',
+                type: 'GET',
+                data: { mostagerid: tenantId },
+                dataType: 'json',
+                success: function(response) {
+                    if (response.success && response.data) {
+                        var tenant = response.data;
+
+                        // Update hidden mostagerid field
+                        $('#mostagerid').val(tenant.mostagerid);
+
+                        // Populate tenant personal information fields
+                        populateField('mostagername', tenant.mostagername);
+                        populateField('mostagervatnumber', tenant.mostagervatnumber);
+                        populateField('mostageridnumber', tenant.mostageridnumber);
+                        populateField('mostageridplace', tenant.mostageridplace);
+                        populateField('mostageriddate', tenant.mostageriddate);
+                        populateField('mostageridtype', tenant.mostageridtype);
+                        populateField('mostagertel', tenant.mostagertel);
+                        populateField('mostageragent', tenant.mostageragent);
+                        populateField('mostageremail', tenant.mostageremail);
+                        populateField('work', tenant.work);
+                        populateField('workaddress', tenant.workaddress);
+                        populateField('mostagergensia', tenant.mostagergensia);
+
+                        // Populate guarantor information fields
+                        populateField('kafelname', tenant.kafelname);
+                        populateField('kafelphone', tenant.kafelphone);
+                        populateField('kafeladdress', tenant.kafeladdress);
+
+                        console.log('Tenant data loaded successfully');
+                    } else {
+                        console.error('Failed to load tenant data:', response.error);
+                        alert('فشل تحميل بيانات المستأجر: ' + response.error);
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error('AJAX Error:', error);
+                    alert('حدث خطأ في تحميل بيانات المستأجر. يرجى المحاولة مرة أخرى.');
+                }
+            });
+        }
+
+        // Helper function to populate field and update cookie
+        function populateField(fieldName, value) {
+            var field = $('[name="' + fieldName + '"]');
+            if (field.length) {
+                field.val(value || '');
+                // Trigger cookie update
+                createCookie(fieldName + 'coc', value || '', 1);
+            }
+        }
+
+        // Function to clear all tenant fields
+        function clearTenantFields() {
+            var fieldsToClear = [
+                'mostagername', 'mostagervatnumber', 'mostageridnumber', 'mostageridplace',
+                'mostageriddate', 'mostageridtype', 'mostagertel', 'mostageragent',
+                'mostageremail', 'work', 'workaddress', 'mostagergensia',
+                'kafelname', 'kafelphone', 'kafeladdress'
+            ];
+
+            fieldsToClear.forEach(function(fieldName) {
+                populateField(fieldName, '');
+            });
+        }
+
+        // Change calendar type via AJAX (without page refresh)
+        function changeCalendarType(calendarType) {
+            var isHijri = (calendarType == '0');
+
+            console.log('============================================');
+            console.log('Changing calendar type to:', isHijri ? 'Hijri (0)' : 'Gregorian (1)');
+            console.log('Calendar Type Value:', calendarType);
+
+            // Update the badge display
+            var badge = $('#calendarBadge');
+            if (isHijri) {
+                badge.removeClass('bg-primary').addClass('bg-success');
+                badge.text('🌙 هجري');
+            } else {
+                badge.removeClass('bg-success').addClass('bg-primary');
+                badge.text('📅 ميلادي');
+            }
+
+            // Update the current value display
+            $('#calendarTypeValue').text(calendarType);
+
+            // Store the preference in a cookie
+            createCookie('hnt_dll', calendarType, 365);
+
+            // Store current values from date inputs
+            var dateValues = {};
+            $('.datepicker-input').each(function() {
+                var val = $(this).val();
+                if (val) {
+                    dateValues[this.id] = val;
+                    console.log('Saving date value for', this.id, ':', val);
+                }
+            });
+
+            // Completely destroy all datepickers
+            console.log('Removing existing datepickers...');
+            $('.datepicker-input').each(function() {
+                var $input = $(this);
+
+                // Try to destroy the datepicker
+                try {
+                    $input.datepicker('destroy');
+                } catch (e) {}
+
+                try {
+                    $input.datepicker('remove');
+                } catch (e) {}
+
+                // Remove datepicker-specific data
+                $input.removeData('datepicker');
+                $input.removeData('date');
+
+                // Only unbind datepicker-specific events
+                $input.off('changeDate');
+                $input.off('show hide change clearDate');
+                $input.off('focus.datepicker');
+                $input.off('blur.datepicker');
+                $input.off('click.datepicker');
+
+                console.log('Removed datepicker from:', this.id);
+            });
+
+            // Remove all datepicker DOM elements
+            $('.datepicker').remove();
+            $('.datepicker-dropdown').remove();
+            $('.datepicker-inline').remove();
+
+            console.log('All datepickers removed. Waiting before reinitializing...');
+
+            // Wait for DOM to be completely clean
+            setTimeout(function() {
+                console.log('Reinitializing datepickers with calendarType:', isHijri ? 'hijri' : 'gregorian');
+
+                // Reinitialize each datepicker individually
+                $('.datepicker-input').each(function() {
+                    var $input = $(this);
+                    var inputId = this.id;
+                    var calType = isHijri ? 'hijri' : 'gregorian';
+
+                    console.log('Initializing datepicker for:', inputId, 'with calendar:', calType);
+
+                    // Set calendarType as a data attribute before initialization (plugin reads 'calendartype' without hyphen)
+                    $input.data('calendartype', calType);
+
+                    // Initialize with explicit calendarType
+                    var dpOptions = {
+                        format: 'dd/mm/yyyy',
+                        language: 'ar',
+                        rtl: true,
+                        autoclose: true,
+                        todayHighlight: true,
+                        orientation: 'bottom auto',
+                        weekStart: isHijri ? 6 : 0
+                    };
+
+                    // Force set calendarType
+                    dpOptions.calendarType = calType;
+
+                    $input.datepicker(dpOptions).on('changeDate', function(e) {
+                        if (this.id === 'st_date_') {
+                            calculatEndDate();
+                        }
+                    });
+
+                    // Force update the calendarType after initialization
+                    setTimeout(function() {
+                        var dpData = $input.data('datepicker');
+                        if (dpData) {
+                            // Force set multiple ways
+                            if (dpData.o) {
+                                dpData.o.calendarType = calType;
+                            }
+                            if (dpData.calendarType !== undefined) {
+                                dpData.calendarType = calType;
+                            }
+
+                            // Trigger update/fill to force re-render with new calendar type
+                            try {
+                                if (dpData.fill) {
+                                    dpData.fill();
+                                }
+                                if (dpData.update) {
+                                    dpData.update();
+                                }
+                            } catch (e) {
+                                console.log('Error updating datepicker:', e);
+                            }
+
+                            // Verify
+                            var finalType = dpData.o ? dpData.o.calendarType : 'unknown';
+                            console.log('Datepicker', inputId, 'calendarType after update:', finalType);
+                        }
+                    }, 50);
+                });
+
+                // Convert and restore previous values
+                $.each(dateValues, function(id, value) {
+                    if (value && value.trim()) {
+                        var parts = value.split('/');
+                        if (parts.length === 3) {
+                            var day = parseInt(parts[0]);
+                            var month = parseInt(parts[1]);
+                            var year = parseInt(parts[2]);
+
+                            var convertedDate;
+                            if (isHijri) {
+                                // Converting from Gregorian to Hijri
+                                convertedDate = GregorianToHijri(day, month, year);
+                                console.log('Converting', value, 'from Gregorian to Hijri:', convertedDate.day + '/' + convertedDate.month + '/' + convertedDate.year);
+                            } else {
+                                // Converting from Hijri to Gregorian
+                                convertedDate = HijriToGregorian(day, month, year);
+                                console.log('Converting', value, 'from Hijri to Gregorian:', convertedDate.day + '/' + convertedDate.month + '/' + convertedDate.year);
+                            }
+
+                            var newValue = String(convertedDate.day).padStart(2, '0') + '/' +
+                                          String(convertedDate.month).padStart(2, '0') + '/' +
+                                          convertedDate.year;
+                            $('#' + id).val(newValue);
+                            console.log('Converted and restored date value for', id, ':', newValue);
+                        } else {
+                            $('#' + id).val(value);
+                            console.log('Restored date value without conversion for', id, ':', value);
+                        }
+                    }
+                });
+
+                // Reattach calendar icon click handlers
+                $('.input-group-text').off('click.datepicker').on('click.datepicker', function() {
+                    var input = $(this).prev('input');
+                    if (input.length && input.hasClass('datepicker-input')) {
+                        input.focus();
+                        try {
+                            input.datepicker('show');
+                        } catch (e) {
+                            console.error('Error showing datepicker:', e);
+                        }
+                    }
+                });
+
+                console.log('Calendar type change completed successfully!');
+                console.log('============================================');
+            }, 150);
+        }
+    </script>
+
+    <iframe style="display:none;" id="checkrakam3akd" name="checkrakam3akd" src="about:blank"></iframe>
+
+<?php
+    // Close the if (!$is_ajax_request) block
+}
+
+// Include footer after HTML rendering
+require_once '../../../foter.hnt';
+
+// Database schema updates - ensure required columns exist
+mysql_query("ALTER TABLE `egar`
+	ADD COLUMN `services` DECIMAL(10,2) NOT NULL,
+	ADD COLUMN `secondsa3e_duration` INT(11) NOT NULL,
+	ADD COLUMN `water_duration` INT(11) NOT NULL ,
+	ADD COLUMN `elect_reading` VARCHAR(50) NOT NULL,
+	ADD COLUMN `services_duration` INT(11) NOT NULL", $link);
+mysql_query("ALTER TABLE `eradat`
+	ADD COLUMN `services` DECIMAL(10,2) NOT NULL ", $link);
+mysql_query("ALTER TABLE `aksat`
+	ADD COLUMN `services` DECIMAL(10,2) NOT NULL ", $link);
+mysql_query("ALTER TABLE `sanad`
+	ADD COLUMN `payment_type` INT(11) NULL DEFAULT '0' ,
+	ADD COLUMN `notes` VARCHAR(500) NULL", $link);
+mysql_query("ALTER TABLE `sanadsarf`
+	ADD COLUMN `payment_type` INT(11) NULL DEFAULT '0' ,
+	ADD COLUMN `notes` VARCHAR(500) NULL", $link);
+mysql_query("ALTER TABLE `payment_voucher`
+	ADD COLUMN `payment_type` INT(11) NULL DEFAULT '0' ,
+	ADD COLUMN `notes` VARCHAR(500) NULL", $link);
+mysql_query("ALTER TABLE `recive_voucher`
+	ADD COLUMN `payment_type` INT(11) NULL DEFAULT '0' ,
+	ADD COLUMN `notes` VARCHAR(500) NULL", $link);
+mysql_query("ALTER TABLE `egar` ADD COLUMN `notes` VARCHAR(1000) NULL", $link);
+mysql_query("ALTER TABLE `aksat`
+	ADD COLUMN `egar_id` INT(11) NULL DEFAULT '0' ", $link);
+mysql_query("ALTER TABLE `egar` ADD COLUMN `insert_date` INT(11) NULL DEFAULT '0' ", $link);
+mysql_query("ALTER TABLE `egar` ADD COLUMN `elect` VARCHAR(50) NULL", $link);
+?>
