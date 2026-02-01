@@ -1,0 +1,471 @@
+<?php
+/**
+ * Rent Management System - Comprehensive Validation Script
+ *
+ * Tests all components of the modernized rent management system:
+ * - Database schema validation
+ * - Configuration checks
+ * - Auto-renewal system
+ * - Installment generation
+ * - Contract lifecycle
+ * - Calendar calculations
+ *
+ * Run via browser: http://yoursite.com/admin/include/amlak/system_validation.hnt?run=1
+ * Run via CLI: php system_validation.hnt
+ *
+ * @date 2025-12-05
+ */
+
+// Determine execution mode
+$isCLI = (php_sapi_name() === 'cli');
+
+if (!$isCLI) {
+    if (!isset($_REQUEST['run']) || $_REQUEST['run'] != '1') {
+        die('⚠ Add ?run=1 to execute this validation script');
+    }
+    header('Content-Type: text/html; charset=utf-8');
+    echo '<!DOCTYPE html><html dir="rtl" lang="ar">';
+    echo '<head><meta charset="utf-8"><title>System Validation</title>';
+    echo '<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">';
+    echo '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">';
+    echo '<style>body{font-family:Arial;padding:20px;background:#f5f5f5}.card{margin-bottom:20px}pre{background:#2d2d2d;color:#f8f8f2;padding:15px;border-radius:6px;overflow-x:auto}.pass{color:#28a745}.fail{color:#dc3545}.warn{color:#ffc107}.info{color:#17a2b8}</style>';
+    echo '</head><body><div class="container">';
+}
+
+// Include required files
+require_once '../../../connectdb.hnt';
+require_once 'CalendarManager.class.hnt';
+require_once 'auto_renewal_config.hnt';
+
+// Initialize
+$calendar = new CalendarManager();
+$tests = [];
+$passed = 0;
+$failed = 0;
+$warnings = 0;
+
+// Helper functions
+function printHeader($title) {
+    global $isCLI;
+    echo $isCLI ? "\n" . str_repeat('=', 70) . "\n$title\n" . str_repeat('=', 70) . "\n" : "<div class='card'><div class='card-header bg-primary text-white'><h5 class='mb-0'>$title</h5></div><div class='card-body'>";
+}
+
+function printFooter() {
+    global $isCLI;
+    if (!$isCLI) echo "</div></div>";
+}
+
+function testResult($testName, $passed, $message = '', $level = 'info') {
+    global $tests, $passed as $passedCount, $failed, $warnings, $isCLI;
+
+    $tests[] = ['name' => $testName, 'passed' => $passed, 'message' => $message, 'level' => $level];
+
+    if ($passed && $level !== 'warning') {
+        $passedCount++;
+        $icon = $isCLI ? '✓' : '<i class="bi bi-check-circle-fill"></i>';
+        $class = 'pass';
+    } elseif ($level === 'warning') {
+        $warnings++;
+        $icon = $isCLI ? '⚠' : '<i class="bi bi-exclamation-triangle-fill"></i>';
+        $class = 'warn';
+    } else {
+        $failed++;
+        $icon = $isCLI ? '✗' : '<i class="bi bi-x-circle-fill"></i>';
+        $class = 'fail';
+    }
+
+    echo $isCLI
+        ? "$icon $testName" . ($message ? " - $message" : "") . "\n"
+        : "<div class='mb-2'><span class='$class'>$icon</span> <strong>$testName</strong>" . ($message ? "<br><small class='text-muted ms-4'>$message</small>" : "") . "</div>";
+}
+
+// ============================================================================
+// TEST SUITE 1: DATABASE SCHEMA VALIDATION
+// ============================================================================
+printHeader('1. Database Schema Validation');
+
+// Test: egar table has new columns
+$result = mysql_query("SHOW COLUMNS FROM egar LIKE 'status'", $link);
+testResult(
+    'egar.status column exists',
+    mysql_num_rows($result) > 0,
+    'Required for contract lifecycle management'
+);
+
+$result = mysql_query("SHOW COLUMNS FROM egar LIKE 'calendar_type'", $link);
+testResult(
+    'egar.calendar_type column exists',
+    mysql_num_rows($result) > 0,
+    'Required for dual calendar support'
+);
+
+$result = mysql_query("SHOW COLUMNS FROM egar LIKE 'updated_at'", $link);
+testResult(
+    'egar.updated_at column exists',
+    mysql_num_rows($result) > 0,
+    'Required for audit trail'
+);
+
+// Test: aksat table has new columns
+$result = mysql_query("SHOW COLUMNS FROM aksat LIKE 'status'", $link);
+testResult(
+    'aksat.status column exists',
+    mysql_num_rows($result) > 0,
+    'Required for installment tracking'
+);
+
+$result = mysql_query("SHOW COLUMNS FROM aksat LIKE 'amount_paid'", $link);
+testResult(
+    'aksat.amount_paid column exists',
+    mysql_num_rows($result) > 0,
+    'Required for payment tracking'
+);
+
+// Test: egar_history table exists
+$result = mysql_query("SHOW TABLES LIKE 'egar_history'", $link);
+testResult(
+    'egar_history table exists',
+    mysql_num_rows($result) > 0,
+    'Required for audit trail'
+);
+
+printFooter();
+
+// ============================================================================
+// TEST SUITE 2: CONFIGURATION VALIDATION
+// ============================================================================
+printHeader('2. Configuration Validation');
+
+// Test: Configuration constants defined
+testResult(
+    'INSTALLMENT_MONTHS_UPFRONT defined',
+    defined('INSTALLMENT_MONTHS_UPFRONT'),
+    'Value: ' . (defined('INSTALLMENT_MONTHS_UPFRONT') ? INSTALLMENT_MONTHS_UPFRONT : 'undefined')
+);
+
+testResult(
+    'RENEWAL_THRESHOLD_DAYS defined',
+    defined('RENEWAL_THRESHOLD_DAYS'),
+    'Value: ' . (defined('RENEWAL_THRESHOLD_DAYS') ? RENEWAL_THRESHOLD_DAYS : 'undefined')
+);
+
+testResult(
+    'RENEWAL_PERIOD_MONTHS defined',
+    defined('RENEWAL_PERIOD_MONTHS'),
+    'Value: ' . (defined('RENEWAL_PERIOD_MONTHS') ? RENEWAL_PERIOD_MONTHS : 'undefined')
+);
+
+
+printFooter();
+
+// ============================================================================
+// TEST SUITE 3: FILE EXISTENCE CHECKS
+// ============================================================================
+printHeader('3. Required Files Check');
+
+$requiredFiles = [
+    'CalendarManager.class.hnt' => 'Calendar calculation engine',
+    'auto_renewal_config.hnt' => 'Configuration file',
+    'auto_renew_contracts.api.hnt' => 'Auto-renewal system',
+    'contract_status_indicator.hnt' => 'Status badge renderer',
+    'contract_lifecycle.api.hnt' => 'Lifecycle management API',
+    'update_contract_statuses.hnt' => 'Status migration script',
+    'rental_dashboard_widget.hnt' => 'Dashboard widget'
+];
+
+foreach ($requiredFiles as $file => $description) {
+    testResult(
+        $file,
+        file_exists(__DIR__ . '/' . $file),
+        $description
+    );
+}
+
+printFooter();
+
+// ============================================================================
+// TEST SUITE 4: CALENDAR MANAGER TESTS
+// ============================================================================
+printHeader('4. Calendar Manager Tests');
+
+try {
+    // Test Hijri to Gregorian conversion
+    $hijriDate = ['day' => 1, 'month' => 1, 'year' => 1446];
+    $timestamp = $calendar->dateToTimestamp(1, 1, 1446, 'hijri');
+    $gregorian = $calendar->timestampToDate($timestamp, 'gregorian');
+
+    testResult(
+        'Hijri to Gregorian conversion',
+        $gregorian['year'] == 2024,
+        'Converts 1/1/1446 Hijri correctly'
+    );
+
+    // Test Gregorian to Hijri conversion
+    $timestamp = $calendar->dateToTimestamp(1, 1, 2025, 'gregorian');
+    $hijri = $calendar->timestampToDate($timestamp, 'hijri');
+
+    testResult(
+        'Gregorian to Hijri conversion',
+        $hijri['year'] == 1446,
+        'Converts 1/1/2025 Gregorian correctly'
+    );
+
+    // Test month addition (Gregorian)
+    $startTimestamp = strtotime('2025-01-01');
+    $endTimestamp = $calendar->addMonths($startTimestamp, 12, 1);
+    $diff = round(($endTimestamp - $startTimestamp) / (30 * 24 * 60 * 60));
+
+    testResult(
+        'Add 12 months (Gregorian)',
+        $diff >= 11 && $diff <= 13,
+        "Added $diff months (expected ~12)"
+    );
+
+    // Test month addition (Hijri)
+    $startTimestamp = $calendar->dateToTimestamp(1, 1, 1446, 'hijri');
+    $endTimestamp = $calendar->addMonths($startTimestamp, 12, 0);
+    $diff = round(($endTimestamp - $startTimestamp) / (29.5 * 24 * 60 * 60));
+
+    testResult(
+        'Add 12 months (Hijri)',
+        $diff >= 11 && $diff <= 13,
+        "Added $diff Hijri months (expected ~12)"
+    );
+
+} catch (Exception $e) {
+    testResult(
+        'Calendar Manager',
+        false,
+        'Error: ' . $e->getMessage()
+    );
+}
+
+printFooter();
+
+// ============================================================================
+// TEST SUITE 5: DATA INTEGRITY CHECKS
+// ============================================================================
+printHeader('5. Data Integrity Checks');
+
+// Test: Active contracts have proper status
+$result = mysql_query("SELECT COUNT(*) as count FROM egar WHERE end3aqd >= UNIX_TIMESTAMP() AND (status IS NULL OR status = '')", $link);
+$row = mysql_fetch_assoc($result);
+testResult(
+    'Active contracts have status field set',
+    $row['count'] == 0,
+    $row['count'] > 0 ? $row['count'] . ' contracts need status update' : 'All contracts have status',
+    $row['count'] > 0 ? 'warning' : 'info'
+);
+
+// Test: Installments have new status fields
+$result = mysql_query("SELECT COUNT(*) as count FROM aksat WHERE status IS NULL OR status = ''", $link);
+$row = mysql_fetch_assoc($result);
+testResult(
+    'Installments have status field set',
+    $row['count'] == 0,
+    $row['count'] > 0 ? $row['count'] . ' installments need status update' : 'All installments have status',
+    $row['count'] > 0 ? 'warning' : 'info'
+);
+
+// Test: Contracts have calendar_type
+$result = mysql_query("SELECT COUNT(*) as count FROM egar WHERE calendar_type IS NULL", $link);
+$row = mysql_fetch_assoc($result);
+testResult(
+    'Contracts have calendar_type set',
+    $row['count'] == 0,
+    $row['count'] > 0 ? $row['count'] . ' contracts missing calendar type' : 'All contracts have calendar type',
+    $row['count'] > 0 ? 'warning' : 'info'
+);
+
+// Test: Check for contracts with future installments
+$result = mysql_query("
+    SELECT
+        e.rakam3akdid,
+        COUNT(a.kastid) as total_installments,
+        SUM(CASE WHEN a.kastdate > UNIX_TIMESTAMP() THEN 1 ELSE 0 END) as future_installments
+    FROM egar e
+    LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+    WHERE e.end3aqd >= UNIX_TIMESTAMP()
+    AND (e.status IS NULL OR e.status IN ('active', 'active_arrears'))
+    GROUP BY e.rakam3akdid
+    HAVING future_installments < 12
+    LIMIT 1
+", $link);
+
+$needsInstallments = mysql_num_rows($result);
+testResult(
+    'Active contracts have sufficient future installments',
+    $needsInstallments == 0,
+    $needsInstallments > 0 ? 'Some contracts have <12 months of future installments' : 'All contracts have adequate future installments',
+    $needsInstallments > 0 ? 'warning' : 'info'
+);
+
+printFooter();
+
+// ============================================================================
+// TEST SUITE 6: AUTO-RENEWAL READINESS
+// ============================================================================
+printHeader('6. Auto-Renewal System Readiness');
+
+// Test: Find contracts that would be renewed
+$now = time();
+$threshold = $now + (RENEWAL_THRESHOLD_DAYS * 24 * 60 * 60);
+$result = mysql_query("
+    SELECT COUNT(*) as count
+    FROM egar
+    WHERE end3aqd >= $now
+    AND end3aqd <= $threshold
+    AND (status IS NULL OR status IN ('active', 'active_arrears'))
+", $link);
+$row = mysql_fetch_assoc($result);
+
+testResult(
+    'Contracts ready for auto-renewal',
+    true,
+    $row['count'] . ' contract(s) will be renewed within ' . RENEWAL_THRESHOLD_DAYS . ' days',
+    'info'
+);
+
+// Test: Auto-renewal script executable
+testResult(
+    'auto_renew_contracts.api.hnt is readable',
+    is_readable(__DIR__ . '/auto_renew_contracts.api.hnt'),
+    'Script can be executed'
+);
+
+printFooter();
+
+// ============================================================================
+// TEST SUITE 7: PERFORMANCE CHECKS
+// ============================================================================
+printHeader('7. Performance Checks');
+
+// Test: Key indexes exist
+$indexes = [
+    'egar' => ['end3aqd', 'status'],
+    'aksat' => ['iscomplete', 'kastdate', 'egar_id']
+];
+
+foreach ($indexes as $table => $cols) {
+    $result = mysql_query("SHOW INDEX FROM $table", $link);
+    $existingIndexes = [];
+    while ($row = mysql_fetch_assoc($result)) {
+        $existingIndexes[] = $row['Column_name'];
+    }
+
+    foreach ($cols as $col) {
+        testResult(
+            "Index on $table.$col",
+            in_array($col, $existingIndexes),
+            in_array($col, $existingIndexes) ? 'Indexed for fast queries' : 'Consider adding index',
+            in_array($col, $existingIndexes) ? 'info' : 'warning'
+        );
+    }
+}
+
+// Test: Query execution time
+$start = microtime(true);
+mysql_query("SELECT COUNT(*) FROM egar WHERE end3aqd >= UNIX_TIMESTAMP()", $link);
+$duration = round((microtime(true) - $start) * 1000, 2);
+
+testResult(
+    'Contract count query performance',
+    $duration < 100,
+    "$duration ms" . ($duration >= 100 ? ' (slow, consider optimization)' : ' (fast)'),
+    $duration >= 100 ? 'warning' : 'info'
+);
+
+printFooter();
+
+// ============================================================================
+// SUMMARY
+// ============================================================================
+printHeader('Validation Summary');
+
+$total = $passed + $failed + $warnings;
+$passRate = $total > 0 ? round(($passed / $total) * 100, 1) : 0;
+
+echo $isCLI
+    ? "\nTotal Tests: $total\n✓ Passed: $passed\n✗ Failed: $failed\n⚠ Warnings: $warnings\n\nPass Rate: $passRate%\n"
+    : "<div class='alert alert-" . ($failed == 0 ? 'success' : ($failed < 3 ? 'warning' : 'danger')) . "'>";
+
+if (!$isCLI) {
+    echo "<h5><i class='bi bi-clipboard-check'></i> Test Results</h5>";
+    echo "<div class='row'>";
+    echo "<div class='col-md-3'><strong>Total Tests:</strong> $total</div>";
+    echo "<div class='col-md-3 text-success'><strong>Passed:</strong> $passed</div>";
+    echo "<div class='col-md-3 text-danger'><strong>Failed:</strong> $failed</div>";
+    echo "<div class='col-md-3 text-warning'><strong>Warnings:</strong> $warnings</div>";
+    echo "</div>";
+    echo "<div class='mt-3'><strong>Pass Rate:</strong> <span class='badge bg-" . ($passRate >= 80 ? 'success' : ($passRate >= 60 ? 'warning' : 'danger')) . " fs-5'>$passRate%</span></div>";
+}
+
+// Recommendations
+echo $isCLI ? "\n" . str_repeat('-', 70) . "\nRecommendations:\n" . str_repeat('-', 70) . "\n" : "</div><div class='alert alert-info'><h5><i class='bi bi-lightbulb'></i> Recommendations</h5><ul>";
+
+if ($failed > 0) {
+    echo $isCLI
+        ? "⚠ CRITICAL: Fix failed tests before using the system in production\n"
+        : "<li class='text-danger'><strong>CRITICAL:</strong> Fix failed tests before using the system in production</li>";
+}
+
+if ($warnings > 0) {
+    echo $isCLI
+        ? "⚠ Address warnings to ensure optimal performance\n"
+        : "<li class='text-warning'>Address warnings to ensure optimal performance</li>";
+}
+
+// Specific recommendations
+$result = mysql_query("SELECT COUNT(*) as count FROM egar WHERE status IS NULL", $link);
+$row = mysql_fetch_assoc($result);
+if ($row['count'] > 0) {
+    echo $isCLI
+        ? "→ Run update_contract_statuses.hnt to set status for existing contracts\n"
+        : "<li>Run <a href='update_contract_statuses.hnt?run=1' target='_blank'>update_contract_statuses.hnt</a> to set status for existing contracts</li>";
+}
+
+$result = mysql_query("SELECT COUNT(*) as count FROM aksat WHERE status IS NULL", $link);
+$row = mysql_fetch_assoc($result);
+if ($row['count'] > 0) {
+    echo $isCLI
+        ? "→ Run migration script to set installment statuses\n"
+        : "<li>Run migration script to set installment statuses</li>";
+}
+
+if ($failed == 0 && $warnings == 0) {
+    echo $isCLI
+        ? "✓ System is ready for production use!\n"
+        : "<li class='text-success'><strong>✓ System is ready for production use!</strong></li>";
+}
+
+echo $isCLI ? "\n" : "</ul></div>";
+
+printFooter();
+
+// ============================================================================
+// NEXT STEPS
+// ============================================================================
+if (!$isCLI) {
+    echo "<div class='card'><div class='card-header bg-success text-white'><h5 class='mb-0'>Next Steps</h5></div><div class='card-body'>";
+    echo "<ol>";
+    echo "<li>Review test results above</li>";
+    echo "<li>Fix any failed tests (red ✗)</li>";
+    echo "<li>Address warnings if possible (yellow ⚠)</li>";
+    echo "<li>Test contract creation with 24-month installments</li>";
+    echo "<li>Test auto-renewal system: <a href='auto_renew_contracts.api.hnt?run=1' target='_blank'>Run Auto-Renewal</a></li>";
+    echo "<li>Integrate dashboard into egarstatus.hnt</li>";
+    echo "<li>Set up daily cron job for auto-renewal</li>";
+    echo "<li>Train users on new features</li>";
+    echo "</ol>";
+    echo "</div></div>";
+
+    echo "</div></body></html>";
+}
+
+// Return exit code (CLI only)
+if ($isCLI) {
+    exit($failed > 0 ? 1 : 0);
+}
+
+mysql_close($link);
+?>

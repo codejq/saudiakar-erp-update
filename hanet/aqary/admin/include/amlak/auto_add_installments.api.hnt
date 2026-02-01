@@ -7,9 +7,9 @@
  * Purpose: Automatically add installments for contracts
  *
  * Scenarios handled:
+ * 0. Contracts with ZERO installments (new contracts) → Generate initial installments
  * 1. Contracts with ALL installments paid → Add new installments batch
  * 2. Contracts approaching last installment (within 60 days) → Add more installments
- * 3. New installments based on contract duration/length
  *
  * Strategy:
  * - Add installments WITHOUT changing contract end date
@@ -29,10 +29,11 @@
 // Security and environment setup
 $isCLI = php_sapi_name() === 'cli';
 $runParam = isset($_GET['run']) && $_GET['run'] == '1';
+$debugParam = isset($_GET['debug']) && $_GET['debug'] == '1';
 
 if (!isset($link)) {
-    if (!$isCLI && !$runParam) {
-        die('Access denied. Use ?run=1 to execute.');
+    if (!$isCLI && !$runParam && !$debugParam) {
+        die('Access denied. Use ?run=1 to execute or ?debug=1 for diagnostics.');
     }
 
     require_once '../../../connectdb.hnt';
@@ -51,12 +52,15 @@ $dcal = new uCal();
 // ============================================================================
 
 $thresholdDays = defined('INSTALLMENT_GENERATION_THRESHOLD_DAYS') ? INSTALLMENT_GENERATION_THRESHOLD_DAYS : 60;
-$initialMonthsToGenerate = 24; // Generate 2 years upfront for new contracts
+$initialMonthsToGenerate = 12; // Generate 2 years upfront for new contracts
 $extensionMonths = null; // Use contract duration (null = auto-detect)
 $maxHijriDay = defined('MAX_HIJRI_DAY') ? MAX_HIJRI_DAY : 29;
 $maxGregorianDay = defined('MAX_GREGORIAN_DAY') ? MAX_GREGORIAN_DAY : 28;
 $gracePeriod = defined('INSTALLMENT_GRACE_PERIOD_DAYS') ? INSTALLMENT_GRACE_PERIOD_DAYS : 5;
 $logActions = defined('LOG_AUTO_RENEWALS') ? LOG_AUTO_RENEWALS : true;
+
+// Batch processing limit to avoid timeout (use ?limit=N to override)
+$batchLimit = isset($_GET['limit']) ? intval($_GET['limit']) : 10;
 
 // ============================================================================
 // Initialize Report
@@ -65,6 +69,7 @@ $logActions = defined('LOG_AUTO_RENEWALS') ? LOG_AUTO_RENEWALS : true;
 $report = [
     'start_time' => time(),
     'contracts_checked' => 0,
+    'contracts_with_zero_installments' => 0,
     'contracts_with_no_installments' => 0,
     'contracts_needing_extension' => 0,
     'installments_added' => 0,
@@ -75,6 +80,69 @@ $report = [
 
 $now = time();
 $thresholdTimestamp = $now + ($thresholdDays * 24 * 60 * 60);
+
+// Skip processing if in debug mode - jump straight to debug output
+if ($debugParam) {
+    goto debug_section;
+}
+
+// ============================================================================
+// SCENARIO 0: Find Contracts with NO Installments (New Contracts)
+// ============================================================================
+// These are active contracts that have no installments at all
+// They need initial installments to be generated
+
+$sqlNoInstallmentsAtAll = "SELECT
+            e.rakam3akdid,
+            e.end3aqd,
+            e.startegar,
+            e.installments_extended_to,
+            e.fixed_payment_day,
+            e.duration,
+            e.depositeamount,
+            e.secondsa3e,
+            e.water,
+            e.services,
+            e.secondsa3e_duration,
+            e.water_duration,
+            e.services_duration,
+            ad.hnt_dll_type,
+            e.status,
+            ad.idsubaqar,
+            COUNT(a.kastid) as total_installments
+        FROM egar e
+        LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
+        LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+        WHERE e.end3aqd IS NOT NULL
+        AND e.startegar IS NOT NULL AND e.startegar > 0
+        AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
+        GROUP BY e.rakam3akdid
+        HAVING COUNT(a.kastid) = 0
+        ORDER BY e.rakam3akdid ASC
+        LIMIT {$batchLimit}";
+
+$resultNoInstallmentsAtAll = mysql_query($sqlNoInstallmentsAtAll, $link);
+
+if (!$resultNoInstallmentsAtAll) {
+    $report['errors'][] = "Scenario 0 Query Failed: " . mysql_error($link);
+} else {
+    while ($contract = mysql_fetch_assoc($resultNoInstallmentsAtAll)) {
+        $report['contracts_checked']++;
+        $report['contracts_with_zero_installments']++;
+
+        // For new contracts, use initial months or contract duration
+        $monthsToAdd = $initialMonthsToGenerate;
+
+        // Set last_installment_date to start date for initial generation
+        $contract['last_installment_date'] = $contract['startegar'];
+        $contract['total_installments'] = 0;
+
+        // Debug log
+        error_log("Processing contract {$contract['rakam3akdid']} (Unit {$contract['idsubaqar']}) - No installments scenario (Initial)");
+
+        processContract($contract, $monthsToAdd, 'initial', $report, $link, $calendar, $dcal, $now, $maxHijriDay, $maxGregorianDay, $gracePeriod, $logActions);
+    }
+}
 
 // ============================================================================
 // SCENARIO 1: Find Contracts with ALL Installments Paid
@@ -104,11 +172,12 @@ $sqlNoInstallments = "SELECT
         LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
         LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
         WHERE e.end3aqd IS NOT NULL
-        AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'active_expiring_soon'))
+        AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
         GROUP BY e.rakam3akdid
         HAVING COUNT(a.kastid) > 0
         AND COUNT(a.kastid) = SUM(CASE WHEN a.iscomplete = 1 THEN 1 ELSE 0 END)
-        ORDER BY e.rakam3akdid ASC";
+        ORDER BY e.rakam3akdid ASC
+        LIMIT {$batchLimit}";
 
 $resultNoInstallments = mysql_query($sqlNoInstallments, $link);
 
@@ -155,12 +224,13 @@ $sqlNeedingExtension = "SELECT
         LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
         LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
         WHERE e.end3aqd IS NOT NULL
-        AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'active_expiring_soon'))
+        AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
         GROUP BY e.rakam3akdid
         HAVING COUNT(a.kastid) > 0
         AND MAX(a.kastdate) IS NOT NULL
         AND MAX(a.kastdate) <= {$thresholdTimestamp}
-        ORDER BY MAX(a.kastdate) ASC";
+        ORDER BY MAX(a.kastdate) ASC
+        LIMIT {$batchLimit}";
 
 $resultNeedingExtension = mysql_query($sqlNeedingExtension, $link);
 
@@ -241,20 +311,30 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
     }
 
     // Calculate number of installments to generate
-    // If last installment is in the past, we need to catch up to current date + threshold
-    $thresholdDays = defined('INSTALLMENT_GENERATION_THRESHOLD_DAYS') ? INSTALLMENT_GENERATION_THRESHOLD_DAYS : 60;
-    $targetDate = $now + ($thresholdDays * 24 * 60 * 60); // 60 days from now
+    // For 'all_paid' type: ONLY add ONE installment (no catch-up)
+    // For 'initial' type: Generate initial batch
+    // For 'extension' type: Catch up if needed
+    if ($type === 'all_paid') {
+        // Only add ONE installment for contracts with all installments paid
+        $numInstallments = 1;
+    } else {
+        // For initial and extension types, use catch-up logic
+        $thresholdDays = defined('INSTALLMENT_GENERATION_THRESHOLD_DAYS') ? INSTALLMENT_GENERATION_THRESHOLD_DAYS : 60;
+        $targetDate = $now + ($thresholdDays * 24 * 60 * 60); // 60 days from now
 
-    if ($lastInstallmentDate < $targetDate) {
-        // Calculate approximate months behind
-        $secondsBehind = $targetDate - $lastInstallmentDate;
-        $monthsBehind = ceil($secondsBehind / (30 * 24 * 60 * 60)); // Approximate: 30 days per month
+        if ($lastInstallmentDate < $targetDate) {
+            // Calculate approximate months behind
+            $secondsBehind = $targetDate - $lastInstallmentDate;
+            $monthsBehind = ceil($secondsBehind / (30 * 24 * 60 * 60)); // Approximate: 30 days per month
 
-        // Generate enough installments to catch up
-        $monthsToGenerate = max($monthsToGenerate, $monthsBehind);
+            // Generate enough installments to catch up
+            $monthsToGenerate = max($monthsToGenerate, $monthsBehind);
+        }
+        if($monthsToGenerate > 12){
+            $monthsToGenerate = 12;
+        }
+        $numInstallments = ceil($monthsToGenerate / $duration);
     }
-
-    $numInstallments = ceil($monthsToGenerate / $duration);
 
     // Start transaction
     mysql_query("START TRANSACTION", $link);
@@ -473,6 +553,7 @@ function outputReport($report) {
         echo "Execution Time: " . date('Y-m-d H:i:s', $report['start_time']) . "\n";
         echo "Duration: " . (time() - $report['start_time']) . " seconds\n\n";
         echo "Contracts Checked: " . $report['contracts_checked'] . "\n";
+        echo "- With zero installments (new): " . $report['contracts_with_zero_installments'] . "\n";
         echo "- With all installments paid: " . $report['contracts_with_no_installments'] . "\n";
         echo "- Needing extension: " . $report['contracts_needing_extension'] . "\n";
         echo "Contracts Processed: " . $report['contracts_processed'] . "\n";
@@ -694,18 +775,24 @@ function outputReport($report) {
         <h1><span class="icon">⚙️</span>تقرير إضافة الأقساط التلقائية</h1>
 
         <div class="alert alert-info">
-            <strong><span class="icon">ℹ️</span>ملاحظة هامة:</strong> هذه الخدمة تضيف الأقساط للعقود تلقائياً وتتعامل مع سيناريوهين:
+            <strong><span class="icon">ℹ️</span>ملاحظة هامة:</strong> هذه الخدمة تضيف الأقساط للعقود تلقائياً وتتعامل مع ثلاثة سيناريوهات:
             <ul style="margin: 10px 0 0 20px;">
+                <li><strong>العقود الجديدة بدون أقساط</strong> → إنشاء أقساط أولية</li>
                 <li><strong>العقود التي جميع أقساطها مدفوعة</strong> → إضافة أقساط جديدة (حسب مدة العقد)</li>
                 <li><strong>العقود التي تقترب من آخر قسط</strong> (خلال 60 يوم) → إضافة أقساط جديدة (حسب مدة العقد)</li>
             </ul>
-            <strong>مهم:</strong> تاريخ نهاية العقد يبقى كما هو حتى يقوم المستخدم بتجديده يدوياً.
+            <strong>مهم:</strong> تاريخ نهاية العقد يبقى كما هو حتى يقوم المستخدم بتجديده يدوياً.<br>
+            <strong>📦 حد المعالجة:</strong> <?= $batchLimit ?> عقد لكل سيناريو (استخدم <code>?run=1&limit=N</code> لتغيير الحد)
         </div>
 
         <div class="summary">
             <div class="metric info">
                 <div class="metric-value"><?= $report['contracts_checked'] ?></div>
                 <div class="metric-label">عقد تم فحصه</div>
+            </div>
+            <div class="metric" style="background: linear-gradient(135deg, #ff6b6b 0%, #feca57 100%);">
+                <div class="metric-value"><?= $report['contracts_with_zero_installments'] ?></div>
+                <div class="metric-label">عقد بدون أقساط</div>
             </div>
             <div class="metric warning">
                 <div class="metric-value"><?= $report['contracts_with_no_installments'] ?></div>
@@ -785,11 +872,153 @@ function outputReport($report) {
 // ============================================================================
 // DEBUG: Show contracts with all installments paid (for testing)
 // ============================================================================
+debug_section:
 if (isset($_GET['debug']) && $_GET['debug'] == '1') {
     echo "<h2>Debug: Contracts Analysis</h2>";
 
-    // First, show what the actual query will find
-    echo "<h3>Step 1: Contracts that WILL be processed by Scenario 1 (All Paid)</h3>";
+    // Check specific unit if provided
+    $checkUnit = isset($_GET['unit']) ? intval($_GET['unit']) : 0;
+    if ($checkUnit > 0) {
+        echo "<h3 style='color: #d63384;'>🔍 Specific Unit Check: {$checkUnit}</h3>";
+
+        // Get contract info for this unit
+        $unitSql = "SELECT
+            ad.idsubaqar,
+            ad.rakam3akdid,
+            e.status,
+            e.end3aqd,
+            e.startegar,
+            e.duration,
+            e.depositeamount,
+            COUNT(a.kastid) as total_installments,
+            SUM(CASE WHEN a.iscomplete = 1 THEN 1 ELSE 0 END) as paid_installments,
+            SUM(CASE WHEN a.kastid IS NOT NULL AND (a.iscomplete = 0 OR a.iscomplete IS NULL) THEN 1 ELSE 0 END) as unpaid_installments,
+            MAX(a.kastdate) as last_installment_date
+        FROM amlakdetails ad
+        LEFT JOIN egar e ON e.rakam3akdid = ad.rakam3akdid
+        LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+        WHERE ad.idsubaqar = {$checkUnit}
+        GROUP BY ad.idsubaqar";
+
+        $unitResult = mysql_query($unitSql, $link);
+        if ($unitResult && mysql_num_rows($unitResult) > 0) {
+            $unitData = mysql_fetch_assoc($unitResult);
+            echo "<table border='1' style='margin: 20px; border-collapse: collapse; background: #fff3cd;'>";
+            echo "<tr><th style='padding: 8px;'>Field</th><th style='padding: 8px;'>Value</th><th style='padding: 8px;'>Issue?</th></tr>";
+
+            // Check each field
+            $issues = [];
+
+            echo "<tr><td style='padding: 8px;'>Unit ID (idsubaqar)</td><td style='padding: 8px;'>{$unitData['idsubaqar']}</td><td style='padding: 8px;'>-</td></tr>";
+            echo "<tr><td style='padding: 8px;'>Contract ID (rakam3akdid)</td><td style='padding: 8px;'>{$unitData['rakam3akdid']}</td><td style='padding: 8px;'>" . ($unitData['rakam3akdid'] ? '✅' : '❌ No contract linked!') . "</td></tr>";
+
+            $statusOk = is_null($unitData['status']) || in_array($unitData['status'], ['active', 'active_arrears', 'expiring_soon', 'expired']);
+            echo "<tr><td style='padding: 8px;'>Status</td><td style='padding: 8px;'>" . ($unitData['status'] ?: 'NULL') . "</td><td style='padding: 8px;'>" . ($statusOk ? '✅' : '❌ Status not in allowed list!') . "</td></tr>";
+
+            echo "<tr><td style='padding: 8px;'>end3aqd</td><td style='padding: 8px;'>" . ($unitData['end3aqd'] ? date('Y-m-d', $unitData['end3aqd']) : 'NULL') . "</td><td style='padding: 8px;'>" . ($unitData['end3aqd'] ? '✅' : '❌ end3aqd is NULL!') . "</td></tr>";
+            echo "<tr><td style='padding: 8px;'>startegar</td><td style='padding: 8px;'>" . ($unitData['startegar'] ? date('Y-m-d', $unitData['startegar']) : 'NULL') . "</td><td style='padding: 8px;'>" . ($unitData['startegar'] ? '✅' : '⚠️ startegar is NULL') . "</td></tr>";
+            echo "<tr><td style='padding: 8px;'>Duration</td><td style='padding: 8px;'>{$unitData['duration']}</td><td style='padding: 8px;'>" . (intval($unitData['duration']) > 0 ? '✅' : '❌ Invalid duration!') . "</td></tr>";
+            echo "<tr><td style='padding: 8px;'>Total Installments</td><td style='padding: 8px;'>{$unitData['total_installments']}</td><td style='padding: 8px;'>-</td></tr>";
+            echo "<tr><td style='padding: 8px;'>Paid Installments</td><td style='padding: 8px;'>{$unitData['paid_installments']}</td><td style='padding: 8px;'>-</td></tr>";
+            echo "<tr><td style='padding: 8px;'>Unpaid Installments</td><td style='padding: 8px;'>{$unitData['unpaid_installments']}</td><td style='padding: 8px;'>" . ($unitData['unpaid_installments'] > 0 ? '❌ Has unpaid installments!' : '✅ All paid') . "</td></tr>";
+            echo "<tr><td style='padding: 8px;'>Last Installment Date</td><td style='padding: 8px;'>" . ($unitData['last_installment_date'] ? date('Y-m-d', $unitData['last_installment_date']) : 'NULL') . "</td><td style='padding: 8px;'>-</td></tr>";
+            echo "</table>";
+
+            // Summary
+            $allPaid = $unitData['total_installments'] > 0 && $unitData['total_installments'] == $unitData['paid_installments'];
+            $zeroInst = $unitData['total_installments'] == 0;
+
+            echo "<div style='margin: 20px; padding: 15px; background: " . ($allPaid || $zeroInst ? '#d4edda' : '#f8d7da') . "; border-radius: 8px;'>";
+            if ($zeroInst && $statusOk && $unitData['end3aqd']) {
+                echo "<strong>→ Should be processed by Scenario 0</strong> (Zero installments)";
+            } elseif ($allPaid && $statusOk && $unitData['end3aqd']) {
+                echo "<strong>→ Should be processed by Scenario 1</strong> (All installments paid)";
+            } else {
+                echo "<strong>→ Will NOT be processed.</strong> Reasons:<br>";
+                if (!$unitData['end3aqd']) echo "- end3aqd is NULL<br>";
+                if (!$statusOk) echo "- Status '{$unitData['status']}' is not in allowed list (active, active_arrears, expiring_soon, expired)<br>";
+                if ($unitData['unpaid_installments'] > 0) echo "- Has {$unitData['unpaid_installments']} unpaid installments<br>";
+            }
+            echo "</div>";
+
+            // Show individual installments
+            echo "<h4>Installments for this unit:</h4>";
+            $instSql = "SELECT kastid, kastname, kastdate, kastvalue, iscomplete, status FROM aksat WHERE egar_id = {$unitData['rakam3akdid']} ORDER BY kastdate ASC";
+            $instResult = mysql_query($instSql, $link);
+            if ($instResult && mysql_num_rows($instResult) > 0) {
+                echo "<table border='1' style='margin: 20px; border-collapse: collapse;'>";
+                echo "<tr style='background: #e9ecef;'><th style='padding: 8px;'>ID</th><th style='padding: 8px;'>Name</th><th style='padding: 8px;'>Date</th><th style='padding: 8px;'>Value</th><th style='padding: 8px;'>iscomplete</th><th style='padding: 8px;'>status</th></tr>";
+                while ($inst = mysql_fetch_assoc($instResult)) {
+                    $bg = $inst['iscomplete'] == 1 ? '#d4edda' : '#fff3cd';
+                    echo "<tr style='background: {$bg};'>";
+                    echo "<td style='padding: 8px;'>{$inst['kastid']}</td>";
+                    echo "<td style='padding: 8px;'>{$inst['kastname']}</td>";
+                    echo "<td style='padding: 8px;'>" . ($inst['kastdate'] ? date('Y-m-d', $inst['kastdate']) : 'NULL') . "</td>";
+                    echo "<td style='padding: 8px;'>{$inst['kastvalue']}</td>";
+                    echo "<td style='padding: 8px;'>{$inst['iscomplete']}</td>";
+                    echo "<td style='padding: 8px;'>{$inst['status']}</td>";
+                    echo "</tr>";
+                }
+                echo "</table>";
+            } else {
+                echo "<p style='color: orange;'>No installments found for this contract.</p>";
+            }
+        } else {
+            echo "<p style='color: red;'>❌ Unit {$checkUnit} not found in amlakdetails!</p>";
+        }
+        echo "<hr>";
+    } else {
+        echo "<p style='background: #cce5ff; padding: 10px; border-radius: 5px;'>💡 Tip: Add <code>?debug=1&unit=742</code> to check a specific unit</p>";
+    }
+
+    // First, show contracts with ZERO installments (Scenario 0)
+    echo "<h3>Step 0: Contracts with ZERO installments (New Contracts)</h3>";
+    $zeroInstSql = "SELECT
+        e.rakam3akdid,
+        e.status,
+        e.startegar,
+        e.end3aqd,
+        e.duration,
+        ad.idsubaqar,
+        COUNT(a.kastid) as total_installments
+    FROM egar e
+    LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
+    LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+    WHERE e.end3aqd IS NOT NULL
+    AND e.startegar IS NOT NULL AND e.startegar > 0
+    AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
+    GROUP BY e.rakam3akdid
+    HAVING COUNT(a.kastid) = 0
+    ORDER BY e.rakam3akdid ASC";
+
+    $zeroInstResult = mysql_query($zeroInstSql, $link);
+    if ($zeroInstResult && mysql_num_rows($zeroInstResult) > 0) {
+        echo "<table border='1' style='margin: 20px; border-collapse: collapse;'>";
+        echo "<tr style='background: #ffcccb;'>";
+        echo "<th style='padding: 8px;'>Contract ID</th>";
+        echo "<th style='padding: 8px;'>Unit ID</th>";
+        echo "<th style='padding: 8px;'>Status</th>";
+        echo "<th style='padding: 8px;'>Duration</th>";
+        echo "<th style='padding: 8px;'>Start Date</th>";
+        echo "<th style='padding: 8px;'>End Date</th>";
+        echo "</tr>";
+        while ($row = mysql_fetch_assoc($zeroInstResult)) {
+            echo "<tr>";
+            echo "<td style='padding: 8px;'>{$row['rakam3akdid']}</td>";
+            echo "<td style='padding: 8px;'>{$row['idsubaqar']}</td>";
+            echo "<td style='padding: 8px;'>" . ($row['status'] ?: 'NULL') . "</td>";
+            echo "<td style='padding: 8px;'>{$row['duration']}</td>";
+            echo "<td style='padding: 8px;'>" . ($row['startegar'] ? date('Y-m-d', $row['startegar']) : 'NULL') . "</td>";
+            echo "<td style='padding: 8px;'>" . ($row['end3aqd'] ? date('Y-m-d', $row['end3aqd']) : 'NULL') . "</td>";
+            echo "</tr>";
+        }
+        echo "</table>";
+    } else {
+        echo "<p style='color: green;'>✅ No contracts with zero installments found.</p>";
+    }
+
+    // Show what the actual query will find
+    echo "<hr><h3>Step 1: Contracts that WILL be processed by Scenario 1 (All Paid)</h3>";
     $actualQuerySql = "SELECT
         e.rakam3akdid,
         e.status,
@@ -807,7 +1036,7 @@ if (isset($_GET['debug']) && $_GET['debug'] == '1') {
     LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
     LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
     WHERE e.end3aqd IS NOT NULL
-    AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'active_expiring_soon'))
+    AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
     GROUP BY e.rakam3akdid
     HAVING COUNT(a.kastid) > 0
     AND COUNT(a.kastid) = SUM(CASE WHEN a.iscomplete = 1 THEN 1 ELSE 0 END)
@@ -877,7 +1106,7 @@ if (isset($_GET['debug']) && $_GET['debug'] == '1') {
 
     while ($row = mysql_fetch_assoc($debugResult)) {
         $allPaid = $row['total_installments'] == $row['paid_installments'];
-        $statusOk = is_null($row['status']) || in_array($row['status'], ['active', 'active_arrears', 'active_expiring_soon']);
+        $statusOk = is_null($row['status']) || in_array($row['status'], ['active', 'active_arrears', 'expiring_soon', 'expired']);
         $willProcess = $allPaid && $statusOk;
 
         echo "<tr style='background: " . ($willProcess ? '#d4edda' : '#fff3cd') . ";'>";
