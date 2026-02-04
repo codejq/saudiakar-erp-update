@@ -1,0 +1,428 @@
+<?php
+/**
+ * Property Details Report - Detailed property units report
+ * Modern refactored version with Bootstrap 5
+ */
+
+// Extract POST variables
+extract($_REQUEST);
+
+// Initialize variables
+$idaqar = isset($idaqar) ? intval($idaqar) : 0;
+$aqarname = isset($aqarname) ? addslashes($aqarname) : '';
+$report = isset($report) ? intval($report) : 0;
+
+$sc_title = "تقرير عن عقار";
+$sc_id = "50";
+
+include_once "../../../nocash.hnt";
+$canscroll = 1;
+
+if ($report == 1) {
+    include_once "../../../report_header.hnt";
+} else {
+    include_once "../../../header.hnt";
+}
+
+require '../arabicTools.class.hnt';
+include_once "arabic_num.class.hnt";
+include_once "amlakfunctions.hnt";
+
+// Get current date
+$daxx = date("H/i/s/m/d/Y");
+$daxx = explode("/", $daxx);
+$h_date = mktime($daxx[0], $daxx[1], $daxx[2], $daxx[3], $daxx[4], $daxx[5]);
+$h_date2 = arabicDate("ar:l d/F -Y h:iA", $h_date);
+$h_date1 = arabicDate('hj:l d-F-Y هـ', $h_date);
+?>
+
+<?php if ($report != 1) { ?>
+<!-- Main Content -->
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <!-- Page Header -->
+            <div class="card mb-4 shadow-sm border-0">
+                <div class="card-header text-white" style="background: linear-gradient(135deg, #0a7047 0%, #0d9488 100%);">
+                    <h4 class="mb-0">
+                        <i class="bi bi-file-text me-2"></i>
+                        <?= $sc_title ?>
+                    </h4>
+                </div>
+            </div>
+
+            <!-- Property Selection Form -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-body p-4">
+                    <form method="get" action="?" id="propertyForm">
+                        <input type="hidden" name="formuid" id="formuid"
+                               value="<?= str_replace('.', '', microtime(true) . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+
+                        <div class="row g-3 align-items-end">
+                            <div class="col-md-8">
+                                <label for="idaqar" class="form-label">
+                                    <i class="bi bi-building me-1"></i>
+                                    اختر العقار لعرض التقرير
+                                </label>
+                                <select name="idaqar" id="idaqar" class="form-select form-select-lg" required>
+                                    <option value="">اختر العقار</option>
+                                    <?php
+                                    $sql = "SELECT idaqar, aqarname FROM amlak ORDER BY aqarname";
+                                    $result = mysql_query($sql, $link);
+                                    while ($row = mysql_fetch_array($result)) {
+                                        $selected = ($idaqar == $row['idaqar']) ? 'selected' : '';
+                                        echo "<option value='" . $row['idaqar'] . "' $selected>" . htmlspecialchars($row['aqarname']) . "</option>";
+                                    }
+                                    ?>
+                                </select>
+                            </div>
+
+                            <div class="col-md-4">
+                                <div class="d-grid gap-2">
+                                    <button type="submit" class="btn btn-primary btn-lg">
+                                        <i class="bi bi-search me-2"></i>
+                                        عرض التقرير
+                                    </button>
+                                    <?php if ($idaqar) { ?>
+                                    <button type="button" class="btn btn-success" onclick="window.location.href='amlakdetails.report.hnt?idaqar=<?= $idaqar ?>&aqarname=<?= urlencode($aqarname) ?>&report=1'">
+                                        <i class="bi bi-printer me-2"></i>
+                                        نسخة للطباعة
+                                    </button>
+                                    <?php } ?>
+                                    <a href="reports.hnt" class="btn btn-secondary">
+                                        <i class="bi bi-arrow-left me-2"></i>
+                                        عودة
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <?php if ($idaqar) { ?>
+            <!-- Report Header -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-body text-center p-4">
+                    <h3 class="mb-3">
+                        <i class="bi bi-building-fill me-2 text-primary"></i>
+                        <?= htmlspecialchars($aqarname) ?>
+                    </h3>
+                    <div class="text-muted">
+                        <i class="bi bi-calendar-event me-2"></i>
+                        <?= $h_date2 ?>
+                        <br>
+                        الموافق <?= $h_date1 ?>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Available Units (Not Rented) -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-light">
+                    <h5 class="mb-0">
+                        <i class="bi bi-house-door me-2"></i>
+                        الوحدات المتاحة (غير المؤجرة)
+                    </h5>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover table-striped align-middle mb-0">
+                            <thead class="table-light">
+                                <tr class="text-center">
+                                    <th style="width: 60px;">م</th>
+                                    <th>الوحدة</th>
+                                    <th style="width: 150px;">الإيجار السنوي</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php
+                                $sqlaq = "SELECT idsubaqar, rakam, idaqar, aqarsubtype, price FROM amlakdetails WHERE mostagerid=0 AND idaqar='" . intval($idaqar) . "' ORDER BY aqarsubtype";
+                                $resaq = mysql_query($sqlaq, $link);
+                                $xx = 0;
+                                $total_available = 0;
+
+                                while ($rowaq = mysql_fetch_array($resaq)) {
+                                    $xx++;
+                                    $total_available += $rowaq['price'];
+                                    ?>
+                                    <tr class="text-center">
+                                        <td><strong><?= $xx ?></strong></td>
+                                        <td class="text-start">
+                                            <i class="bi bi-house me-2 text-primary"></i>
+                                            <?= displaysubtype($rowaq['aqarsubtype']) ?>
+                                            رقم <?= htmlspecialchars($rowaq['rakam']) ?>
+                                            موجود في <?= displayaqarname($rowaq['idaqar']) ?>
+                                        </td>
+                                        <td>
+                                            <span class="badge bg-success">
+                                                <?= number_format($rowaq['price'], 2) ?> ريال
+                                            </span>
+                                        </td>
+                                    </tr>
+                                <?php } ?>
+
+                                <?php if ($xx == 0) { ?>
+                                    <tr>
+                                        <td colspan="3" class="text-center text-muted py-4">
+                                            <i class="bi bi-info-circle me-2"></i>
+                                            لا توجد وحدات متاحة
+                                        </td>
+                                    </tr>
+                                <?php } ?>
+                            </tbody>
+                            <tfoot class="table-light">
+                                <tr class="text-center fw-bold">
+                                    <td colspan="2">الإجمالي</td>
+                                    <td>
+                                        <span class="badge bg-primary fs-6">
+                                            <?= number_format($total_available, 2) ?> ريال
+                                        </span>
+                                    </td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Rented Units -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-light">
+                    <h5 class="mb-0">
+                        <i class="bi bi-house-check me-2"></i>
+                        الوحدات المؤجرة
+                    </h5>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover table-striped align-middle mb-0">
+                            <thead class="table-light">
+                                <tr class="text-center">
+                                    <th style="width: 60px;">م</th>
+                                    <th>الوحدة</th>
+                                    <th style="width: 150px;">الإيجار السنوي</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php
+                                $sqlaq = "SELECT idsubaqar, rakam, idaqar, aqarsubtype, price, mostagerid, rakam3akdid FROM amlakdetails WHERE mostagerid > 0 AND idaqar='" . intval($idaqar) . "' ORDER BY aqarsubtype";
+                                $resaq = mysql_query($sqlaq, $link);
+                                $xx = 0;
+                                $totalprice = 0;
+
+                                while ($rowaq = mysql_fetch_array($resaq)) {
+                                    $xx++;
+                                    $price = mysql_fetch_array(mysql_query("SELECT annualprice FROM egar WHERE mostagerid='" . intval($rowaq['mostagerid']) . "' AND rakam3akdid='" . intval($rowaq['rakam3akdid']) . "' ORDER BY rakam3akdid DESC LIMIT 1", $link));
+                                    $totalprice += $price['annualprice'];
+                                    ?>
+                                    <tr class="text-center">
+                                        <td><strong><?= $xx ?></strong></td>
+                                        <td class="text-start">
+                                            <i class="bi bi-house-fill me-2 text-success"></i>
+                                            <?= displaysubtype($rowaq['aqarsubtype']) ?>
+                                            رقم <?= htmlspecialchars($rowaq['rakam']) ?>
+                                            موجود في <?= displayaqarname($rowaq['idaqar']) ?>
+                                        </td>
+                                        <td>
+                                            <span class="badge bg-success">
+                                                <?= number_format($price['annualprice'], 2) ?> ريال
+                                            </span>
+                                        </td>
+                                    </tr>
+                                <?php } ?>
+
+                                <?php if ($xx == 0) { ?>
+                                    <tr>
+                                        <td colspan="3" class="text-center text-muted py-4">
+                                            <i class="bi bi-info-circle me-2"></i>
+                                            لا توجد وحدات مؤجرة
+                                        </td>
+                                    </tr>
+                                <?php } ?>
+                            </tbody>
+                            <tfoot class="table-light">
+                                <tr class="text-center fw-bold">
+                                    <td colspan="2">الإجمالي</td>
+                                    <td>
+                                        <span class="badge bg-primary fs-6">
+                                            <?= number_format($totalprice, 2) ?> ريال
+                                        </span>
+                                    </td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Summary Statistics -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-light">
+                    <h5 class="mb-0">
+                        <i class="bi bi-graph-up me-2"></i>
+                        ملخص الإحصائيات
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3 text-center">
+                        <div class="col-md-3">
+                            <div class="p-3 bg-light rounded">
+                                <i class="bi bi-house-door text-primary" style="font-size: 2rem;"></i>
+                                <h4 class="mb-0 mt-2 text-primary">
+                                    <?php
+                                    $available_count = mysql_fetch_array(mysql_query("SELECT COUNT(*) as count FROM amlakdetails WHERE mostagerid=0 AND idaqar='" . intval($idaqar) . "'", $link));
+                                    echo $available_count['count'];
+                                    ?>
+                                </h4>
+                                <small class="text-muted">وحدات متاحة</small>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="p-3 bg-light rounded">
+                                <i class="bi bi-house-check text-success" style="font-size: 2rem;"></i>
+                                <h4 class="mb-0 mt-2 text-success">
+                                    <?php
+                                    $rented_count = mysql_fetch_array(mysql_query("SELECT COUNT(*) as count FROM amlakdetails WHERE mostagerid > 0 AND idaqar='" . intval($idaqar) . "'", $link));
+                                    echo $rented_count['count'];
+                                    ?>
+                                </h4>
+                                <small class="text-muted">وحدات مؤجرة</small>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="p-3 bg-light rounded">
+                                <i class="bi bi-cash-stack text-info" style="font-size: 2rem;"></i>
+                                <h4 class="mb-0 mt-2 text-info"><?= number_format($total_available, 0) ?></h4>
+                                <small class="text-muted">إيجار الوحدات المتاحة</small>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="p-3 bg-light rounded">
+                                <i class="bi bi-currency-exchange text-success" style="font-size: 2rem;"></i>
+                                <h4 class="mb-0 mt-2 text-success"><?= number_format($totalprice, 0) ?></h4>
+                                <small class="text-muted">إيجار الوحدات المؤجرة</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <?php } ?>
+        </div>
+    </div>
+</div>
+
+<?php } else { ?>
+<!-- Print Version -->
+<div class="container-fluid">
+    <div class="text-center mb-4">
+        <h2><?= htmlspecialchars($aqarname) ?></h2>
+        <p class="text-muted">
+            <?= $h_date2 ?><br>
+            الموافق <?= $h_date1 ?>
+        </p>
+    </div>
+
+    <!-- Available Units Print -->
+    <h4 class="mb-3">الوحدات المتاحة (غير المؤجرة)</h4>
+    <table class="table table-bordered" style="width: 100%;">
+        <thead class="table-light">
+            <tr class="text-center">
+                <th style="width: 60px;">م</th>
+                <th>الوحدة</th>
+                <th style="width: 150px;">الإيجار السنوي</th>
+            </tr>
+        </thead>
+        <tbody>
+            <?php
+            $sqlaq = "SELECT idsubaqar, rakam, idaqar, aqarsubtype, price FROM amlakdetails WHERE mostagerid=0 AND idaqar='" . intval($idaqar) . "' ORDER BY aqarsubtype";
+            $resaq = mysql_query($sqlaq, $link);
+            $xx = 0;
+            $total_available = 0;
+
+            while ($rowaq = mysql_fetch_array($resaq)) {
+                $xx++;
+                $total_available += $rowaq['price'];
+                ?>
+                <tr class="text-center">
+                    <td><?= $xx ?></td>
+                    <td class="text-start">
+                        <?= displaysubtype($rowaq['aqarsubtype']) ?>
+                        رقم <?= htmlspecialchars($rowaq['rakam']) ?>
+                        موجود في <?= displayaqarname($rowaq['idaqar']) ?>
+                    </td>
+                    <td><?= number_format($rowaq['price'], 2) ?></td>
+                </tr>
+            <?php } ?>
+        </tbody>
+        <tfoot class="table-light">
+            <tr class="text-center fw-bold">
+                <td colspan="2">الإجمالي</td>
+                <td><?= number_format($total_available, 2) ?></td>
+            </tr>
+        </tfoot>
+    </table>
+
+    <div style="page-break-after: always;"></div>
+
+    <!-- Rented Units Print -->
+    <h4 class="mb-3 mt-4">الوحدات المؤجرة</h4>
+    <table class="table table-bordered" style="width: 100%;">
+        <thead class="table-light">
+            <tr class="text-center">
+                <th style="width: 60px;">م</th>
+                <th>الوحدة</th>
+                <th style="width: 150px;">الإيجار السنوي</th>
+            </tr>
+        </thead>
+        <tbody>
+            <?php
+            $sqlaq = "SELECT idsubaqar, rakam, idaqar, aqarsubtype, price, mostagerid, rakam3akdid FROM amlakdetails WHERE mostagerid > 0 AND idaqar='" . intval($idaqar) . "' ORDER BY aqarsubtype";
+            $resaq = mysql_query($sqlaq, $link);
+            $xx = 0;
+            $totalprice = 0;
+
+            while ($rowaq = mysql_fetch_array($resaq)) {
+                $xx++;
+                $price = mysql_fetch_array(mysql_query("SELECT annualprice FROM egar WHERE mostagerid='" . intval($rowaq['mostagerid']) . "' AND rakam3akdid='" . intval($rowaq['rakam3akdid']) . "' ORDER BY rakam3akdid DESC LIMIT 1", $link));
+                $totalprice += $price['annualprice'];
+                ?>
+                <tr class="text-center">
+                    <td><?= $xx ?></td>
+                    <td class="text-start">
+                        <?= displaysubtype($rowaq['aqarsubtype']) ?>
+                        رقم <?= htmlspecialchars($rowaq['rakam']) ?>
+                        موجود في <?= displayaqarname($rowaq['idaqar']) ?>
+                    </td>
+                    <td><?= number_format($price['annualprice'], 2) ?></td>
+                </tr>
+            <?php } ?>
+        </tbody>
+        <tfoot class="table-light">
+            <tr class="text-center fw-bold">
+                <td colspan="2">الإجمالي</td>
+                <td><?= number_format($totalprice, 2) ?></td>
+            </tr>
+        </tfoot>
+    </table>
+</div>
+
+<?php
+require("../../../reportfooter.hnt");
+}
+?>
+
+<script>
+// Modern ES6+ JavaScript
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', () => {
+    // Focus on property select if no property selected
+    const propertySelect = document.getElementById('idaqar');
+    if (propertySelect && !propertySelect.value) {
+        propertySelect.focus();
+    }
+});
+</script>
+
+<?php require('../../../foter.hnt'); ?>
