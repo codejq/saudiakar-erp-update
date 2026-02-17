@@ -16,7 +16,7 @@ IF EXIST c:\aqary-backup\sqldump\%day%-%month%-%year%.sql.zip GOTO Backupexist
 
 
 
-mysqldump.exe --skip-lock-tables --user=root --password=1 --port=3329 --host=127.0.0.1 aqary_utf >c:\aqary-backup\sqldump\%day%-%month%-%year%.sql 2>&1
+mysqldump.exe --skip-lock-tables --force --user=root --password=1 --port=3329 --host=127.0.0.1 aqary_utf >c:\aqary-backup\sqldump\%day%-%month%-%year%.sql 2>c:\aqary-backup\sqldump\%day%-%month%-%year%.err
 
 PING 1.1.1.1 -n 1 -w 60000 >NUL
 
