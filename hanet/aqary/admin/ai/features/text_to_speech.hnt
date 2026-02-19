@@ -93,6 +93,10 @@ try {
             handleDelete($user_id);
             break;
 
+        case 'voices':
+            handleVoicesList($ai_config);
+            break;
+
         default:
             ob_end_clean();
             echo json_encode([
@@ -213,7 +217,7 @@ function handleGenerate($user_id, $ai_config) {
             'success' => true,
             'audio_url' => $file_info['relative_path'],
             'filename' => $file_info['filename'],
-            'file_size' => $file_info['file_size'],
+            'file_size' => formatFileSize($file_info['file_size']),
             'duration' => $file_info['duration'] ?? null,
             'response_time' => $response_time,
             'content_id' => $content_id
@@ -366,44 +370,41 @@ function handleDelete($user_id) {
  */
 function generateTTSAudio($text, $language, $gender, $speed, $api_key) {
     // Speechify API endpoint
-    $api_url = 'https://api.sws.speechify.com/v1/audio/speech';
+    $api_url = 'https://api.speechify.ai/v1/audio/speech';
 
-    // Map language codes to Speechify format
-    $language_codes = [
-        'ara' => 'ar',  // Arabic
-        'eng' => 'en'   // English
+    // simba-english      = English-only (fast)
+    // simba-multilingual = Multilingual incl. Arabic
+    $models = [
+        'ara' => 'simba-multilingual',
+        'eng' => 'simba-english'
     ];
 
-    $lang_code = $language_codes[$language] ?? 'en';
+    $language_codes = [
+        'ara' => 'ar-AE',
+        'eng' => 'en-US'
+    ];
 
-    // Select model based on language
-    // simba-english: Optimized for English
-    // simba-multilingual: Supports 50+ languages including Arabic
-    $model = ($language === 'ara') ? 'simba-multilingual' : 'simba-english';
-
-    // Select voice based on language and gender
-    // Verified Speechify voice IDs from API
     $voices = [
         'ara' => [
-            'male' => 'ismail',    // Arabic male voice (ar-AE)
-            'female' => 'aicha'    // Arabic female voice (ar-AE)
+            'male'   => 'ismail',
+            'female' => 'aicha'
         ],
         'eng' => [
-            'male' => 'george',    // English male voice (en-US)
-            'female' => 'lisa'     // English female voice (en-US)
+            'male'   => 'george',
+            'female' => 'lisa'
         ]
     ];
 
+    $model    = $models[$language]        ?? 'simba-turbo';
+    $lang_code = $language_codes[$language] ?? 'en-US';
     $voice_id = $voices[$language][$gender] ?? 'george';
 
     // Build request payload
-    // Required: input (text), voice_id (voice identifier), model (simba model)
-    // Optional: language (ISO-639-1), speed, audio_format
     $payload = [
-        'input' => $text,
-        'voice_id' => $voice_id,
-        'model' => $model,
-        'language' => $lang_code,
+        'input'        => $text,
+        'voice_id'     => $voice_id,
+        'model'        => $model,
+        'language'     => $lang_code,
         'audio_format' => 'mp3'
     ];
 
@@ -412,12 +413,14 @@ function generateTTSAudio($text, $language, $gender, $speed, $api_key) {
         $payload['speed'] = $speed;
     }
 
+    $json_payload = json_encode($payload, JSON_UNESCAPED_UNICODE);
+
     // Make HTTP POST request using cURL
     $ch = curl_init($api_url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => json_encode($payload),
+        CURLOPT_POSTFIELDS => $json_payload,
         CURLOPT_HTTPHEADER => [
             'Authorization: Bearer ' . $api_key,
             'Content-Type: application/json'
@@ -430,7 +433,7 @@ function generateTTSAudio($text, $language, $gender, $speed, $api_key) {
     $response = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $curl_error = curl_error($ch);
-    //curl_close($ch);
+    curl_close($ch);
 
     // Handle errors
     if ($curl_error) {
@@ -440,16 +443,13 @@ function generateTTSAudio($text, $language, $gender, $speed, $api_key) {
     if ($http_code !== 200) {
         $error_data = json_decode($response, true);
         $error_details = [
-            'file' => 'text_to_speech.hnt',
-            'function' => 'generateTTSAudio',
-            'tts_engine' => 'Speechify API',
-            'model' => $model,
-            'voice_id' => $voice_id,
-            'language' => $lang_code,
-            'http_code' => $http_code,
-            'api_error' => $error_data['error'] ?? $error_data['message'] ?? 'Unknown error',
-            'full_response' => $response,
-            'note' => 'Make sure Speechify API key is configured. Get free key at https://speechify.com/api/'
+            'file'         => 'text_to_speech.hnt',
+            'function'     => 'generateTTSAudio',
+            'tts_engine'   => 'Speechify API',
+            'voice_id'     => $voice_id,
+            'http_code'    => $http_code,
+            'api_error'    => $error_data['error'] ?? $error_data['message'] ?? 'Unknown error',
+            'full_response'=> $response,
         ];
 
         throw new Exception('فشل في توليد الصوت: ' . json_encode($error_details, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
@@ -462,8 +462,12 @@ function generateTTSAudio($text, $language, $gender, $speed, $api_key) {
         throw new Exception('فشل في فك تشفير استجابة API. الاستجابة: ' . substr($response, 0, 200));
     }
 
-    // Decode base64 audio data
-    $audio_binary = base64_decode($response_data['audio_data']);
+    // Decode base64 audio data (strip data URI prefix if present)
+    $audio_base64 = $response_data['audio_data'];
+    if (($prefix_pos = strpos($audio_base64, 'base64,')) !== false) {
+        $audio_base64 = substr($audio_base64, $prefix_pos + 7);
+    }
+    $audio_binary = base64_decode($audio_base64);
 
     if ($audio_binary === false || empty($audio_binary)) {
         throw new Exception('فشل في فك تشفير البيانات الصوتية من base64');
@@ -544,4 +548,55 @@ function logAIUsage($user_id, $feature, $input, $output, $response_time) {
         $stmt->bind_param("isssi", $user_id, $feature, $input, $output, $response_time);
         $stmt->execute();
     }
+}
+
+/**
+ * Fetch available voices from Speechify API (for debugging)
+ */
+function handleVoicesList($ai_config) {
+    $api_key = $ai_config['speechify_api_key'] ?? '';
+
+    $ch = curl_init('https://api.speechify.ai/v1/voices');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => [
+            'Authorization: Bearer ' . $api_key
+        ],
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => 0
+    ]);
+
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    $data = json_decode($response, true);
+
+    $all_voices = $data['voices'] ?? (is_array($data) && isset($data[0]) ? $data : []);
+
+    // Find Arabic voices and also find 'ismail' wherever it is
+    $arabic_voices = [];
+    $ismail_voice  = null;
+    foreach ($all_voices as $voice) {
+        $lang = strtolower($voice['language'] ?? $voice['locale'] ?? $voice['languageCode'] ?? '');
+        if (strpos($lang, 'ar') !== false) {
+            $arabic_voices[] = $voice;
+        }
+        $vid = strtolower($voice['id'] ?? $voice['voice_id'] ?? $voice['name'] ?? '');
+        if ($vid === 'ismail') {
+            $ismail_voice = $voice;
+        }
+    }
+
+    ob_end_clean();
+    echo json_encode([
+        'success'           => true,
+        'http_code'         => $http_code,
+        'all_voices_count'  => count($all_voices),
+        'arabic_voices'     => $arabic_voices,
+        'ismail_voice_info' => $ismail_voice,
+        'raw_keys'          => array_keys($data ?? []),
+        'first_5_voices'    => array_slice($all_voices, 0, 5),
+    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
 }
