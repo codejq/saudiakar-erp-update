@@ -84,7 +84,7 @@ exit;
  */
 function createContract($data, $link, $dcal, $user_data) {
     $response = ['success' => false, 'message' => '', 'data' => null];
-
+    $collect_first_installment = isset($data['collect_first_installment']) ? intval($data['collect_first_installment']) : 1;
     // Check for duplicate submission
     if (isset($data['formuid'])) {
         $sql = "SELECT COUNT(rakam3akdid) as dd FROM egar WHERE formuid = '" . mysql_real_escape_string($data['formuid']) . "'";
@@ -229,10 +229,10 @@ function createContract($data, $link, $dcal, $user_data) {
     mysql_query($sql, $link);
 
     // Generate rent installments
-    $installments = generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed_payment_day);
+    $installments = generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed_payment_day, $collect_first_installment);
 
     // Create payment receipt if payment made
-    if ($payedamount > 0 && isset($installments[0])) {
+    if ($payedamount > 0 && isset($installments[0]) && $collect_first_installment == 2) {
         createPaymentReceipt($installments[0], $data, $mostagerid, $payedamount, $user_data, $link);
     }
 
@@ -288,7 +288,7 @@ function handleTenant($data, $link) {
  * Now generates 24 months of installments upfront to allow tracking of all arrears
  * Uses fixed_payment_day to ensure consistent payment dates across all months
  */
-function generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed_payment_day) {
+function generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed_payment_day, $collect_first_installment = 1) {
     global $calendar;
 
     $installments = [];
@@ -355,6 +355,12 @@ function generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed
                 $fpayedamount = $payedamount;
                 $installment_status = ($fpayedamount > 0) ? 'partial' : 'pending';
             }
+            if($collect_first_installment == 1){
+                $iscomplete = 0;
+                $installment_status = 'pending';
+                $fpayedamount = 0;
+            }
+
         } elseif (($duration * ($i - 1)) % 12 == 0) {
             // Start of new year: includes annual commission and fees
             $sa3e_value = $secondsa3e;

@@ -65,14 +65,6 @@ if ($maksanad == 2) {
     $dofx = $dof3at_tafsel['dof3at'];
     $dof3at_tafsel = $dof3at_tafsel['dof3at_tafsel'] . " + " . $depositeamount;
 
-    $sql = "UPDATE aksat SET
-        dof3at = dof3at + $depositeamount,
-        dof3at_tafsel = '$dof3at_tafsel'
-        WHERE kastid='$kastid'";
-
-    if (!$renewfromoutside) {
-        mysql_query($sql, $link);
-    }
 
     // Check if installment is complete
     $sql = "SELECT dof3at, kastvalue, kastname, water, sa3ee, services FROM aksat WHERE kastid='$kastid'";
@@ -80,9 +72,10 @@ if ($maksanad == 2) {
     $mysa3ee = $rowks['sa3ee'];
     $mywater = $rowks['water'];
     $services = $rowks['services'];
+    $totalPidAmount = $rowks['dof3at'] + $depositeamount;
 
-    if ($rowks['dof3at'] >= ($commesion_vat + $depositeamount_vat + $rowks['kastvalue']) ||
-        abs($rowks['dof3at'] - ($commesion_vat + $depositeamount_vat + $rowks['kastvalue'])) < 0.2) {
+    if ($totalPidAmount  >= ($commesion_vat + $depositeamount_vat + $rowks['kastvalue']) ||
+        abs($totalPidAmount  - ($commesion_vat + $depositeamount_vat + $rowks['kastvalue'])) < 0.2) {
         $sql = "UPDATE aksat SET iscomplete=1 WHERE kastid='$kastid'";
         if (!$renewfromoutside) {
             mysql_query($sql, $link);
@@ -95,6 +88,7 @@ if ($maksanad == 2) {
         }
     }
 
+
     // Process payment date
     $payeddate = isset($_REQUEST['paymentdate']) ? $_REQUEST['paymentdate'] : date('d/m/Y');
     $payeddate = explode("/", $payeddate);
@@ -106,6 +100,22 @@ if ($maksanad == 2) {
     }
     $payeddate = mktime(0, 0, 0, $payeddate[1], $payeddate[0], $payeddate[2]);
     $paymentdate = $payeddate;
+
+
+    $amountRemaining = ($commesion_vat + $depositeamount_vat + $rowks['kastvalue']) - ($rowks['dof3at'] + $depositeamount) ;
+    $sql = "UPDATE aksat SET
+        dof3at = dof3at + $depositeamount,
+        amount_paid = amount_paid + $depositeamount,
+        amount_remaining = '$amountRemaining',
+        paid_date = '".$payeddate."',
+        dof3at_tafsel = '$dof3at_tafsel'
+        WHERE kastid='$kastid'";
+
+    if (!$renewfromoutside) {
+        mysql_query($sql, $link);
+    }
+
+
 
     // Detect commission percentage
     $sql = "SELECT persentage FROM amlak WHERE idaqar='$idaqar'";
@@ -193,6 +203,32 @@ if ($maksanad == 2) {
         mysql_query("UPDATE mostagereen SET mostagervatnumber='" . (isset($_REQUEST['mostagervatnumber']) ? mysql_real_escape_string($_REQUEST['mostagervatnumber'], $link) : '') . "'
           WHERE mostagerid='$mostagerid'", $link);
     }
+
+
+        $newStatus = 'paid';
+    $newAmountRemaining = ($commesion_vat + $depositeamount_vat + $rowks['kastvalue']) - $rowks['dof3at'];
+    if ($newAmountRemaining > 0) {
+        $newStatus = 'partial';
+    }
+    
+    $paymentTimestamp = $payeddate;
+
+
+    
+    // Record payment history
+    $sql = "INSERT INTO aksat_payment_history SET
+            kastid = '$kastid',
+            payment_date = '$paymentTimestamp',
+            amount_paid = '$depositeamount',
+            payment_method = '$nakda',
+            reference_number = '$idsanad',
+            notes = '$mybyan - $notes',
+            created_by_userid = " . ($userid ?? 1) . ",
+            created_at = " . time();
+
+    mysql_query($sql, $link);
+    $paymentHistoryId = mysql_insert_id();
+
 
     if (function_exists('loginfo')) {
         loginfo("critical", "insert", $barcodedata, "", "sanad", $idsanad, $link);

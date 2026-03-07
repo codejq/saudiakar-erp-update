@@ -39,6 +39,23 @@ $idsubaqar = isset($_REQUEST['idsubaqar']) ? intval($_REQUEST['idsubaqar']) : 0;
 $mostagerid = isset($_REQUEST['mostagerid']) ? intval($_REQUEST['mostagerid']) : 0;
 
 // Get property and contract data
+// First, get the current contract ID from amlakdetails for this property
+$sql = "SELECT ad.rakam3akdid, ad.hnt_dll_type
+        FROM amlakdetails ad
+        WHERE ad.idsubaqar = '$idsubaqar'";
+$result = mysql_query($sql, $link);
+$propertyData = mysql_fetch_assoc($result);
+
+if (!$propertyData) {
+    echo "<div class='alert alert-danger'>لم يتم العثور على العقار</div>";
+    exit;
+}
+
+// Get the current contract ID from amlakdetails (not from egar table)
+$contractId = intval($propertyData['rakam3akdid']);
+$calendarType = isset($propertyData['hnt_dll_type']) ? intval($propertyData['hnt_dll_type']) : 0;
+
+// Now get full property and contract details
 $sql = "SELECT ad.*, a.*, e.*, m.mostagername
         FROM amlakdetails ad
         LEFT JOIN amlak a ON ad.idaqar = a.idaqar
@@ -48,14 +65,10 @@ $sql = "SELECT ad.*, a.*, e.*, m.mostagername
 $result = mysql_query($sql, $link);
 $property = mysql_fetch_assoc($result);
 
-
 if (!$property) {
     echo "<div class='alert alert-danger'>لم يتم العثور على العقار</div>";
     exit;
 }
-
-$contractId = $property['rakam3akdid'];
-$calendarType = isset($property['hnt_dll_type']) ? intval($property['hnt_dll_type']) : 0;
 
 ?>
 
@@ -235,14 +248,21 @@ $calendarType = isset($property['hnt_dll_type']) ? intval($property['hnt_dll_typ
     <!-- Installment Summary Statistics -->
     <?php
     // Calculate installment statistics for this specific property
-    // Note: Works with both old and new database schemas
+    // Uses new database schema with status and amount tracking
+    $currentTime = time();
     $statsSql = "SELECT
                     COUNT(*) as total_installments,
-                    SUM(CASE WHEN iscomplete = 1 THEN 1 ELSE 0 END) as paid_count,
-                    SUM(kastvalue + IFNULL(water, 0) + IFNULL(sa3ee, 0) + IFNULL(services, 0)) as total_amount
+                    SUM(CASE WHEN status = 'paid' OR iscomplete = 1 THEN 1 ELSE 0 END) as paid_count,
+                    SUM(CASE WHEN status = 'partial' THEN 1 ELSE 0 END) as partial_count,
+                    SUM(CASE WHEN status = 'overdue' OR (status NOT IN ('paid', 'cancelled', 'waived') AND kastdate < $currentTime AND iscomplete = 0) THEN 1 ELSE 0 END) as overdue_count,
+                    SUM(kastvalue + IFNULL(water, 0) + IFNULL(sa3ee, 0) + IFNULL(services, 0)) as total_amount,
+                    SUM(IFNULL(amount_paid, 0)) as total_paid,
+                    SUM(IFNULL(amount_remaining, 0)) as total_remaining,
+                    SUM(IFNULL(late_fee, 0)) as total_late_fees
                  FROM aksat
-                 WHERE egar_id = '$contractId'
-                 AND idsubaqar = '$idsubaqar'";
+                 WHERE idsubaqar = '$idsubaqar'
+                 AND egar_id = '$contractId'
+                 AND status != 'cancelled'";
     $statsResult = mysql_query($statsSql, $link);
     $stats = mysql_fetch_assoc($statsResult);
 
@@ -251,16 +271,29 @@ $calendarType = isset($property['hnt_dll_type']) ? intval($property['hnt_dll_typ
         $stats = [
             'total_installments' => 0,
             'paid_count' => 0,
-            'total_amount' => 0
+            'partial_count' => 0,
+            'overdue_count' => 0,
+            'total_amount' => 0,
+            'total_paid' => 0,
+            'total_remaining' => 0,
+            'total_late_fees' => 0
         ];
     }
 
-    // Initialize values that may not exist in old schema
-    $stats['partial_count'] = 0;
-    $stats['overdue_count'] = 0;
-    $stats['total_paid'] = $stats['paid_count'] > 0 ? $stats['total_amount'] : 0;
-    $stats['total_remaining'] = $stats['total_amount'] - $stats['total_paid'];
-    $stats['total_late_fees'] = 0;
+    // Ensure numeric values
+    $stats['total_installments'] = intval($stats['total_installments']);
+    $stats['paid_count'] = intval($stats['paid_count']);
+    $stats['partial_count'] = intval($stats['partial_count']);
+    $stats['overdue_count'] = intval($stats['overdue_count']);
+    $stats['total_amount'] = floatval($stats['total_amount']);
+    $stats['total_paid'] = floatval($stats['total_paid']);
+    $stats['total_remaining'] = floatval($stats['total_remaining']);
+    $stats['total_late_fees'] = floatval($stats['total_late_fees']);
+    
+    // If total_remaining is 0 but we have unpaid installments, calculate it
+    if ($stats['total_remaining'] == 0 && ($stats['paid_count'] + $stats['partial_count']) < $stats['total_installments']) {
+        $stats['total_remaining'] = $stats['total_amount'] - $stats['total_paid'];
+    }
     ?>
 
     <div class="installment-summary">
@@ -345,31 +378,57 @@ $calendarType = isset($property['hnt_dll_type']) ? intval($property['hnt_dll_typ
     <!-- Installments List -->
     <div class="row" id="installmentsList">
         <?php
-        // Get installments for this specific property
-        $sql = "SELECT * FROM aksat
-                WHERE egar_id = '$contractId'
-                AND idsubaqar = '$idsubaqar'
-                ORDER BY kastdate ASC";
+        // Get installments with VAT info for this specific property's current contract
+        $sql = "SELECT a.*, e.vat_type
+                FROM aksat a
+                LEFT JOIN amlakdetails ad ON a.idsubaqar = ad.idsubaqar
+                LEFT JOIN egar e ON ad.rakam3akdid = e.rakam3akdid
+                WHERE a.idsubaqar = '$idsubaqar'
+                AND a.egar_id = '$contractId'
+                ORDER BY a.kastdate ASC";
+                
         $result = mysql_query($sql, $link);
 
         $installmentNumber = 1;
         while ($installment = mysql_fetch_assoc($result)):
-            // Initialize fields that may not exist in old schema
-            $installment['amount_paid'] = $installment['amount_paid'] ?? 0;
-            $installment['amount_remaining'] = $installment['amount_remaining'] ?? 0;
+            // DEBUG: Show raw values from database
+            $debug_amount_paid = $installment['amount_paid'] ?? 'NULL';
+            $debug_dof3at = $installment['dof3at'] ?? 'NULL';
+            
+            // Initialize fields - use dof3at (old system) as fallback for amount_paid
+            $installment['amount_paid'] = !empty($installment['amount_paid']) ? $installment['amount_paid'] : floatval($installment['dof3at'] ?? 0);
             $installment['late_fee'] = $installment['late_fee'] ?? 0;
             $installment['status'] = $installment['status'] ?? '';
 
-            // Calculate total amount
-            $totalAmount = $installment['kastvalue'] +
-                          ($installment['water'] ?? 0) +
-                          ($installment['sa3ee'] ?? 0) +
-                          ($installment['services'] ?? 0);
+            // Calculate VAT based on contract type
+            $commesion_vat = 0;
+            $depositeamount_vat = 0;
+            $vat_type = $installment['vat_type'] ?? 0;
+            
+            if ($vat_type > 0) {
+                $rentValue = $installment['kastvalue'] - $installment['water'] - $installment['sa3ee'] - $installment['services'];
+                $commesion_vat = $installment['sa3ee'] * 0.15;
+                
+                if ($vat_type == 2) {
+                    $depositeamount_vat = $rentValue * 0.15;
+                }
+            }
+
+            // Calculate total amount including VAT
+            $totalAmount = $installment['kastvalue'] + $commesion_vat + $depositeamount_vat;
+
+            // Calculate remaining amount
+            $installment['amount_remaining'] = $totalAmount - $installment['amount_paid'];
+            if ($installment['amount_remaining'] < 0) $installment['amount_remaining'] = 0;
 
             // Get status
             $status = $installment['status'];
-            if (empty($status) && $installment['iscomplete'] == 1) {
-                $status = 'paid';
+            if (empty($status) || $status == 'pending') {
+                if ($installment['iscomplete'] == 1 || $installment['amount_paid'] >= $totalAmount) {
+                    $status = 'paid';
+                } elseif ($installment['amount_paid'] > 0 && $installment['amount_paid'] < $totalAmount) {
+                    $status = 'partial';
+                }
             }
 
             // Calculate payment percentage
@@ -417,25 +476,33 @@ $calendarType = isset($property['hnt_dll_type']) ? intval($property['hnt_dll_typ
                         <div class="mb-3">
                             <div class="d-flex justify-content-between mb-2">
                                 <span>قيمة الإيجار:</span>
-                                <strong><?= number_format($installment['kastvalue'], 2) ?></strong>
+                                <strong><?= number_format(($installment['kastvalue']-$installment['water'] - $installment['sa3ee'] - $installment['services']), 2) ?></strong>
                             </div>
-                            <?php if ($installment['water'] > 0): ?>
-                                <div class="d-flex justify-content-between mb-2">
-                                    <span class="text-muted">المياه:</span>
-                                    <span><?= number_format($installment['water'], 2) ?></span>
-                                </div>
-                            <?php endif; ?>
-                            <?php if ($installment['sa3ee'] > 0): ?>
-                                <div class="d-flex justify-content-between mb-2">
-                                    <span class="text-muted">السعي:</span>
-                                    <span><?= number_format($installment['sa3ee'], 2) ?></span>
-                                </div>
-                            <?php endif; ?>
-                            <?php if ($installment['services'] > 0): ?>
-                                <div class="d-flex justify-content-between mb-2">
-                                    <span class="text-muted">الخدمات:</span>
-                                    <span><?= number_format($installment['services'], 2) ?></span>
-                                </div>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span class="text-muted">المياه:</span>
+                                <span><?= number_format($installment['water'], 2) ?></span>
+                            </div>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span class="text-muted">السعي:</span>
+                                <span><?= number_format($installment['sa3ee'], 2) ?></span>
+                            </div>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span class="text-muted">الخدمات:</span>
+                                <span><?= number_format($installment['services'], 2) ?></span>
+                            </div>
+                            <?php if ($vat_type > 0): ?>
+                                <?php if ($commesion_vat > 0): ?>
+                                    <div class="d-flex justify-content-between mb-2">
+                                        <span class="text-info">ضريبة السعي (15%):</span>
+                                        <span><?= number_format($commesion_vat, 2) ?></span>
+                                    </div>
+                                <?php endif; ?>
+                                <?php if ($depositeamount_vat > 0): ?>
+                                    <div class="d-flex justify-content-between mb-2">
+                                        <span class="text-info">ضريبة الإيجار (15%):</span>
+                                        <span><?= number_format($depositeamount_vat, 2) ?></span>
+                                    </div>
+                                <?php endif; ?>
                             <?php endif; ?>
                             <?php if ($installment['late_fee'] > 0): ?>
                                 <div class="d-flex justify-content-between mb-2">
@@ -444,23 +511,31 @@ $calendarType = isset($property['hnt_dll_type']) ? intval($property['hnt_dll_typ
                                 </div>
                             <?php endif; ?>
                             <hr>
-                            <div class="d-flex justify-content-between">
+                            <div class="d-flex justify-content-between mb-2">
                                 <strong>المجموع:</strong>
                                 <strong class="text-primary"><?= number_format($totalAmount + $installment['late_fee'], 2) ?> ريال</strong>
                             </div>
+                            <div class="d-flex justify-content-between mb-2" style="background: #e8f5e9; padding: 5px; border-radius: 4px;">
+                                <strong class="text-success">المدفوع:</strong>
+                                <strong class="text-success"><?= number_format($installment['amount_paid'], 2) ?> ريال</strong>
+                            </div>
+                            <!-- DEBUG INFO -->
+                            <div style="font-size: 10px; color: #666; padding: 3px; background: #f0f0f0; border-radius: 3px;display:none">
+                                DEBUG: amount_paid=<?= $debug_amount_paid ?> | dof3at=<?= $debug_dof3at ?> | final=<?= $installment['amount_paid'] ?>
+                            </div>
+                            <div class="d-flex justify-content-between" style="background: #fff3e0; padding: 5px; border-radius: 4px;">
+                                <strong class="text-warning">المتبقي:</strong>
+                                <strong class="text-warning"><?= number_format($installment['amount_remaining'], 2) ?> ريال</strong>
+                            </div>
                         </div>
 
-                        <!-- Payment Progress -->
-                        <?php if ($status == 'partial' || $installment['amount_paid'] > 0): ?>
+                        <!-- Payment Progress Bar -->
+                        <?php if ($installment['amount_paid'] > 0 && $installment['amount_remaining'] > 0): ?>
                             <div class="mb-3">
-                                <div class="d-flex justify-content-between mb-1">
-                                    <small>المدفوع: <?= number_format($installment['amount_paid'], 2) ?></small>
-                                    <small>المتبقي: <?= number_format($installment['amount_remaining'], 2) ?></small>
-                                </div>
                                 <div class="partial-payment-bar">
                                     <div class="partial-payment-fill" style="width: <?= $paymentPercentage ?>%"></div>
                                 </div>
-                                <small class="text-muted"><?= number_format($paymentPercentage, 1) ?>% مدفوع</small>
+                                <small class="text-muted text-center d-block mt-1"><?= number_format($paymentPercentage, 1) ?>% مدفوع</small>
                             </div>
                         <?php endif; ?>
 
@@ -517,10 +592,29 @@ $calendarType = isset($property['hnt_dll_type']) ? intval($property['hnt_dll_typ
                     <input type="hidden" id="payment_kastid" name="kastid">
                     <input type="hidden" name="action" value="record_payment">
 
+                    <!-- Installment Details -->
+                    <div class="alert alert-info mb-3">
+                        <div class="d-flex justify-content-between mb-1">
+                            <span>المبلغ الإجمالي:</span>
+                            <strong><span id="modal_total_amount">0.00</span> ريال</strong>
+                        </div>
+                        <div class="d-flex justify-content-between mb-1" id="modal_commission_vat_row" style="display: none;">
+                            <span class="text-info">ضريبة السعي (15%):</span>
+                            <span><span id="modal_commission_vat">0.00</span> ريال</span>
+                        </div>
+                        <div class="d-flex justify-content-between mb-1" id="modal_rent_vat_row" style="display: none;">
+                            <span class="text-info">ضريبة الإيجار (15%):</span>
+                            <span><span id="modal_rent_vat">0.00</span> ريال</span>
+                        </div>
+                        <div class="d-flex justify-content-between">
+                            <span>المتبقي:</span>
+                            <strong class="text-warning"><span id="remaining_amount">0.00</span> ريال</strong>
+                        </div>
+                    </div>
+
                     <div class="mb-3">
                         <label class="form-label">المبلغ المدفوع</label>
                         <input type="number" step="0.01" class="form-control" id="payment_amount" name="amount" required>
-                        <small class="text-muted">المتبقي: <span id="remaining_amount">0</span> ريال</small>
                     </div>
 
                     <div class="mb-3">
@@ -941,9 +1035,34 @@ $calendarType = isset($property['hnt_dll_type']) ? intval($property['hnt_dll_typ
             success: function(response) {
                 if (response.success) {
                     const inst = response.data;
+                    
+                    // Get pre-calculated values from API
+                    const commesion_vat = parseFloat(inst.commesion_vat || 0);
+                    const depositeamount_vat = parseFloat(inst.depositeamount_vat || 0);
+                    const totalAmount = parseFloat(inst.total_amount || 0);
+                    const amountRemaining = parseFloat(inst.amount_remaining || 0);
+                    
+                    // Populate modal fields
                     $('#payment_kastid').val(kastid);
-                    $('#remaining_amount').text(parseFloat(inst.amount_remaining).toFixed(2));
-                    $('#payment_amount').val(inst.amount_remaining).attr('max', inst.amount_remaining);
+                    $('#modal_total_amount').text(totalAmount.toFixed(2));
+                    $('#remaining_amount').text(amountRemaining.toFixed(2));
+                    $('#payment_amount').val(amountRemaining.toFixed(2)).attr('max', amountRemaining);
+                    
+                    // Show/hide and populate VAT rows
+                    if (commesion_vat > 0) {
+                        $('#modal_commission_vat').text(commesion_vat.toFixed(2));
+                        $('#modal_commission_vat_row').show();
+                    } else {
+                        $('#modal_commission_vat_row').hide();
+                    }
+                    
+                    if (depositeamount_vat > 0) {
+                        $('#modal_rent_vat').text(depositeamount_vat.toFixed(2));
+                        $('#modal_rent_vat_row').show();
+                    } else {
+                        $('#modal_rent_vat_row').hide();
+                    }
+                    
                     paymentModal.show();
                 }
             }

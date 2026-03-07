@@ -161,7 +161,7 @@ function getInstallment($data, $link, $calendar) {
 
     $kastid = isset($data['kastid']) ? intval($data['kastid']) : 0;
 
-    $sql = "SELECT a.*, e.calendar_type
+    $sql = "SELECT a.*, e.calendar_type, e.vat_type
             FROM aksat a
             LEFT JOIN egar e ON a.egar_id = e.rakam3akdid
             WHERE a.kastid = '$kastid'";
@@ -169,6 +169,7 @@ function getInstallment($data, $link, $calendar) {
 
     if ($row = mysql_fetch_assoc($result)) {
         $calendarType = isset($row['calendar_type']) ? intval($row['calendar_type']) : 0;
+        $vat_type = isset($row['vat_type']) ? intval($row['vat_type']) : 0;
 
         // Format date for display (Arabic text format)
         $row['kastdate_formatted'] = $calendar->formatDateForDisplay($row['kastdate'], $calendarType);
@@ -176,15 +177,26 @@ function getInstallment($data, $link, $calendar) {
         // Format date for datepicker input (dd/mm/yyyy format)
         $row['kastdate_input'] = date('d/m/Y', $row['kastdate']);
 
-        // Calculate total and remaining amounts
-        $totalAmount = $row['kastvalue'] +
-                      ($row['water'] ?? 0) +
-                      ($row['sa3ee'] ?? 0) +
-                      ($row['services'] ?? 0) +
-                      ($row['late_fee'] ?? 0);
+        // Calculate VAT based on contract type
+        $commesion_vat = 0;
+        $depositeamount_vat = 0;
+        
+        if ($vat_type > 0) {
+            $rentValue = $row['kastvalue'] - $row['water'] - $row['sa3ee'] - $row['services'];
+            $commesion_vat = $row['sa3ee'] * 0.15;
+            
+            if ($vat_type == 2) {
+                $depositeamount_vat = $rentValue * 0.15;
+            }
+        }
+
+        // Calculate total and remaining amounts including VAT
+        $totalAmount = $row['kastvalue'] + $commesion_vat + $depositeamount_vat;
 
         $row['total_amount'] = $totalAmount;
         $row['amount_remaining'] = $totalAmount - ($row['amount_paid'] ?? 0);
+        $row['commesion_vat'] = $commesion_vat;
+        $row['depositeamount_vat'] = $depositeamount_vat;
 
         $response['success'] = true;
         $response['data'] = $row;
@@ -213,7 +225,12 @@ function recordPayment($data, $link, $user_data) {
         $createReceipt = isset($data['create_receipt']) && $data['create_receipt'];
 
         // Get installment
-        $sql = "SELECT * FROM aksat WHERE kastid = '$kastid'";
+        // Get installment with contract VAT info in single query
+        $sql = "SELECT a.*, e.vat_type
+                FROM aksat a
+                LEFT JOIN amlakdetails ad ON a.idsubaqar = ad.idsubaqar
+                LEFT JOIN egar e ON ad.rakam3akdid = e.rakam3akdid
+                WHERE a.kastid = '$kastid'";
         $result = mysql_query($sql, $link);
         $installment = mysql_fetch_assoc($result);
 
@@ -221,12 +238,22 @@ function recordPayment($data, $link, $user_data) {
             throw new Exception('القسط غير موجود');
         }
 
+        // Calculate VAT based on contract type
+        $commesion_vat = 0;
+        $depositeamount_vat = 0;
+        $vat_type = $installment['vat_type'] ?? 0;
+        
+        if ($vat_type > 0) {
+            $rentValue = $installment['kastvalue'] - $installment['water'] - $installment['sa3ee'] - $installment['services'];
+            $commesion_vat = number_format(($installment['sa3ee'] * 0.15), 2, '.', '');
+            
+            if ($vat_type == 2) {
+                $depositeamount_vat = number_format(($rentValue * 0.15), 2, '.', '');
+            }
+        }
+
         // Calculate total amount
-        $totalAmount = $installment['kastvalue'] +
-                      ($installment['water'] ?? 0) +
-                      ($installment['sa3ee'] ?? 0) +
-                      ($installment['services'] ?? 0) +
-                      ($installment['late_fee'] ?? 0);
+        $totalAmount = $installment['kastvalue'] + $commesion_vat + $depositeamount_vat ;
 
         // Calculate new amount paid
         $newAmountPaid = ($installment['amount_paid'] ?? 0) + $amount;

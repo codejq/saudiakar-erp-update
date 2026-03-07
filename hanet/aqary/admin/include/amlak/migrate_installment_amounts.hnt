@@ -1,0 +1,149 @@
+<?php
+/**
+ * Migration Script: Populate amount_paid and amount_remaining fields
+ * 
+ * This script updates existing installments to populate the new schema fields
+ * (amount_paid, amount_remaining, status) from the old dof3at field.
+ * 
+ * Run this ONCE to migrate existing data.
+ */
+
+include_once "../../../nocash.hnt";
+include_once "../../../connectdb.hnt";
+
+echo "<h2>تحديث بيانات الأقساط - Migration Script</h2>";
+echo "<p>جاري تحديث حقول amount_paid و amount_remaining و status...</p>";
+
+// Start transaction
+mysql_query("START TRANSACTION", $link);
+
+try {
+    // Get all installments
+    $sql = "SELECT kastid, kastvalue, water, sa3ee, services, dof3at, iscomplete, late_fee, status
+            FROM aksat
+            WHERE idsubaqar > 0";
+    
+    $result = mysql_query($sql, $link);
+    
+    if (!$result) {
+        throw new Exception("خطأ في الاستعلام: " . mysql_error($link));
+    }
+    
+    $totalCount = 0;
+    $updatedCount = 0;
+    $skippedCount = 0;
+    
+    echo "<table border='1' style='border-collapse: collapse; width: 100%; margin-top: 20px;'>";
+    echo "<tr style='background: #f0f0f0;'>
+            <th>رقم القسط</th>
+            <th>المبلغ الكلي</th>
+            <th>المدفوع (dof3at)</th>
+            <th>المدفوع الجديد</th>
+            <th>المتبقي</th>
+            <th>الحالة</th>
+            <th>النتيجة</th>
+          </tr>";
+    
+    while ($installment = mysql_fetch_assoc($result)) {
+        $totalCount++;
+        
+        // Calculate total amount
+        $totalAmount = floatval($installment['kastvalue']) +
+                      floatval($installment['water'] ?? 0) +
+                      floatval($installment['sa3ee'] ?? 0) +
+                      floatval($installment['services'] ?? 0) +
+                      floatval($installment['late_fee'] ?? 0);
+        
+        // Get amount paid from old dof3at field
+        $amountPaid = floatval($installment['dof3at'] ?? 0);
+        
+        // Calculate remaining
+        $amountRemaining = $totalAmount - $amountPaid;
+        if ($amountRemaining < 0) $amountRemaining = 0;
+        
+        // Determine status
+        $newStatus = $installment['status'];
+        
+        // If status is empty or pending, determine from payment
+        if (empty($newStatus) || $newStatus == 'pending' || $newStatus == 'due') {
+            if ($amountPaid >= $totalAmount || $installment['iscomplete'] == 1) {
+                $newStatus = 'paid';
+                $amountRemaining = 0;
+            } elseif ($amountPaid > 0 && $amountPaid < $totalAmount) {
+                $newStatus = 'partial';
+            } elseif ($installment['iscomplete'] == 1) {
+                $newStatus = 'paid';
+                $amountPaid = $totalAmount;
+                $amountRemaining = 0;
+            } else {
+                // Keep existing status or set to pending
+                $newStatus = !empty($installment['status']) ? $installment['status'] : 'pending';
+            }
+        }
+        
+        // Update the installment
+        $updateSql = "UPDATE aksat SET
+                      amount_paid = '$amountPaid',
+                      amount_remaining = '$amountRemaining',
+                      status = '$newStatus',
+                      updated_at = " . time() . "
+                      WHERE kastid = " . $installment['kastid'];
+        
+        if (mysql_query($updateSql, $link)) {
+            $updatedCount++;
+            $resultText = "<span style='color: green;'>✓ تم التحديث</span>";
+        } else {
+            $skippedCount++;
+            $resultText = "<span style='color: red;'>✗ فشل: " . mysql_error($link) . "</span>";
+        }
+        
+        echo "<tr>
+                <td>{$installment['kastid']}</td>
+                <td>" . number_format($totalAmount, 2) . "</td>
+                <td>" . number_format($installment['dof3at'], 2) . "</td>
+                <td>" . number_format($amountPaid, 2) . "</td>
+                <td>" . number_format($amountRemaining, 2) . "</td>
+                <td>{$newStatus}</td>
+                <td>{$resultText}</td>
+              </tr>";
+        
+        // Flush output every 50 rows
+        if ($totalCount % 50 == 0) {
+            echo "</table>";
+            echo "<p>معالجة: $totalCount سجل...</p>";
+            echo "<table border='1' style='border-collapse: collapse; width: 100%;'>";
+            echo "<tr style='background: #f0f0f0;'>
+                    <th>رقم القسط</th>
+                    <th>المبلغ الكلي</th>
+                    <th>المدفوع (dof3at)</th>
+                    <th>المدفوع الجديد</th>
+                    <th>المتبقي</th>
+                    <th>الحالة</th>
+                    <th>النتيجة</th>
+                  </tr>";
+            flush();
+        }
+    }
+    
+    echo "</table>";
+    
+    // Commit transaction
+    mysql_query("COMMIT", $link);
+    
+    echo "<div style='background: #d4edda; border: 1px solid #c3e6cb; padding: 15px; margin-top: 20px; border-radius: 5px;'>";
+    echo "<h3 style='color: #155724; margin: 0 0 10px 0;'>✓ اكتمل التحديث بنجاح!</h3>";
+    echo "<p style='margin: 5px 0;'><strong>إجمالي السجلات:</strong> $totalCount</p>";
+    echo "<p style='margin: 5px 0;'><strong>تم التحديث:</strong> <span style='color: green;'>$updatedCount</span></p>";
+    echo "<p style='margin: 5px 0;'><strong>فشل:</strong> <span style='color: red;'>$skippedCount</span></p>";
+    echo "</div>";
+    
+    echo "<p style='margin-top: 20px;'><a href='editaksat_v2.hnt?idsubaqar=221' style='padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px;'>العودة إلى صفحة الأقساط</a></p>";
+    
+} catch (Exception $e) {
+    mysql_query("ROLLBACK", $link);
+    echo "<div style='background: #f8d7da; border: 1px solid #f5c6cb; padding: 15px; margin-top: 20px; border-radius: 5px;'>";
+    echo "<h3 style='color: #721c24; margin: 0 0 10px 0;'>✗ حدث خطأ!</h3>";
+    echo "<p>" . htmlspecialchars($e->getMessage()) . "</p>";
+    echo "</div>";
+}
+?>
