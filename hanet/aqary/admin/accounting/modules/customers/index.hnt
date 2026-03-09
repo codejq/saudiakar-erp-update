@@ -1,0 +1,533 @@
+<?php
+/**
+ * Customer Management Module
+ * إدارة العملاء
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "إدارة العملاء";
+$sc_id = "209";
+if(isset($_POST['ajax_action'])){
+    include_once "../../../../reqloginajax.hnt";
+}
+else {
+    include_once "../../../../header.hnt";
+}
+    include_once "../../includes/accounting_class.hnt";
+
+// Handle AJAX actions
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $action = $_POST['ajax_action'];
+    $response = ['success' => false, 'message' => ''];
+
+    switch ($action) {
+        case 'add_customer':
+            $name = $_POST['customer_name'];
+            $vatNumber = $_POST['vat_number'] ?? null;
+            $phone = $_POST['phone'] ?? null;
+            $email = $_POST['email'] ?? null;
+            $address = $_POST['address'] ?? null;
+
+            $query = "INSERT INTO acc_customers (customer_name, vat_number, phone, email, address, created_at)
+                      VALUES (?, ?, ?, ?, ?, NOW())";
+            $stmt = $db->prepare($query);
+            $stmt->bind_param('sssss', $name, $vatNumber, $phone, $email, $address);
+
+            if ($stmt->execute()) {
+                $response['success'] = true;
+                $response['message'] = 'تم إضافة العميل بنجاح';
+            } else {
+                $response['message'] = 'فشل في إضافة العميل';
+            }
+            break;
+    }
+
+    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// Create customers table if not exists
+$createTableQuery = "
+CREATE TABLE IF NOT EXISTS acc_customers (
+    customer_id INT AUTO_INCREMENT PRIMARY KEY,
+    customer_name VARCHAR(255) NOT NULL,
+    vat_number VARCHAR(15),
+    phone VARCHAR(20),
+    email VARCHAR(100),
+    address TEXT,
+    is_active TINYINT(1) DEFAULT 1,
+    created_at DATETIME,
+    formuid VARCHAR(36)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+";
+$db->query($createTableQuery);
+
+// Pagination and filters
+$page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
+$perPage = 20;
+$offset = ($page - 1) * $perPage;
+
+$search = isset($_GET['search']) ? trim($_GET['search']) : '';
+$filterBalance = isset($_GET['filter_balance']) ? $_GET['filter_balance'] : 'all';
+
+// Build WHERE clause
+$whereConditions = ["is_active = 1"];
+$params = [];
+$types = '';
+
+if (!empty($search)) {
+    $whereConditions[] = "(customer_name LIKE ? OR vat_number LIKE ? OR phone LIKE ? OR email LIKE ?)";
+    $searchParam = "%{$search}%";
+    $params[] = $searchParam;
+    $params[] = $searchParam;
+    $params[] = $searchParam;
+    $params[] = $searchParam;
+    $types .= 'ssss';
+}
+
+$whereClause = implode(' AND ', $whereConditions);
+
+// Get total count
+$countQuery = "SELECT COUNT(*) as total FROM acc_customers WHERE {$whereClause}";
+if (!empty($params)) {
+    $stmt = $db->prepare($countQuery);
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $totalResult = $stmt->get_result()->fetch_assoc();
+} else {
+    $totalResult = $db->query($countQuery)->fetch_assoc();
+}
+$totalCustomers = $totalResult['total'];
+$totalPages = ceil($totalCustomers / $perPage);
+
+// Get customers with pagination
+$customersQuery = "SELECT * FROM acc_customers WHERE {$whereClause} ORDER BY customer_name LIMIT ? OFFSET ?";
+$params[] = $perPage;
+$params[] = $offset;
+$types .= 'ii';
+
+$stmt = $db->prepare($customersQuery);
+if (!empty($params)) {
+    $stmt->bind_param($types, ...$params);
+}
+$stmt->execute();
+$customersResult = $stmt->get_result();
+
+$customers = [];
+if ($customersResult) {
+    while ($row = $customersResult->fetch_assoc()) {
+        // Get customer invoices
+        $invoiceQuery = "SELECT COUNT(*) as count, SUM(total_amount) as total, SUM(total_amount - paid_amount) as balance
+                        FROM acc_invoices WHERE customer_name = ?";
+        $stmt2 = $db->prepare($invoiceQuery);
+        $stmt2->bind_param('s', $row['customer_name']);
+        $stmt2->execute();
+        $invoiceData = $stmt2->get_result()->fetch_assoc();
+
+        $row['invoice_count'] = $invoiceData['count'] ?? 0;
+        $row['total_sales'] = $invoiceData['total'] ?? 0;
+        $row['balance'] = $invoiceData['balance'] ?? 0;
+
+        $customers[] = $row;
+    }
+}
+
+// Apply balance filter if needed
+if ($filterBalance == 'with_balance') {
+    $customers = array_filter($customers, function($c) { return $c['balance'] > 0; });
+} elseif ($filterBalance == 'no_balance') {
+    $customers = array_filter($customers, function($c) { return $c['balance'] <= 0; });
+}
+?>
+
+
+<style>
+:root {
+    --primary-color: #667eea;
+    --secondary-color: #764ba2;
+}
+
+.page-header {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    padding: 2rem;
+    border-radius: 15px;
+    margin-bottom: 2rem;
+}
+
+.customer-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    transition: all 0.3s ease;
+}
+
+.customer-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.12);
+}
+
+.customer-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid #f0f0f0;
+}
+
+.customer-name {
+    font-weight: 700;
+    font-size: 1.2rem;
+    color: var(--primary-color);
+}
+
+.stats-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+.stat-item {
+    text-align: center;
+    padding: 0.75rem;
+    background: #f8f9fa;
+    border-radius: 8px;
+}
+
+.stat-value {
+    font-weight: 700;
+    font-size: 1.1rem;
+    color: var(--primary-color);
+}
+
+.btn-add-customer {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    border: none;
+    color: white;
+    padding: 0.75rem 1.5rem;
+    border-radius: 10px;
+    font-weight: 600;
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-people me-2"></i>إدارة العملاء
+                </h1>
+                <p class="mb-0 opacity-75">Customer Management</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-add-customer btn-lg ms-2" data-bs-toggle="modal" data-bs-target="#addCustomerModal">
+                    <i class="bi bi-plus-circle me-2"></i>عميل جديد
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Search and Filters -->
+    <div class="card mb-4">
+        <div class="card-body">
+            <form method="GET" class="row g-3">
+                <div class="col-md-6">
+                    <div class="input-group">
+                        <span class="input-group-text"><i class="bi bi-search"></i></span>
+                        <input type="text" class="form-control" name="search" placeholder="بحث بالاسم، الرقم الضريبي، الهاتف، أو البريد الإلكتروني..." value="<?php echo htmlspecialchars($search); ?>">
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <select class="form-select" name="filter_balance">
+                        <option value="all" <?php echo $filterBalance == 'all' ? 'selected' : ''; ?>>جميع العملاء</option>
+                        <option value="with_balance" <?php echo $filterBalance == 'with_balance' ? 'selected' : ''; ?>>عملاء برصيد مستحق</option>
+                        <option value="no_balance" <?php echo $filterBalance == 'no_balance' ? 'selected' : ''; ?>>عملاء بدون رصيد</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <button type="submit" class="btn btn-primary w-100">
+                        <i class="bi bi-funnel me-2"></i>تطبيق الفلاتر
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Results Summary -->
+    <div class="alert alert-info mb-3">
+        <i class="bi bi-info-circle me-2"></i>
+        عرض <?php echo count($customers); ?> من أصل <?php echo $totalCustomers; ?> عميل
+        <?php if (!empty($search)): ?>
+        - نتائج البحث عن: <strong><?php echo htmlspecialchars($search); ?></strong>
+        <?php endif; ?>
+    </div>
+
+    <!-- Customers List -->
+    <div class="row">
+        <div class="col-12">
+            <?php if (empty($customers)): ?>
+            <div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>
+                لا يوجد عملاء. انقر على "عميل جديد" لإضافة أول عميل.
+            </div>
+            <?php else: ?>
+            <?php foreach ($customers as $customer): ?>
+            <div class="customer-card">
+                <div class="customer-header">
+                    <div>
+                        <div class="customer-name"><?php echo $customer['customer_name']; ?></div>
+                        <?php if ($customer['vat_number']): ?>
+                        <small class="text-muted">
+                            <i class="bi bi-receipt me-1"></i>الرقم الضريبي: <?php echo $customer['vat_number']; ?>
+                        </small>
+                        <?php endif; ?>
+                    </div>
+                    <div>
+                        <?php if ($customer['balance'] > 0): ?>
+                        <span class="badge bg-warning" style="font-size: 1rem; padding: 0.5rem 1rem;">
+                            رصيد مستحق: <?php echo number_format($customer['balance'], 2); ?> ر.س
+                        </span>
+                        <?php else: ?>
+                        <span class="badge bg-success" style="font-size: 1rem; padding: 0.5rem 1rem;">
+                            لا يوجد رصيد مستحق
+                        </span>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <?php if ($customer['phone']): ?>
+                        <div class="mb-2">
+                            <i class="bi bi-telephone me-2"></i><?php echo $customer['phone']; ?>
+                        </div>
+                        <?php endif; ?>
+                        <?php if ($customer['email']): ?>
+                        <div class="mb-2">
+                            <i class="bi bi-envelope me-2"></i><?php echo $customer['email']; ?>
+                        </div>
+                        <?php endif; ?>
+                        <?php if ($customer['address']): ?>
+                        <div class="mb-2">
+                            <i class="bi bi-geo-alt me-2"></i><?php echo $customer['address']; ?>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="stats-row">
+                            <div class="stat-item">
+                                <div class="stat-value"><?php echo $customer['invoice_count']; ?></div>
+                                <small class="text-muted">فاتورة</small>
+                            </div>
+                            <div class="stat-item">
+                                <div class="stat-value"><?php echo number_format($customer['total_sales'], 0); ?></div>
+                                <small class="text-muted">إجمالي المبيعات</small>
+                            </div>
+                            <div class="stat-item">
+                                <div class="stat-value text-<?php echo $customer['balance'] > 0 ? 'danger' : 'success'; ?>">
+                                    <?php echo number_format($customer['balance'], 0); ?>
+                                </div>
+                                <small class="text-muted">الرصيد</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="d-flex gap-2">
+                    <button class="btn btn-sm btn-outline-primary" onclick="viewStatement(<?php echo $customer['customer_id']; ?>, '<?php echo $customer['customer_name']; ?>')">
+                        <i class="bi bi-file-text me-1"></i>كشف حساب
+                    </button>
+                    <button class="btn btn-sm btn-outline-success" onclick="createInvoice('<?php echo $customer['customer_name']; ?>', '<?php echo $customer['vat_number']; ?>')">
+                        <i class="bi bi-receipt me-1"></i>فاتورة جديدة
+                    </button>
+                </div>
+            </div>
+            <?php endforeach; ?>
+
+            <!-- Pagination -->
+            <?php if ($totalPages > 1): ?>
+            <nav aria-label="Customer pagination" class="mt-4">
+                <ul class="pagination justify-content-center">
+                    <?php if ($page > 1): ?>
+                    <li class="page-item">
+                        <a class="page-link" href="?page=<?php echo $page - 1; ?>&search=<?php echo urlencode($search); ?>&filter_balance=<?php echo $filterBalance; ?>">
+                            <i class="bi bi-chevron-right"></i> السابق
+                        </a>
+                    </li>
+                    <?php endif; ?>
+
+                    <?php
+                    $startPage = max(1, $page - 2);
+                    $endPage = min($totalPages, $page + 2);
+
+                    if ($startPage > 1): ?>
+                        <li class="page-item">
+                            <a class="page-link" href="?page=1&search=<?php echo urlencode($search); ?>&filter_balance=<?php echo $filterBalance; ?>">1</a>
+                        </li>
+                        <?php if ($startPage > 2): ?>
+                        <li class="page-item disabled"><span class="page-link">...</span></li>
+                        <?php endif; ?>
+                    <?php endif; ?>
+
+                    <?php for ($i = $startPage; $i <= $endPage; $i++): ?>
+                    <li class="page-item <?php echo $i == $page ? 'active' : ''; ?>">
+                        <a class="page-link" href="?page=<?php echo $i; ?>&search=<?php echo urlencode($search); ?>&filter_balance=<?php echo $filterBalance; ?>"><?php echo $i; ?></a>
+                    </li>
+                    <?php endfor; ?>
+
+                    <?php if ($endPage < $totalPages): ?>
+                        <?php if ($endPage < $totalPages - 1): ?>
+                        <li class="page-item disabled"><span class="page-link">...</span></li>
+                        <?php endif; ?>
+                        <li class="page-item">
+                            <a class="page-link" href="?page=<?php echo $totalPages; ?>&search=<?php echo urlencode($search); ?>&filter_balance=<?php echo $filterBalance; ?>"><?php echo $totalPages; ?></a>
+                        </li>
+                    <?php endif; ?>
+
+                    <?php if ($page < $totalPages): ?>
+                    <li class="page-item">
+                        <a class="page-link" href="?page=<?php echo $page + 1; ?>&search=<?php echo urlencode($search); ?>&filter_balance=<?php echo $filterBalance; ?>">
+                            التالي <i class="bi bi-chevron-left"></i>
+                        </a>
+                    </li>
+                    <?php endif; ?>
+                </ul>
+            </nav>
+            <?php endif; ?>
+
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<!-- Add Customer Modal -->
+<div class="modal fade" id="addCustomerModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                <h5 class="modal-title">
+                    <i class="bi bi-person-plus me-2"></i>إضافة عميل جديد
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="addCustomerForm">
+                    <div class="mb-3">
+                        <label class="form-label">اسم العميل *</label>
+                        <input type="text" class="form-control" name="customer_name" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">الرقم الضريبي</label>
+                        <input type="text" class="form-control" name="vat_number" placeholder="3xxxxxxxxxx15">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">رقم الهاتف</label>
+                        <input type="text" class="form-control" name="phone">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">البريد الإلكتروني</label>
+                        <input type="email" class="form-control" name="email">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">العنوان</label>
+                        <textarea class="form-control" name="address" rows="3"></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-primary" onclick="submitCustomer()">
+                    <i class="bi bi-check-circle me-2"></i>حفظ
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Result Modal -->
+<div class="modal fade" id="resultModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header" id="resultModalHeader">
+                <h5 class="modal-title text-white" id="resultModalTitle"></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p id="resultModalMessage"></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إغلاق</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+
+<script>
+function submitCustomer() {
+    const form = document.getElementById('addCustomerForm');
+    const formData = new FormData(form);
+    formData.append('ajax_action', 'add_customer');
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        const modal = bootstrap.Modal.getInstance(document.getElementById('addCustomerModal'));
+        modal.hide();
+
+        showResultModal(data.success, data.message);
+
+        if (data.success) {
+            setTimeout(() => location.reload(), 1500);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showResultModal(false, 'حدث خطأ أثناء الحفظ');
+    });
+}
+
+function viewStatement(customerId, customerName) {
+    window.location = '../reports/customer_statement.hnt?customer_name=' + encodeURIComponent(customerName);
+}
+
+function createInvoice(customerName, vatNumber) {
+    window.location = '../invoices/index.hnt?customer_name=' + encodeURIComponent(customerName) + '&vat_number=' + (vatNumber || '');
+}
+
+function showResultModal(success, message) {
+    const modal = new bootstrap.Modal(document.getElementById('resultModal'));
+    const header = document.getElementById('resultModalHeader');
+    const title = document.getElementById('resultModalTitle');
+    const messageEl = document.getElementById('resultModalMessage');
+
+    if (success) {
+        header.style.background = 'linear-gradient(135deg, #28a745, #20c997)';
+        title.innerHTML = '<i class="bi bi-check-circle me-2"></i>نجحت العملية';
+    } else {
+        header.style.background = 'linear-gradient(135deg, #dc3545, #c82333)';
+        title.innerHTML = '<i class="bi bi-x-circle me-2"></i>فشلت العملية';
+    }
+
+    messageEl.textContent = message;
+    modal.show();
+}
+</script>
+
+<?php require("../../../../foter.hnt"); ?>

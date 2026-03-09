@@ -9,10 +9,15 @@
 
 $sc_title = "القيود اليومية";
 $sc_id = "202";
-include_once "../../../../nocash.hnt";
-include_once "../../../../connectdb.hnt";
-include_once "../../../../header.hnt";
-include_once "../../includes/accounting_class.hnt";
+
+
+if(isset($_POST['ajax_action'])){
+    include_once "../../../../reqloginajax.hnt";
+}
+else {
+    include_once "../../../../header.hnt";
+}
+    include_once "../../includes/accounting_class.hnt";
 
 $accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
 
@@ -25,6 +30,28 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
 
     switch ($action) {
         case 'create_entry':
+            if (empty($_POST['entry_date'])) {
+                $response = ['success' => false, 'error' => 'Entry date is required', 'message' => 'تاريخ القيد مطلوب'];
+                break;
+            }
+            
+            if (empty($_POST['description'])) {
+                $response = ['success' => false, 'error' => 'Description is required', 'message' => 'وصف القيد مطلوب'];
+                break;
+            }
+            
+            $lines = json_decode($_POST['lines'], true);
+            
+            if (empty($lines) || !is_array($lines)) {
+                $response = ['success' => false, 'error' => 'No entry lines provided', 'message' => 'يجب إضافة بنود للقيد'];
+                break;
+            }
+            
+            if (count($lines) < 2) {
+                $response = ['success' => false, 'error' => 'Minimum 2 lines required', 'message' => 'يجب إضافة بندين على الأقل للقيد'];
+                break;
+            }
+            
             $data = [
                 'entry_date' => $_POST['entry_date'],
                 'entry_type' => $_POST['entry_type'] ?? 'manual',
@@ -34,25 +61,60 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                 'status' => $_POST['status'] ?? 'draft'
             ];
 
-            $lines = json_decode($_POST['lines'], true);
-
             $result = $accountingManager->createJournalEntry($data, $lines);
             $response = $result;
-            $response['message'] = $result['success'] ? 'تم إنشاء القيد بنجاح' : ($result['error'] ?? 'فشل في إنشاء القيد');
+            if (!isset($response['message'])) {
+                $response['message'] = $result['success'] ? 'تم إنشاء القيد بنجاح' : ($result['error'] ?? 'فشل في إنشاء القيد');
+            }
             break;
 
         case 'update_entry':
-            $entryId = $_POST['entry_id'];
+            $entryId = intval($_POST['entry_id'] ?? 0);
+            
+            if (empty($entryId)) {
+                $response = ['success' => false, 'error' => 'Entry ID is required', 'message' => 'معرف القيد مطلوب'];
+                break;
+            }
+            
+            $checkEntry = $db->query("SELECT entry_id, status FROM acc_journal_entries WHERE entry_id = $entryId");
+            if (!$checkEntry || $checkEntry->num_rows == 0) {
+                $response = ['success' => false, 'error' => 'Entry not found', 'message' => 'القيد غير موجود'];
+                break;
+            }
+            
+            if (empty($_POST['entry_date'])) {
+                $response = ['success' => false, 'error' => 'Entry date is required', 'message' => 'تاريخ القيد مطلوب'];
+                break;
+            }
+            
+            if (empty($_POST['description'])) {
+                $response = ['success' => false, 'error' => 'Description is required', 'message' => 'وصف القيد مطلوب'];
+                break;
+            }
+            
+            $lines = json_decode($_POST['lines'], true);
+            
+            if (empty($lines) || !is_array($lines)) {
+                $response = ['success' => false, 'error' => 'No entry lines provided', 'message' => 'يجب إضافة بنود للقيد'];
+                break;
+            }
+            
+            if (count($lines) < 2) {
+                $response = ['success' => false, 'error' => 'Minimum 2 lines required', 'message' => 'يجب إضافة بندين على الأقل للقيد'];
+                break;
+            }
+            
             $data = [
                 'entry_date' => $_POST['entry_date'],
                 'entry_type' => $_POST['entry_type'] ?? 'manual',
                 'description' => $_POST['description']
             ];
 
-            $lines = json_decode($_POST['lines'], true);
-
             // Delete old lines
-            $db->query("DELETE FROM acc_journal_entry_lines WHERE entry_id = $entryId");
+            if (!$db->query("DELETE FROM acc_journal_entry_lines WHERE entry_id = $entryId")) {
+                $response = ['success' => false, 'error' => $db->error, 'message' => 'فشل في حذف البنود القديمة: ' . $db->error];
+                break;
+            }
 
             // Update entry (allow editing of both draft and posted entries)
             $updateSql = "UPDATE acc_journal_entries SET
@@ -66,6 +128,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                 $totalDebit = 0;
                 $totalCredit = 0;
                 $lineNumber = 1;
+                $insertSuccess = true;
 
                 foreach ($lines as $line) {
                     $accountId = intval($line['account_id']);
@@ -79,31 +142,71 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                     $lineSql = "INSERT INTO acc_journal_entry_lines
                                (entry_id, line_number, account_id, description, debit_amount, credit_amount)
                                VALUES ($entryId, $lineNumber, $accountId, '$desc', $debit, $credit)";
-                    $db->query($lineSql);
+                    if (!$db->query($lineSql)) {
+                        $insertSuccess = false;
+                        $response = ['success' => false, 'error' => $db->error, 'message' => 'فشل في إضافة البند رقم ' . $lineNumber . ': ' . $db->error];
+                        break;
+                    }
                     $lineNumber++;
                 }
 
-                // Update totals
-                $db->query("UPDATE acc_journal_entries SET total_debit = $totalDebit, total_credit = $totalCredit WHERE entry_id = $entryId");
-
-                $response = ['success' => true, 'message' => 'تم تحديث القيد بنجاح'];
+                if ($insertSuccess) {
+                    // Check if balanced
+                    if (abs($totalDebit - $totalCredit) > 0.01) {
+                        $response = ['success' => false, 'error' => 'Entry is not balanced', 'message' => 'القيد غير متوازن. المدين: ' . number_format($totalDebit, 2) . ' - الدائن: ' . number_format($totalCredit, 2)];
+                    } else {
+                        // Update totals
+                        $db->query("UPDATE acc_journal_entries SET total_debit = $totalDebit, total_credit = $totalCredit WHERE entry_id = $entryId");
+                        $response = ['success' => true, 'message' => 'تم تحديث القيد بنجاح'];
+                    }
+                }
             } else {
-                $response = ['success' => false, 'message' => 'فشل في تحديث القيد'];
+                $response = ['success' => false, 'error' => $db->error, 'message' => 'فشل في تحديث القيد: ' . $db->error];
             }
             break;
 
         case 'post_entry':
-            $entryId = $_POST['entry_id'];
+            $entryId = intval($_POST['entry_id'] ?? 0);
+            
+            if (empty($entryId)) {
+                $response = ['success' => false, 'error' => 'Entry ID is required', 'message' => 'معرف القيد مطلوب'];
+                break;
+            }
+            
+            $checkEntry = $db->query("SELECT status FROM acc_journal_entries WHERE entry_id = $entryId");
+            if (!$checkEntry || $checkEntry->num_rows == 0) {
+                $response = ['success' => false, 'error' => 'Entry not found', 'message' => 'القيد غير موجود'];
+                break;
+            }
+            
+            $entryData = $checkEntry->fetch_assoc();
+            if ($entryData['status'] == 'posted') {
+                $response = ['success' => false, 'error' => 'Entry already posted', 'message' => 'القيد مرحّل بالفعل'];
+                break;
+            }
+            
+            if ($entryData['status'] == 'cancelled') {
+                $response = ['success' => false, 'error' => 'Cannot post cancelled entry', 'message' => 'لا يمكن ترحيل قيد ملغي'];
+                break;
+            }
+            
             $result = $accountingManager->postJournalEntry($entryId);
             $response = $result;
-            $response['message'] = $result['success'] ? 'تم ترحيل القيد بنجاح' : 'فشل في ترحيل القيد';
+            if (!isset($response['message'])) {
+                $response['message'] = $result['success'] ? 'تم ترحيل القيد بنجاح' : ($result['error'] ?? 'فشل في ترحيل القيد');
+            }
             break;
 
         case 'delete_entry':
-            $entryId = $_POST['entry_id'];
+            $entryId = intval($_POST['entry_id'] ?? 0);
+            
+            if (empty($entryId)) {
+                $response = ['success' => false, 'error' => 'Entry ID is required', 'message' => 'معرف القيد مطلوب'];
+                break;
+            }
 
             // Only allow deletion of draft entries (not posted)
-            $checkQuery = "SELECT status FROM acc_journal_entries WHERE entry_id = $entryId";
+            $checkQuery = "SELECT entry_number, status FROM acc_journal_entries WHERE entry_id = $entryId";
             $checkResult = $db->query($checkQuery);
 
             if ($checkResult && $checkResult->num_rows > 0) {
@@ -111,19 +214,23 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
 
                 if ($entry['status'] == 'draft') {
                     // Delete entry lines first
-                    $db->query("DELETE FROM acc_journal_entry_lines WHERE entry_id = $entryId");
+                    if (!$db->query("DELETE FROM acc_journal_entry_lines WHERE entry_id = $entryId")) {
+                        $response = ['success' => false, 'error' => $db->error, 'message' => 'فشل في حذف بنود القيد: ' . $db->error];
+                        break;
+                    }
 
                     // Delete the entry
                     if ($db->query("DELETE FROM acc_journal_entries WHERE entry_id = $entryId")) {
-                        $response = ['success' => true, 'message' => 'تم حذف القيد بنجاح'];
+                        $response = ['success' => true, 'message' => 'تم حذف القيد ' . $entry['entry_number'] . ' بنجاح'];
                     } else {
-                        $response = ['success' => false, 'message' => 'فشل في حذف القيد'];
+                        $response = ['success' => false, 'error' => $db->error, 'message' => 'فشل في حذف القيد: ' . $db->error];
                     }
                 } else {
-                    $response = ['success' => false, 'message' => 'لا يمكن حذف قيد مرحّل. استخدم قيد عكسي بدلاً من ذلك.'];
+                    $statusText = $entry['status'] == 'posted' ? 'مرحّل' : 'ملغي';
+                    $response = ['success' => false, 'error' => 'Cannot delete ' . $entry['status'] . ' entry', 'message' => 'لا يمكن حذف قيد ' . $statusText . '. القيد رقم: ' . $entry['entry_number']];
                 }
             } else {
-                $response = ['success' => false, 'message' => 'القيد غير موجود'];
+                $response = ['success' => false, 'error' => 'Entry not found', 'message' => 'القيد غير موجود في النظام'];
             }
             break;
     }

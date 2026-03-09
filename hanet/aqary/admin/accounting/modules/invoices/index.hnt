@@ -1,0 +1,1411 @@
+<?php
+/**
+ * Invoices Module - ZATCA Compliant
+ * الفواتير الإلكترونية
+ *
+ * @charset UTF-8
+ * @version 1.0
+ * @zatca Phase 2 Compliant
+ */
+
+$sc_title = "الفواتير الإلكترونية";
+$sc_id = "204";
+if ($_SERVER['REQUEST_METHOD'] != 'POST' && !isset($_POST['ajax_action'])) {
+include_once "../../../../header.hnt";
+
+}
+else {
+include_once "../../../../reqloginajax.hnt";
+}
+include_once "../../includes/accounting_class.hnt";
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+
+// Handle ZATCA submission
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['action'] == 'submit_to_zatca') {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $invoiceId = $_POST['invoice_id'] ?? 0;
+
+    try {
+        // Ensure ZATCA columns exist in acc_invoices table
+        $checkColumns = $db->query("SHOW COLUMNS FROM acc_invoices LIKE 'zatca_status'");
+        if ($checkColumns->num_rows == 0) {
+            $alterSQL = "ALTER TABLE acc_invoices
+                ADD COLUMN zatca_status VARCHAR(50) NULL AFTER payment_status,
+                ADD COLUMN zatca_uuid VARCHAR(100) NULL AFTER zatca_status,
+                ADD COLUMN zatca_hash VARCHAR(255) NULL AFTER zatca_uuid,
+                ADD COLUMN zatca_qr_code TEXT NULL AFTER zatca_hash,
+                ADD COLUMN zatca_xml TEXT NULL AFTER zatca_qr_code,
+                ADD COLUMN zatca_submission_date DATETIME NULL AFTER zatca_xml";
+
+            if (!$db->query($alterSQL)) {
+                echo json_encode([
+                    'success' => false,
+                    'error' => 'فشل في إضافة أعمدة ZATCA: ' . $db->error
+                ], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+        }
+
+        // Ensure acc_invoice_items table exists
+        $checkTable = $db->query("SHOW TABLES LIKE 'acc_invoice_items'");
+        if ($checkTable->num_rows == 0) {
+            $createTable = "CREATE TABLE acc_invoice_items (
+                item_id INT AUTO_INCREMENT PRIMARY KEY,
+                invoice_id INT NOT NULL,
+                item_description VARCHAR(255) NOT NULL,
+                quantity DECIMAL(10,2) NOT NULL,
+                unit_price DECIMAL(10,2) NOT NULL,
+                vat_rate DECIMAL(5,2) DEFAULT 15.00,
+                discount DECIMAL(10,2) DEFAULT 0,
+                line_total DECIMAL(10,2) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (invoice_id) REFERENCES acc_invoices(invoice_id) ON DELETE CASCADE,
+                INDEX idx_invoice (invoice_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+            if (!$db->query($createTable)) {
+                echo json_encode([
+                    'success' => false,
+                    'error' => 'فشل في إنشاء جدول عناصر الفاتورة: ' . $db->error
+                ], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+        }
+
+        // Include ZATCA integration files
+        require_once __DIR__ . '/../../../../admin/zatca/config/zatca_config.php';
+        require_once __DIR__ . '/../../../../admin/zatca/config/phase2_config.php';
+        require_once __DIR__ . '/../../../../admin/zatca/phase2/integration/Phase2Manager.php';
+
+        // Get invoice details
+        $stmt = $db->prepare("SELECT * FROM acc_invoices WHERE invoice_id = ?");
+        $stmt->bind_param('i', $invoiceId);
+        $stmt->execute();
+        $invoice = $stmt->get_result()->fetch_assoc();
+
+        if (!$invoice) {
+            echo json_encode([
+                'success' => false,
+                'error' => 'الفاتورة غير موجودة'
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        // Get invoice items
+        $itemsStmt = $db->prepare("SELECT * FROM acc_invoice_items WHERE invoice_id = ?");
+        $itemsStmt->bind_param('i', $invoiceId);
+        $itemsStmt->execute();
+        $itemsResult = $itemsStmt->get_result();
+        $items = [];
+        while ($item = $itemsResult->fetch_assoc()) {
+            $items[] = $item;
+        }
+
+        // Initialize Phase2Manager
+        $phase2Manager = new Phase2Manager($db);
+
+        // Prepare invoice data for ZATCA
+        $isStandardInvoice = $invoice['invoice_type'] == 'standard';
+
+        $zatcaInvoice = [
+            'invoice_number' => $invoice['invoice_number'],
+            'invoice_date' => $invoice['invoice_date'],
+            'invoice_type' => $isStandardInvoice ? '388' : '0200000',
+            'is_standard' => $isStandardInvoice, // Required for API endpoint selection
+            'currency' => 'SAR',
+            'base_amount' => $invoice['subtotal'],
+            'vat_amount' => $invoice['vat_amount'],
+            'total_amount' => $invoice['total_amount'],
+            'customer' => [
+                'name' => $invoice['customer_name'],
+                'vat_number' => $invoice['customer_vat_number'] ?? '',
+                'address' => $invoice['customer_address'] ?? ''
+            ],
+            'items' => array_map(function($item) {
+                return [
+                    'name' => $item['item_description'],
+                    'quantity' => $item['quantity'],
+                    'unit_price' => $item['unit_price'],
+                    'tax_rate' => $item['vat_rate'],
+                    'discount' => $item['discount'] ?? 0
+                ];
+            }, $items)
+        ];
+
+        // Create submission log table if not exists
+        $createLogTable = "CREATE TABLE IF NOT EXISTS zatca_submission_log (
+            log_id INT AUTO_INCREMENT PRIMARY KEY,
+            invoice_id INT NOT NULL,
+            submission_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+            status VARCHAR(20) NOT NULL,
+            zatca_uuid VARCHAR(100) NULL,
+            zatca_hash VARCHAR(255) NULL,
+            api_response TEXT NULL,
+            error_message TEXT NULL,
+            INDEX idx_invoice (invoice_id),
+            INDEX idx_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+        $db->query($createLogTable);
+
+        // Submit to ZATCA
+        $invoiceType = $invoice['invoice_type'] == 'standard' ? 'standard' : 'simplified';
+        $result = $phase2Manager->processInvoice($zatcaInvoice, $invoiceType, true);
+
+        // Check if local processing (XML + signing) succeeded
+        if ($result['success']) {
+            // Ensure columns exist
+            $checkUuidColumn = $db->query("SHOW COLUMNS FROM acc_invoices LIKE 'zatca_uuid'");
+            if ($checkUuidColumn->num_rows == 0) {
+                $db->query("ALTER TABLE acc_invoices ADD COLUMN zatca_uuid VARCHAR(100) NULL AFTER zatca_status");
+            }
+
+            $checkHashColumn = $db->query("SHOW COLUMNS FROM acc_invoices LIKE 'zatca_hash'");
+            if ($checkHashColumn->num_rows == 0) {
+                $db->query("ALTER TABLE acc_invoices ADD COLUMN zatca_hash VARCHAR(255) NULL AFTER zatca_uuid");
+            }
+
+            $checkSubmissionDateColumn = $db->query("SHOW COLUMNS FROM acc_invoices LIKE 'zatca_submission_date'");
+            if ($checkSubmissionDateColumn->num_rows == 0) {
+                $db->query("ALTER TABLE acc_invoices ADD COLUMN zatca_submission_date DATETIME NULL");
+            }
+
+            $checkErrorColumn = $db->query("SHOW COLUMNS FROM acc_invoices LIKE 'zatca_error'");
+            if ($checkErrorColumn->num_rows == 0) {
+                $db->query("ALTER TABLE acc_invoices ADD COLUMN zatca_error TEXT NULL");
+            }
+
+            // Check if actual ZATCA API submission succeeded
+            $apiResult = $result['api_result'] ?? null;
+            $zatcaSuccess = false;
+            $zatcaError = null;
+            $zatcaErrorDetails = null;
+
+            if ($apiResult && isset($apiResult['success']) && $apiResult['success']) {
+                // ZATCA API submission succeeded
+                $zatcaSuccess = true;
+                $finalStatus = 'submitted';
+            } else {
+                // ZATCA API submission failed or was not attempted
+                if ($apiResult && isset($apiResult['error'])) {
+                    $zatcaError = $apiResult['error'];
+
+                    // Extract full technical details from API response
+                    $zatcaErrorDetails = [
+                        'error' => $apiResult['error'] ?? null,
+                        'error_detail' => $apiResult['error_detail'] ?? null,
+                        'http_code' => $apiResult['http_code'] ?? null,
+                        'api_url' => $apiResult['api_url'] ?? null,
+                        'validation_results' => $apiResult['validation_results'] ?? [],
+                        'api_response' => $apiResult['data'] ?? null
+                    ];
+                } else {
+                    $zatcaError = 'لم يتم إرسال الفاتورة إلى ZATCA - الشهادات أو الإعدادات مفقودة';
+                }
+                $finalStatus = 'signed_locally';
+            }
+
+            // Update invoice with results
+            $zatcaUuid = $result['uuid'] ?? '';
+            $zatcaHash = $result['hash'] ?? '';
+
+            if ($zatcaSuccess) {
+                // Save success result in zatca_error field (reusing field for both success and error messages)
+                $zatcaResultMsg = 'SUCCESS: تم إرسال الفاتورة بنجاح';
+
+                if ($apiResult) {
+                    if (!empty($apiResult['status'])) {
+                        $zatcaResultMsg .= ' | Status: ' . $apiResult['status'];
+                    }
+                    if (!empty($apiResult['cleared_invoice'])) {
+                        $zatcaResultMsg .= ' | Cleared';
+                    }
+                    if (!empty($apiResult['reported_invoice'])) {
+                        $zatcaResultMsg .= ' | Reported';
+                    }
+
+                    // ZATCA API returns validation_results as an OBJECT with:
+                    // - infoMessages: array of {type, code, category, message, status}
+                    // - warningMessages: array of {type, code, category, message, status}
+                    // - errorMessages: array of {type, code, category, message, status}
+                    // - status: overall status (PASS, WARNING, ERROR)
+                    if (!empty($apiResult['validation_results']) && is_array($apiResult['validation_results'])) {
+                        $vr = $apiResult['validation_results'];
+                        $overallStatus = $vr['status'] ?? '';
+
+                        // Count total messages
+                        $infoCount = count($vr['infoMessages'] ?? []);
+                        $warnCount = count($vr['warningMessages'] ?? []);
+                        $errorCount = count($vr['errorMessages'] ?? []);
+                        $totalCount = $infoCount + $warnCount + $errorCount;
+
+                        $zatcaResultMsg .= " | Validations: {$totalCount} [{$overallStatus}]";
+
+                        // Add warning messages
+                        if (!empty($vr['warningMessages']) && is_array($vr['warningMessages'])) {
+                            $zatcaResultMsg .= "\n\n⚠️ تحذيرات ({$warnCount}):";
+                            foreach ($vr['warningMessages'] as $msg) {
+                                $code = $msg['code'] ?? '';
+                                $text = $msg['message'] ?? '';
+                                $category = $msg['category'] ?? '';
+                                $zatcaResultMsg .= "\n- [{$code}] ({$category}): {$text}";
+                            }
+                        }
+
+                        // Add error messages
+                        if (!empty($vr['errorMessages']) && is_array($vr['errorMessages'])) {
+                            $zatcaResultMsg .= "\n\n❌ أخطاء ({$errorCount}):";
+                            foreach ($vr['errorMessages'] as $msg) {
+                                $code = $msg['code'] ?? '';
+                                $text = $msg['message'] ?? '';
+                                $category = $msg['category'] ?? '';
+                                $zatcaResultMsg .= "\n- [{$code}] ({$category}): {$text}";
+                            }
+                        }
+
+                        // Add info messages (optional, less important)
+                        if (!empty($vr['infoMessages']) && is_array($vr['infoMessages'])) {
+                            $zatcaResultMsg .= "\n\n✅ معلومات ({$infoCount}):";
+                            foreach ($vr['infoMessages'] as $msg) {
+                                $code = $msg['code'] ?? '';
+                                $text = $msg['message'] ?? '';
+                                $zatcaResultMsg .= "\n- [{$code}]: {$text}";
+                            }
+                        }
+                    }
+                }
+                $updateStmt = $db->prepare("UPDATE acc_invoices SET zatca_status = ?, zatca_uuid = ?, zatca_hash = ?, zatca_submission_date = NOW(), zatca_error = ? WHERE invoice_id = ?");
+                $updateStmt->bind_param('ssssi', $finalStatus, $zatcaUuid, $zatcaHash, $zatcaResultMsg, $invoiceId);
+            } else {
+                $updateStmt = $db->prepare("UPDATE acc_invoices SET zatca_status = ?, zatca_uuid = ?, zatca_hash = ?, zatca_error = ? WHERE invoice_id = ?");
+                $updateStmt->bind_param('ssssi', $finalStatus, $zatcaUuid, $zatcaHash, $zatcaError, $invoiceId);
+            }
+
+            $updateStmt->execute();
+
+            // Log the submission attempt
+            $logStatus = $zatcaSuccess ? 'success' : 'failed';
+            $apiResponseJson = $apiResult ? json_encode($apiResult, JSON_UNESCAPED_UNICODE) : null;
+
+            $logStmt = $db->prepare("INSERT INTO zatca_submission_log (invoice_id, status, zatca_uuid, zatca_hash, api_response, error_message) VALUES (?, ?, ?, ?, ?, ?)");
+            $logStmt->bind_param('isssss', $invoiceId, $logStatus, $zatcaUuid, $zatcaHash, $apiResponseJson, $zatcaError);
+            $logStmt->execute();
+
+            if ($zatcaSuccess) {
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'تم إرسال الفاتورة إلى ZATCA بنجاح',
+                    'zatca_uuid' => $zatcaUuid,
+                    'zatca_hash' => $zatcaHash,
+                    'api_result' => $apiResult
+                ], JSON_UNESCAPED_UNICODE);
+            } else {
+                echo json_encode([
+                    'success' => false,
+                    'error' => 'تم توقيع الفاتورة محلياً ولكن فشل الإرسال إلى ZATCA: ' . $zatcaError,
+                    'technical_details' => $zatcaErrorDetails,
+                    'zatca_uuid' => $zatcaUuid,
+                    'zatca_hash' => $zatcaHash
+                ], JSON_UNESCAPED_UNICODE);
+            }
+        } else {
+            // Local processing failed (XML generation or signing failed)
+            echo json_encode([
+                'success' => false,
+                'error' => $result['error'] ?? 'فشل في معالجة الفاتورة'
+            ], JSON_UNESCAPED_UNICODE);
+        }
+    } catch (Exception $e) {
+        echo json_encode([
+            'success' => false,
+            'error' => 'خطأ: ' . $e->getMessage()
+        ], JSON_UNESCAPED_UNICODE);
+    }
+
+    exit;
+}
+
+// Handle AJAX actions
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $action = $_POST['ajax_action'];
+    $response = ['success' => false, 'message' => ''];
+
+    switch ($action) {
+        case 'search_customers':
+            $searchTerm = $_POST['search'] ?? '';
+            $query = "SELECT customer_id, customer_name, vat_number, phone, address FROM acc_customers WHERE is_active = 1 AND (customer_name LIKE ? OR vat_number LIKE ? OR phone LIKE ?) ORDER BY customer_name LIMIT 10";
+            $stmt = $db->prepare($query);
+            $searchParam = "%{$searchTerm}%";
+            $stmt->bind_param('sss', $searchParam, $searchParam, $searchParam);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            $customers = [];
+            while ($row = $result->fetch_assoc()) {
+                $customers[] = $row;
+            }
+            $response = ['success' => true, 'customers' => $customers];
+            break;
+
+        case 'add_customer_quick':
+            $name = trim($_POST['customer_name'] ?? '');
+            $vatNumber = trim($_POST['vat_number'] ?? '');
+            $phone = trim($_POST['phone'] ?? '');
+            $address = trim($_POST['address'] ?? '');
+            
+            if (empty($name)) {
+                $response = ['success' => false, 'error' => 'Customer name is required', 'message' => 'اسم العميل مطلوب'];
+                break;
+            }
+            
+            $query = "INSERT INTO acc_customers (customer_name, vat_number, phone, address, is_active, created_at, formuid) VALUES (?, ?, ?, ?, 1, NOW(), UUID())";
+            $stmt = $db->prepare($query);
+            $stmt->bind_param('ssss', $name, $vatNumber, $phone, $address);
+            
+            if ($stmt->execute()) {
+                $customerId = $stmt->insert_id;
+                $response = [
+                    'success' => true, 
+                    'message' => 'تم إضافة العميل بنجاح',
+                    'customer' => [
+                        'customer_id' => $customerId,
+                        'customer_name' => $name,
+                        'vat_number' => $vatNumber,
+                        'phone' => $phone,
+                        'address' => $address
+                    ]
+                ];
+            } else {
+                $response = ['success' => false, 'error' => $db->error, 'message' => 'فشل في إضافة العميل: ' . $db->error];
+            }
+            break;
+
+        case 'create_invoice':
+            $customerId = intval($_POST['customer_id'] ?? 0);
+            
+            if (empty($customerId)) {
+                $response = ['success' => false, 'error' => 'Customer ID is required', 'message' => 'معرف العميل مطلوب'];
+                break;
+            }
+            
+            $invoiceData = [
+                'invoice_type' => $_POST['invoice_type'],
+                'customer_id' => $customerId,
+                'customer_type' => $_POST['customer_type'] ?? 'tenant',
+                'customer_name' => $_POST['customer_name'],
+                'customer_vat_number' => $_POST['customer_vat_number'] ?? null,
+                'customer_address' => $_POST['customer_address'] ?? null,
+                'invoice_date' => $_POST['invoice_date'],
+                'due_date' => $_POST['due_date'] ?? null,
+                'payment_method' => $_POST['payment_method'] ?? 'cash',
+                'notes' => $_POST['notes'] ?? null
+            ];
+
+            $items = json_decode($_POST['items'], true);
+            
+            if (empty($items) || !is_array($items)) {
+                $response = ['success' => false, 'error' => 'No items provided', 'message' => 'يجب إضافة بنود للفاتورة'];
+                break;
+            }
+
+            $result = $accountingManager->createInvoice($invoiceData, $items);
+            $response = $result;
+            if (!isset($response['message'])) {
+                $response['message'] = $result['success'] ? 'تم إنشاء الفاتورة بنجاح' : ($result['error'] ?? 'فشل في إنشاء الفاتورة');
+            }
+            break;
+
+        case 'get_invoice':
+            $invoiceId = $_POST['invoice_id'];
+            $query = "SELECT * FROM acc_invoices WHERE invoice_id = ?";
+            $stmt = $db->prepare($query);
+            $stmt->bind_param('i', $invoiceId);
+            $stmt->execute();
+            $result = $stmt->get_result();
+
+            if ($invoice = $result->fetch_assoc()) {
+                $response['success'] = true;
+                $response['invoice'] = $invoice;
+            }
+            break;
+    }
+
+    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// Get invoices
+$invoicesQuery = "SELECT * FROM acc_invoices ORDER BY invoice_date DESC, invoice_id DESC LIMIT 50";
+$invoicesResult = $db->query($invoicesQuery);
+$invoices = [];
+if ($invoicesResult) {
+    while ($row = $invoicesResult->fetch_assoc()) {
+        $invoices[] = $row;
+    }
+}
+
+// Get VAT rate from settings
+$vatRate = $accountingManager->getSetting('default_vat_rate', 15);
+?>
+
+
+
+<style>
+:root {
+    --primary-color: #667eea;
+    --secondary-color: #764ba2;
+}
+
+.page-header {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    padding: 2rem;
+    border-radius: 15px;
+    margin-bottom: 2rem;
+}
+
+.invoice-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    transition: all 0.3s ease;
+}
+
+.invoice-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.12);
+}
+
+.invoice-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid #f0f0f0;
+    margin-bottom: 1rem;
+}
+
+.invoice-number {
+    font-weight: 700;
+    font-size: 1.2rem;
+    color: var(--primary-color);
+}
+
+.badge-zatca {
+    background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+    color: white;
+    padding: 0.5rem 1rem;
+    border-radius: 20px;
+    font-weight: 600;
+}
+
+.badge-pending {
+    background: linear-gradient(135deg, #ffc107 0%, #ff9800 100%);
+    color: white;
+}
+
+.badge-paid {
+    background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+    color: white;
+}
+
+.btn-add-invoice {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    border: none;
+    color: white;
+    padding: 0.75rem 1.5rem;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+.item-row {
+    background: #f8f9fa;
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+}
+
+.total-section {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 12px;
+    margin-top: 1rem;
+}
+
+.qr-code-preview {
+    width: 150px;
+    height: 150px;
+    background: white;
+    border: 2px solid #ddd;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.zatca-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.stats-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    text-align: center;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.stats-value {
+    font-size: 2rem;
+    font-weight: bold;
+    color: var(--primary-color);
+}
+
+#customerDropdown {
+    box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+    border-radius: 8px;
+    margin-top: 5px;
+}
+
+#customerDropdown .list-group-item {
+    border: none;
+    border-bottom: 1px solid #f0f0f0;
+    transition: all 0.2s ease;
+}
+
+#customerDropdown .list-group-item:hover {
+    background: #f8f9fa;
+    transform: translateX(-3px);
+}
+
+#customerDropdown .list-group-item:last-child {
+    border-bottom: none;
+}
+
+#customerDetails {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 2px solid #f0f0f0;
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-receipt me-2"></i>الفواتير الإلكترونية
+                </h1>
+                <p class="mb-0 opacity-75">E-Invoices - ZATCA Compliant</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-add-invoice btn-lg ms-2" data-bs-toggle="modal" data-bs-target="#addInvoiceModal">
+                    <i class="bi bi-plus-circle me-2"></i>فاتورة جديدة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Statistics -->
+    <div class="row g-3 mb-4">
+        <?php
+        $totalInvoices = count($invoices);
+        $totalAmount = array_sum(array_column($invoices, 'total_amount'));
+        $paidInvoices = count(array_filter($invoices, function($inv) {
+            return isset($inv['payment_status']) && $inv['payment_status'] == 'paid';
+        }));
+        $pendingInvoices = $totalInvoices - $paidInvoices;
+        ?>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value"><?php echo $totalInvoices; ?></div>
+                <div class="text-muted">إجمالي الفواتير</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value text-success"><?php echo $paidInvoices; ?></div>
+                <div class="text-muted">فواتير مدفوعة</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value text-warning"><?php echo $pendingInvoices; ?></div>
+                <div class="text-muted">فواتير معلقة</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value"><?php echo number_format($totalAmount, 2); ?></div>
+                <div class="text-muted">إجمالي المبلغ (ر.س)</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Invoices List -->
+    <div class="row">
+        <div class="col-12">
+            <?php if (empty($invoices)): ?>
+            <div class="card border-0 shadow-sm" style="border-radius: 15px;">
+                <div class="card-body text-center p-5">
+                    <div class="mb-4">
+                        <i class="bi bi-receipt" style="font-size: 5rem; color: #667eea;"></i>
+                    </div>
+                    <h3 class="mb-3">لا توجد فواتير بعد</h3>
+                    <p class="text-muted mb-4">ابدأ بإنشاء أول فاتورة إلكترونية متوافقة مع متطلبات ZATCA</p>
+                    <button class="btn btn-add-invoice btn-lg" data-bs-toggle="modal" data-bs-target="#addInvoiceModal">
+                        <i class="bi bi-plus-circle me-2"></i>إنشاء فاتورة جديدة
+                    </button>
+                    <div class="mt-4">
+                        <small class="text-muted">
+                            أو يمكنك
+                            <a href="../../sync_amlak.hnt" class="text-decoration-none">مزامنة الفواتير من نظام العقارات</a>
+                        </small>
+                    </div>
+                </div>
+            </div>
+            <?php else: ?>
+            <?php foreach ($invoices as $invoice): ?>
+            <div class="invoice-card">
+                <div class="invoice-header">
+                    <div>
+                        <span class="invoice-number"><?php echo $invoice['invoice_number']; ?></span>
+                        <span class="text-muted ms-3"><?php echo date('Y-m-d', strtotime($invoice['invoice_date'])); ?></span>
+                    </div>
+                    <div>
+                        <?php if (isset($invoice['zatca_status']) && $invoice['zatca_status'] == 'submitted'): ?>
+                        <span class="badge badge-zatca">
+                            <i class="bi bi-check-circle me-1"></i>ZATCA
+                        </span>
+                        <?php endif; ?>
+
+                        <?php if (isset($invoice['payment_status']) && $invoice['payment_status'] == 'paid'): ?>
+                        <span class="badge badge-paid ms-2">مدفوعة</span>
+                        <?php elseif (isset($invoice['payment_status'])): ?>
+                        <span class="badge badge-pending ms-2">معلقة</span>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <strong>العميل:</strong> <?php echo $invoice['customer_name']; ?><br>
+                        <?php if ($invoice['customer_vat_number']): ?>
+                        <small class="text-muted">الرقم الضريبي: <?php echo $invoice['customer_vat_number']; ?></small>
+                        <?php endif; ?>
+                    </div>
+                    <div class="col-md-6 text-end">
+                        <div class="mb-2">
+                            <strong>المبلغ قبل الضريبة:</strong>
+                            <?php echo number_format($invoice['subtotal'], 2); ?> ر.س
+                        </div>
+                        <div class="mb-2">
+                            <strong>ضريبة القيمة المضافة:</strong>
+                            <?php echo number_format($invoice['vat_amount'], 2); ?> ر.س
+                        </div>
+                        <div class="h5 mb-0">
+                            <strong>الإجمالي:</strong>
+                            <span class="text-primary"><?php echo number_format($invoice['total_amount'], 2); ?> ر.س</span>
+                        </div>
+                    </div>
+                </div>
+
+                <?php if (!empty($invoice['zatca_error'])): ?>
+                <?php if (strpos($invoice['zatca_error'], 'SUCCESS:') === 0): ?>
+                <div class="alert alert-success mt-2 mb-2" style="padding: 10px; font-size: 0.9em;">
+                    <i class="bi bi-check-circle me-2"></i>
+                    <strong>نتيجة ZATCA:</strong>
+                    <br><small><?php echo htmlspecialchars($invoice['zatca_error']); ?></small>
+                </div>
+                <?php else: ?>
+                <div class="alert alert-danger mt-2 mb-2" style="padding: 10px; font-size: 0.9em;">
+                    <i class="bi bi-exclamation-triangle me-2"></i>
+                    <strong>خطأ في الإرسال إلى ZATCA:</strong>
+                    <br><small><?php echo htmlspecialchars($invoice['zatca_error']); ?></small>
+                </div>
+                <?php endif; ?>
+                <?php endif; ?>
+
+                <div class="d-flex gap-2">
+                    <button class="btn btn-sm btn-outline-primary" onclick="viewInvoice(<?php echo $invoice['invoice_id']; ?>)">
+                        <i class="bi bi-eye me-1"></i>عرض
+                    </button>
+                    <button class="btn btn-sm btn-outline-success" onclick="printInvoice(<?php echo $invoice['invoice_id']; ?>)">
+                        <i class="bi bi-printer me-1"></i>طباعة
+                    </button>
+                    <?php if (empty($invoice['zatca_status']) || $invoice['zatca_status'] != 'submitted'): ?>
+                    <button class="btn btn-sm btn-outline-info" onclick="submitToZatca(<?php echo $invoice['invoice_id']; ?>)">
+                        <i class="bi bi-send me-1"></i>إرسال لـ ZATCA
+                    </button>
+                    <?php endif; ?>
+                    <?php if (isset($invoice['payment_status']) && $invoice['payment_status'] != 'paid'): ?>
+                    <button class="btn btn-sm btn-outline-warning" onclick="recordPayment(<?php echo $invoice['invoice_id']; ?>)">
+                        <i class="bi bi-cash me-1"></i>تسجيل دفعة
+                    </button>
+                    <?php endif; ?>
+                </div>
+            </div>
+            <?php endforeach; ?>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<!-- Add Invoice Modal -->
+<div class="modal fade" id="addInvoiceModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-plus-circle me-2"></i>فاتورة جديدة
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="addInvoiceForm">
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-6">
+                            <label class="form-label">نوع الفاتورة *</label>
+                            <select class="form-select" name="invoice_type" required>
+                                <option value="standard">فاتورة ضريبية</option>
+                                <option value="simplified">فاتورة مبسطة</option>
+                                <option value="credit_note">إشعار دائن</option>
+                                <option value="debit_note">إشعار مدين</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">تاريخ الفاتورة *</label>
+                            <input type="date" class="form-control" name="invoice_date" value="<?php echo date('Y-m-d'); ?>" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">نوع العميل *</label>
+                            <select class="form-select" name="customer_type" id="customer_type" required>
+                                <option value="tenant">مستأجر</option>
+                                <option value="buyer">مشتري</option>
+                                <option value="owner">مالك</option>
+                                <option value="supplier">مورد</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">العميل *</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="customerSearch" placeholder="ابحث عن عميل أو أدخل اسم جديد..." autocomplete="off">
+                                <button type="button" class="btn btn-outline-primary" id="addNewCustomerBtn">
+                                    <i class="bi bi-plus-circle me-1"></i>عميل جديد
+                                </button>
+                            </div>
+                            <div id="customerDropdown" class="list-group position-absolute" style="z-index: 1000; max-height: 300px; overflow-y: auto; display: none; width: calc(100% - 30px);"></div>
+                            <input type="hidden" id="selectedCustomerId" name="customer_id">
+                        </div>
+                        
+                        <!-- Customer Details (shown when customer is selected or new) -->
+                        <div id="customerDetails" class="row" style="display: none;">
+                            <div class="col-md-6">
+                                <label class="form-label">اسم العميل *</label>
+                                <input type="text" class="form-control" id="customer_name" name="customer_name" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">الرقم الضريبي للعميل</label>
+                                <input type="text" class="form-control" id="customer_vat_number" name="customer_vat_number" placeholder="3xxxxxxxxxx15">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">رقم الهاتف</label>
+                                <input type="text" class="form-control" id="customer_phone" name="customer_phone">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">عنوان العميل</label>
+                                <textarea class="form-control" id="customer_address" name="customer_address" rows="1"></textarea>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">طريقة الدفع</label>
+                            <select class="form-select" name="payment_method">
+                                <option value="cash">نقداً</option>
+                                <option value="bank_transfer">تحويل بنكي</option>
+                                <option value="credit_card">بطاقة ائتمان</option>
+                                <option value="cheque">شيك</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">تاريخ الاستحقاق</label>
+                            <input type="date" class="form-control" name="due_date">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">ملاحظات</label>
+                            <textarea class="form-control" name="notes" rows="2"></textarea>
+                        </div>
+                    </div>
+
+                    <h6 class="mb-3"><i class="bi bi-list-ul me-2"></i>بنود الفاتورة</h6>
+
+                    <div id="invoiceItems">
+                        <!-- Items will be added here -->
+                    </div>
+
+                    <button type="button" class="btn btn-outline-primary mb-3" onclick="addItem()">
+                        <i class="bi bi-plus-circle me-2"></i>إضافة بند
+                    </button>
+
+                    <div class="total-section">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="mb-2">المجموع قبل الضريبة: <span id="subtotalDisplay">0.00</span> ر.س</div>
+                                <div class="mb-2">ضريبة القيمة المضافة (<?php echo $vatRate; ?>%): <span id="vatDisplay">0.00</span> ر.س</div>
+                                <div class="h4 mb-0">الإجمالي: <span id="totalDisplay">0.00</span> ر.س</div>
+                            </div>
+                            <div class="col-md-6 text-center">
+                                <div class="qr-code-preview">
+                                    <i class="bi bi-qr-code" style="font-size: 3rem; color: #ddd;"></i>
+                                </div>
+                                <small class="text-white-50 mt-2 d-block">سيتم إنشاء رمز QR بعد الحفظ</small>
+                            </div>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-primary" onclick="submitInvoice()">
+                    <i class="bi bi-check-circle me-2"></i>حفظ الفاتورة
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Result Modal -->
+<div class="modal fade" id="resultModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header" id="resultModalHeader">
+                <h5 class="modal-title text-white" id="resultModalTitle"></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" style="max-height: 500px; overflow-y: auto;">
+                <div id="resultModalMessage" style="overflow-x: auto;"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إغلاق</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+
+<script>
+const vatRate = <?php echo $vatRate; ?>;
+let itemCounter = 0;
+
+function addItem() {
+    itemCounter++;
+    const itemHtml = `
+        <div class="item-row" id="item_${itemCounter}">
+            <div class="row g-2">
+                <div class="col-md-4">
+                    <input type="text" class="form-control" name="item_description_${itemCounter}" placeholder="وصف الصنف" required>
+                </div>
+                <div class="col-md-2">
+                    <input type="number" step="0.01" class="form-control quantity-input" name="quantity_${itemCounter}" placeholder="الكمية" value="1" onchange="calculateTotals()" required>
+                </div>
+                <div class="col-md-2">
+                    <input type="number" step="0.01" class="form-control price-input" name="unit_price_${itemCounter}" placeholder="السعر" value="0" onchange="calculateTotals()" required>
+                </div>
+                <div class="col-md-2">
+                    <input type="number" step="0.01" class="form-control" name="vat_rate_${itemCounter}" placeholder="الضريبة %" value="${vatRate}" readonly>
+                </div>
+                <div class="col-md-1">
+                    <input type="text" class="form-control item-total" name="total_${itemCounter}" placeholder="المجموع" readonly>
+                </div>
+                <div class="col-md-1">
+                    <button type="button" class="btn btn-danger btn-sm" onclick="removeItem(${itemCounter})">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    document.getElementById('invoiceItems').insertAdjacentHTML('beforeend', itemHtml);
+}
+
+function removeItem(itemId) {
+    document.getElementById('item_' + itemId).remove();
+    calculateTotals();
+}
+
+function calculateTotals() {
+    let subtotal = 0;
+
+    for (let i = 1; i <= itemCounter; i++) {
+        const quantityInput = document.querySelector(`[name="quantity_${i}"]`);
+        const priceInput = document.querySelector(`[name="unit_price_${i}"]`);
+        const totalInput = document.querySelector(`[name="total_${i}"]`);
+
+        if (quantityInput && priceInput) {
+            const quantity = parseFloat(quantityInput.value) || 0;
+            const price = parseFloat(priceInput.value) || 0;
+            const itemTotal = quantity * price;
+
+            if (totalInput) {
+                totalInput.value = itemTotal.toFixed(2);
+            }
+
+            subtotal += itemTotal;
+        }
+    }
+
+    const vat = subtotal * (vatRate / 100);
+    const total = subtotal + vat;
+
+    document.getElementById('subtotalDisplay').textContent = subtotal.toFixed(2);
+    document.getElementById('vatDisplay').textContent = vat.toFixed(2);
+    document.getElementById('totalDisplay').textContent = total.toFixed(2);
+}
+
+function submitInvoice() {
+    const form = document.getElementById('addInvoiceForm');
+    const formData = new FormData(form);
+
+    // Collect items
+    const items = [];
+    for (let i = 1; i <= itemCounter; i++) {
+        const descInput = document.querySelector(`[name="item_description_${i}"]`);
+        if (descInput && descInput.value) {
+            const quantity = parseFloat(document.querySelector(`[name="quantity_${i}"]`).value) || 0;
+            const unitPrice = parseFloat(document.querySelector(`[name="unit_price_${i}"]`).value) || 0;
+            const vatRate = parseFloat(document.querySelector(`[name="vat_rate_${i}"]`).value) || 0;
+
+            items.push({
+                description: descInput.value,
+                quantity: quantity,
+                unit_price: unitPrice,
+                vat_rate: vatRate,
+                vat_amount: (quantity * unitPrice * vatRate / 100),
+                total_amount: quantity * unitPrice * (1 + vatRate / 100)
+            });
+        }
+    }
+
+    if (items.length === 0) {
+        showResultModal(false, 'يجب إضافة بند واحد على الأقل');
+        return;
+    }
+
+    formData.append('ajax_action', 'create_invoice');
+    formData.append('items', JSON.stringify(items));
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        showResultModal(data.success, data.message || (data.error ? data.error : 'خطأ غير معروف'));
+
+        if (data.success) {
+            const modal = bootstrap.Modal.getInstance(document.getElementById('addInvoiceModal'));
+            if (modal) {
+                modal.hide();
+            }
+            setTimeout(() => location.reload(), 1500);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showResultModal(false, 'حدث خطأ أثناء الحفظ');
+    });
+}
+
+function viewInvoice(invoiceId) {
+    window.location = 'view.hnt?id=' + invoiceId;
+}
+
+function printInvoice(invoiceId) {
+    window.open('print.hnt?id=' + invoiceId, '_blank');
+}
+
+function submitToZatca(invoiceId) {
+    console.log('submitToZatca called with invoice ID:', invoiceId);
+
+    // Check if custom confirm function exists
+    if (typeof confirm === 'function' && confirm.length >= 3) {
+        // Use custom confirm dialog
+        confirm('هل تريد إرسال هذه الفاتورة إلى ZATCA؟', 'تأكيد الإرسال', function() {
+            console.log('User confirmed, proceeding with submission');
+            performZatcaSubmission(invoiceId);
+        }, function() {
+            console.log('User cancelled ZATCA submission');
+        });
+    } else {
+        // Fallback to native confirm
+        if (window.confirm('هل تريد إرسال هذه الفاتورة إلى ZATCA؟')) {
+            console.log('User confirmed, proceeding with submission');
+            performZatcaSubmission(invoiceId);
+        }
+    }
+}
+
+function performZatcaSubmission(invoiceId) {
+    // Show loading message
+    const loadingModal = new bootstrap.Modal(document.getElementById('resultModal'));
+    const header = document.getElementById('resultModalHeader');
+    const title = document.getElementById('resultModalTitle');
+    const messageEl = document.getElementById('resultModalMessage');
+
+    header.style.background = 'linear-gradient(135deg, #0891b2, #06b6d4)';
+    title.innerHTML = '<i class="bi bi-hourglass-split me-2"></i>جاري الإرسال';
+    messageEl.textContent = 'جاري إرسال الفاتورة إلى ZATCA...';
+    loadingModal.show();
+
+    // Submit to ZATCA
+    const formData = new FormData();
+    formData.append('action', 'submit_to_zatca');
+    formData.append('invoice_id', invoiceId);
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        loadingModal.hide();
+
+        // Build detailed error message
+        let errorMessage = data.message || data.error || 'خطأ غير معروف';
+
+        // Add technical details if available
+        if (!data.success && data.technical_details) {
+            errorMessage += '\n\n--- تفاصيل تقنية من ZATCA API ---';
+
+            if (data.technical_details.api_url) {
+                errorMessage += '\nAPI URL: ' + data.technical_details.api_url;
+            }
+
+            if (data.technical_details.http_code) {
+                errorMessage += '\nHTTP Status Code: ' + data.technical_details.http_code;
+            }
+
+            if (data.technical_details.error) {
+                errorMessage += '\nError: ' + data.technical_details.error;
+            }
+
+            if (data.technical_details.error_detail) {
+                errorMessage += '\nDetail: ' + data.technical_details.error_detail;
+            }
+
+            if (data.technical_details.validation_results && data.technical_details.validation_results.length > 0) {
+                errorMessage += '\n\nValidation Results:';
+                data.technical_details.validation_results.forEach((result, index) => {
+                    errorMessage += '\n' + (index + 1) + '. ' + JSON.stringify(result, null, 2);
+                });
+            }
+
+            if (data.technical_details.api_response) {
+                errorMessage += '\n\nFull API Response:\n' + JSON.stringify(data.technical_details.api_response, null, 2);
+            }
+
+            // Log to console for developers
+            console.error('ZATCA API Error Details:', data.technical_details);
+        }
+
+        // Build success message with ZATCA result details
+        if (data.success) {
+            let successMessage = data.message || 'تم إرسال الفاتورة بنجاح';
+
+            // Add ZATCA result details
+            if (data.zatca_uuid) {
+                successMessage += '\n\n✅ UUID: ' + data.zatca_uuid;
+            }
+            if (data.zatca_hash) {
+                successMessage += '\n✅ Hash: ' + data.zatca_hash.substring(0, 40) + '...';
+            }
+            if (data.api_result) {
+                if (data.api_result.status) {
+                    successMessage += '\n✅ Status: ' + data.api_result.status;
+                }
+                if (data.api_result.cleared_invoice) {
+                    successMessage += '\n✅ Invoice Cleared Successfully';
+                }
+                if (data.api_result.reported_invoice) {
+                    successMessage += '\n✅ Invoice Reported Successfully';
+                }
+                if (data.api_result.validation_results && data.api_result.validation_results.length > 0) {
+                    successMessage += '\n\n📋 Validation Results:';
+                    data.api_result.validation_results.forEach((result, index) => {
+                        if (result.status) {
+                            successMessage += '\n  ' + (index + 1) + '. ' + result.status;
+                        }
+                    });
+                }
+                if (data.api_result.warnings && data.api_result.warnings.length > 0) {
+                    successMessage += '\n\n⚠️ Warnings:';
+                    data.api_result.warnings.forEach((warning, index) => {
+                        successMessage += '\n  ' + (index + 1) + '. ' + warning;
+                    });
+                }
+            }
+
+            successMessage += '\n\n⏳ سيتم تحديث الصفحة خلال 6 ثواني...';
+
+            showResultModal(true, successMessage, null);
+
+            // Wait 6 seconds before reload so user can see the success message
+            setTimeout(() => location.reload(), 6000);
+        } else {
+            showResultModal(false, errorMessage, data.technical_details);
+        }
+    })
+    .catch(error => {
+        loadingModal.hide();
+        console.error('Error:', error);
+        showResultModal(false, 'حدث خطأ أثناء الإرسال إلى ZATCA');
+    });
+}
+
+function recordPayment(invoiceId) {
+    window.location = '../payments/record.hnt?invoice_id=' + invoiceId;
+}
+
+function showResultModal(success, message, technicalDetails) {
+    const modalElement = document.getElementById('resultModal');
+    const modal = new bootstrap.Modal(modalElement);
+    const header = document.getElementById('resultModalHeader');
+    const title = document.getElementById('resultModalTitle');
+    const messageEl = document.getElementById('resultModalMessage');
+
+    if (success) {
+        header.style.background = 'linear-gradient(135deg, #28a745, #20c997)';
+        title.innerHTML = '<i class="bi bi-check-circle me-2"></i>نجحت العملية';
+    } else {
+        header.style.background = 'linear-gradient(135deg, #dc3545, #c82333)';
+        title.innerHTML = '<i class="bi bi-x-circle me-2"></i>فشلت العملية';
+    }
+
+    // Format message with technical details if available
+    if (technicalDetails) {
+        messageEl.innerHTML = '<div style="white-space: pre-wrap; font-family: monospace; text-align: left; direction: ltr;">' +
+                              message.replace(/</g, '&lt;').replace(/>/g, '&gt;') +
+                              '</div>';
+    } else {
+        messageEl.textContent = message;
+    }
+
+    // Clean up modal and backdrop when hidden
+    modalElement.addEventListener('hidden.bs.modal', function() {
+        modal.dispose();
+        // Remove any remaining backdrops
+        const backdrops = document.querySelectorAll('.modal-backdrop');
+        backdrops.forEach(backdrop => backdrop.remove());
+        // Restore body scroll
+        document.body.classList.remove('modal-open');
+        document.body.style.removeProperty('overflow');
+        document.body.style.removeProperty('padding-right');
+    }, { once: true });
+
+    modal.show();
+}
+
+// Customer autocomplete functionality
+let searchTimeout;
+const customerSearchInput = document.getElementById('customerSearch');
+const customerDropdown = document.getElementById('customerDropdown');
+const customerDetails = document.getElementById('customerDetails');
+let isNewCustomer = false;
+
+customerSearchInput.addEventListener('input', function() {
+    const searchTerm = this.value.trim();
+    
+    clearTimeout(searchTimeout);
+    
+    if (searchTerm.length < 2) {
+        customerDropdown.style.display = 'none';
+        return;
+    }
+    
+    searchTimeout = setTimeout(() => {
+        searchCustomers(searchTerm);
+    }, 300);
+});
+
+function searchCustomers(searchTerm) {
+    const formData = new FormData();
+    formData.append('ajax_action', 'search_customers');
+    formData.append('search', searchTerm);
+    
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success && data.customers.length > 0) {
+            displayCustomerDropdown(data.customers);
+        } else {
+            customerDropdown.style.display = 'none';
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+    });
+}
+
+function displayCustomerDropdown(customers) {
+    customerDropdown.innerHTML = '';
+    
+    customers.forEach(customer => {
+        const item = document.createElement('a');
+        item.href = '#';
+        item.className = 'list-group-item list-group-item-action';
+        item.innerHTML = `
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <strong>${customer.customer_name}</strong>
+                    ${customer.vat_number ? '<br><small class="text-muted">الرقم الضريبي: ' + customer.vat_number + '</small>' : ''}
+                    ${customer.phone ? '<br><small class="text-muted">الهاتف: ' + customer.phone + '</small>' : ''}
+                </div>
+            </div>
+        `;
+        
+        item.addEventListener('click', function(e) {
+            e.preventDefault();
+            selectCustomer(customer);
+        });
+        
+        customerDropdown.appendChild(item);
+    });
+    
+    customerDropdown.style.display = 'block';
+}
+
+function selectCustomer(customer) {
+    isNewCustomer = false;
+    
+    // Fill customer fields
+    document.getElementById('selectedCustomerId').value = customer.customer_id;
+    document.getElementById('customer_name').value = customer.customer_name;
+    document.getElementById('customer_vat_number').value = customer.vat_number || '';
+    document.getElementById('customer_phone').value = customer.phone || '';
+    document.getElementById('customer_address').value = customer.address || '';
+    
+    // Update search input
+    customerSearchInput.value = customer.customer_name;
+    
+    // Show customer details
+    customerDetails.style.display = 'block';
+    customerDetails.querySelectorAll('.col-md-6, .col-md-12').forEach(el => {
+        el.style.display = 'block';
+    });
+    
+    // Hide dropdown
+    customerDropdown.style.display = 'none';
+    
+    // Make fields readonly for existing customer
+    document.getElementById('customer_name').readOnly = true;
+    document.getElementById('customer_vat_number').readOnly = true;
+    document.getElementById('customer_phone').readOnly = true;
+    document.getElementById('customer_address').readOnly = true;
+}
+
+// Add new customer button
+document.getElementById('addNewCustomerBtn').addEventListener('click', function() {
+    isNewCustomer = true;
+    
+    // Clear all fields
+    document.getElementById('selectedCustomerId').value = '';
+    document.getElementById('customer_name').value = customerSearchInput.value;
+    document.getElementById('customer_vat_number').value = '';
+    document.getElementById('customer_phone').value = '';
+    document.getElementById('customer_address').value = '';
+    
+    // Show customer details
+    customerDetails.style.display = 'block';
+    customerDetails.querySelectorAll('.col-md-6, .col-md-12').forEach(el => {
+        el.style.display = 'block';
+    });
+    
+    // Hide dropdown
+    customerDropdown.style.display = 'none';
+    
+    // Make fields editable for new customer
+    document.getElementById('customer_name').readOnly = false;
+    document.getElementById('customer_vat_number').readOnly = false;
+    document.getElementById('customer_phone').readOnly = false;
+    document.getElementById('customer_address').readOnly = false;
+    
+    // Focus on customer name
+    document.getElementById('customer_name').focus();
+});
+
+// Hide dropdown when clicking outside
+document.addEventListener('click', function(e) {
+    if (!customerSearchInput.contains(e.target) && !customerDropdown.contains(e.target)) {
+        customerDropdown.style.display = 'none';
+    }
+});
+
+// Modified submitInvoice to handle new customer creation
+const originalSubmitInvoice = submitInvoice;
+submitInvoice = function() {
+    // If it's a new customer, create them first
+    if (isNewCustomer && !document.getElementById('selectedCustomerId').value) {
+        const customerName = document.getElementById('customer_name').value.trim();
+        const vatNumber = document.getElementById('customer_vat_number').value.trim();
+        const phone = document.getElementById('customer_phone').value.trim();
+        const address = document.getElementById('customer_address').value.trim();
+        
+        if (!customerName) {
+            showResultModal(false, 'اسم العميل مطلوب');
+            return;
+        }
+        
+        // Create customer first
+        const formData = new FormData();
+        formData.append('ajax_action', 'add_customer_quick');
+        formData.append('customer_name', customerName);
+        formData.append('vat_number', vatNumber);
+        formData.append('phone', phone);
+        formData.append('address', address);
+        
+        fetch('index.hnt', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // Customer created, set the ID and proceed with invoice
+                document.getElementById('selectedCustomerId').value = data.customer.customer_id;
+                isNewCustomer = false;
+                
+                // Now create the invoice
+                originalSubmitInvoice();
+            } else {
+                showResultModal(false, data.message || 'فشل في إضافة العميل');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showResultModal(false, 'حدث خطأ أثناء إضافة العميل');
+        });
+    } else {
+        // Customer already exists or selected, proceed normally
+        originalSubmitInvoice();
+    }
+};
+
+// Add initial item
+addItem();
+</script>
+
+<?php require("../../../../foter.hnt"); ?>

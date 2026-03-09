@@ -1,0 +1,602 @@
+<?php
+/**
+ * Chart of Accounts Module
+ * دليل الحسابات
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "دليل الحسابات";
+$sc_id = "201";
+if(isset($_POST['ajax_action'])){
+    include_once "../../../../reqloginajax.hnt";
+    include_once "../../includes/accounting_class.hnt";
+}
+else {
+    include_once "../../../../header.hnt";
+    include_once "../../includes/accounting_class.hnt";
+}
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+
+// Handle AJAX actions
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $action = $_POST['ajax_action'];
+    $response = ['success' => false, 'message' => ''];
+
+    switch ($action) {
+        case 'create_account':
+            $data = [
+                'account_code' => $_POST['account_code'],
+                'account_name_ar' => $_POST['account_name_ar'],
+                'account_name_en' => $_POST['account_name_en'],
+                'parent_account_id' => $_POST['parent_account_id']?? null,
+                'account_type' => $_POST['account_type'],
+                'account_category' => $_POST['account_category'],
+                'account_level' => $_POST['account_level'],
+                'is_leaf' => $_POST['is_leaf'] ?? 1,
+                'opening_balance' => $_POST['opening_balance'] ?? 0,
+                'is_active' => 1,
+                'vat_applicable' => $_POST['vat_applicable'] ?? 0,
+                'description' => $_POST['description'] ?? ''
+            ];
+
+            $result = $accountingManager->createAccount($data);
+            $response = $result;
+            if (!isset($response['message'])) {
+                $response['message'] = $result['success'] ? 'تم إنشاء الحساب بنجاح' : 'فشل في إنشاء الحساب';
+            }
+            break;
+
+        case 'get_account':
+            $accountId = $_POST['account_id'];
+            $account = $accountingManager->getAccount($accountId);
+            if ($account) {
+                $response['success'] = true;
+                $response['account'] = $account;
+            }
+            break;
+    }
+
+    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// Get all accounts
+$accounts = $accountingManager->getAllAccounts(['is_active' => 1]);
+
+// Function to build hierarchical tree
+function buildAccountTree($accounts, $parentId = null) {
+    $branch = [];
+    foreach ($accounts as $account) {
+        if ($account['parent_account_id'] == $parentId) {
+            $children = buildAccountTree($accounts, $account['account_id']);
+            if ($children) {
+                $account['children'] = $children;
+            }
+            $branch[] = $account;
+        }
+    }
+    return $branch;
+}
+
+// Function to flatten tree with proper levels
+function flattenTree($tree, $level = 1) {
+    $flat = [];
+    foreach ($tree as $node) {
+        $node['display_level'] = $level;
+        $children = $node['children'] ?? [];
+        unset($node['children']);
+        $flat[] = $node;
+        if ($children) {
+            $flat = array_merge($flat, flattenTree($children, $level + 1));
+        }
+    }
+    return $flat;
+}
+
+// Group accounts by type with hierarchy
+$accountsByType = [
+    'asset' => [],
+    'liability' => [],
+    'equity' => [],
+    'revenue' => [],
+    'expense' => []
+];
+
+foreach ($accounts as $account) {
+    $accountsByType[$account['account_type']][] = $account;
+}
+
+// Build hierarchical structure for each type
+foreach ($accountsByType as $type => $typeAccounts) {
+    $tree = buildAccountTree($typeAccounts);
+    $accountsByType[$type] = flattenTree($tree);
+}
+?>
+
+
+
+<style>
+:root {
+    --primary-color: #667eea;
+    --secondary-color: #764ba2;
+}
+
+.page-header {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    padding: 2rem;
+    border-radius: 15px;
+    margin-bottom: 2rem;
+}
+
+.account-type-card {
+    background: white;
+    border-radius: 15px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    transition: all 0.3s ease;
+}
+
+.account-type-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.12);
+}
+
+.account-type-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid #f0f0f0;
+    margin-bottom: 1rem;
+}
+
+.account-type-icon {
+    width: 50px;
+    height: 50px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5rem;
+    color: white;
+}
+
+.account-type-icon.asset { background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); }
+.account-type-icon.liability { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }
+.account-type-icon.equity { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); }
+.account-type-icon.revenue { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); }
+.account-type-icon.expense { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+
+.account-item {
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.5rem;
+    background: #f8f9fa;
+    border-radius: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: all 0.2s ease;
+}
+
+.account-item:hover {
+    background: #e9ecef;
+    transform: translateX(-5px);
+}
+
+.account-item.level-1 { margin-right: 0; background: #f8f9fa; font-weight: 600; }
+.account-item.level-2 { margin-right: 2rem; background: #f0f4f8; border-right: 3px solid var(--primary-color); }
+.account-item.level-3 { margin-right: 4rem; background: #e8f0f8; border-right: 3px solid #a0aec0; }
+.account-item.level-4 { margin-right: 6rem; background: #e0ecf8; border-right: 3px solid #cbd5e0; }
+
+.account-item .tree-icon {
+    color: var(--primary-color);
+    margin-left: 0.5rem;
+    font-size: 0.9rem;
+}
+
+.account-code {
+    font-weight: 600;
+    color: var(--primary-color);
+    font-family: monospace;
+}
+
+.account-balance {
+    font-weight: 600;
+    color: #28a745;
+}
+
+.btn-add-account {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    border: none;
+    color: white;
+    padding: 0.75rem 1.5rem;
+    border-radius: 10px;
+    font-weight: 600;
+    transition: all 0.3s ease;
+}
+
+.btn-add-account:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+    color: white;
+}
+
+.modal-content {
+    border-radius: 15px;
+    border: none;
+}
+
+.modal-header {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    border-radius: 15px 15px 0 0;
+}
+
+.form-control:focus, .form-select:focus {
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25);
+}
+
+.stats-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    text-align: center;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.stats-value {
+    font-size: 2rem;
+    font-weight: bold;
+    color: var(--primary-color);
+}
+
+.stats-label {
+    color: #6c757d;
+    font-size: 0.9rem;
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-diagram-3 me-2"></i>دليل الحسابات
+                </h1>
+                <p class="mb-0 opacity-75">Chart of Accounts</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-add-account btn-lg ms-2" data-bs-toggle="modal" data-bs-target="#addAccountModal">
+                    <i class="bi bi-plus-circle me-2"></i>حساب جديد
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Statistics -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-6 col-lg-3">
+            <div class="stats-card">
+                <div class="stats-value"><?php echo count($accountsByType['asset']); ?></div>
+                <div class="stats-label">حسابات الأصول</div>
+            </div>
+        </div>
+        <div class="col-md-6 col-lg-3">
+            <div class="stats-card">
+                <div class="stats-value"><?php echo count($accountsByType['liability']); ?></div>
+                <div class="stats-label">حسابات الخصوم</div>
+            </div>
+        </div>
+        <div class="col-md-6 col-lg-3">
+            <div class="stats-card">
+                <div class="stats-value"><?php echo count($accountsByType['revenue']); ?></div>
+                <div class="stats-label">حسابات الإيرادات</div>
+            </div>
+        </div>
+        <div class="col-md-6 col-lg-3">
+            <div class="stats-card">
+                <div class="stats-value"><?php echo count($accountsByType['expense']); ?></div>
+                <div class="stats-label">حسابات المصروفات</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Accounts by Type -->
+    <div class="row">
+        <div class="col-12">
+            <!-- Assets -->
+            <div class="account-type-card">
+                <div class="account-type-header">
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="account-type-icon asset">
+                            <i class="bi bi-building"></i>
+                        </div>
+                        <div>
+                            <h4 class="mb-0">الأصول</h4>
+                            <small class="text-muted">Assets</small>
+                        </div>
+                    </div>
+                    <span class="badge bg-success"><?php echo count($accountsByType['asset']); ?> حساب</span>
+                </div>
+                <?php foreach ($accountsByType['asset'] as $account): ?>
+                <div class="account-item level-<?php echo $account['display_level']; ?>">
+                    <div>
+                        <?php if ($account['display_level'] > 1): ?>
+                            <i class="bi bi-arrow-return-left tree-icon"></i>
+                        <?php endif; ?>
+                        <span class="account-code"><?php echo $account['account_code']; ?></span>
+                        <span class="ms-3"><?php echo $account['account_name_ar']; ?></span>
+                    </div>
+                    <div>
+                        <span class="account-balance"><?php echo number_format($account['current_balance'], 2); ?> ر.س</span>
+                        <button class="btn btn-sm btn-outline-primary ms-2" onclick="viewAccount(<?php echo $account['account_id']; ?>)">
+                            <i class="bi bi-eye"></i>
+                        </button>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+
+            <!-- Liabilities -->
+            <div class="account-type-card">
+                <div class="account-type-header">
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="account-type-icon liability">
+                            <i class="bi bi-credit-card"></i>
+                        </div>
+                        <div>
+                            <h4 class="mb-0">الخصوم</h4>
+                            <small class="text-muted">Liabilities</small>
+                        </div>
+                    </div>
+                    <span class="badge bg-danger"><?php echo count($accountsByType['liability']); ?> حساب</span>
+                </div>
+                <?php foreach ($accountsByType['liability'] as $account): ?>
+                <div class="account-item level-<?php echo $account['display_level']; ?>">
+                    <div>
+                        <?php if ($account['display_level'] > 1): ?>
+                            <i class="bi bi-arrow-return-left tree-icon"></i>
+                        <?php endif; ?>
+                        <span class="account-code"><?php echo $account['account_code']; ?></span>
+                        <span class="ms-3"><?php echo $account['account_name_ar']; ?></span>
+                    </div>
+                    <div>
+                        <span class="account-balance"><?php echo number_format($account['current_balance'], 2); ?> ر.س</span>
+                        <button class="btn btn-sm btn-outline-primary ms-2" onclick="viewAccount(<?php echo $account['account_id']; ?>)">
+                            <i class="bi bi-eye"></i>
+                        </button>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+
+            <!-- Revenue -->
+            <div class="account-type-card">
+                <div class="account-type-header">
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="account-type-icon revenue">
+                            <i class="bi bi-currency-dollar"></i>
+                        </div>
+                        <div>
+                            <h4 class="mb-0">الإيرادات</h4>
+                            <small class="text-muted">Revenue</small>
+                        </div>
+                    </div>
+                    <span class="badge bg-warning"><?php echo count($accountsByType['revenue']); ?> حساب</span>
+                </div>
+                <?php foreach ($accountsByType['revenue'] as $account): ?>
+                <div class="account-item level-<?php echo $account['display_level']; ?>">
+                    <div>
+                        <?php if ($account['display_level'] > 1): ?>
+                            <i class="bi bi-arrow-return-left tree-icon"></i>
+                        <?php endif; ?>
+                        <span class="account-code"><?php echo $account['account_code']; ?></span>
+                        <span class="ms-3"><?php echo $account['account_name_ar']; ?></span>
+                    </div>
+                    <div>
+                        <span class="account-balance"><?php echo number_format($account['current_balance'], 2); ?> ر.س</span>
+                        <button class="btn btn-sm btn-outline-primary ms-2" onclick="viewAccount(<?php echo $account['account_id']; ?>)">
+                            <i class="bi bi-eye"></i>
+                        </button>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+
+            <!-- Expenses -->
+            <div class="account-type-card">
+                <div class="account-type-header">
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="account-type-icon expense">
+                            <i class="bi bi-cart-dash"></i>
+                        </div>
+                        <div>
+                            <h4 class="mb-0">المصروفات</h4>
+                            <small class="text-muted">Expenses</small>
+                        </div>
+                    </div>
+                    <span class="badge bg-info"><?php echo count($accountsByType['expense']); ?> حساب</span>
+                </div>
+                <?php foreach ($accountsByType['expense'] as $account): ?>
+                <div class="account-item level-<?php echo $account['display_level']; ?>">
+                    <div>
+                        <?php if ($account['display_level'] > 1): ?>
+                            <i class="bi bi-arrow-return-left tree-icon"></i>
+                        <?php endif; ?>
+                        <span class="account-code"><?php echo $account['account_code']; ?></span>
+                        <span class="ms-3"><?php echo $account['account_name_ar']; ?></span>
+                    </div>
+                    <div>
+                        <span class="account-balance"><?php echo number_format($account['current_balance'], 2); ?> ر.س</span>
+                        <button class="btn btn-sm btn-outline-primary ms-2" onclick="viewAccount(<?php echo $account['account_id']; ?>)">
+                            <i class="bi bi-eye"></i>
+                        </button>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add Account Modal -->
+<div class="modal fade" id="addAccountModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-plus-circle me-2"></i>إضافة حساب جديد
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="addAccountForm">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">رمز الحساب *</label>
+                            <input type="text" class="form-control" name="account_code" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">نوع الحساب *</label>
+                            <select class="form-select" name="account_type" required>
+                                <option value="">اختر النوع</option>
+                                <option value="asset">أصول</option>
+                                <option value="liability">خصوم</option>
+                                <option value="equity">حقوق ملكية</option>
+                                <option value="revenue">إيرادات</option>
+                                <option value="expense">مصروفات</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">اسم الحساب (عربي) *</label>
+                            <input type="text" class="form-control" name="account_name_ar" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">اسم الحساب (إنجليزي)</label>
+                            <input type="text" class="form-control" name="account_name_en">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">الحساب الرئيسي</label>
+                            <select class="form-select" name="parent_account_id">
+                                <option value="">لا يوجد (حساب رئيسي)</option>
+                                <?php foreach ($accounts as $acc): ?>
+                                <option value="<?php echo $acc['account_id']; ?>">
+                                    <?php echo $acc['account_code'] . ' - ' . $acc['account_name_ar']; ?>
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">التصنيف</label>
+                            <input type="text" class="form-control" name="account_category">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">الرصيد الافتتاحي</label>
+                            <input type="number" step="0.01" class="form-control" name="opening_balance" value="0">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">خاضع للضريبة</label>
+                            <select class="form-select" name="vat_applicable">
+                                <option value="0">لا</option>
+                                <option value="1">نعم</option>
+                            </select>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">الوصف</label>
+                            <textarea class="form-control" name="description" rows="3"></textarea>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-primary" onclick="submitAccount()">
+                    <i class="bi bi-check-circle me-2"></i>حفظ
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Result Modal -->
+<div class="modal fade" id="resultModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header" id="resultModalHeader">
+                <h5 class="modal-title text-white" id="resultModalTitle"></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p id="resultModalMessage"></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إغلاق</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+ 
+
+<script>
+function submitAccount() {
+    const form = document.getElementById('addAccountForm');
+    const formData = new FormData(form);
+    formData.append('ajax_action', 'create_account');
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        const modal = bootstrap.Modal.getInstance(document.getElementById('addAccountModal'));
+        modal.hide();
+
+        showResultModal(data.success, data.message);
+
+        if (data.success) {
+            setTimeout(() => location.reload(), 1500);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showResultModal(false, 'حدث خطأ أثناء الحفظ');
+    });
+}
+
+function showResultModal(success, message) {
+    const modal = new bootstrap.Modal(document.getElementById('resultModal'));
+    const header = document.getElementById('resultModalHeader');
+    const title = document.getElementById('resultModalTitle');
+    const messageEl = document.getElementById('resultModalMessage');
+
+    if (success) {
+        header.style.background = 'linear-gradient(135deg, #28a745, #20c997)';
+        title.innerHTML = '<i class="bi bi-check-circle me-2"></i>نجحت العملية';
+    } else {
+        header.style.background = 'linear-gradient(135deg, #dc3545, #c82333)';
+        title.innerHTML = '<i class="bi bi-x-circle me-2"></i>فشلت العملية';
+    }
+
+    messageEl.textContent = message;
+    modal.show();
+}
+
+function viewAccount(accountId) {
+    window.location = 'view.hnt?id=' + accountId;
+}
+</script>
+
+<?php require("../../../../foter.hnt"); ?>

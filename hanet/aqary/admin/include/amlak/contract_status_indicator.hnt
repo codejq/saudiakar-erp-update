@@ -1,0 +1,341 @@
+<?php
+/**
+ * Contract Status Indicator Component
+ * Include this file in contract list pages to show status badges
+ *
+ * Usage in all3kood.hnt or similar:
+ * include_once('contract_status_indicator.hnt');
+ * echo renderContractStatus($contract);
+ * echo renderContractStatusFilter();
+ *
+ * @version 1.0
+ * @date 2025-12-04
+ */
+
+require_once(__DIR__ . '/CalendarManager.class.hnt');
+
+/**
+ * Render contract status badge
+ *
+ * @param array $contract Contract data from database
+ * @return string HTML for status badge
+ */
+function renderContractStatus($contract) {
+    $statusConfig = [
+        'draft' => [
+            'label' => 'مسودة',
+            'color' => 'secondary',
+            'icon' => 'fa-file-o',
+            'text' => 'text-white'
+        ],
+        'active' => [
+            'label' => 'نشط',
+            'color' => 'success',
+            'icon' => 'fa-check-circle',
+            'text' => 'text-white'
+        ],
+        'active_arrears' => [
+            'label' => 'نشط - متأخرات',
+            'color' => 'warning',
+            'icon' => 'fa-exclamation-triangle',
+            'text' => 'text-dark'
+        ],
+        'expiring_soon' => [
+            'label' => 'ينتهي قريباً',
+            'color' => 'warning',
+            'icon' => 'fa-clock-o',
+            'text' => 'text-dark'
+        ],
+        'expired' => [
+            'label' => 'منتهي',
+            'color' => 'danger',
+            'icon' => 'fa-times-circle',
+            'text' => 'text-white'
+        ],
+        'renewed' => [
+            'label' => 'مجدد',
+            'color' => 'info',
+            'icon' => 'fa-refresh',
+            'text' => 'text-white'
+        ],
+        'terminated' => [
+            'label' => 'مفسوخ',
+            'color' => 'dark',
+            'icon' => 'fa-ban',
+            'text' => 'text-white'
+        ],
+        'cancelled' => [
+            'label' => 'ملغي',
+            'color' => 'secondary',
+            'icon' => 'fa-trash',
+            'text' => 'text-white'
+        ]
+    ];
+
+    $status = isset($contract['status']) ? $contract['status'] : 'active';
+    $config = isset($statusConfig[$status]) ? $statusConfig[$status] : $statusConfig['active'];
+
+    $html = '<span class="badge bg-' . $config['color'] . ' ' . $config['text'] . '" title="' . $config['label'] . '">';
+    $html .= '<i class="fa ' . $config['icon'] . '"></i> ';
+    $html .= $config['label'];
+    $html .= '</span>';
+
+    // Add days until expiry for expiring_soon and active contracts
+    if (($status == 'expiring_soon' || $status == 'active') && isset($contract['end3aqd'])) {
+        $daysUntilExpiry = floor(($contract['end3aqd'] - time()) / (60 * 60 * 24));
+        if ($daysUntilExpiry >= 0 && $daysUntilExpiry <= 60) {
+            $html .= ' <small class="text-muted">(' . $daysUntilExpiry . ' يوم)</small>';
+        }
+    }
+
+    // Add renewal chain indicator
+    if (isset($contract['renewed_to_contract_id']) && $contract['renewed_to_contract_id']) {
+        $html .= ' <span class="badge bg-info text-white" title="تم التجديد إلى عقد آخر">';
+        $html .= '<i class="fa fa-arrow-left"></i>';
+        $html .= '</span>';
+    }
+
+    return $html;
+}
+
+/**
+ * Render status filter dropdown for contract list pages
+ *
+ * @param string $currentStatus Currently selected status (optional)
+ * @return string HTML for filter dropdown
+ */
+function renderContractStatusFilter($currentStatus = '') {
+    $html = '<div class="form-group">';
+    $html .= '<label>تصفية حسب الحالة:</label>';
+    $html .= '<select class="form-control" id="statusFilter" onchange="filterByStatus(this.value)">';
+    $html .= '<option value="">جميع العقود</option>';
+
+    $statuses = [
+        'active' => 'نشط',
+        'expiring_soon' => 'ينتهي قريباً',
+        'expired' => 'منتهي',
+        'renewed' => 'مجدد',
+        'active_arrears' => 'متأخرات',
+        'terminated' => 'مفسوخ',
+        'draft' => 'مسودة',
+        'cancelled' => 'ملغي'
+    ];
+
+    foreach ($statuses as $value => $label) {
+        $selected = ($value == $currentStatus) ? 'selected' : '';
+        $html .= '<option value="' . $value . '" ' . $selected . '>' . $label . '</option>';
+    }
+
+    $html .= '</select>';
+    $html .= '</div>';
+
+    // Add JavaScript for filtering
+    $html .= '<script>
+    function filterByStatus(status) {
+        var url = new URL(window.location.href);
+        if (status) {
+            url.searchParams.set("status_filter", status);
+        } else {
+            url.searchParams.delete("status_filter");
+        }
+        window.location.href = url.toString();
+    }
+
+    // Set selected value on page load
+    $(document).ready(function() {
+        var urlParams = new URLSearchParams(window.location.search);
+        var statusFilter = urlParams.get("status_filter");
+        if (statusFilter) {
+            $("#statusFilter").val(statusFilter);
+        }
+    });
+    </script>';
+
+    return $html;
+}
+
+/**
+ * Get contract status statistics
+ *
+ * @param resource $link Database connection
+ * @return array Status counts
+ */
+function getContractStatusStats($link) {
+    $sql = "SELECT
+        status,
+        COUNT(*) as count
+        FROM egar
+        GROUP BY status";
+
+    $result = mysql_query($sql, $link);
+
+    $stats = [];
+    while ($row = mysql_fetch_assoc($result)) {
+        $stats[$row['status']] = intval($row['count']);
+    }
+
+    return $stats;
+}
+
+/**
+ * Render contract status statistics dashboard
+ *
+ * @param resource $link Database connection
+ * @return string HTML for statistics cards
+ */
+function renderContractStatusDashboard($link) {
+    $stats = getContractStatusStats($link);
+
+    $cards = [
+        'active' => ['label' => 'عقود نشطة', 'color' => 'success', 'icon' => 'fa-check-circle'],
+        'expiring_soon' => ['label' => 'تنتهي قريباً', 'color' => 'warning', 'icon' => 'fa-clock-o'],
+        'expired' => ['label' => 'منتهية', 'color' => 'danger', 'icon' => 'fa-times-circle'],
+        'renewed' => ['label' => 'مجددة', 'color' => 'info', 'icon' => 'fa-refresh']
+    ];
+
+    $html = '<div class="row mb-4">';
+
+    foreach ($cards as $status => $config) {
+        $count = isset($stats[$status]) ? $stats[$status] : 0;
+
+        $html .= '<div class="col-md-3 col-sm-6 mb-3">';
+        $html .= '<div class="card border-' . $config['color'] . '">';
+        $html .= '<div class="card-body">';
+        $html .= '<div class="d-flex justify-content-between align-items-center">';
+        $html .= '<div>';
+        $html .= '<h6 class="text-muted mb-1">' . $config['label'] . '</h6>';
+        $html .= '<h2 class="mb-0">' . $count . '</h2>';
+        $html .= '</div>';
+        $html .= '<div class="text-' . $config['color'] . '">';
+        $html .= '<i class="fa ' . $config['icon'] . ' fa-3x"></i>';
+        $html .= '</div>';
+        $html .= '</div>';
+        $html .= '</div>';
+        $html .= '</div>';
+        $html .= '</div>';
+    }
+
+    $html .= '</div>';
+
+    return $html;
+}
+
+/**
+ * Get expiring contracts (next 30 days)
+ *
+ * @param resource $link Database connection
+ * @param int $days Number of days to look ahead (default 30)
+ * @return array Array of expiring contracts
+ */
+function getExpiringContracts($link, $days = 30) {
+    $now = time();
+    $futureDate = $now + ($days * 24 * 60 * 60);
+
+    $sql = "SELECT
+        e.rakam3akdid,
+        e.rakam3akd,
+        e.end3aqd,
+        e.status,
+        e.calendar_type,
+        m.mostagername,
+        a.idsubaqar
+        FROM egar e
+        INNER JOIN mostagereen m ON e.mostagerid = m.mostagerid
+        LEFT JOIN amlakdetails a ON e.rakam3akdid = a.rakam3akdid
+        WHERE e.status IN ('active', 'expiring_soon')
+        AND e.end3aqd BETWEEN $now AND $futureDate
+        ORDER BY e.end3aqd ASC
+        LIMIT 20";
+
+    $result = mysql_query($sql, $link);
+
+    $contracts = [];
+    $calendar = new CalendarManager();
+
+    while ($row = mysql_fetch_assoc($result)) {
+        $row['end3aqd_formatted'] = $calendar->formatDateForDisplay(
+            $row['end3aqd'],
+            intval($row['calendar_type'])
+        );
+        $row['days_until_expiry'] = floor(($row['end3aqd'] - time()) / (60 * 60 * 24));
+        $contracts[] = $row;
+    }
+
+    return $contracts;
+}
+
+/**
+ * Render expiring contracts widget
+ *
+ * @param resource $link Database connection
+ * @return string HTML for expiring contracts widget
+ */
+function renderExpiringContractsWidget($link) {
+    $contracts = getExpiringContracts($link);
+
+    if (empty($contracts)) {
+        return '<div class="alert alert-info">لا توجد عقود تنتهي في الأيام الـ 30 القادمة</div>';
+    }
+
+    $html = '<div class="card">';
+    $html .= '<div class="card-header bg-warning text-white">';
+    $html .= '<i class="fa fa-clock-o"></i> عقود تنتهي قريباً (' . count($contracts) . ')';
+    $html .= '</div>';
+    $html .= '<div class="card-body p-0">';
+    $html .= '<div class="table-responsive">';
+    $html .= '<table class="table table-hover mb-0">';
+    $html .= '<thead>';
+    $html .= '<tr>';
+    $html .= '<th>رقم العقد</th>';
+    $html .= '<th>المستأجر</th>';
+    $html .= '<th>تاريخ الانتهاء</th>';
+    $html .= '<th>الأيام المتبقية</th>';
+    $html .= '<th>إجراء</th>';
+    $html .= '</tr>';
+    $html .= '</thead>';
+    $html .= '<tbody>';
+
+    foreach ($contracts as $contract) {
+        $daysClass = $contract['days_until_expiry'] <= 7 ? 'text-danger font-weight-bold' : '';
+
+        $html .= '<tr>';
+        $html .= '<td>' . htmlspecialchars($contract['rakam3akd']) . '</td>';
+        $html .= '<td>' . htmlspecialchars($contract['mostagername']) . '</td>';
+        $html .= '<td>' . $contract['end3aqd_formatted'] . '</td>';
+        $html .= '<td class="' . $daysClass . '">' . $contract['days_until_expiry'] . ' يوم</td>';
+        $html .= '<td>';
+        $html .= '<a href="renewegar_v2.hnt?contract_id=' . $contract['rakam3akdid'] . '" class="btn btn-sm btn-primary">';
+        $html .= '<i class="fa fa-refresh"></i> تجديد';
+        $html .= '</a>';
+        $html .= '</td>';
+        $html .= '</tr>';
+    }
+
+    $html .= '</tbody>';
+    $html .= '</table>';
+    $html .= '</div>';
+    $html .= '</div>';
+    $html .= '</div>';
+
+    return $html;
+}
+
+/**
+ * Get SQL WHERE clause for status filter
+ *
+ * @param string $status Status to filter by
+ * @return string SQL WHERE clause
+ */
+function getStatusFilterSQL($status = '') {
+    if (empty($status)) {
+        return '';
+    }
+
+    $validStatuses = ['draft', 'active', 'active_arrears', 'expiring_soon', 'expired', 'renewed', 'terminated', 'cancelled'];
+
+    if (!in_array($status, $validStatuses)) {
+        return '';
+    }
+
+    return "AND e.status = '" . mysql_real_escape_string($status) . "'";
+}

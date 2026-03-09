@@ -1,0 +1,353 @@
+<?php
+/**
+ * Suppliers Module
+ * الموردين
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "إدارة الموردين";
+$sc_id = "206";
+if(isset($_POST['ajax_action'])){
+    include_once "../../../../reqloginajax.hnt";
+}
+else {
+    include_once "../../../../header.hnt";
+}
+    include_once "../../includes/accounting_class.hnt";
+
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+
+// Handle AJAX actions
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $action = $_POST['ajax_action'];
+    $response = ['success' => false, 'message' => ''];
+
+    switch ($action) {
+        case 'add_supplier':
+            $stmt = $db->prepare("
+                INSERT INTO acc_suppliers 
+                (supplier_name, vat_number, phone, email, address, contact_person, is_active, formuid)
+                VALUES (?, ?, ?, ?, ?, ?, 1, UUID())
+            ");
+
+            $stmt->bind_param("ssssss",
+                $_POST['supplier_name'],
+                $_POST['vat_number'],
+                $_POST['phone'],
+                $_POST['email'],
+                $_POST['address'],
+                $_POST['contact_person']
+            );
+
+            if ($stmt->execute()) {
+                $response['success'] = true;
+                $response['message'] = 'تم إضافة المورد بنجاح';
+                $response['supplier_id'] = $stmt->insert_id;
+            } else {
+                $response['message'] = 'فشل في إضافة المورد: ' . $stmt->error;
+            }
+            break;
+    }
+
+    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// Get suppliers
+$suppliersQuery = "SELECT * FROM acc_suppliers ORDER BY supplier_name ASC";
+$suppliersResult = $db->query($suppliersQuery);
+$suppliers = [];
+if ($suppliersResult) {
+    while ($row = $suppliersResult->fetch_assoc()) {
+        $suppliers[] = $row;
+    }
+}
+?>
+
+<style>
+:root {
+    --primary-color: #667eea;
+    --secondary-color: #764ba2;
+}
+
+.page-header {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    padding: 2rem;
+    border-radius: 15px;
+    margin-bottom: 2rem;
+}
+
+.supplier-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    transition: all 0.3s ease;
+}
+
+.supplier-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.12);
+}
+
+.btn-add-supplier {
+    background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+    border: none;
+    color: white;
+    padding: 0.75rem 1.5rem;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+.stats-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    text-align: center;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.stats-value {
+    font-size: 2rem;
+    font-weight: bold;
+    color: var(--primary-color);
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-truck me-2"></i>إدارة الموردين
+                </h1>
+                <p class="mb-0 opacity-75">Suppliers Management</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-add-supplier btn-lg ms-2" data-bs-toggle="modal" data-bs-target="#addSupplierModal">
+                    <i class="bi bi-plus-circle me-2"></i>مورد جديد
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Statistics -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-4">
+            <div class="stats-card">
+                <div class="stats-value"><?php echo count($suppliers); ?></div>
+                <div class="text-muted">إجمالي الموردين</div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="stats-card">
+                <div class="stats-value text-success">
+                    <?php echo count(array_filter($suppliers, function($s) { return $s['is_active'] == 1; })); ?>
+                </div>
+                <div class="text-muted">موردين نشطين</div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="stats-card">
+                <div class="stats-value text-muted">
+                    <?php echo count(array_filter($suppliers, function($s) { return $s['is_active'] == 0; })); ?>
+                </div>
+                <div class="text-muted">موردين غير نشطين</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Suppliers List -->
+    <div class="row">
+        <div class="col-12">
+            <?php if (empty($suppliers)): ?>
+            <div class="card border-0 shadow-sm" style="border-radius: 15px;">
+                <div class="card-body text-center p-5">
+                    <div class="mb-4">
+                        <i class="bi bi-truck" style="font-size: 5rem; color: #667eea;"></i>
+                    </div>
+                    <h3 class="mb-3">لا يوجد موردين بعد</h3>
+                    <p class="text-muted mb-4">ابدأ بإضافة أول مورد لإدارة المشتريات والمصروفات</p>
+                    <button class="btn btn-add-supplier btn-lg" data-bs-toggle="modal" data-bs-target="#addSupplierModal">
+                        <i class="bi bi-plus-circle me-2"></i>إضافة مورد جديد
+                    </button>
+                </div>
+            </div>
+            <?php else: ?>
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead>
+                        <tr>
+                            <th>اسم المورد</th>
+                            <th>الرقم الضريبي</th>
+                            <th>الهاتف</th>
+                            <th>البريد الإلكتروني</th>
+                            <th>جهة الاتصال</th>
+                            <th>الحالة</th>
+                            <th>الإجراءات</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($suppliers as $supplier): ?>
+                        <tr>
+                            <td>
+                                <strong><?php echo htmlspecialchars($supplier['supplier_name']); ?></strong>
+                            </td>
+                            <td><?php echo htmlspecialchars($supplier['vat_number'] ?? '-'); ?></td>
+                            <td><?php echo htmlspecialchars($supplier['phone'] ?? '-'); ?></td>
+                            <td><?php echo htmlspecialchars($supplier['email'] ?? '-'); ?></td>
+                            <td><?php echo htmlspecialchars($supplier['contact_person'] ?? '-'); ?></td>
+                            <td>
+                                <?php if ($supplier['is_active']): ?>
+                                <span class="badge bg-success">نشط</span>
+                                <?php else: ?>
+                                <span class="badge bg-secondary">غير نشط</span>
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-primary" onclick="viewSupplier(<?php echo $supplier['supplier_id']; ?>)">
+                                    <i class="bi bi-eye"></i>
+                                </button>
+                                <button class="btn btn-sm btn-outline-info" onclick="editSupplier(<?php echo $supplier['supplier_id']; ?>)">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<!-- Add Supplier Modal -->
+<div class="modal fade" id="addSupplierModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header" style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); color: white;">
+                <h5 class="modal-title">
+                    <i class="bi bi-plus-circle me-2"></i>إضافة مورد جديد
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="addSupplierForm">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">اسم المورد *</label>
+                            <input type="text" class="form-control" name="supplier_name" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">الرقم الضريبي</label>
+                            <input type="text" class="form-control" name="vat_number" maxlength="15">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">الهاتف</label>
+                            <input type="tel" class="form-control" name="phone">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">البريد الإلكتروني</label>
+                            <input type="email" class="form-control" name="email">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">جهة الاتصال</label>
+                            <input type="text" class="form-control" name="contact_person">
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label">العنوان</label>
+                            <textarea class="form-control" name="address" rows="2"></textarea>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-success" onclick="submitSupplier()">
+                    <i class="bi bi-check-circle me-2"></i>حفظ
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Result Modal -->
+<div class="modal fade" id="resultModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header" id="resultModalHeader">
+                <h5 class="modal-title text-white" id="resultModalTitle"></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p id="resultModalMessage"></p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function submitSupplier() {
+    const form = document.getElementById('addSupplierForm');
+    const formData = new FormData(form);
+    formData.append('ajax_action', 'add_supplier');
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        const modal = bootstrap.Modal.getInstance(document.getElementById('addSupplierModal'));
+        modal.hide();
+
+        showResultModal(data.success, data.message);
+
+        if (data.success) {
+            setTimeout(() => location.reload(), 1500);
+        }
+    })
+    .catch(error => {
+        showResultModal(false, 'حدث خطأ في الاتصال');
+    });
+}
+
+function viewSupplier(supplierId) {
+    window.location = 'view.hnt?id=' + supplierId;
+}
+
+function editSupplier(supplierId) {
+    window.location = 'edit.hnt?id=' + supplierId;
+}
+
+function showResultModal(success, message) {
+    const modal = new bootstrap.Modal(document.getElementById('resultModal'));
+    const header = document.getElementById('resultModalHeader');
+    const title = document.getElementById('resultModalTitle');
+    const messageEl = document.getElementById('resultModalMessage');
+
+    if (success) {
+        header.style.background = 'linear-gradient(135deg, #28a745, #20c997)';
+        title.innerHTML = '<i class="bi bi-check-circle me-2"></i>نجحت العملية';
+    } else {
+        header.style.background = 'linear-gradient(135deg, #dc3545, #c82333)';
+        title.innerHTML = '<i class="bi bi-x-circle me-2"></i>فشلت العملية';
+    }
+
+    messageEl.textContent = message;
+    modal.show();
+}
+</script>
+
+<?php require("../../../../foter.hnt"); ?>

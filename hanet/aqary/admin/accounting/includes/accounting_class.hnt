@@ -1,0 +1,666 @@
+<?php
+/**
+ * Accounting Manager Class
+ * كلاس إدارة المحاسبة
+ * 
+ * @charset UTF-8
+ * @version 1.0
+ * @author Real Estate System
+ */
+
+class AccountingManager {
+    private $db;
+    private $userId;
+    private $fiscalYear;
+    
+    public function __construct($db, $userId) {
+        if (!$db) {
+            die("Database connection error: \$db is null. Please check connectdb.hnt is included properly.");
+        }
+        $this->db = $db;
+        $this->userId = $userId;
+        $this->fiscalYear = $this->getCurrentFiscalYear();
+    }
+    
+    // ============================================
+    // Chart of Accounts Methods
+    // دليل الحسابات
+    // ============================================
+    
+    /**
+     * Create new account
+     * إنشاء حساب جديد
+     */
+    public function createAccount($data) {
+        if (empty($data['account_type'])) {
+            return [
+                'success' => false, 
+                'error' => 'Account type is required',
+                'message' => 'نوع الحساب مطلوب. يرجى اختيار نوع الحساب'
+            ];
+        }
+        
+        $accountLevel = 1;
+        if (!empty($data['parent_account_id'])) {
+            $parentStmt = $this->db->prepare("SELECT account_level, is_leaf FROM acc_chart_of_accounts WHERE account_id = ?");
+            $parentStmt->bind_param("i", $data['parent_account_id']);
+            $parentStmt->execute();
+            $parent = $parentStmt->get_result()->fetch_assoc();
+            
+            if ($parent) {
+                $accountLevel = $parent['account_level'] + 1;
+                
+                if ($parent['is_leaf'] == 1) {
+                    $this->db->query("UPDATE acc_chart_of_accounts SET is_leaf = 0 WHERE account_id = {$data['parent_account_id']}");
+                }
+            }
+        }
+        
+        $stmt = $this->db->prepare("
+            INSERT INTO acc_chart_of_accounts 
+            (account_code, account_name_ar, account_name_en, parent_account_id, 
+             account_type, account_category, account_level, is_leaf, 
+             opening_balance, is_active, vat_applicable, description, 
+             created_by, formuid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UUID())
+        ");
+        
+        $stmt->bind_param("sssississdiss",
+            $data['account_code'],
+            $data['account_name_ar'],
+            $data['account_name_en'],
+            $data['parent_account_id'],
+            $data['account_type'],
+            $data['account_category'],
+            $accountLevel,
+            $data['is_leaf'],
+            $data['opening_balance'],
+            $data['is_active'],
+            $data['vat_applicable'],
+            $data['description'],
+            $this->userId
+        );
+        
+        if ($stmt->execute()) {
+            $accountId = $stmt->insert_id;
+            $this->logAudit('create', 'account', $accountId, null, $data);
+            return ['success' => true, 'account_id' => $accountId];
+        }
+        
+        $error = $stmt->error;
+        $errorMessage = 'فشل في إنشاء الحساب';
+        
+        if (strpos($error, 'Duplicate entry') !== false && strpos($error, 'idx_code') !== false) {
+            preg_match("/Duplicate entry '([^']+)'/", $error, $matches);
+            $duplicateCode = $matches[1] ?? $data['account_code'];
+            $errorMessage = "رمز الحساب '{$duplicateCode}' موجود بالفعل. يرجى استخدام رمز مختلف";
+        }
+        
+        return ['success' => false, 'error' => $error, 'message' => $errorMessage];
+    }
+    
+    /**
+     * Get account by ID
+     * الحصول على حساب
+     */
+    public function getAccount($accountId) {
+        $stmt = $this->db->prepare("SELECT * FROM acc_chart_of_accounts WHERE account_id = ?");
+        $stmt->bind_param("i", $accountId);
+        $stmt->execute();
+        return $stmt->get_result()->fetch_assoc();
+    }
+    
+    /**
+     * Get all accounts with filters
+     * الحصول على جميع الحسابات
+     */
+    public function getAllAccounts($filters = []) {
+        $sql = "SELECT * FROM acc_chart_of_accounts WHERE 1=1";
+        $params = [];
+        $types = "";
+        
+        if (isset($filters['account_type'])) {
+            $sql .= " AND account_type = ?";
+            $params[] = $filters['account_type'];
+            $types .= "s";
+        }
+        
+        if (isset($filters['is_active'])) {
+            $sql .= " AND is_active = ?";
+            $params[] = $filters['is_active'];
+            $types .= "i";
+        }
+        
+        if (isset($filters['is_leaf'])) {
+            $sql .= " AND is_leaf = ?";
+            $params[] = $filters['is_leaf'];
+            $types .= "i";
+        }
+        
+        $sql .= " ORDER BY account_code";
+        
+        $stmt = $this->db->prepare($sql);
+        if (!empty($params)) {
+            $stmt->bind_param($types, ...$params);
+        }
+        $stmt->execute();
+        
+        $result = $stmt->get_result();
+        $accounts = [];
+        while ($row = $result->fetch_assoc()) {
+            $accounts[] = $row;
+        }
+        
+        return $accounts;
+    }
+    
+    /**
+     * Get account balance
+     * الحصول على رصيد الحساب
+     */
+    public function getAccountBalance($accountId, $date = null) {
+        if (!$date) {
+            $date = date('Y-m-d');
+        }
+        
+        $sql = "SELECT 
+                    COALESCE(SUM(debit_amount), 0) as total_debit,
+                    COALESCE(SUM(credit_amount), 0) as total_credit
+                FROM acc_journal_entry_lines jel
+                JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+                WHERE jel.account_id = ? 
+                AND je.status = 'posted'
+                AND je.entry_date <= ?";
+        
+        $stmt = $this->db->prepare($sql);
+        $stmt->bind_param("is", $accountId, $date);
+        $stmt->execute();
+        $result = $stmt->get_result()->fetch_assoc();
+        
+        // Get account type to determine balance calculation
+        $account = $this->getAccount($accountId);
+        $balance = 0;
+        
+        if (in_array($account['account_type'], ['asset', 'expense'])) {
+            // Debit balance accounts
+            $balance = $result['total_debit'] - $result['total_credit'];
+        } else {
+            // Credit balance accounts (liability, equity, revenue)
+            $balance = $result['total_credit'] - $result['total_debit'];
+        }
+        
+        return $balance + $account['opening_balance'];
+    }
+    
+    // ============================================
+    // Journal Entry Methods
+    // القيود اليومية
+    // ============================================
+    
+    /**
+     * Create journal entry
+     * إنشاء قيد يومية
+     */
+    public function createJournalEntry($data, $lines) {
+        // Validate totals
+        $totalDebit = array_sum(array_column($lines, 'debit_amount'));
+        $totalCredit = array_sum(array_column($lines, 'credit_amount'));
+        
+        if (abs($totalDebit - $totalCredit) > 0.01) {
+            return ['success' => false, 'error' => 'القيد غير متوازن: المدين لا يساوي الدائن'];
+        }
+        
+        // Generate entry number
+        $entryNumber = $this->generateEntryNumber();
+        
+        // Insert entry header
+        $stmt = $this->db->prepare("
+            INSERT INTO acc_journal_entries 
+            (entry_number, entry_date, entry_type, reference_type, reference_id,
+             description, total_debit, total_credit, fiscal_year, fiscal_period,
+             status, created_by, formuid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UUID())
+        ");
+        
+        $fiscalPeriod = (int)date('m', strtotime($data['entry_date']));
+        $status = $data['status'] ?? 'draft';
+        
+        $stmt->bind_param("ssssissdiisi",
+            $entryNumber,
+            $data['entry_date'],
+            $data['entry_type'],
+            $data['reference_type'],
+            $data['reference_id'],
+            $data['description'],
+            $totalDebit,
+            $totalCredit,
+            $this->fiscalYear,
+            $fiscalPeriod,
+            $status,
+            $this->userId
+        );
+        
+        if (!$stmt->execute()) {
+            return ['success' => false, 'error' => $stmt->error];
+        }
+        
+        $entryId = $stmt->insert_id;
+        
+        // Insert entry lines
+        foreach ($lines as $index => $line) {
+            $stmt = $this->db->prepare("
+                INSERT INTO acc_journal_entry_lines
+                (entry_id, account_id, line_number, description,
+                 debit_amount, credit_amount, cost_center_id, formuid)
+                VALUES (?, ?, ?, ?, ?, ?, ?, UUID())
+            ");
+            
+            $lineNumber = $index + 1;
+            $stmt->bind_param("iiisddi",
+                $entryId,
+                $line['account_id'],
+                $lineNumber,
+                $line['description'],
+                $line['debit_amount'],
+                $line['credit_amount'],
+                $line['cost_center_id']
+            );
+            
+            if (!$stmt->execute()) {
+                // Rollback - delete entry
+                $this->db->query("DELETE FROM acc_journal_entries WHERE entry_id = $entryId");
+                return ['success' => false, 'error' => $stmt->error];
+            }
+        }
+        
+        // Auto-post if requested
+        if ($status == 'posted') {
+            $this->postJournalEntry($entryId);
+        }
+        
+        $this->logAudit('create', 'journal_entry', $entryId, null, $data);
+        
+        return ['success' => true, 'entry_id' => $entryId, 'entry_number' => $entryNumber];
+    }
+    
+    /**
+     * Post journal entry
+     * ترحيل قيد اليومية
+     */
+    public function postJournalEntry($entryId) {
+        // Update entry status
+        $stmt = $this->db->prepare("
+            UPDATE acc_journal_entries 
+            SET status = 'posted', posted_date = NOW(), posted_by = ?
+            WHERE entry_id = ? AND status = 'draft'
+        ");
+        $stmt->bind_param("ii", $this->userId, $entryId);
+        
+        if ($stmt->execute() && $stmt->affected_rows > 0) {
+            // Update account balances
+            $this->updateAccountBalances($entryId);
+            $this->logAudit('post', 'journal_entry', $entryId, ['status' => 'draft'], ['status' => 'posted']);
+            return ['success' => true];
+        }
+        
+        return ['success' => false, 'error' => 'لا يمكن ترحيل القيد'];
+    }
+    
+    /**
+     * Update account balances from journal entry
+     * تحديث أرصدة الحسابات
+     */
+    private function updateAccountBalances($entryId) {
+        $sql = "SELECT account_id, 
+                       SUM(debit_amount) as debit, 
+                       SUM(credit_amount) as credit
+                FROM acc_journal_entry_lines
+                WHERE entry_id = ?
+                GROUP BY account_id";
+        
+        $stmt = $this->db->prepare($sql);
+        $stmt->bind_param("i", $entryId);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        
+        while ($row = $result->fetch_assoc()) {
+            $account = $this->getAccount($row['account_id']);
+            $change = 0;
+            
+            if (in_array($account['account_type'], ['asset', 'expense'])) {
+                $change = $row['debit'] - $row['credit'];
+            } else {
+                $change = $row['credit'] - $row['debit'];
+            }
+            
+            $this->db->query("
+                UPDATE acc_chart_of_accounts 
+                SET current_balance = current_balance + $change
+                WHERE account_id = {$row['account_id']}
+            ");
+        }
+    }
+    
+    /**
+     * Generate entry number
+     * توليد رقم القيد
+     */
+    private function generateEntryNumber() {
+        $prefix = $this->getSetting('journal_prefix', 'JE');
+        $year = date('Y');
+        
+        $result = $this->db->query("
+            SELECT MAX(CAST(SUBSTRING(entry_number, LENGTH('$prefix-$year-') + 1) AS UNSIGNED)) as max_num
+            FROM acc_journal_entries
+            WHERE entry_number LIKE '$prefix-$year-%'
+        ");
+        
+        $row = $result->fetch_assoc();
+        $nextNum = ($row['max_num'] ?? 0) + 1;
+        
+        return sprintf("%s-%s-%05d", $prefix, $year, $nextNum);
+    }
+    
+    // ============================================
+    // Invoice Methods
+    // الفواتير
+    // ============================================
+    
+    /**
+     * Create invoice
+     * إنشاء فاتورة
+     */
+    public function createInvoice($data, $items) {
+        // Calculate totals
+        $subtotal = 0;
+        $vatAmount = 0;
+        
+        foreach ($items as $item) {
+            $itemSubtotal = $item['quantity'] * $item['unit_price'];
+            $itemVat = $itemSubtotal * ($item['vat_rate'] / 100);
+            $subtotal += $itemSubtotal;
+            $vatAmount += $itemVat;
+        }
+        
+        $totalAmount = $subtotal + $vatAmount;
+        
+        // Generate invoice number
+        $invoiceNumber = $this->generateInvoiceNumber($data['invoice_type'] ?? 'standard');
+
+        // Ensure required columns exist in acc_invoices table
+        $checkColumns = $this->db->query("SHOW COLUMNS FROM acc_invoices LIKE 'customer_address'");
+        if ($checkColumns->num_rows == 0) {
+            // Add missing columns
+            $alterSQL = "ALTER TABLE acc_invoices
+                ADD COLUMN customer_address TEXT NULL AFTER customer_vat_number,
+                ADD COLUMN payment_method VARCHAR(50) NULL AFTER payment_status,
+                ADD COLUMN notes TEXT NULL AFTER payment_method";
+
+            if (!$this->db->query($alterSQL)) {
+                return ['success' => false, 'error' => 'Failed to add required columns: ' . $this->db->error];
+            }
+        }
+
+        // Insert invoice
+        $stmt = $this->db->prepare("
+            INSERT INTO acc_invoices
+            (invoice_number, invoice_type, invoice_date, due_date,
+             customer_type, customer_id, customer_name, customer_vat_number, customer_address,
+             subtotal, vat_amount, total_amount, paid_amount,
+             payment_status, payment_method, notes, created_by, formuid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'unpaid', ?, ?, ?, UUID())
+        ");
+
+        if (!$stmt) {
+            return ['success' => false, 'error' => 'SQL Prepare Error: ' . $this->db->error];
+        }
+
+        $customerType = $data['customer_type'] ?? 'tenant';
+        $customerId = $data['customer_id'] ?? 0;
+        $customerAddress = $data['customer_address'] ?? '';
+        $paymentMethod = $data['payment_method'] ?? '';
+        $notes = $data['notes'] ?? '';
+
+        $stmt->bind_param("ssssissssdddsssi",
+            $invoiceNumber,
+            $data['invoice_type'],
+            $data['invoice_date'],
+            $data['due_date'],
+            $customerType,
+            $customerId,
+            $data['customer_name'],
+            $data['customer_vat_number'],
+            $customerAddress,
+            $subtotal,
+            $vatAmount,
+            $totalAmount,
+            $paymentMethod,
+            $notes,
+            $this->userId
+        );
+        
+        if (!$stmt->execute()) {
+            return ['success' => false, 'error' => $stmt->error];
+        }
+
+        $invoiceId = $stmt->insert_id;
+
+        // Ensure acc_invoice_items table exists
+        $checkItemsTable = $this->db->query("SHOW TABLES LIKE 'acc_invoice_items'");
+        if ($checkItemsTable->num_rows == 0) {
+            $createItemsTable = "CREATE TABLE acc_invoice_items (
+                item_id INT AUTO_INCREMENT PRIMARY KEY,
+                invoice_id INT NOT NULL,
+                item_description VARCHAR(255) NOT NULL,
+                quantity DECIMAL(10,2) NOT NULL,
+                unit_price DECIMAL(10,2) NOT NULL,
+                vat_rate DECIMAL(5,2) DEFAULT 15.00,
+                discount DECIMAL(10,2) DEFAULT 0,
+                line_total DECIMAL(10,2) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_invoice (invoice_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+            if (!$this->db->query($createItemsTable)) {
+                return ['success' => false, 'error' => 'Failed to create invoice items table: ' . $this->db->error];
+            }
+        }
+
+        // Insert invoice items
+        $itemStmt = $this->db->prepare("
+            INSERT INTO acc_invoice_items
+            (invoice_id, item_description, quantity, unit_price, vat_rate, discount, line_total)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ");
+
+        if (!$itemStmt) {
+            return ['success' => false, 'error' => 'Failed to prepare item statement: ' . $this->db->error];
+        }
+
+        foreach ($items as $item) {
+            $lineTotal = ($item['quantity'] * $item['unit_price']) * (1 + ($item['vat_rate'] / 100));
+            $discount = $item['discount'] ?? 0;
+
+            $itemStmt->bind_param("isddddd",
+                $invoiceId,
+                $item['description'],
+                $item['quantity'],
+                $item['unit_price'],
+                $item['vat_rate'],
+                $discount,
+                $lineTotal
+            );
+
+            if (!$itemStmt->execute()) {
+                return ['success' => false, 'error' => 'Failed to insert item: ' . $itemStmt->error];
+            }
+        }
+
+        $this->logAudit('create', 'invoice', $invoiceId, null, $data);
+
+        return ['success' => true, 'invoice_id' => $invoiceId, 'invoice_number' => $invoiceNumber];
+    }
+    
+    /**
+     * Generate invoice number
+     * توليد رقم الفاتورة
+     */
+    private function generateInvoiceNumber($type) {
+        $prefix = $this->getSetting('invoice_prefix', 'INV');
+        $year = date('Y');
+        
+        $result = $this->db->query("
+            SELECT MAX(CAST(SUBSTRING(invoice_number, LENGTH('$prefix-$year-') + 1) AS UNSIGNED)) as max_num
+            FROM acc_invoices
+            WHERE invoice_number LIKE '$prefix-$year-%'
+        ");
+        
+        $row = $result->fetch_assoc();
+        $nextNum = ($row['max_num'] ?? 0) + 1;
+        
+        return sprintf("%s-%s-%05d", $prefix, $year, $nextNum);
+    }
+    
+    // ============================================
+    // Reports
+    // التقارير
+    // ============================================
+    
+    /**
+     * Get trial balance
+     * ميزان المراجعة
+     */
+    public function getTrialBalance($date = null) {
+        if (!$date) {
+            $date = date('Y-m-d');
+        }
+        
+        $sql = "SELECT 
+                    acc.account_id,
+                    acc.account_code,
+                    acc.account_name_ar,
+                    acc.account_type,
+                    acc.opening_balance,
+                    COALESCE(SUM(jel.debit_amount), 0) as total_debit,
+                    COALESCE(SUM(jel.credit_amount), 0) as total_credit
+                FROM acc_chart_of_accounts acc
+                LEFT JOIN acc_journal_entry_lines jel ON acc.account_id = jel.account_id
+                LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id 
+                    AND je.status = 'posted' AND je.entry_date <= ?
+                WHERE acc.is_leaf = 1 AND acc.is_active = 1
+                GROUP BY acc.account_id
+                ORDER BY acc.account_code";
+        
+        $stmt = $this->db->prepare($sql);
+        $stmt->bind_param("s", $date);
+        $stmt->execute();
+        
+        return $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    }
+    
+    // ============================================
+    // Utilities
+    // الأدوات المساعدة
+    // ============================================
+    
+    /**
+     * Get current fiscal year
+     * الحصول على السنة المالية الحالية
+     */
+    private function getCurrentFiscalYear() {
+        $result = $this->db->query("
+            SELECT fiscal_year 
+            FROM acc_fiscal_years 
+            WHERE status = 'open' 
+            ORDER BY fiscal_year DESC 
+            LIMIT 1
+        ");
+        
+        if ($result && $row = $result->fetch_assoc()) {
+            return $row['fiscal_year'];
+        }
+        
+        return date('Y');
+    }
+    
+    /**
+     * Get system setting
+     * الحصول على إعداد النظام
+     */
+    public function getSetting($key, $default = null) {
+        $stmt = $this->db->prepare("SELECT setting_value FROM acc_system_settings WHERE setting_key = ?");
+        $stmt->bind_param("s", $key);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        
+        if ($row = $result->fetch_assoc()) {
+            return $row['setting_value'];
+        }
+        
+        return $default;
+    }
+    
+    /**
+     * Log audit trail
+     * تسجيل سجل التدقيق
+     */
+    private function logAudit($action, $entity, $entityId, $oldValues, $newValues) {
+        // Check if audit log table exists, create if not
+        $tableCheck = $this->db->query("SHOW TABLES LIKE 'acc_audit_log'");
+        if ($tableCheck->num_rows == 0) {
+            // Create audit log table
+            $createTable = "CREATE TABLE acc_audit_log (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                username VARCHAR(100) NOT NULL,
+                action_type VARCHAR(50) NOT NULL,
+                entity_type VARCHAR(50) NOT NULL,
+                entity_id INT NULL,
+                old_values TEXT NULL,
+                new_values TEXT NULL,
+                ip_address VARCHAR(45) NULL,
+                formuid VARCHAR(36) NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_user (user_id),
+                INDEX idx_entity (entity_type, entity_id),
+                INDEX idx_created (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+            if (!$this->db->query($createTable)) {
+                error_log('Failed to create audit log table: ' . $this->db->error);
+                return; // Skip logging if table creation fails
+            }
+        }
+
+        $stmt = $this->db->prepare("
+            INSERT INTO acc_audit_log
+            (user_id, username, action_type, entity_type, entity_id,
+             old_values, new_values, ip_address, formuid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, UUID())
+        ");
+
+        if (!$stmt) {
+            error_log('Failed to prepare audit log statement: ' . $this->db->error);
+            return; // Skip logging if prepare fails
+        }
+
+        $username = $_SESSION['username'] ?? 'system';
+        $ipAddress = $_SERVER['REMOTE_ADDR'] ?? '';
+        $oldJson = json_encode($oldValues);
+        $newJson = json_encode($newValues);
+
+        $stmt->bind_param("isssisss",
+            $this->userId,
+            $username,
+            $action,
+            $entity,
+            $entityId,
+            $oldJson,
+            $newJson,
+            $ipAddress
+        );
+
+        $stmt->execute();
+    }
+}
+?>

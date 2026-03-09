@@ -29,6 +29,7 @@ $idsubaqar = $_REQUEST['idsubaqar'] ?? '';
 $freewehda = $_REQUEST['freewehda'] ?? 0;
 $deletemostagerdata = $_REQUEST['deletemostagerdata'] ?? '';
 $mostagerid = $_REQUEST['mostagerid'] ?? 0;
+$termination_reason = $_REQUEST['termination_reason'] ?? 'إخلاء الوحدة بناءً على طلب الإدارة';
 
 
 // Load required utilities
@@ -46,16 +47,31 @@ if ($rakam3akdid && !$idsubaqar) {
 
 // Process evacuation request
 if ($freewehda == 1 && $idsubaqar) {
-    // Get contract ID
-    $sql = "SELECT rakam3akdid FROM amlakdetails WHERE idsubaqar='" . intval($idsubaqar) . "'";
+    // Get contract ID and current tenant ID
+    $sql = "SELECT rakam3akdid, mostagerid FROM amlakdetails WHERE idsubaqar='" . intval($idsubaqar) . "'";
     $result = mysql_fetch_array(mysql_query($sql, $link));
     $rakam3akdid = $result['rakam3akdid'] ?? '';
+    $current_mostagerid = $result['mostagerid'] ?? 0;
 
     // Archive the contract
     $deleted3adkd = @file_get_contents("HTTP://" . $_SERVER['SERVER_ADDR'] . ":" . $_SERVER['SERVER_PORT'] . "/aqary/admin/include/amlak/show3akd.hnt?rakam3akdid=$rakam3akdid&username={$_SESSION['usernamev']}&password={$_SESSION['passwordv']}");
 
-    // Update contract status
-    $sql = "UPDATE egar SET mostagerid='0', txt3akd='" . addslashes($deleted3adkd) . "' WHERE rakam3akdid='" . addslashes($rakam3akdid) . "'";
+    // Get current timestamp
+    $termination_timestamp = time();
+    $current_userid = $_SESSION['userid'] ?? 0;
+
+    // Update contract status - preserve tenant ID in elect field, set status to terminated
+    $sql = "UPDATE egar SET 
+            mostagerid='0', 
+            txt3akd='" . addslashes($deleted3adkd) . "',
+            status='terminated',
+            termination_date='" . intval($termination_timestamp) . "',
+            termination_reason='" . addslashes($termination_reason) . "',
+            terminated_by_userid='" . intval($current_userid) . "',
+            elect='" . intval($current_mostagerid) . "',
+            updated_at='" . intval($termination_timestamp) . "',
+            updated_by_userid='" . intval($current_userid) . "'
+            WHERE rakam3akdid='" . addslashes($rakam3akdid) . "'";
     mysql_query($sql, $link);
 
     // Clear unit assignment
@@ -301,6 +317,17 @@ if (!$is_ajax_request):
                 <input type='hidden' name='idsubaqar' value="<?= intval($idsubaqar) ?>">
                 <input type='hidden' name='mostagerid' value="<?= intval($rowm['mostagerid'] ?? 0) ?>">
                 <input type='hidden' name='freewehda' value="1">
+
+                <!-- Termination Reason -->
+                <div class="mb-4">
+                    <label class="form-label">
+                        <i class="bi bi-chat-left-text text-primary me-1"></i>
+                        سبب الإخلاء
+                        <span class="text-danger">*</span>
+                    </label>
+                    <textarea class="form-control" name="termination_reason" id="termination_reason" rows="3" required>إخلاء الوحدة بناءً على طلب الإدارة</textarea>
+                    <small class="text-muted">يمكنك تعديل السبب الافتراضي أو كتابة سبب مخصص</small>
+                </div>
 
                 <!-- Tenant Data Options -->
                 <div class="mb-4">
