@@ -74,22 +74,163 @@ if (isset($_POST['action']) && $_POST['action'] == 'add_property_type') {
 
     $aqartypename = $_POST['aqartypename'];
 
+    // Check if the property type already exists
+    $check_sql = "SELECT aqartype FROM aqartype WHERE aqartypename='" . addslashes($aqartypename) . "' LIMIT 1";
+    $check_result = mysql_query($check_sql, $link);
 
-
-    $sql = "INSERT INTO aqartype SET aqartypename='" . addslashes($aqartypename) . "'";
-    $result = mysql_query($sql, $link);
-
-    if ($result) {
-        $new_id = mysql_insert_id($link);
+    if ($check_result && mysql_num_rows($check_result) > 0) {
+        // Property type already exists, return the existing ID
+        $existing_row = mysql_fetch_array($check_result);
         echo json_encode([
             'success' => true,
-            'aqartype' => $new_id,
-            'aqartypename' => $aqartypename
+            'aqartype' => $existing_row['aqartype'],
+            'aqartypename' => $aqartypename,
+            'already_exists' => true
         ], JSON_UNESCAPED_UNICODE);
     } else {
-        echo json_encode(['success' => false, 'error' => mysql_error($link)], JSON_UNESCAPED_UNICODE);
+        // Insert new property type
+        $sql = "INSERT INTO aqartype SET aqartypename='" . addslashes($aqartypename) . "'";
+        $result = mysql_query($sql, $link);
+
+        if ($result) {
+            $new_id = mysql_insert_id($link);
+            echo json_encode([
+                'success' => true,
+                'aqartype' => $new_id,
+                'aqartypename' => $aqartypename
+            ], JSON_UNESCAPED_UNICODE);
+        } else {
+            echo json_encode(['success' => false, 'error' => mysql_error($link)], JSON_UNESCAPED_UNICODE);
+        }
     }
     exit;
+}
+
+// Handle AJAX requests for bank accounts
+if (isset($_POST['action']) && in_array($_POST['action'], ['add_bank_account', 'update_bank_account', 'delete_bank_account', 'list_bank_accounts'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    
+    $action = $_POST['action'];
+    
+    // Add bank account
+    if ($action == 'add_bank_account') {
+        $bankname = addslashes($_POST['bankname']);
+        $acountnumber = addslashes($_POST['acountnumber']);
+        $acountholder = addslashes($_POST['acountholder']);
+        $iban = addslashes($_POST['iban']);
+        $currentblance = isset($_POST['currentblance']) ? floatval($_POST['currentblance']) : 0;
+        $ownerid = addslashes($_POST['ownerid']); // formuid
+        $ownerid2 = isset($_POST['ownerid2']) ? intval($_POST['ownerid2']) : 0; // idaqar
+        $formuid = addslashes($_POST['formuid']);
+        
+        $sql = "INSERT INTO bankacounts SET 
+                bankname = '$bankname',
+                acountnumber = '$acountnumber',
+                acountholder = '$acountholder',
+                iban = '$iban',
+                currentblance = '$currentblance',
+                ownerid = '$ownerid',
+                ownerid2 = '$ownerid2',
+                formuid = '$formuid',
+                bankbranch = '',
+                swift = '',
+                initialblance = 0";
+        
+        $result = mysql_query($sql, $link);
+        
+        if ($result) {
+            echo json_encode([
+                'success' => true,
+                'id' => mysql_insert_id($link),
+                'message' => 'تم إضافة الحساب البنكي بنجاح'
+            ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        } else {
+            echo json_encode([
+                'success' => false,
+                'error' => mysql_error($link)
+            ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        }
+        exit;
+    }
+    
+    // Update bank account
+    if ($action == 'update_bank_account') {
+        $id = intval($_POST['id']);
+        $bankname = addslashes($_POST['bankname']);
+        $acountnumber = addslashes($_POST['acountnumber']);
+        $acountholder = addslashes($_POST['acountholder']);
+        $iban = addslashes($_POST['iban']);
+        $currentblance = isset($_POST['currentblance']) ? floatval($_POST['currentblance']) : 0;
+        
+        $sql = "UPDATE bankacounts SET 
+                bankname = '$bankname',
+                acountnumber = '$acountnumber',
+                acountholder = '$acountholder',
+                iban = '$iban',
+                currentblance = '$currentblance'
+                WHERE id = '$id'";
+        
+        $result = mysql_query($sql, $link);
+        
+        if ($result) {
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم تحديث الحساب البنكي بنجاح'
+            ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        } else {
+            echo json_encode([
+                'success' => false,
+                'error' => mysql_error($link)
+            ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        }
+        exit;
+    }
+    
+    // Delete bank account
+    if ($action == 'delete_bank_account') {
+        $id = intval($_POST['id']);
+        
+        $sql = "DELETE FROM bankacounts WHERE id = '$id'";
+        $result = mysql_query($sql, $link);
+        
+        if ($result) {
+            echo json_encode([
+                'success' => true,
+                'message' => 'تم حذف الحساب البنكي بنجاح'
+            ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        } else {
+            echo json_encode([
+                'success' => false,
+                'error' => mysql_error($link)
+            ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        }
+        exit;
+    }
+    
+    // List bank accounts
+    if ($action == 'list_bank_accounts') {
+        $ownerid = addslashes($_POST['ownerid']); // formuid or idaqar
+        $use_ownerid2 = isset($_POST['use_ownerid2']) && $_POST['use_ownerid2'] == '1';
+        
+        if ($use_ownerid2) {
+            $sql = "SELECT * FROM bankacounts WHERE ownerid2 = '" . intval($ownerid) . "' ORDER BY id ASC";
+        } else {
+            $sql = "SELECT * FROM bankacounts WHERE ownerid = '$ownerid' ORDER BY id ASC";
+        }
+        
+        $result = mysql_query($sql, $link);
+        $accounts = array();
+        
+        while ($row = mysql_fetch_assoc($result)) {
+            $accounts[] = $row;
+        }
+        
+        echo json_encode([
+            'success' => true,
+            'data' => $accounts
+        ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        exit;
+    }
 }
 
 
@@ -114,13 +255,17 @@ mysql_query("ALTER TABLE amlakdetails ADD externaltype varchar(50) NOT NULL ", $
 mysql_query("ALTER TABLE amlakowner ADD owner_vat_number varchar(50) NOT NULL ", $link);
 mysql_query("ALTER TABLE amlak ADD owner_vat_number varchar(50) NOT NULL ", $link);
 
+// Bank accounts table schema updates
+mysql_query("ALTER TABLE bankacounts ADD iban varchar(250) NOT NULL ", $link);
+mysql_query("ALTER TABLE bankacounts ADD currentblance decimal(20,9) NOT NULL DEFAULT 0", $link);
+
 
 
 // Only output JavaScript if not AJAX
 if (!$is_ajax_request) {
 ?>
 <SCRIPT LANGUAGE="JavaScript">
-    hs.preserveContent = false; <
+    hs.preserveContent = false; 
 
 
     function formHandler(form) {
@@ -346,6 +491,14 @@ if ((isset($_POST['ownername']) && $_POST['ownername']) && (!isset($_POST['idaqa
     //$row=mysql_fetch_array(mysql_query($sql,$link));
     //$idaqar=$row['idaqar'];
     $idaqar = mysql_insert_id($link);
+    
+    // Update bank accounts to link them to this property
+    if ($idaqar > 0 && isset($_POST['formuid']) && $_POST['formuid']) {
+        $formuid = addslashes($_POST['formuid']);
+        $update_banks_sql = "UPDATE bankacounts SET ownerid2 = '$idaqar' WHERE ownerid = '$formuid'";
+        mysql_query($update_banks_sql, $link);
+    }
+    
     if ($idaqar > 0) {
         if (isset($_POST['externalid']) && $_POST['externalid']) {
             $sql = "insert into amlakdetails set aqarsubtype='" . (isset($_REQUEST['aqarsubtype']) ? $_REQUEST['aqarsubtype'] : '') . "',
@@ -507,30 +660,34 @@ if (!$is_ajax_request) {
                             <span>معلومات العقار</span>
                         </div>
                         <div class="row g-3 mb-4">
-                            <div class="col-lg-3 col-md-6">
+                            <div class="col-lg-4 col-md-6">
                                 <label class="form-label"><i class="bi bi-tag-fill text-primary me-1"></i>نوع العقار <span class="required-mark">*</span></label>
-                                <div class="input-group input-group-sm">
-                                    <select name="aqartype" id="aqartype" class="form-select" required>
-                                        <option value="">-- اختر نوع العقار --</option>
-                                        <?
-                                        $sql = "select * from aqartype";
-                                        $result = mysql_query($sql, $link);
-                                        while ($row = mysql_fetch_array($result)) {
-                                            $selected = (isset($rowaqar['aqartype']) && $rowaqar['aqartype'] == $row['aqartype']) ? " selected" : "";
-                                            echo "<option value='{$row['aqartype']}' {$selected}>{$row['aqartypename']}</option>";
-                                        }
-                                        ?>
-                                    </select>
-                                    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#addPropertyTypeModal" title="إضافة">
-                                        <i class="bi bi-plus-lg"></i>
-                                    </button>
+                                <div class="row g-1">
+                                    <div class="col">
+                                        <select name="aqartype" id="aqartype" class="form-select form-select-sm" required>
+                                            <option value="">-- اختر نوع العقار --</option>
+                                            <?
+                                            $sql = "select * from aqartype";
+                                            $result = mysql_query($sql, $link);
+                                            while ($row = mysql_fetch_array($result)) {
+                                                $selected = (isset($rowaqar['aqartype']) && $rowaqar['aqartype'] == $row['aqartype']) ? " selected" : "";
+                                                echo "<option value='{$row['aqartype']}' {$selected}>{$row['aqartypename']}</option>";
+                                            }
+                                            ?>
+                                        </select>
+                                    </div>
+                                    <div class="col-auto">
+                                        <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#addPropertyTypeModal" title="إضافة" style="height: 100%;width:38px;">
+                                            <i class="bi bi-plus-lg"></i>
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                             <div class="col-lg-3 col-md-6">
                                 <label class="form-label"><i class="bi bi-pencil-fill text-info me-1"></i>اسم العقار <span class="required-mark">*</span></label>
                                 <input type="text" name="aqarname" value='<?= isset($rowaqar['aqarname']) ? $rowaqar['aqarname'] : '' ?>' class="form-control form-control-sm" required>
                             </div>
-                            <div class="col-lg-6 col-md-12">
+                            <div class="col-lg-5 col-md-12">
                                 <label class="form-label"><i class="bi bi-geo-alt-fill text-danger me-1"></i>عنوان العقار <span class="required-mark">*</span></label>
                                 <input type="text" name="aqaraddress" value='<?= isset($rowaqar['aqaraddress']) ? $rowaqar['aqaraddress'] : '' ?>' class="form-control form-control-sm" required>
                             </div>
@@ -569,27 +726,13 @@ if (!$is_ajax_request) {
             </h5>
         </div>
         <div class="card-body p-4">
-                <div class="row g-3 mb-3">
-                    <div class="col-lg-3 col-md-6">
-                        <label class="form-label"><i class="fas fa-landmark text-primary me-1"></i>اسم البنك</label>
-                        <input type="text" name="bankname" id="bankname" value="<?= isset($rowaqar['bankname']) ? $rowaqar['bankname'] : '' ?>" class="form-control form-control-sm">
-                    </div>
-
-                    <div class="col-lg-3 col-md-6">
-                        <label class="form-label"><i class="fas fa-hashtag text-success me-1"></i>رقم الحساب</label>
-                        <input type="text" name="acountnumber" id="acountnumber" value="<?= isset($rowaqar['acountnumber']) ? $rowaqar['acountnumber'] : '' ?>" class="form-control form-control-sm">
-                    </div>
-                    <div class="col-lg-3 col-md-6">
-                        <label class="form-label"><i class="bi bi-person text-warning me-1"></i>اسم صاحب الحساب</label>
-                        <input type="text" name="acountholder" id="acountholder" value="<?= isset($rowaqar['acountholder']) ? $rowaqar['acountholder'] : '' ?>" class="form-control form-control-sm">
-                    </div>
-                    <div class="col-lg-3 col-md-6">
-                        <label class="form-label"><i class="fas fa-globe text-danger me-1"></i>رقم IBAN</label>
-                        <input type="text" name="iban" id="iban" value="<?= isset($rowaqar['iban']) ? $rowaqar['iban'] : '' ?>" class="form-control form-control-sm">
-                    </div>
+                <div id="bankAccountsList" class="mb-3">
+                    <!-- Bank accounts will be loaded here -->
                 </div>
-
-
+                <button type="button" class="btn btn-primary btn-sm" onclick="showBankAccountModal()">
+                    <i class="bi bi-plus-circle me-1"></i>
+                    إضافة حساب بنكي
+                </button>
         </div>
     </div>
 </div>
@@ -607,9 +750,11 @@ if (!$is_ajax_request) {
 
                         <div class="col-lg-6 col-md-12">
                             <label class="form-label"><i class="bi bi-person-badge-fill text-success me-1"></i>اسم المالك <span class="required-mark">*</span></label>
-                            <div class="input-group input-group-sm">
-                                <input type="text" name="ownername" id="ownername" value='<?= isset($rowaqar['ownername']) ? $rowaqar['ownername'] : '' ?>' class="form-control" required>
-                                <button type="button" class="btn btn-outline-success btn-sm" onclick="return hs.htmlExpand(this, {contentId: 'my-content3', objectType: 'iframe', objectWidth: 350, width: 350, objectHeight: 160});" title="اختر">
+                            <div class="input-group ">
+                                <input type="text" name="ownername" id="ownername" value='<?= isset($rowaqar['ownername']) ? $rowaqar['ownername'] : '' ?>' class="form-control  form-control-sm" required placeholder="اختر المالك"
+                                    onclick="ajaxfilldiv('select ownerid,ownername,mobile,phone,owneraddress,email,hawiarakam,gensia,owner_vat_number from amlakowner','ownerid','ownername');return false">
+                                <button type="button" class="btn btn-outline-success btn-sm" title="اختر"
+                                    onclick="document.getElementById('ownername').click(); return false;">
                                     <i class="bi bi-search"></i>
                                 </button>
                             </div>
@@ -769,7 +914,7 @@ function savePropertyType() {
     var formData = new FormData();
     formData.append('action', 'add_property_type');
     formData.append('aqartypename', aqartypename);
-
+    formData.append('ajax_submit', '1');
     fetch('addamlak.hnt', {
         method: 'POST',
         body: formData
@@ -936,6 +1081,293 @@ $(document).ready(function() {
         });
     };
 });
+</script>
+
+<!-- Bank Account Modal -->
+<div class="modal fade" id="bankAccountModal" tabindex="-1" aria-labelledby="bankAccountModalLabel" aria-hidden="true" dir="rtl">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header" style="background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%); color: white;">
+                <h5 class="modal-title" id="bankAccountModalLabel">
+                    <i class="fas fa-university me-2"></i>
+                    <span id="modalTitleText">إضافة حساب بنكي</span>
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <form id="bankAccountForm">
+                    <input type="hidden" id="bank_account_id" name="id">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label for="bank_bankname" class="form-label">
+                                <i class="fas fa-landmark text-primary me-1"></i>اسم البنك <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" class="form-control" id="bank_bankname" name="bankname" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="bank_acountnumber" class="form-label">
+                                <i class="fas fa-hashtag text-success me-1"></i>رقم الحساب <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" class="form-control" id="bank_acountnumber" name="acountnumber" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="bank_acountholder" class="form-label">
+                                <i class="bi bi-person text-warning me-1"></i>اسم صاحب الحساب <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" class="form-control" id="bank_acountholder" name="acountholder" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="bank_iban" class="form-label">
+                                <i class="fas fa-globe text-danger me-1"></i>رقم IBAN
+                            </label>
+                            <input type="text" class="form-control" id="bank_iban" name="iban">
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                    <i class="bi bi-x-circle me-1"></i>إلغاء
+                </button>
+                <button type="button" class="btn btn-primary" onclick="saveBankAccount()">
+                    <i class="bi bi-check-circle me-1"></i>حفظ
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Bank Account Management
+let bankAccountModal;
+let currentEditingBankId = null;
+
+document.addEventListener('DOMContentLoaded', function() {
+    bankAccountModal = new bootstrap.Modal(document.getElementById('bankAccountModal'));
+    
+    // Load bank accounts if editing existing property
+    const idaqar = document.querySelector('input[name="idaqar"]');
+    if (idaqar && idaqar.value) {
+        loadBankAccounts(idaqar.value, true);
+    } else {
+        // For new property, load by formuid
+        const formuid = document.getElementById('formuid').value;
+        loadBankAccounts(formuid, false);
+    }
+});
+
+function showBankAccountModal(accountId = null) {
+    currentEditingBankId = accountId;
+    
+    if (accountId) {
+        // Edit mode
+        document.getElementById('modalTitleText').textContent = 'تعديل حساب بنكي';
+        
+        // Find account data and populate form
+        const accountCard = document.querySelector(`[data-account-id="${accountId}"]`);
+        if (accountCard) {
+            document.getElementById('bank_account_id').value = accountId;
+            document.getElementById('bank_bankname').value = accountCard.dataset.bankname || '';
+            document.getElementById('bank_acountnumber').value = accountCard.dataset.acountnumber || '';
+            document.getElementById('bank_acountholder').value = accountCard.dataset.acountholder || '';
+            document.getElementById('bank_iban').value = accountCard.dataset.iban || '';
+        }
+    } else {
+        // Add mode
+        document.getElementById('modalTitleText').textContent = 'إضافة حساب بنكي';
+        document.getElementById('bankAccountForm').reset();
+        document.getElementById('bank_account_id').value = '';
+    }
+    
+    bankAccountModal.show();
+}
+
+function saveBankAccount() {
+    const form = document.getElementById('bankAccountForm');
+    
+    if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+    }
+    
+    const formData = new FormData(form);
+    formData.append('ajax_submit', '1');
+    
+    const idaqarInput = document.querySelector('input[name="idaqar"]');
+    const formuidInput = document.getElementById('formuid');
+    
+    // Determine ownerid and ownerid2 based on whether we're editing existing property or adding new
+    let ownerid, ownerid2;
+    
+    if (idaqarInput && idaqarInput.value) {
+        // Editing existing property - use idaqar for ownerid2
+        ownerid = formuidInput.value;
+        ownerid2 = idaqarInput.value;
+    } else {
+        // New property - use formuid for ownerid, ownerid2 will be 0 until property is saved
+        ownerid = formuidInput.value;
+        ownerid2 = '0';
+    }
+    
+    formData.append('formuid', formuidInput.value);
+    formData.append('ownerid', ownerid);
+    formData.append('ownerid2', ownerid2);
+    
+    const accountId = document.getElementById('bank_account_id').value;
+    
+    if (accountId) {
+        // Update existing account
+        formData.append('action', 'update_bank_account');
+    } else {
+        // Add new account
+        formData.append('action', 'add_bank_account');
+    }
+    
+    fetch('addamlak.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            alert(data.message);
+            bankAccountModal.hide();
+            
+            // Reload bank accounts
+            if (idaqarInput && idaqarInput.value) {
+                loadBankAccounts(idaqarInput.value, true);
+            } else {
+                loadBankAccounts(ownerid, false);
+            }
+        } else {
+            alert('حدث خطأ: ' + (data.error || 'غير معروف'));
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('حدث خطأ في الاتصال');
+    });
+}
+
+function loadBankAccounts(ownerId, useOwnerid2 = false) {
+    console.log('Loading bank accounts - ownerId:', ownerId, 'useOwnerid2:', useOwnerid2);
+    
+    const formData = new FormData();
+    formData.append('action', 'list_bank_accounts');
+    formData.append('ajax_submit', '1');
+    formData.append('ownerid', ownerId);
+    formData.append('use_ownerid2', useOwnerid2 ? '1' : '0');
+    
+    fetch('addamlak.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        console.log('Bank accounts response:', data);
+        if (data.success) {
+            renderBankAccounts(data.data);
+        } else {
+            console.error('Failed to load bank accounts:', data);
+        }
+    })
+    .catch(error => {
+        console.error('Error loading bank accounts:', error);
+    });
+}
+
+function renderBankAccounts(accounts) {
+    const container = document.getElementById('bankAccountsList');
+    
+    if (!accounts || accounts.length === 0) {
+        container.innerHTML = '<div class="alert alert-info"><i class="bi bi-info-circle me-2"></i>لا توجد حسابات بنكية مضافة</div>';
+        return;
+    }
+    
+    let html = '';
+    accounts.forEach((account, index) => {
+        html += `
+            <div class="card mb-2" data-account-id="${account.id}" 
+                 data-bankname="${account.bankname || ''}"
+                 data-acountnumber="${account.acountnumber || ''}"
+                 data-acountholder="${account.acountholder || ''}"
+                 data-iban="${account.iban || ''}"
+                 data-currentblance="${account.currentblance || '0'}">
+                <div class="card-body p-3">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div class="flex-grow-1">
+                            <h6 class="mb-2">
+                                <i class="fas fa-landmark text-primary me-1"></i>
+                                ${account.bankname || 'غير محدد'}
+                            </h6>
+                            <div class="row g-2 small">
+                                <div class="col-md-6">
+                                    <strong>رقم الحساب:</strong> ${account.acountnumber || '-'}
+                                </div>
+                                <div class="col-md-6">
+                                    <strong>صاحب الحساب:</strong> ${account.acountholder || '-'}
+                                </div>
+                                <div class="col-md-6">
+                                    <strong>IBAN:</strong> ${account.iban || '-'}
+                                </div>
+                                <div class="col-md-6">
+                                    <strong>الرصيد:</strong> ${parseFloat(account.currentblance || 0).toFixed(2)}
+                                </div>
+                            </div>
+                        </div>
+                        <div class="ms-3">
+                            <button type="button" class="btn btn-sm btn-outline-primary me-1" onclick="showBankAccountModal(${account.id})" title="تعديل">
+                                <i class="bi bi-pencil"></i>
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteBankAccount(${account.id})" title="حذف">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+    
+    container.innerHTML = html;
+}
+
+function deleteBankAccount(accountId) {
+    if (!confirm('هل أنت متأكد من حذف هذا الحساب البنكي؟')) {
+        return;
+    }
+    
+    const formData = new FormData();
+    formData.append('action', 'delete_bank_account');
+    formData.append('ajax_submit', '1');
+    formData.append('id', accountId);
+    
+    fetch('addamlak.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            alert(data.message);
+            
+            // Reload bank accounts
+            const idaqarInput = document.querySelector('input[name="idaqar"]');
+            if (idaqarInput && idaqarInput.value) {
+                loadBankAccounts(idaqarInput.value, true);
+            } else {
+                const ownerid = document.getElementById('formuid').value;
+                loadBankAccounts(ownerid, false);
+            }
+        } else {
+            alert('حدث خطأ: ' + (data.error || 'غير معروف'));
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('حدث خطأ في الاتصال');
+    });
+}
 </script>
 
 <iframe name=tooltipf id="tooltipf"

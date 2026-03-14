@@ -1,0 +1,605 @@
+<?php
+// Receipt Voucher Form Display
+// Modern Bootstrap UI for payment entry
+
+// Load necessary functions
+include_once "amlakfunctions.hnt";
+
+// Get property ID if unit is selected
+if ($idsubaqar) {
+    $idaqar_result = mysql_fetch_array(mysql_query("SELECT idaqar FROM amlakdetails WHERE idsubaqar='$idsubaqar'", $link));
+    $idaqar = $idaqar_result['idaqar'];
+}
+?>
+
+<style>
+.section-header {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    font-weight: 600;
+}
+#stalemtDataTable {
+    width: 100%;
+    border-collapse: collapse;
+}
+#stalemtDataTable th,
+#stalemtDataTable td {
+    padding: 10px;
+    border: 1px solid #dee2e6;
+    text-align: center;
+}
+#stalemtDataTable th {
+    background: #f8f9fa;
+    font-weight: 600;
+}
+.payment-method-card {
+    border: 2px solid #dee2e6;
+    border-radius: 8px;
+    padding: 1rem;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+.payment-method-card:hover {
+    border-color: #0891b2;
+    background: #f0f9ff;
+}
+.payment-method-card.active {
+    border-color: #0891b2;
+    background: #e0f2fe;
+}
+</style>
+
+<div class="container-fluid py-3">
+    <div class="card shadow-sm border-0">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-receipt me-2"></i>
+                تحرير سندات القبض
+            </h4>
+        </div>
+        <div class="card-body p-4">
+            <div class="alert alert-info mb-4" role="alert" dir="rtl">
+                <i class="bi bi-info-circle me-2"></i>
+                <strong>ملحوظة:</strong> يمكنك إدخال جزء من الإيجار وسيقوم النظام بحساب المتبقي. يتم تحصيل الإيجار أولاً بأول.
+            </div>
+
+            <form id="sanadForm" method="post" action="?" dir="rtl">
+                <input type="hidden" name="formuid" id="formuid" value="<?= str_replace('.', '', microtime() . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+                <input type="hidden" name="searchgeneral" value="1">
+                <input type="hidden" name="maksanad" value="2">
+
+                <!-- Property and Unit Selection -->
+                <div class="row g-3 mb-4">
+                    <div class="col-md-6">
+                        <label for="idaqar" class="form-label">اختر العقار <span class="text-danger">*</span></label>
+                        <select name="idaqar" id="idaqar" class="form-select" required>
+                            <option value="">اختر العقار</option>
+                            <?php
+                            $sql = "SELECT idaqar, aqarname FROM amlak";
+                            $result = mysql_query($sql, $link);
+                            while ($row = mysql_fetch_array($result)) {
+                                $selected = (isset($idaqar) && $row['idaqar'] == $idaqar) ? 'selected' : '';
+                                echo "<option value='{$row['idaqar']}' $selected>" . htmlspecialchars($row['aqarname']) . "</option>";
+                            }
+                            ?>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="idsubaqar" class="form-label">
+                            اختر الوحدة <span class="text-danger">*</span>
+                            <i class="bi bi-question-circle text-muted" data-bs-toggle="tooltip" title="سوف تظهر هنا فقط الوحدات المؤجرة"></i>
+                        </label>
+                        <select name="idsubaqar" id="idsubaqar" class="form-select" required>
+                            <option value="">اختر وحدة</option>
+                            <?php
+                            if (isset($idsubaqar) && $idsubaqar) {
+                                $sql = "SELECT amlakdetails.idsubaqar, CONCAT(aqarsubtype.aqarsubtypename, ' - ', amlakdetails.rakam) AS unitname
+                                        FROM amlakdetails, aqarsubtype
+                                        WHERE amlakdetails.aqarsubtype = aqarsubtype.aqarsubtype
+                                        AND amlakdetails.rakam3akdid > 0
+                                        AND amlakdetails.idaqar = '$idaqar'";
+                                $result = mysql_query($sql, $link);
+                                while ($row = mysql_fetch_array($result)) {
+                                    $selected = ($row['idsubaqar'] == $idsubaqar) ? 'selected' : '';
+                                    echo "<option value='{$row['idsubaqar']}' $selected>" . htmlspecialchars($row['unitname']) . "</option>";
+                                }
+                            }
+                            ?>
+                        </select>
+                    </div>
+                </div>
+
+                <?php if (!$idsubaqar) { ?>
+                    <div class="text-center py-4">
+                        <button type="button" class="btn btn-primary me-2" onclick="window.location.href='allsanad.hnt'">
+                            <i class="bi bi-list me-1"></i>لإستعراض السندات السابقة
+                        </button>
+                        <button type="button" class="btn btn-outline-secondary" onclick="window.location.href='/aqary/admin/amlak.hnt'">
+                            <i class="bi bi-x-circle me-1"></i>إلغاء الأمر
+                        </button>
+                    </div>
+                <?php } else {
+                    // Load installment data
+                    if (!isset($kastid) || !$kastid) {
+                        echo "<div class='alert alert-danger'>معذرة لم أتمكن من تحديد رقم القسط</div>";
+                        exit();
+                    }
+
+                    $sql = "SELECT * FROM aksat WHERE kastid=$kastid";
+                    $rowk = mysql_fetch_array(mysql_query($sql, $link));
+
+                    $bakee = "";
+                    if ($rowk['dof3at'] > 0 && $rowk['dof3at'] < $rowk['kastvalue']) {
+                        $bakee = "باقي";
+                    }
+
+                    if ($rowk['kastname'] == '') {
+                        echo "<div class='alert alert-warning text-center'>
+                            <a href='renew3kodorend.hnt?idsubaqar=$idsubaqar' class='btn btn-warning'>
+                                انتهت مدة العقد الخاص بهذا العقار - لتجديد العقد أو إنهاؤه اضغط هنا
+                            </a>
+                        </div>";
+                        exit();
+                    }
+
+                    $sql = "SELECT * FROM amlakdetails WHERE idsubaqar=$idsubaqar";
+                    $result = mysql_query($sql, $link);
+                    $row = mysql_fetch_array($result);
+
+                    if ($row['hnt_dll_type'] == 1 || $row['hnt_dll_type'] === "0" || $hnt_supper_dll == 5) {
+                        $hnt_dll = $row['hnt_dll_type'];
+                        echo "<input type='hidden' name='hnt_dll' value='$hnt_dll'>";
+                    }
+
+                    $sql = "SELECT * FROM egar WHERE rakam3akdid='" . $row['rakam3akdid'] . "'";
+                    $result = mysql_query($sql, $link);
+                    $rowegar = mysql_fetch_array($result);
+                    if ($rowegar['duration'] == "") {
+                        $rowegar['duration'] = 6;
+                    }
+
+                    $mybyan = "$bakee قسط رقم {$rowk['kastname']} قيمة إيجار " . displaysubtype($row['aqarsubtype']) . " رقم {$row['rakam']} الكائن بـ " . displayaqarname($row['idaqar']) . displaydoor($row['door']);
+
+                    $sql = "SELECT mostagereen.mostagerid, mostagereen.mostagername, mostagereen.mostagervatnumber
+                            FROM mostagereen, amlakdetails
+                            WHERE mostagereen.mostagerid = amlakdetails.mostagerid
+                            AND amlakdetails.idsubaqar='$idsubaqar'";
+                    $rowmos = mysql_fetch_array(mysql_query($sql, $link));
+
+                    $rentValue = $rowk['kastvalue'] - $rowk['water'] - $rowk['sa3ee'] - $rowk['services'];
+
+                    // Get next receipt number
+                    $sql = "SELECT MAX(idsanad) AS dd FROM sanad";
+                    $rows = mysql_fetch_array(mysql_query($sql, $link));
+                    $sanadrakam = $rows['dd'] + 1;
+
+                    // Calculate period
+                    if ($hnt_dll || $hnt_supper_dll == 5) {
+                        $startingkast = mktime(0, 0, 0, (date("m", $rowk['kastdate']) + $rowegar['duration']), date("d", $rowk['kastdate']), date("Y", $rowk['kastdate']));
+                        $period = date("d/m/Y", $rowk['kastdate']) . " - " . date("d/m/Y", $startingkast);
+                        $today = date("d/m/Y", time());
+                    } else {
+                        $dateo = $dcal->g2u(date("d", $rowk['kastdate']), date("m", $rowk['kastdate']), date("Y", $rowk['kastdate']));
+                        $dateo = $dcal->u2g($dateo['day'], ($dateo['month'] + ($rowegar['duration'])), $dateo['year']);
+                        $dateo = $dcal->g2u($dateo['day'], $dateo['month'], $dateo['year']);
+                        $period_end = "{$dateo['day']}/{$dateo['month']}/{$dateo['year']}";
+
+                        $dateo = $dcal->g2u(date("d", $rowk['kastdate']), date("m", $rowk['kastdate']), date("Y", $rowk['kastdate']));
+                        $period = "{$dateo['day']}/{$dateo['month']}/{$dateo['year']} - $period_end";
+
+                        $today = $dcal->g2u(date("d", time()), date("m", time()), date("Y", time()));
+                        $today = "{$today['day']}/{$today['month']}/{$today['year']}";
+                    }
+
+                    // Calculate required amount
+                    $required_amound = $rentValue - $rowk['dof3at'] + $rowk["water"] + $rowk["sa3ee"] + $rowk["services"];
+                    if ($rowegar["vat_type"] == 1) {
+                        $required_amound += ($rowk['sa3ee'] * 0.15);
+                    }
+                    if ($rowegar["vat_type"] == 2) {
+                        $required_amound += ($rowk['sa3ee'] * 0.15) + ($rentValue * 0.15);
+                    }
+                ?>
+
+                <input type="hidden" name="kastid" value="<?= $rowk['kastid']; ?>">
+                <input type="hidden" name="attachedimages" id="attachedimages">
+                <input type="hidden" name="sanadrakam" value="<?= $sanadrakam; ?>">
+                <input type="hidden" name="recivername" value="<?= isset($user_data['name']) ? htmlspecialchars($user_data['name']) : ''; ?>">
+                <input type="hidden" name="mostagerid" value="<?= $rowmos['mostagerid']; ?>">
+                <input type="hidden" name="cidaqar" value="<?= $row['idaqar']; ?>">
+                <input type="hidden" name="cidsubaqar" value="<?= $idsubaqar; ?>">
+                <input type="hidden" name="period" value="<?= $period; ?>">
+                <input type="hidden" name="bankid" id="bankid" value="0">
+                <?php if ($rowegar["vat_type"] > 0) { ?>
+                    <input type="hidden" name="total_vat" id="total_vat" value="">
+                <?php } ?>
+
+                <!-- Installment Details Table -->
+                <div class="section-header">
+                    <i class="bi bi-table me-2"></i>بيانات القسط
+                </div>
+                <div class="table-responsive mb-4">
+                    <table id="stalemtDataTable" class="table table-bordered">
+                        <thead>
+                            <tr>
+                                <th>القسط</th>
+                                <th>الإيجار</th>
+                                <th>ضريبة إيجار</th>
+                                <th>المياه</th>
+                                <th>العمولة</th>
+                                <th>ضريبة عمولة</th>
+                                <th>خدمات</th>
+                                <th>المطلوب</th>
+                                <th>المدفوع</th>
+                                <th>المتبقي</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><?= $bakee; ?> قسط رقم <?= $rowk['kastname']; ?></td>
+                                <td id="amount0"><?= number_format($rentValue, 2); ?></td>
+                                <td id="amount1"><?= $rowegar["vat_type"] == 2 ? number_format($rentValue * 0.15, 2) : "0.00"; ?></td>
+                                <td id="amount2"><?= number_format($rowk['water'], 2); ?></td>
+                                <td id="amount3"><?= number_format($rowk['sa3ee'], 2); ?></td>
+                                <td id="amount4"><?= $rowegar["vat_type"] > 0 ? number_format($rowk['sa3ee'] * 0.15, 2) : "0.00"; ?></td>
+                                <td id="amount5"><?= number_format($rowk['services'], 2); ?></td>
+                                <td class="fw-bold text-primary" id="requiredamound"></td>
+                                <td><?= number_format($rowk['dof3at'], 2); ?></td>
+                                <td><?= number_format($rowk['kastvalue'] + $commesion_vat + $depositeamount_vat - $rowk['dof3at'], 2); ?></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Payment Details -->
+                <div class="row g-3 mb-4">
+                    <div class="col-md-6">
+                        <label for="mostagername" class="form-label">اسم المستأجر</label>
+                        <input type="text" class="form-control" name="mostagername" value="<?= htmlspecialchars($rowmos['mostagername']); ?>" readonly>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="mostagervatnumber" class="form-label">رقم المستأجر الضريبي (إن وجد)</label>
+                        <input type="text" class="form-control" name="mostagervatnumber" value="<?= htmlspecialchars($rowmos['mostagervatnumber']); ?>">
+                    </div>
+                </div>
+
+                <div class="row g-3 mb-4">
+                    <div class="col-md-4">
+                        <label for="depositeamount" class="form-label">إجمالي المبلغ المدفوع <span class="text-danger">*</span></label>
+                        <div class="input-group">
+                            <input type="number" step="0.01" class="form-control" name="depositeamount" id="depositeamount" value="<?= $required_amound; ?>" required>
+                            <span class="input-group-text"><?= isset($myomla) ? $myomla : 'ريال'; ?></span>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <label for="paymentdate" class="form-label">
+                            تاريخ التحصيل
+                            <i class="bi bi-question-circle text-muted" data-bs-toggle="tooltip" title="إذا كان القسط قديم اكتب تاريخ التحصيل الحقيقي"></i>
+                        </label>
+                        <input type="text" class="form-control" name="paymentdate" id="paymentdate" value="<?= $today; ?>" onblur="checkdateformat(this, this.value);">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">عن الفترة</label>
+                        <input type="text" class="form-control" value="<?= $period; ?>" readonly>
+                    </div>
+                </div>
+
+                <!-- Payment Method -->
+                <div class="section-header">
+                    <i class="bi bi-credit-card me-2"></i>طريقة الدفع
+                </div>
+                <div class="row g-3 mb-4">
+                    <div class="col-md-2">
+                        <div class="payment-method-card active" data-method="1">
+                            <input type="radio" name="nakda" id="nakda1" value="1" checked class="form-check-input me-2">
+                            <label for="nakda1" class="form-check-label">نقداً</label>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
+                        <div class="payment-method-card" data-method="2">
+                            <input type="radio" name="nakda" id="nakda2" value="2" class="form-check-input me-2">
+                            <label for="nakda2" class="form-check-label">شيك</label>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
+                        <div class="payment-method-card" data-method="4">
+                            <input type="radio" name="nakda" id="nakda4" value="4" class="form-check-input me-2">
+                            <label for="nakda4" class="form-check-label">تحويل</label>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
+                        <div class="payment-method-card" data-method="5">
+                            <input type="radio" name="nakda" id="nakda5" value="5" class="form-check-input me-2">
+                            <label for="nakda5" class="form-check-label">شبكة</label>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
+                        <div class="payment-method-card" data-method="3">
+                            <input type="radio" name="nakda" id="nakda3" value="3" class="form-check-input me-2">
+                            <label for="nakda3" class="form-check-label">طريقة أخرى</label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="row g-3 mb-4" id="paymentDetails" style="display: none;">
+                    <div class="col-md-3" id="bankAccountSelector" style="display: none;">
+                        <label for="bank_account_select" class="form-label">
+                            <i class="bi bi-bank me-1"></i>اختر الحساب البنكي
+                        </label>
+                        <select class="form-select" id="bank_account_select">
+                            <option value="">-- اختر حساب بنكي --</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="cheqnumber" class="form-label">رقم الشيك/الحوالة/العملية</label>
+                        <input type="text" class="form-control" name="cheqnumber" id="cheqnumber">
+                    </div>
+                    <div class="col-md-3">
+                        <label for="cheqon" class="form-label">مسحوب على/البنك</label>
+                        <input type="text" class="form-control" name="cheqon" id="cheqon">
+                    </div>
+                    <div class="col-md-3">
+                        <label for="cheqdate1" class="form-label">التاريخ</label>
+                        <input type="text" class="form-control" name="cheqdate1" id="cheqdate1" value="<?= date("d/m/Y"); ?>">
+                    </div>
+                </div>
+
+                <!-- Description and Notes -->
+                <div class="row g-3 mb-4">
+                    <div class="col-md-12">
+                        <label for="mybyan" class="form-label">بيان المبلغ</label>
+                        <input type="text" class="form-control" name="mybyan" value="<?= htmlspecialchars($mybyan . ' الفترة ' . $period); ?>">
+                    </div>
+                </div>
+
+                <div class="row g-3 mb-4">
+                    <div class="col-md-12">
+                        <label for="notes" class="form-label">تفاصيل الدفع وملحوظات</label>
+                        <textarea class="form-control" name="notes" id="notes" rows="2"></textarea>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="text-center">
+                    <button type="submit" id="submitBtn" class="btn btn-success btn-lg px-5">
+                        <i class="bi bi-check-circle me-2"></i>نعم قم بعمل السند
+                    </button>
+                    <button type="button" class="btn btn-primary btn-lg px-5 ms-2" onclick="window.open('showeditaqar.hnt?idaqar=<?= $row['idaqar']; ?>&idsubaqar=<?= $idsubaqar; ?>');">
+                        <i class="bi bi-eye me-2"></i>عرض بيانات العقار
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary btn-lg px-5 ms-2" onclick="window.location.href='egarstatus.hnt';">
+                        <i class="bi bi-x-circle me-2"></i>إلغاء الأمر
+                    </button>
+                </div>
+
+                <?php } ?>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+$(document).ready(function() {
+    // Initialize tooltips
+    const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    tooltipTriggerList.map(function(tooltipTriggerEl) {
+        return new bootstrap.Tooltip(tooltipTriggerEl);
+    });
+
+    // Calculate VAT and required amount
+    function calcVat() {
+        const total_vat = floatval($('#amount1').text());
+        $('#total_vat').val(total_vat);
+
+        const requiredAmount = floatval($('#amount0').text()) +
+                              floatval($('#amount1').text()) +
+                              floatval($('#amount2').text()) +
+                              floatval($('#amount3').text()) +
+                              floatval($('#amount4').text()) +
+                              floatval($('#amount5').text());
+        $('#requiredamound').text(requiredAmount.toFixed(2));
+    }
+
+    calcVat();
+
+    // Update VAT when amount changes
+    $('#depositeamount').on('keyup change', function() {
+        calcVat();
+    });
+
+    // Property selection change
+    $('#idaqar').on('change', function() {
+        const idaqar = $(this).val();
+        if (idaqar) {
+            const sql = "SELECT amlakdetails.idsubaqar, CONCAT(aqarsubtype.aqarsubtypename, ' - ', amlakdetails.rakam) AS unitname FROM amlakdetails, aqarsubtype WHERE amlakdetails.aqarsubtype = aqarsubtype.aqarsubtype AND amlakdetails.rakam3akdid > 0 AND amlakdetails.idaqar = '" + idaqar + "'";
+            ajaxfillcombox(document.getElementById('idsubaqar'), sql);
+        }
+    });
+
+    // Unit selection change
+    $('#idsubaqar').on('change', function() {
+        const idsubaqar = $(this).val();
+        if (idsubaqar) {
+            window.location.href = 'sanad.hnt?idsubaqar=' + idsubaqar;
+        }
+    });
+
+    // Load bank accounts for the current property
+    function loadBankAccounts() {
+        const idsubaqar = $('#idsubaqar').val();
+        if (!idsubaqar) return;
+
+        $.ajax({
+            url: 'sanad.hnt',
+            type: 'POST',
+            data: {
+                ajax_submit: '1',
+                action: 'get_bank_accounts',
+                idsubaqar: idsubaqar
+            },
+            dataType: 'json',
+            success: function(response) {
+                if (response.success && response.accounts) {
+                    const select = $('#bank_account_select');
+                    select.empty();
+                    select.append('<option value="">-- اختر حساب بنكي --</option>');
+                    
+                    response.accounts.forEach(function(acc) {
+                        const label = acc.bankname + ' - ' + acc.acountholder + ' (' + acc.acountnumber + ')';
+                        select.append($('<option></option>')
+                            .attr('value', acc.id)
+                            .attr('data-bankname', acc.bankname)
+                            .attr('data-holder', acc.acountholder)
+                            .attr('data-number', acc.acountnumber)
+                            .attr('data-iban', acc.iban || '')
+                            .text(label));
+                    });
+                }
+            }
+        });
+    }
+
+    // Load bank accounts on page load
+    loadBankAccounts();
+
+    // Bank account selection handler
+    $('#bank_account_select').on('change', function() {
+        const selected = $(this).find('option:selected');
+        if (selected.val()) {
+            const bankname = selected.data('bankname') || '';
+            const holder = selected.data('holder') || '';
+            const acountnumber = selected.data('number') || '';
+            const iban = selected.data('iban') || '';
+            const fillText = bankname + ' - ' + holder;
+            
+            $('#cheqon').val(fillText);
+            $('#bankid').val(selected.val());
+            
+            // Auto-fill notes with detailed bank account information
+            let notesText = 'تحويل الى حساب ' + holder;
+            notesText += ' - بنك ' + bankname;
+            notesText += '-  حساب ' + acountnumber;
+            if (iban) {
+                notesText += ' - آيبان ' + iban;
+            }
+            $('#notes').val(notesText);
+        } else {
+            $('#cheqon').val('');
+            $('#bankid').val('0');
+            $('#notes').val('');
+        }
+    });
+
+    // Payment method selection
+    $('.payment-method-card').on('click', function() {
+        $('.payment-method-card').removeClass('active');
+        $(this).addClass('active');
+        $(this).find('input[type="radio"]').prop('checked', true);
+
+        const method = $(this).data('method');
+        
+        // Clear cheqon, bankid, and notes when changing payment method
+        $('#cheqon').val('');
+        $('#bankid').val('0');
+        $('#bank_account_select').val('');
+        $('#notes').val('');
+        
+        if (method === 1) {
+            $('#paymentDetails').hide();
+            $('#bankAccountSelector').hide();
+            $('#cheqnumber').val('');
+        } else {
+            $('#paymentDetails').show();
+            
+            if (method === 4) {
+                // Transfer - show bank account selector
+                $('#bankAccountSelector').show();
+                $('#cheqnumber').attr('placeholder', 'رقم الحوالة');
+                $('#cheqon').attr('placeholder', 'البنك');
+            } else {
+                $('#bankAccountSelector').hide();
+                
+                if (method === 2) {
+                    $('#cheqnumber').attr('placeholder', 'اكتب رقم الشيك');
+                    $('#cheqon').attr('placeholder', 'مسحوب على');
+                } else if (method === 5) {
+                    $('#cheqnumber').attr('placeholder', 'رقم العملية');
+                    $('#cheqon').attr('placeholder', 'البنك');
+                } else {
+                    $('#cheqnumber').attr('placeholder', '');
+                    $('#cheqon').attr('placeholder', '');
+                }
+            }
+        }
+    });
+
+    // Form submission
+    $('#sanadForm').on('submit', function(e) {
+        e.preventDefault();
+
+        // Validate amount
+        const depositeamount = floatval($('#depositeamount').val());
+        const requiredamound = floatval($('#requiredamound').text());
+
+        if (depositeamount > requiredamound) {
+            if (typeof showBootstrapNotification === 'function') {
+                showBootstrapNotification('warning', 'المبلغ المدخل أكبر من قيمة القسط - لا يمكن دفع أكثر من قيمة القسط');
+            } else {
+                alert('المبلغ المدخل أكبر من قيمة القسط - لا يمكن دفع أكثر من قيمة القسط');
+            }
+            return false;
+        }
+
+        const formData = new FormData(this);
+        formData.append('ajax_submit', '1');
+
+        $('#submitBtn').prop('disabled', true).html('<span class="spinner-border spinner-border-sm me-2"></span>جاري المعالجة...');
+
+        $.ajax({
+            url: 'sanad.hnt',
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            dataType: 'json',
+            success: function(response) {
+                if (response.success) {
+                    if (response.html) {
+                        $('.card-body').html(response.html);
+                    } else {
+                        if (typeof showBootstrapNotification === 'function') {
+                            showBootstrapNotification('success', response.message);
+                        } else {
+                            alert(response.message);
+                        }
+                        setTimeout(function() {
+                            window.location.href = 'selectprintform.hnt?formtype=recivevoucher&id=' + response.idsanad;
+                        }, 1500);
+                    }
+                } else {
+                    if (typeof showBootstrapNotification === 'function') {
+                        showBootstrapNotification('danger', response.message);
+                    } else {
+                        alert(response.message);
+                    }
+                    $('#submitBtn').prop('disabled', false).html('<i class="bi bi-check-circle me-2"></i>نعم قم بعمل السند');
+                }
+            },
+            error: function() {
+                if (typeof showBootstrapNotification === 'function') {
+                    showBootstrapNotification('danger', 'حدث خطأ أثناء حفظ السند');
+                } else {
+                    alert('حدث خطأ أثناء حفظ السند');
+                }
+                $('#submitBtn').prop('disabled', false).html('<i class="bi bi-check-circle me-2"></i>نعم قم بعمل السند');
+            }
+        });
+    });
+});
+</script>
+
+<?php include("../uploadmodule.hnt"); ?>
+<?php require("../../../foter.hnt"); ?>

@@ -1,0 +1,599 @@
+<?php
+$sc_title = "إدارة أنواع العقارات";
+$sc_id = "41";
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+if ($is_ajax_request) {
+    include_once "../../../reqloginajax.hnt";
+} else {
+    include_once "../../../nocash.hnt";
+    $_SERVER['HTTP_REFERER'] = "reports.hnt";
+    include_once "../../../header.hnt";
+}
+
+// Handle AJAX requests
+if ($is_ajax_request) {
+    $action = isset($_POST['action']) ? $_POST['action'] : '';
+    header('Content-Type: application/json; charset=utf-8');
+    
+
+    // Get property type
+    if ($action == 'get') {
+        $aqartype = intval($_POST['aqartype']);
+        $sql = "SELECT * FROM aqartype WHERE aqartype='" . $aqartype . "'";
+        $result = mysql_query($sql, $link);
+        
+        if ($result && mysql_num_rows($result) > 0) {
+            $row = mysql_fetch_array($result, MYSQL_ASSOC);
+            echo json_encode(['success' => true, 'data' => $row], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        } else {
+            echo json_encode(['success' => false, 'error' => 'نوع العقار غير موجود'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        }
+        exit;
+    }
+
+    // Add property type
+    if ($action == 'add') {
+        $aqartypename = trim($_POST['aqartypename']);
+        $note = trim($_POST['note']);
+
+        if (empty($aqartypename)) {
+            echo json_encode(['success' => false, 'error' => 'الرجاء إدخال اسم نوع العقار'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+            exit;
+        }
+
+        // Check if already exists
+        $check_sql = "SELECT aqartype FROM aqartype WHERE aqartypename='" . addslashes($aqartypename) . "'";
+        $check_result = mysql_query($check_sql, $link);
+        
+        if ($check_result && mysql_num_rows($check_result) > 0) {
+            echo json_encode(['success' => false, 'error' => 'هذا النوع موجود بالفعل'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+            exit;
+        }
+
+        $sql = "INSERT INTO aqartype SET 
+                aqartypename='" . addslashes($aqartypename) . "',
+                note='" . addslashes($note) . "',
+                formuid='" . md5(time() . rand()) . "'";
+        
+        if (mysql_query($sql, $link)) {
+            echo json_encode(['success' => true, 'message' => 'تم إضافة نوع العقار بنجاح'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        } else {
+            echo json_encode(['success' => false, 'error' => 'حدث خطأ أثناء الإضافة'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        }
+        exit;
+    }
+
+    // Update property type
+    if ($action == 'update') {
+        $aqartype = intval($_POST['aqartype']);
+        $aqartypename = trim($_POST['aqartypename']);
+        $note = trim($_POST['note']);
+
+        if (empty($aqartypename)) {
+            echo json_encode(['success' => false, 'error' => 'الرجاء إدخال اسم نوع العقار'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+            exit;
+        }
+
+        // Check if name already exists for different ID
+        $check_sql = "SELECT aqartype FROM aqartype WHERE aqartypename='" . addslashes($aqartypename) . "' AND aqartype!=" . $aqartype;
+        $check_result = mysql_query($check_sql, $link);
+        
+        if ($check_result && mysql_num_rows($check_result) > 0) {
+            echo json_encode(['success' => false, 'error' => 'هذا الاسم مستخدم بالفعل'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+            exit;
+        }
+
+        $sql = "UPDATE aqartype SET 
+                aqartypename='" . addslashes($aqartypename) . "',
+                note='" . addslashes($note) . "'
+                WHERE aqartype=" . $aqartype;
+        
+        if (mysql_query($sql, $link)) {
+            echo json_encode(['success' => true, 'message' => 'تم تحديث نوع العقار بنجاح'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        } else {
+            echo json_encode(['success' => false, 'error' => 'حدث خطأ أثناء التحديث'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        }
+        exit;
+    }
+
+    // Delete property type
+    if ($action == 'delete') {
+        $aqartype = intval($_POST['aqartype']);
+
+        // Check if type is used in amlak table
+        $check_sql = "SELECT COUNT(*) as count FROM amlak WHERE aqartype='" . $aqartype . "'";
+        $check_result = mysql_query($check_sql, $link);
+        $check_row = mysql_fetch_array($check_result);
+
+        if ($check_row['count'] > 0) {
+            echo json_encode([
+                'success' => false, 
+                'error' => 'لا يمكن حذف هذا النوع لأنه مستخدم في ' . $check_row['count'] . ' عقار. الرجاء تغيير نوع هذه العقارات أولاً'
+            ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+            exit;
+        }
+
+        $sql = "DELETE FROM aqartype WHERE aqartype=" . $aqartype;
+        
+        if (mysql_query($sql, $link)) {
+            echo json_encode(['success' => true, 'message' => 'تم حذف نوع العقار بنجاح'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        } else {
+            echo json_encode(['success' => false, 'error' => 'حدث خطأ أثناء الحذف'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        }
+        exit;
+    }
+
+    // List all property types
+    if ($action == 'list') {
+        $sql = "SELECT * FROM aqartype ORDER BY aqartypename";
+        $result = mysql_query($sql, $link);
+        $types = [];
+        
+        while ($row = mysql_fetch_array($result, MYSQL_ASSOC)) {
+            $types[] = $row;
+        }
+        
+        echo json_encode(['success' => true, 'data' => $types], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        exit;
+    }
+
+    // Get count of properties using this type
+    if ($action == 'get_count') {
+        $aqartype = intval($_POST['aqartype']);
+        $sql = "SELECT COUNT(*) as count FROM amlak WHERE aqartype='" . $aqartype . "'";
+        $result = mysql_query($sql, $link);
+        $row = mysql_fetch_array($result);
+        
+        echo json_encode(['success' => true, 'count' => $row['count']], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        exit;
+    }
+}
+
+// Only render HTML if not AJAX
+if (!$is_ajax_request) {
+?>
+
+<style>
+.property-types-container {
+    background: #f8f9fa;
+    min-height: calc(100vh - 100px);
+    padding: 2rem 0;
+}
+
+.types-card {
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    overflow: hidden;
+}
+
+.types-header {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    padding: 1.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.types-header h4 {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 600;
+}
+
+.types-body {
+    padding: 1.5rem;
+}
+
+.table-responsive {
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.types-table {
+    margin: 0;
+}
+
+.types-table thead {
+    background: #f1f5f9;
+}
+
+.types-table thead th {
+    font-weight: 600;
+    color: #334155;
+    border: none;
+    padding: 1rem;
+    text-align: right;
+}
+
+.types-table tbody td {
+    padding: 1rem;
+    vertical-align: middle;
+    text-align: right;
+    border-top: 1px solid #e2e8f0;
+}
+
+.types-table tbody tr:hover {
+    background: #f8fafc;
+}
+
+.badge-count {
+    background: #0891b2;
+    color: white;
+    padding: 0.25rem 0.75rem;
+    border-radius: 12px;
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.btn-action {
+    padding: 0.375rem 0.75rem;
+    font-size: 0.875rem;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.btn-action:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+.empty-state {
+    text-align: center;
+    padding: 3rem;
+    color: #64748b;
+}
+
+.empty-state i {
+    font-size: 4rem;
+    margin-bottom: 1rem;
+    opacity: 0.3;
+}
+
+.loading-spinner {
+    text-align: center;
+    padding: 2rem;
+}
+
+.modal-header {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    border: none;
+}
+
+.modal-header .btn-close {
+    filter: brightness(0) invert(1);
+}
+</style>
+
+<div class="property-types-container" dir="rtl">
+    <div class="container-fluid">
+        <div class="types-card">
+            <div class="types-header">
+                <div>
+                    <h4>
+                        <i class="fas fa-building me-2"></i>
+                        إدارة أنواع العقارات
+                    </h4>
+                    <small>إضافة وتعديل وحذف أنواع العقارات</small>
+                </div>
+                <button class="btn btn-light" onclick="showAddModal()">
+                    <i class="bi bi-plus-lg me-2"></i>
+                    إضافة نوع جديد
+                </button>
+            </div>
+
+            <div class="types-body">
+                <div id="loadingSpinner" class="loading-spinner">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">جاري التحميل...</span>
+                    </div>
+                </div>
+
+                <div id="typesTableContainer" style="display: none;">
+                    <div class="table-responsive">
+                        <table class="table types-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 80px;">#</th>
+                                    <th>اسم نوع العقار</th>
+                                    <th>ملاحظات</th>
+                                    <th style="width: 120px;">عدد العقارات</th>
+                                    <th style="width: 200px;">الإجراءات</th>
+                                </tr>
+                            </thead>
+                            <tbody id="typesTableBody">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="emptyState" class="empty-state" style="display: none;">
+                    <i class="fas fa-building"></i>
+                    <h5>لا توجد أنواع عقارات</h5>
+                    <p>ابدأ بإضافة نوع عقار جديد</p>
+                    <button class="btn btn-primary" onclick="showAddModal()">
+                        <i class="bi bi-plus-lg me-2"></i>
+                        إضافة نوع جديد
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add/Edit Modal -->
+<div class="modal fade" id="typeModal" tabindex="-1" dir="rtl">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modalTitle">
+                    <i class="bi bi-plus-circle me-2"></i>
+                    إضافة نوع عقار جديد
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="typeForm">
+                    <input type="hidden" id="aqartype" name="aqartype">
+                    <input type="hidden" id="formAction" value="add">
+                    
+                    <div class="mb-3">
+                        <label for="aqartypename" class="form-label">
+                            <i class="bi bi-tag-fill text-primary me-1"></i>
+                            اسم نوع العقار <span class="text-danger">*</span>
+                        </label>
+                        <input type="text" class="form-control" id="aqartypename" name="aqartypename" required placeholder="مثال: عمارة، فيلا، أرض">
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="note" class="form-label">
+                            <i class="bi bi-card-text text-secondary me-1"></i>
+                            ملاحظات
+                        </label>
+                        <textarea class="form-control" id="note" name="note" rows="3" placeholder="أي ملاحظات إضافية..."></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                    <i class="bi bi-x-circle me-1"></i>
+                    إلغاء
+                </button>
+                <button type="button" class="btn btn-primary" onclick="saveType()">
+                    <i class="bi bi-check-circle me-1"></i>
+                    حفظ
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let typesData = [];
+let modal = null;
+
+$(document).ready(function() {
+    modal = new bootstrap.Modal(document.getElementById('typeModal'));
+    loadTypes();
+});
+
+function loadTypes() {
+    $('#loadingSpinner').show();
+    $('#typesTableContainer').hide();
+    $('#emptyState').hide();
+
+    $.ajax({
+        url: 'property_types.hnt',
+        type: 'POST',
+        data: {
+            ajax_submit: '1',
+            action: 'list'
+        },
+        dataType: 'json',
+        success: function(response) {
+            $('#loadingSpinner').hide();
+            
+            if (response.success) {
+                typesData = response.data;
+                
+                if (typesData.length === 0) {
+                    $('#emptyState').show();
+                } else {
+                    renderTable();
+                    $('#typesTableContainer').show();
+                }
+            } else {
+                showAlert('حدث خطأ أثناء تحميل البيانات', 'danger');
+            }
+        },
+        error: function() {
+            $('#loadingSpinner').hide();
+            showAlert('حدث خطأ في الاتصال', 'danger');
+        }
+    });
+}
+
+function renderTable() {
+    let html = '';
+    
+    typesData.forEach((type, index) => {
+        // Get count of properties using this type
+        let countBadge = '<span class="badge-count" id="count_' + type.aqartype + '">...</span>';
+        
+        html += `
+            <tr>
+                <td><strong>${index + 1}</strong></td>
+                <td><strong>${type.aqartypename}</strong></td>
+                <td><small class="text-muted">${type.note || '-'}</small></td>
+                <td>${countBadge}</td>
+                <td>
+                    <button class="btn btn-sm btn-primary btn-action me-1" onclick="editType(${type.aqartype})" title="تعديل">
+                        <i class="bi bi-pencil"></i>
+                    </button>
+                    <button class="btn btn-sm btn-danger btn-action" onclick="deleteType(${type.aqartype}, '${type.aqartypename.replace(/'/g, "\\'")}')"
+ title="حذف">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </td>
+            </tr>
+        `;
+    });
+    
+    $('#typesTableBody').html(html);
+    
+    // Load counts for each type
+    typesData.forEach(type => {
+        loadTypeCount(type.aqartype);
+    });
+}
+
+function loadTypeCount(aqartype) {
+    $.ajax({
+        url: 'property_types.hnt',
+        type: 'POST',
+        data: {
+            ajax_submit: '1',
+            action: 'get_count',
+            aqartype: aqartype
+        },
+        dataType: 'json',
+        success: function(response) {
+            if (response && response.success) {
+                $('#count_' + aqartype).text(response.count);
+            }
+        }
+    });
+}
+
+function showAddModal() {
+    $('#modalTitle').html('<i class="bi bi-plus-circle me-2"></i>إضافة نوع عقار جديد');
+    $('#formAction').val('add');
+    $('#typeForm')[0].reset();
+    $('#aqartype').val('');
+    modal.show();
+}
+
+function editType(aqartype) {
+    $.ajax({
+        url: 'property_types.hnt',
+        type: 'POST',
+        data: {
+            ajax_submit: '1',
+            action: 'get',
+            aqartype: aqartype
+        },
+        dataType: 'json',
+        success: function(response) {
+            if (response.success) {
+                $('#modalTitle').html('<i class="bi bi-pencil me-2"></i>تعديل نوع العقار');
+                $('#formAction').val('update');
+                $('#aqartype').val(response.data.aqartype);
+                $('#aqartypename').val(response.data.aqartypename);
+                $('#note').val(response.data.note);
+                modal.show();
+            } else {
+                showAlert(response.error, 'danger');
+            }
+        },
+        error: function() {
+            showAlert('حدث خطأ في الاتصال', 'danger');
+        }
+    });
+}
+
+function saveType() {
+    const form = $('#typeForm')[0];
+    if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+    }
+
+    const action = $('#formAction').val();
+    const data = {
+        ajax_submit: '1',
+        action: action,
+        aqartypename: $('#aqartypename').val().trim(),
+        note: $('#note').val().trim()
+    };
+
+    if (action === 'update') {
+        data.aqartype = $('#aqartype').val();
+    }
+
+    $.ajax({
+        url: 'property_types.hnt',
+        type: 'POST',
+        data: data,
+        dataType: 'json',
+        success: function(response) {
+            if (response.success) {
+                modal.hide();
+                showAlert(response.message, 'success');
+                loadTypes();
+            } else {
+                showAlert(response.error, 'danger');
+            }
+        },
+        error: function() {
+            showAlert('حدث خطأ في الاتصال', 'danger');
+        }
+    });
+}
+
+function deleteType(aqartype, typename) {
+    confirm(
+        'هل أنت متأكد من حذف نوع العقار "' + typename + '"؟',
+        'تأكيد الحذف',
+        function() {
+            $.ajax({
+                url: 'property_types.hnt',
+                type: 'POST',
+                data: {
+                    ajax_submit: '1',
+                    action: 'delete',
+                    aqartype: aqartype
+                },
+                dataType: 'json',
+                success: function(response) {
+                    if (response.success) {
+                        showAlert(response.message, 'success');
+                        loadTypes();
+                    } else {
+                        showAlert(response.error, 'danger');
+                    }
+                },
+                error: function() {
+                    showAlert('حدث خطأ في الاتصال', 'danger');
+                }
+            });
+        }
+    );
+}
+
+function showAlert(message, type) {
+    const alertHtml = `
+        <div class="alert alert-${type} alert-dismissible fade show" role="alert" style="position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 9999; min-width: 300px;">
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+    `;
+    
+    $('body').append(alertHtml);
+    
+    setTimeout(function() {
+        $('.alert').fadeOut(300, function() {
+            $(this).remove();
+        });
+    }, 3000);
+}
+</script>
+
+<?php
+    require('../../../foter.hnt');
+}
+?>

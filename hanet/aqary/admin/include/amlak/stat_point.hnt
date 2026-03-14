@@ -1,0 +1,285 @@
+<?php
+/**
+ * System Checkpoints Report
+ * Displays property settlement points and financial history
+ * 
+ * @version 2.0
+ * @date 2026-03-14
+ */
+
+$sc_title = "نقاط النظام";
+$sc_id = "54";
+
+include_once "../../../nocash.hnt";
+
+// Initialize variables from request
+$report = isset($_REQUEST['report']) ? intval($_REQUEST['report']) : 0;
+$idaqar = isset($_REQUEST['idaqar']) ? intval($_REQUEST['idaqar']) : 0;
+$aqarname = isset($_REQUEST['aqarname']) ? trim($_REQUEST['aqarname']) : '';
+$startfrom = isset($_REQUEST['startfromx']) ? intval($_REQUEST['startfromx']) : 0;
+
+if ($report == 1) {
+    include_once "../../../report_header.hnt";
+} else {
+    include_once "../../../header.hnt";
+}
+
+require '../uCal.class.hnt';
+$dcal = new uCal();
+
+// Get current date in both calendars
+$daxx = date("H/i/s/m/d/Y");
+$daxx = explode("/", $daxx);
+$h_date = mktime($daxx[0], $daxx[1], $daxx[2], $daxx[3], $daxx[4], $daxx[5]);
+$h_date2 = arabicDate("ar:l d/F -Y h:iA", $h_date);
+$h_date1 = arabicDate('hj:l d-F-Y هـ', $h_date);
+
+include_once "amlakfunctions.hnt";
+
+?>
+<style>
+.checkpoint-card {
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    overflow: hidden;
+}
+
+.checkpoint-header {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    padding: 1.5rem;
+}
+
+.data-grid-container {
+    background: white;
+    border-radius: 8px;
+    padding: 1rem;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.pagination-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    margin-bottom: 1rem;
+}
+
+.page-input {
+    width: 60px;
+    text-align: center;
+}
+</style>
+
+<div class="container-fluid py-3">
+    <!-- Page Header -->
+    <div class="card checkpoint-card mb-4">
+        <div class="checkpoint-header">
+            <h4 class="mb-2">
+                <i class="bi bi-flag-fill me-2"></i>
+                <?= $sc_title ?>
+            </h4>
+            <p class="mb-0 small">
+                <i class="bi bi-calendar-event me-1"></i>
+                <?= $h_date2 ?> الموافق <?= $h_date1 ?>
+            </p>
+        </div>
+    </div>
+
+    <?php if ($report != 1): ?>
+    <!-- Filter Section -->
+    <div class="card checkpoint-card mb-4">
+        <div class="card-body p-4">
+            <form method="get" action="?" id="filterForm">
+                <input type="hidden" name="formuid" id="formuid" value="<?= str_replace('.', '', microtime() . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+                
+                <div class="row align-items-end">
+                    <div class="col-md-6 mb-3">
+                        <label for="idaqar" class="form-label">
+                            <i class="bi bi-building me-1"></i>
+                            اختر العقار
+                        </label>
+                        <select name="idaqar" id="idaqar" class="form-select">
+                            <option value="">-- اختر العقار --</option>
+                            <?php
+                            $sql = "SELECT idaqar, aqarname FROM amlak ORDER BY aqarname";
+                            $result = mysql_query($sql, $link);
+                            while ($row = mysql_fetch_array($result)) {
+                                $selected = ($row['idaqar'] == $idaqar) ? 'selected' : '';
+                                echo '<option value="' . $row['idaqar'] . '" ' . $selected . '>' . $row['idaqar'] . ' - ' . htmlspecialchars($row['aqarname']) . '</option>';
+                            }
+                            ?>
+                        </select>
+                    </div>
+
+                    <div class="col-md-6 mb-3">
+                        <div class="d-flex gap-2">
+                            <button type="button" class="btn btn-primary" onclick="loadCheckpoints()">
+                                <i class="bi bi-search me-1"></i>
+                                عرض النقاط
+                            </button>
+                            <button type="button" class="btn btn-success" onclick="printReport()">
+                                <i class="bi bi-printer me-1"></i>
+                                طباعة
+                            </button>
+                            <a href="reports.hnt" class="btn btn-secondary">
+                                <i class="bi bi-x-circle me-1"></i>
+                                إلغاء
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+    <?php endif; ?>
+
+
+    <!-- Checkpoints Data Grid -->
+    <div class="card checkpoint-card">
+        <div class="card-body p-4">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="mb-0">
+                    <i class="bi bi-table me-2"></i>
+                    نقاط التصفية
+                </h5>
+                
+                <!-- Pagination Controls -->
+                <div class="pagination-controls">
+                    <button type="button" class="btn btn-sm btn-outline-primary" id="prevPage">
+                        <i class="bi bi-chevron-right"></i>
+                    </button>
+                    <input type="text" id="tajpagenum" class="form-control form-control-sm page-input" value="1">
+                    <button type="button" class="btn btn-sm btn-outline-primary" id="nextPage">
+                        <i class="bi bi-chevron-left"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="data-grid-container">
+                <div id="containerid1"></div>
+            </div>
+
+            <div class="alert alert-info mt-3" role="alert">
+                <i class="bi bi-info-circle me-2"></i>
+                <strong>ملاحظة:</strong> نقاط النظام هي نقاط التصفية التي تم إنشاؤها عند تسوية حسابات العقار بالكامل
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Modern ES6+ JavaScript for System Checkpoints
+
+const loadCheckpoints = (pageNum = 1) => {
+    const idaqar = document.getElementById('idaqar').value;
+    
+    if (!idaqar) {
+        alert('الرجاء اختيار عقار أولاً');
+        return;
+    }
+
+    const sql = `SELECT sanadid as 'رقم',
+                 amount as 'آخر مبلغ',
+                 bayan as 'البيان',
+                 FROM_UNIXTIME(tasfia,'%Y-%m-%d') as 'تاريخ التصفية'
+                 FROM sanadsarf
+                 WHERE tasfia <> '' AND aqarid = '${idaqar}'
+                 GROUP BY tasfia
+                 ORDER BY tasfia DESC`;
+
+    ajaxfillgrid(sql, 'containerid1', true, pageNum);
+};
+
+const printReport = () => {
+    const idaqar = document.getElementById('idaqar').value;
+    const aqarname = document.getElementById('idaqar').options[document.getElementById('idaqar').selectedIndex].text;
+    
+    if (!idaqar) {
+        alert('الرجاء اختيار عقار أولاً');
+        return;
+    }
+
+    window.location.href = `stat_point.hnt?idaqar=${idaqar}&aqarname=${encodeURIComponent(aqarname)}&report=1`;
+};
+
+// Initialize on page load - Only for non-report mode
+document.addEventListener('DOMContentLoaded', () => {
+    const idaqarSelect = document.getElementById('idaqar');
+    
+    // If in report mode (elements don't exist), load data from URL parameter
+    if (!idaqarSelect) {
+        // Get idaqar from URL parameters
+        const urlParams = new URLSearchParams(window.location.search);
+        const idaqar = urlParams.get('idaqar');
+        
+        if (idaqar) {
+            // Load checkpoints for the property in report mode
+            const sql = `SELECT sanadid as 'رقم',
+                         amount as 'آخر مبلغ',
+                         bayan as 'البيان',
+                         FROM_UNIXTIME(tasfia,'%Y-%m-%d') as 'تاريخ التصفية'
+                         FROM sanadsarf
+                         WHERE tasfia <> '' AND aqarid = '${idaqar}'
+                         GROUP BY tasfia
+                         ORDER BY tasfia DESC`;
+            
+            ajaxfillgrid(sql, 'containerid1', true, 1);
+        }
+        return;
+    }
+
+    const prevPage = document.getElementById('prevPage');
+    const nextPage = document.getElementById('nextPage');
+    const tajpagenum = document.getElementById('tajpagenum');
+
+    // Property selection change - Use jQuery for Select2
+    $('#idaqar').on('change', function() {
+        loadCheckpoints();
+    });
+
+    // Pagination - Previous page
+    if (prevPage) {
+        prevPage.addEventListener('click', () => {
+            let page = intval(tajpagenum.value) - 1;
+            if (page < 1) return;
+            tajpagenum.value = page;
+            loadCheckpoints(page);
+        });
+    }
+
+    // Pagination - Next page
+    if (nextPage) {
+        nextPage.addEventListener('click', () => {
+            const container = document.getElementById('containerid1');
+            if (!container.innerHTML) return;
+
+            let page = intval(tajpagenum.value) + 1;
+            tajpagenum.value = page;
+            loadCheckpoints(page);
+        });
+    }
+
+    // Pagination - Enter key
+    if (tajpagenum) {
+        tajpagenum.addEventListener('keyup', (e) => {
+            if (e.key === 'Enter') {
+                loadCheckpoints(intval(tajpagenum.value));
+            }
+        });
+    }
+
+    // Load data if property is already selected
+    if (idaqarSelect.value) {
+        loadCheckpoints();
+    }
+});
+</script>
+
+<?
+require('../../../foter.hnt');
+
+?>

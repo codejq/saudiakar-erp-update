@@ -1,0 +1,104 @@
+<?php
+$sc_title = "تحرير سندات القبض";
+$sc_id = "41";
+
+// Check if this is an AJAX form submission
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+if ($is_ajax_request) {
+    include_once "../../../reqloginajax.hnt";
+} else {
+    include_once "../../../nocash.hnt";
+    $_SERVER['HTTP_REFERER'] = "egarstatus.hnt";
+    include_once "../../../header.hnt";
+}
+
+require_once('../../../iconv_cross.hnt');
+require '../uCal.class.hnt';
+$dcal = new uCal;
+
+// Sanitize input
+$idsubaqar = isset($_REQUEST['idsubaqar']) ? intval($_REQUEST['idsubaqar']) : 0;
+
+// Database schema updates
+if (!$is_ajax_request) {
+    if (!file_exists('update_2022')) {
+        file_put_contents('update_2022', time());
+    }
+    @mysql_query("ALTER TABLE sanad ADD attachedimages varchar(500) NOT NULL", $link);
+    @mysql_query("ALTER TABLE mostagereen ADD mostagervatnumber varchar(100) NOT NULL", $link);
+    @mysql_query("ALTER TABLE sanad ADD mostagervatnumber varchar(100) NOT NULL", $link);
+    @mysql_query("ALTER TABLE eradat ADD kastid int(11) NOT NULL", $link);
+    @mysql_query("ALTER TABLE sanad ADD bankid int(11) NOT NULL DEFAULT 0", $link);
+}
+
+// AJAX handler to fetch bank accounts for property
+if ($is_ajax_request && isset($_POST['action']) && $_POST['action'] == 'get_bank_accounts') {
+    header('Content-Type: application/json; charset=utf-8');
+    $idsubaqar = isset($_POST['idsubaqar']) ? intval($_POST['idsubaqar']) : 0;
+    
+    if ($idsubaqar > 0) {
+        // Get idaqar from idsubaqar
+        $sql = "SELECT idaqar FROM amlakdetails WHERE idsubaqar='$idsubaqar'";
+        $result = mysql_query($sql, $link);
+        $row = mysql_fetch_array($result);
+        $idaqar = $row ? intval($row['idaqar']) : 0;
+        
+        // Fetch bank accounts: company accounts (ownerid2=0) OR property accounts (ownerid2=idaqar)
+        $sql = "SELECT id, bankname, acountholder, acountnumber, iban 
+                FROM bankacounts 
+                WHERE ownerid2 = 0 OR ownerid2 = '$idaqar'
+                ORDER BY ownerid2 DESC, id DESC";
+        $result = mysql_query($sql, $link);
+        
+        $accounts = [];
+        while ($row = mysql_fetch_assoc($result)) {
+            $accounts[] = $row;
+        }
+        
+        echo json_encode(['success' => true, 'accounts' => $accounts], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    } else {
+        echo json_encode(['success' => false, 'message' => 'معرف الوحدة غير صحيح'], JSON_UNESCAPED_UNICODE);
+    }
+    exit;
+}
+
+// Check for duplicate form submission
+if (isset($_REQUEST['formuid']) && $_REQUEST['formuid']) {
+    $formuid = mysql_real_escape_string($_REQUEST['formuid'], $link);
+    $sql = "SELECT COUNT(idsanad) AS dd FROM sanad WHERE formuid = '$formuid'";
+    $row = mysql_fetch_array(mysql_query($sql, $link));
+    if ($row['dd']) {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['success' => false, 'message' => 'حدث خطأ: محاولة تكرار الدفع'], JSON_UNESCAPED_UNICODE);
+            exit;
+        } else {
+            echo "<div class='alert alert-danger text-center'>حدث خطأ: محاولة تكرار الدفع</div>";
+            exit();
+        }
+    }
+}
+
+// Include payment processing logic
+include 'sanad_process.hnt';
+
+// Only render HTML if not AJAX request
+if ($is_ajax_request) {
+    exit;
+}
+
+// Load contract data if unit selected
+if ($idsubaqar) {
+    $sql = "SELECT * FROM egar, amlakdetails WHERE egar.rakam3akdid = amlakdetails.rakam3akdid AND amlakdetails.idsubaqar = '$idsubaqar'";
+    $re = mysql_fetch_array(mysql_query($sql, $link));
+}
+
+// Display success message if available
+if (isset($mytitile) && $mytitile) {
+    echo $mytitile;
+    exit();
+}
+
+// Include form display
+include 'sanad_form.hnt';

@@ -1,0 +1,373 @@
+<?php
+$sc_title = "حساباتك البنكية";
+
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+if ($is_ajax_request) {
+    include_once "../reqloginajax.hnt";
+} else {
+    include_once "../nocash.hnt";
+    include_once "../header.hnt";
+}
+
+function json_out($data)
+{
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+
+if ($is_ajax_request && isset($_POST['action'])) {
+    $action = $_POST['action'];
+
+    if ($action == 'list_company_bank_accounts') {
+        $sql = "SELECT * FROM bankacounts WHERE ownerid2 = 0 ORDER BY id DESC";
+        $result = mysql_query($sql, $link);
+        if (!$result) {
+            json_out(['success' => false, 'error' => mysql_error($link)]);
+        }
+        $accounts = [];
+        while ($row = mysql_fetch_assoc($result)) {
+            $accounts[] = $row;
+        }
+        json_out(['success' => true, 'data' => $accounts]);
+    }
+
+    if ($action == 'add_company_bank_account') {
+        $bankname = addslashes(isset($_POST['bankname']) ? $_POST['bankname'] : '');
+        $acountnumber = addslashes(isset($_POST['acountnumber']) ? $_POST['acountnumber'] : '');
+        $acountholder = addslashes(isset($_POST['acountholder']) ? $_POST['acountholder'] : '');
+        $iban = addslashes(isset($_POST['iban']) ? $_POST['iban'] : '');
+        $formuid = addslashes(isset($_POST['formuid']) ? $_POST['formuid'] : '');
+
+        if ($formuid == '') {
+            $formuid = md5(microtime(true) . rand(1, 999999));
+        }
+
+        if ($bankname == '' || $acountnumber == '' || $acountholder == '') {
+            json_out(['success' => false, 'message' => 'يرجى تعبئة اسم البنك ورقم الحساب واسم صاحب الحساب']);
+        }
+
+        $sql = "INSERT INTO bankacounts SET 
+            bankname='$bankname',
+            bankbranch='',
+            acountnumber='$acountnumber',
+            acountholder='$acountholder',
+            swift='',
+            ownerid='company',
+            initialblance=0,
+            currentblance=0,
+            ownerid2=0,
+            formuid='$formuid'";
+
+        $result = mysql_query($sql, $link);
+        if (!$result) {
+            json_out(['success' => false, 'error' => mysql_error($link)]);
+        }
+
+        $new_id = mysql_insert_id($link);
+
+        if ($iban != '') {
+            @mysql_query("UPDATE bankacounts SET iban='$iban' WHERE id='" . intval($new_id) . "'", $link);
+        }
+
+        json_out(['success' => true, 'id' => $new_id, 'message' => 'تم إضافة الحساب البنكي بنجاح']);
+    }
+
+    if ($action == 'update_company_bank_account') {
+        $id = intval(isset($_POST['id']) ? $_POST['id'] : 0);
+        $bankname = addslashes(isset($_POST['bankname']) ? $_POST['bankname'] : '');
+        $acountnumber = addslashes(isset($_POST['acountnumber']) ? $_POST['acountnumber'] : '');
+        $acountholder = addslashes(isset($_POST['acountholder']) ? $_POST['acountholder'] : '');
+        $iban = addslashes(isset($_POST['iban']) ? $_POST['iban'] : '');
+
+        if ($id <= 0) {
+            json_out(['success' => false, 'message' => 'معرّف الحساب غير صحيح']);
+        }
+
+        $check = mysql_query("SELECT id FROM bankacounts WHERE id='$id' AND ownerid2=0", $link);
+        if (!$check || mysql_num_rows($check) == 0) {
+            json_out(['success' => false, 'message' => 'الحساب غير موجود أو ليس ضمن حسابات الشركة']);
+        }
+
+        if ($bankname == '' || $acountnumber == '' || $acountholder == '') {
+            json_out(['success' => false, 'message' => 'يرجى تعبئة اسم البنك ورقم الحساب واسم صاحب الحساب']);
+        }
+
+        $sql = "UPDATE bankacounts SET 
+            bankname='$bankname',
+            acountnumber='$acountnumber',
+            acountholder='$acountholder'
+            WHERE id='$id'";
+        $result = mysql_query($sql, $link);
+        if (!$result) {
+            json_out(['success' => false, 'error' => mysql_error($link)]);
+        }
+
+        if ($iban != '') {
+            @mysql_query("UPDATE bankacounts SET iban='$iban' WHERE id='$id'", $link);
+        } else {
+            @mysql_query("UPDATE bankacounts SET iban='' WHERE id='$id'", $link);
+        }
+
+        json_out(['success' => true, 'message' => 'تم تحديث الحساب البنكي بنجاح']);
+    }
+
+    if ($action == 'delete_company_bank_account') {
+        $id = intval(isset($_POST['id']) ? $_POST['id'] : 0);
+        if ($id <= 0) {
+            json_out(['success' => false, 'message' => 'معرّف الحساب غير صحيح']);
+        }
+
+        $sql = "DELETE FROM bankacounts WHERE id='$id' AND ownerid2=0";
+        $result = mysql_query($sql, $link);
+        if (!$result) {
+            json_out(['success' => false, 'error' => mysql_error($link)]);
+        }
+        json_out(['success' => true, 'message' => 'تم حذف الحساب البنكي بنجاح']);
+    }
+
+    json_out(['success' => false, 'message' => 'إجراء غير معروف']);
+}
+
+if ($is_ajax_request) {
+    exit;
+}
+?>
+
+<div class="container-fluid py-3" dir="rtl">
+    <div class="card shadow-sm border-0">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-bank me-2"></i>
+                حساباتك البنكية
+            </h4>
+        </div>
+        <div class="card-body p-4">
+            <div class="alert alert-info mb-4" role="alert">
+                <i class="bi bi-info-circle me-2"></i>
+                الحسابات البنكية الخاصة بالشركة 
+            </div>
+
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div></div>
+                <button type="button" class="btn btn-primary" id="addAccountBtn">
+                    <i class="bi bi-plus-circle me-1"></i>
+                    إضافة حساب بنكي
+                </button>
+            </div>
+
+            <div id="companyAccountsList"></div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="companyBankAccountModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header" style="background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%); color: white;">
+                <h5 class="modal-title">
+                    <i class="bi bi-bank me-2"></i>
+                    <span id="companyBankModalTitle">إضافة حساب بنكي</span>
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <form id="companyBankAccountForm">
+                    <input type="hidden" id="company_bank_id" name="id">
+                    <input type="hidden" id="company_formuid" name="formuid" value="<?= str_replace('.', '', microtime() . rand(11111, 99999) . rand(11111, 99999)); ?>">
+
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">اسم البنك <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" id="company_bankname" name="bankname" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">رقم الحساب <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" id="company_acountnumber" name="acountnumber" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">اسم صاحب الحساب <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" id="company_acountholder" name="acountholder" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">رقم IBAN</label>
+                            <input type="text" class="form-control" id="company_iban" name="iban">
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-primary" id="saveCompanyBankBtn">حفظ</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    let modal;
+    let editingId = null;
+
+    function postAjax(payload) {
+        payload.ajax_submit = '1';
+        return fetch('option.bank-accounts.hnt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+            body: new URLSearchParams(payload).toString()
+        }).then(r => r.json());
+    }
+
+    function notify(type, message) {
+        if (typeof showBootstrapNotification === 'function') {
+            showBootstrapNotification(type, message);
+        } else {
+            alert(message);
+        }
+    }
+
+    function escapeHtml(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    function renderList(accounts) {
+        const container = document.getElementById('companyAccountsList');
+        if (!accounts || accounts.length === 0) {
+            container.innerHTML = '<div class="alert alert-warning">لا توجد حسابات بنكية للشركة</div>';
+            return;
+        }
+
+        let html = '';
+        accounts.forEach(acc => {
+            html += `
+                <div class="card mb-2" data-id="${acc.id}" data-bankname="${escapeHtml(acc.bankname)}" data-acountnumber="${escapeHtml(acc.acountnumber)}" data-acountholder="${escapeHtml(acc.acountholder)}" data-iban="${escapeHtml(acc.iban || '')}">
+                    <div class="card-body p-3">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div class="flex-grow-1">
+                                <div class="fw-bold mb-2"><i class="bi bi-bank me-1 text-primary"></i>${escapeHtml(acc.bankname)}</div>
+                                <div class="small">
+                                    <div><strong>رقم الحساب:</strong> ${escapeHtml(acc.acountnumber)}</div>
+                                    <div><strong>صاحب الحساب:</strong> ${escapeHtml(acc.acountholder)}</div>
+                                    <div><strong>IBAN:</strong> ${escapeHtml(acc.iban || '-')}</div>
+                                </div>
+                            </div>
+                            <div class="ms-3">
+                                <button type="button" class="btn btn-sm btn-outline-primary me-1" data-action="edit" data-id="${acc.id}"><i class="bi bi-pencil"></i></button>
+                                <button type="button" class="btn btn-sm btn-outline-danger" data-action="delete" data-id="${acc.id}"><i class="bi bi-trash"></i></button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        });
+        container.innerHTML = html;
+    }
+
+    function loadAccounts() {
+        postAjax({ action: 'list_company_bank_accounts' })
+            .then(res => {
+                if (res && res.success) {
+                    renderList(res.data);
+                } else {
+                    notify('danger', (res && (res.message || res.error)) ? (res.message || res.error) : 'فشل تحميل الحسابات');
+                }
+            })
+            .catch(() => notify('danger', 'حدث خطأ في الاتصال'));
+    }
+
+    function openAdd() {
+        editingId = null;
+        document.getElementById('companyBankModalTitle').textContent = 'إضافة حساب بنكي';
+        document.getElementById('companyBankAccountForm').reset();
+        document.getElementById('company_bank_id').value = '';
+        modal.show();
+    }
+
+    function openEdit(id) {
+        const card = document.querySelector(`.card[data-id="${id}"]`);
+        if (!card) return;
+        editingId = id;
+        document.getElementById('companyBankModalTitle').textContent = 'تعديل حساب بنكي';
+        document.getElementById('company_bank_id').value = id;
+        document.getElementById('company_bankname').value = card.dataset.bankname || '';
+        document.getElementById('company_acountnumber').value = card.dataset.acountnumber || '';
+        document.getElementById('company_acountholder').value = card.dataset.acountholder || '';
+        document.getElementById('company_iban').value = card.dataset.iban || '';
+        modal.show();
+    }
+
+    function save() {
+        const form = document.getElementById('companyBankAccountForm');
+        if (!form.checkValidity()) {
+            form.reportValidity();
+            return;
+        }
+
+        const payload = {
+            action: editingId ? 'update_company_bank_account' : 'add_company_bank_account',
+            id: document.getElementById('company_bank_id').value,
+            formuid: document.getElementById('company_formuid').value,
+            bankname: document.getElementById('company_bankname').value,
+            acountnumber: document.getElementById('company_acountnumber').value,
+            acountholder: document.getElementById('company_acountholder').value,
+            iban: document.getElementById('company_iban').value
+        };
+
+        postAjax(payload)
+            .then(res => {
+                if (res && res.success) {
+                    notify('success', res.message || 'تم الحفظ');
+                    modal.hide();
+                    loadAccounts();
+                } else {
+                    notify('danger', (res && (res.message || res.error)) ? (res.message || res.error) : 'فشل الحفظ');
+                }
+            })
+            .catch(() => notify('danger', 'حدث خطأ في الاتصال'));
+    }
+
+    const doDelete = async function(id) {
+        postAjax({ action: 'delete_company_bank_account', id: id })
+            .then(res => {
+                if (res && res.success) {
+                    notify('success', res.message || 'تم الحذف');
+                    loadAccounts();
+                } else {
+                    notify('danger', (res && (res.message || res.error)) ? (res.message || res.error) : 'فشل الحذف');
+                }
+            })
+            .catch(() => notify('danger', 'حدث خطأ في الاتصال'));
+    };
+
+
+    function remove(id) {
+        confirm('هل أنت متأكد من حذف هذا الحساب البنكي؟', 'تأكيد الحذف', () => {doDelete(id)});
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        modal = new bootstrap.Modal(document.getElementById('companyBankAccountModal'));
+        document.getElementById('addAccountBtn').addEventListener('click', openAdd);
+        document.getElementById('saveCompanyBankBtn').addEventListener('click', save);
+        document.getElementById('companyAccountsList').addEventListener('click', function(e) {
+            const btn = e.target.closest('button');
+            if (!btn) return;
+            const action = btn.getAttribute('data-action');
+            const id = btn.getAttribute('data-id');
+            if (action === 'edit') openEdit(id);
+            if (action === 'delete') remove(id);
+        });
+        loadAccounts();
+    });
+})();
+</script>
+
+<?php
+require("../foter.hnt");
+?>

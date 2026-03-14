@@ -1,0 +1,800 @@
+<?php
+// Set page variables
+$sc_title = "إصدار سند صرف";
+$sc_id = "54";
+
+// Include authentication and database
+include_once "../../../nocash.hnt";
+include_once "../../../reqloginajax.hnt";
+
+$_SERVER['HTTP_REFERER'] = "reports.hnt";
+include_once "../../../header.hnt";
+
+// Include required files
+require '../uCal.class.hnt';
+require '../arabicTools.class.hnt';
+$dcal = new uCal();
+
+// Initialize variables
+$amount = isset($_REQUEST['amount']) ? $_REQUEST['amount'] : '';
+$sanadate_input = isset($_REQUEST['sanadate']) ? $_REQUEST['sanadate'] : '';
+$bayansanad = isset($_REQUEST['bayansanad']) ? addslashes($_REQUEST['bayansanad']) : '';
+$note = isset($_REQUEST['note']) ? addslashes($_REQUEST['note']) : '';
+$mostafeed = isset($_REQUEST['mostafeed']) ? addslashes($_REQUEST['mostafeed']) : '';
+$movement = isset($_REQUEST['movement']) ? intval($_REQUEST['movement']) : 0;
+$mowazaf = isset($_REQUEST['mowazaf']) ? addslashes($_REQUEST['mowazaf']) : '';
+$aqarid = isset($_REQUEST['aqarid']) ? intval($_REQUEST['aqarid']) : 0;
+$checkrakam = isset($_REQUEST['checkrakam']) ? addslashes($_REQUEST['checkrakam']) : '';
+$checkdate = isset($_REQUEST['checkdate']) ? addslashes($_REQUEST['checkdate']) : '';
+$checkbank = isset($_REQUEST['checkbank']) ? addslashes($_REQUEST['checkbank']) : '';
+$nonedeleverttomalek = isset($_REQUEST['nonedeleverttomalek']) ? floatval($_REQUEST['nonedeleverttomalek']) : 0;
+$ajax_request = isset($_REQUEST['ajax']) ? intval($_REQUEST['ajax']) : 0;
+
+// Handle AJAX form submission
+if ($amount && $ajax_request == 1) {
+    // Process date
+    $payeddate = explode("/", $sanadate_input);
+    if (count($payeddate) == 3 && $payeddate[2] < 1700) {
+        $dateo = $dcal->u2g($payeddate[0], $payeddate[1], $payeddate[2]);
+        $payeddate[0] = $dateo['day'];
+        $payeddate[1] = $dateo['month'];
+        $payeddate[2] = $dateo['year'];
+    }
+
+    $sanadate = mktime(0, 0, 0, $payeddate[1], $payeddate[0], $payeddate[2]);
+
+    // Insert payment voucher
+    $sql = "INSERT INTO sanadsarf SET
+            sanadate = '" . addslashes($sanadate) . "',
+            amount = '" . addslashes($amount) . "',
+            bayan = '" . $bayansanad . "',
+            note = '" . $note . "',
+            mostafeed = '" . $mostafeed . "',
+            qayedtype = '" . $movement . "',
+            mowazaf = '" . $mowazaf . "',
+            aqarid = '" . $aqarid . "',
+            checkrakam = '" . $checkrakam . "',
+            checkdate = '" . $checkdate . "',
+            checkbank = '" . $checkbank . "'";
+
+    mysql_query($sql, $link);
+    $sanadsarfrakam = mysql_insert_id();
+
+    // Lock tables for transaction
+    mysql_query("LOCK TABLES eradat WRITE, sanadsarf WRITE, masrofat WRITE", $link);
+
+    $reminder = $nonedeleverttomalek - floatval($amount);
+    $nethampoint = 0;
+
+    // Check if we need to create a system checkpoint
+    if ($reminder < 2 && ($movement == 3 || $movement == 4) && $aqarid > 0) {
+        $mytime = time();
+        mysql_query("UPDATE eradat SET tasfia = '" . $mytime . "' WHERE tasfia = '' AND idaqar = '" . $aqarid . "'", $link);
+        mysql_query("UPDATE sanadsarf SET tasfia = '" . $mytime . "' WHERE tasfia = '' AND aqarid = '" . $aqarid . "'", $link);
+        mysql_query("UPDATE masrofat SET tasfia = '" . $mytime . "' WHERE tasfia = '' AND idaqar = '" . $aqarid . "'", $link);
+        $nethampoint = 1;
+    }
+
+    mysql_query("UNLOCK TABLES", $link);
+
+    // Return JSON response
+    $response = array(
+        'success' => true,
+        'message' => 'تم إدراج السند بنجاح',
+        'sanad_id' => $sanadsarfrakam,
+        'reminder' => $reminder,
+        'nethampoint' => $nethampoint
+    );
+
+    echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit();
+}
+
+// Handle success messages
+$nethampoint = isset($_REQUEST['nethampoint']) ? intval($_REQUEST['nethampoint']) : 0;
+$reminder = isset($_REQUEST['reminder']) ? floatval($_REQUEST['reminder']) : 0;
+$shwome = isset($_REQUEST['shwome']) ? intval($_REQUEST['shwome']) : 0;
+
+if ($nethampoint) {
+    echo '<div class="alert alert-success text-center mb-3" role="alert">
+            <i class="bi bi-check-circle-fill me-2"></i>
+            <strong>تم إنشاء نقطة نظام بتاريخ اليوم</strong> - لن تظهر الإيرادات والمصروفات السابقة في سند القبض
+          </div>';
+}
+
+if ($reminder) {
+    echo '<div class="alert alert-warning text-center mb-3" role="alert">
+            <i class="bi bi-exclamation-triangle-fill me-2"></i>
+            <strong>تنبيه:</strong> تم إنشاء نقطة نظام وعليك أن تصرف مبلغ ' . number_format($reminder, 2) . ' وذلك لضبط الحسابات
+          </div>';
+}
+
+if ($shwome) {
+    echo '<div class="alert alert-success text-center mb-3" role="alert">
+            <i class="bi bi-check-circle-fill me-2"></i>
+            <h5>تم إدراج السند بنجاح</h5>
+            <div class="mt-3">
+                <a href="selectprintform.hnt?formtype=paymentvaoucher&id=' . $shwome . '" class="btn btn-primary me-2">
+                    <i class="bi bi-printer me-1"></i>
+                    عرض نسخة للطباعة
+                </a>
+                <a href="reports.hnt" class="btn btn-secondary">
+                    <i class="bi bi-x-circle me-1"></i>
+                    إلغاء الأمر
+                </a>
+            </div>
+          </div>';
+    require('../../../foter.hnt');
+    exit();
+}
+
+// Get current date
+if ($hnt_dll || $hnt_supper_dll == 5) {
+    $today = date("d/m/Y", time());
+} else {
+    $today_arr = $dcal->g2u(date("d", time()), date("m", time()), date("Y", time()));
+    $today = $today_arr['day'] . '/' . $today_arr['month'] . '/' . $today_arr['year'];
+}
+?>
+
+<style>
+.summary-card {
+    background: white;
+    border-radius: 8px;
+    padding: 1rem;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    margin-bottom: 0.75rem;
+}
+
+.summary-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.summary-row:last-child {
+    border-bottom: none;
+}
+
+.summary-label {
+    font-weight: 600;
+    color: #4b5563;
+}
+
+.summary-value {
+    font-weight: 700;
+    color: #1f2937;
+}
+
+.summary-value.negative {
+    color: #dc2626;
+}
+
+.summary-value.positive {
+    color: #16a34a;
+}
+
+.data-table-container {
+    background: white;
+    border-radius: 8px;
+    padding: 1rem;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.help-note {
+    background: #f0fdf4;
+    border-left: 4px solid #16a34a;
+    padding: 1rem;
+    border-radius: 4px;
+    margin-top: 1rem;
+}
+
+.warning-note {
+    background: #fef3c7;
+    border-left: 4px solid #f59e0b;
+    padding: 1rem;
+    border-radius: 4px;
+    margin-top: 1rem;
+}
+</style>
+
+<div class="container-fluid py-3">
+    <!-- Page Header -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-receipt me-2"></i>
+                <?= $sc_title ?>
+            </h4>
+        </div>
+        <div class="card-body p-4">
+            <div class="row">
+                <!-- Form Section -->
+                <div class="col-lg-8">
+                    <form method="post" id="formsandsarf" class="needs-validation" novalidate>
+                        <input type="hidden" name="formuid" id="formuid" value="<?= str_replace('.', '', microtime() . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+                        <input type="hidden" name="nonedeleverttomalek" id="nonedeleverttomalek" value="0">
+                        <input type="hidden" name="ajax" value="1">
+                        <!-- Movement Type -->
+                        <div class="mb-3">
+                            <label for="movement" class="form-label">
+                                <i class="bi bi-arrow-left-right me-1"></i>
+                                اختر الحركة
+                            </label>
+                            <select name="movement" class="form-select" id="movement" required>
+                                <option value="1">من حساب الصندوق إلى حساب البنك</option>
+                                <option value="2">من حساب البنك إلى حساب الصندوق</option>
+                                <option value="3">من حساب الصندوق إلى حساب مالك عقار</option>
+                                <option value="4" selected>من حساب البنك إلى حساب مالك عقار</option>
+                                <option value="5">من حساب الصندوق إلى حساب مصروفات المكتب</option>
+                                <option value="6">من حساب البنك إلى حساب مصروفات المكتب</option>
+                                <option value="7">من حساب الصندوق إلى حساب أجور العاملين</option>
+                                <option value="8">من حساب البنك إلى حساب أجور العاملين</option>
+                                <option value="9">من حساب الصندوق إلى حساب مصروفات أخرى</option>
+                                <option value="10">من حساب البنك إلى حساب مصروفات أخرى</option>
+                            </select>
+                        </div>
+
+                        <!-- Property Selection -->
+                        <div class="mb-3" id="propertySection">
+                            <label for="idaqar" class="form-label">
+                                <i class="bi bi-building me-1"></i>
+                                اختر العقار
+                            </label>
+                            <select name="aqarid" id="idaqar" class="form-select">
+                                <option value="">اختر العقار</option>
+                                <?php
+                                $sql = "SELECT idaqar, aqarname FROM amlak ORDER BY aqarname";
+                                $result = mysql_query($sql, $link);
+                                while ($row = mysql_fetch_array($result)) {
+                                    echo '<option value="' . $row['idaqar'] . '">' . htmlspecialchars($row['aqarname']) . '</option>';
+                                }
+                                ?>
+                            </select>
+                        </div>
+
+                        <div class="row">
+                            <!-- Payment Date -->
+                            <div class="col-md-6 mb-3">
+                                <label for="sanadate" class="form-label">
+                                    <i class="bi bi-calendar-event me-1"></i>
+                                    تاريخ الصرف
+                                </label>
+                                <input type="text" name="sanadate" id="sanadate" class="form-control" value="<?= $today ?>" required>
+                                <div class="form-text">
+                                    <i class="bi bi-info-circle me-1"></i>
+                                    أدخل التاريخ بالشكل: 20/7/1400
+                                </div>
+                            </div>
+
+                            <!-- Amount -->
+                            <div class="col-md-6 mb-3">
+                                <label for="amount" class="form-label">
+                                    <i class="bi bi-cash me-1"></i>
+                                    المبلغ
+                                </label>
+                                <div class="input-group">
+                                    <input type="number" step="0.01" name="amount" id="amount" class="form-control" required>
+                                    <span class="input-group-text"><?= $myomla ?></span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Payment Method -->
+                        <div class="mb-3">
+                            <label class="form-label">
+                                <i class="bi bi-credit-card me-1"></i>
+                                طريقة الدفع
+                            </label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="payment_method" id="nakdan" value="cash" checked>
+                                <label class="form-check-label" for="nakdan">
+                                    <i class="bi bi-cash-stack me-1"></i>
+                                    نقداً
+                                </label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="payment_method" id="checkan" value="check">
+                                <label class="form-check-label" for="checkan">
+                                    <i class="bi bi-file-earmark-text me-1"></i>
+                                    شيك
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- Check Details (Hidden by default) -->
+                        <div id="checkDetails" style="display: none;">
+                            <div class="card mb-3" style="background: #f8f9fa;">
+                                <div class="card-body">
+                                    <h6 class="card-title">
+                                        <i class="bi bi-file-earmark-text me-1"></i>
+                                        تفاصيل الشيك
+                                    </h6>
+                                    <div class="row">
+                                        <div class="col-md-4 mb-3">
+                                            <label for="checkrakam" class="form-label">رقم الشيك</label>
+                                            <input type="text" name="checkrakam" id="checkrakam" class="form-control">
+                                        </div>
+                                        <div class="col-md-4 mb-3">
+                                            <label for="checkdate" class="form-label">تاريخ الشيك</label>
+                                            <input type="text" name="checkdate" id="checkdate" class="form-control">
+                                        </div>
+                                        <div class="col-md-4 mb-3">
+                                            <label for="checkbank" class="form-label">اسم البنك</label>
+                                            <input type="text" name="checkbank" id="checkbank" class="form-control">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <!-- Description -->
+                            <div class="col-md-6 mb-3">
+                                <label for="bayansanad" class="form-label">
+                                    <i class="bi bi-card-text me-1"></i>
+                                    البيان
+                                </label>
+                                <input type="text" name="bayansanad" id="bayansanad" class="form-control">
+                            </div>
+
+                            <!-- Beneficiary -->
+                            <div class="col-md-6 mb-3">
+                                <label for="mostafeed" class="form-label">
+                                    <i class="bi bi-person me-1"></i>
+                                    اسم المستفيد
+                                </label>
+                                <input type="text" name="mostafeed" id="mostafeed" class="form-control">
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <!-- Employee Name -->
+                            <div class="col-md-6 mb-3">
+                                <label for="mowazaf" class="form-label">
+                                    <i class="bi bi-person-badge me-1"></i>
+                                    اسم الموظف
+                                </label>
+                                <input type="text" name="mowazaf" id="mowazaf" class="form-control" value="<?= isset($_SESSION['namev']) ? htmlspecialchars($_SESSION['namev']) : '' ?>">
+                            </div>
+
+                            <!-- Notes -->
+                            <div class="col-md-6 mb-3">
+                                <label for="note" class="form-label">
+                                    <i class="bi bi-sticky me-1"></i>
+                                    ملحوظات
+                                </label>
+                                <input type="text" name="note" id="note" class="form-control">
+                            </div>
+                        </div>
+
+                        <!-- Form Actions -->
+                        <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4" id="initialButtons">
+                            <button type="button" class="btn btn-primary btn-lg" id="showConfirmBtn">
+                                <i class="bi bi-receipt me-1"></i>
+                                إدراج سند الصرف
+                            </button>
+                            <a href="reports.hnt" class="btn btn-secondary btn-lg">
+                                <i class="bi bi-x-circle me-1"></i>
+                                إلغاء الأمر
+                            </a>
+                        </div>
+
+                        <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4" id="confirmButtons" style="display: none;">
+                            <button type="submit" class="btn btn-success btn-lg">
+                                <i class="bi bi-check-circle me-1"></i>
+                                تأكيد الإدراج
+                            </button>
+                            <button type="button" class="btn btn-warning btn-lg" id="cancelConfirmBtn">
+                                <i class="bi bi-arrow-counterclockwise me-1"></i>
+                                إلغاء التأكيد
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Summary Section -->
+                <div class="col-lg-4">
+                    <div class="summary-card">
+                        <h5 class="mb-3">
+                            <i class="bi bi-calculator me-2"></i>
+                            ملخص الحسابات
+                        </h5>
+
+                        <div class="summary-row">
+                            <span class="summary-label">المبالغ المحصلة:</span>
+                            <input type="text" id="allcollectedmony" class="form-control form-control-sm" readonly style="max-width: 120px; text-align: left;">
+                        </div>
+
+                        <div class="summary-row">
+                            <span class="summary-label">المبالغ المسلمة للمالك:</span>
+                            <input type="text" id="alldeleverdmony" class="form-control form-control-sm" readonly style="max-width: 120px; text-align: left;">
+                        </div>
+
+                        <div class="summary-row">
+                            <span class="summary-label">مصروفات العقار:</span>
+                            <input type="text" id="allexpensesdmony" class="form-control form-control-sm" readonly style="max-width: 120px; text-align: left;">
+                        </div>
+
+                        <div class="summary-row">
+                            <span class="summary-label">إجمالي المياه:</span>
+                            <input type="text" id="allwaterdmony" class="form-control form-control-sm" readonly style="max-width: 120px; text-align: left;">
+                        </div>
+
+                        <div class="summary-row">
+                            <span class="summary-label">إجمالي التأمين:</span>
+                            <input type="text" id="alltameenmony" class="form-control form-control-sm" readonly style="max-width: 120px; text-align: left;">
+                        </div>
+
+                        <div class="summary-row">
+                            <span class="summary-label">النسبة المستحقة:</span>
+                            <div class="d-flex gap-1">
+                                <input type="text" id="alnesbamony" class="form-control form-control-sm" readonly style="max-width: 60px; text-align: left;">
+                                <span>%</span>
+                                <input type="text" id="alnesbamonytotal" class="form-control form-control-sm" readonly style="max-width: 100px; text-align: left;">
+                            </div>
+                        </div>
+
+                        <div class="summary-row">
+                            <span class="summary-label">إضافة التأمين لـ:</span>
+                            <input type="text" id="addtameento" class="form-control form-control-sm" readonly style="max-width: 100px;">
+                        </div>
+
+                        <div class="summary-row">
+                            <span class="summary-label">إضافة المياه لـ:</span>
+                            <input type="text" id="addwaterto" class="form-control form-control-sm" readonly style="max-width: 100px;">
+                        </div>
+
+                        <div class="summary-row">
+                            <span class="summary-label">مبالغ غير مسلمة:</span>
+                            <input type="text" id="allnotdeleverdmony" class="form-control form-control-sm summary-value negative" readonly style="max-width: 120px; text-align: left; font-weight: bold;">
+                        </div>
+                    </div>
+
+                    <!-- Help Notes -->
+                    <div class="help-note">
+                        <h6>
+                            <i class="bi bi-info-circle me-1"></i>
+                            ملحوظة هامة
+                        </h6>
+                        <p class="small mb-2">
+                            عند تسديد جميع مطالبات المالك سيتم إنشاء نقطة نظام تلقائياً لهذا العقار.
+                        </p>
+                        <a href="#" id="viewSystemPoints" class="btn btn-sm btn-success">
+                            <i class="bi bi-eye me-1"></i>
+                            استعراض نقاط النظام السابقة
+                        </a>
+                    </div>
+
+                    <div class="warning-note">
+                        <h6>
+                            <i class="bi bi-exclamation-triangle me-1"></i>
+                            تنبيه
+                        </h6>
+                        <p class="small mb-2">
+                            المبالغ المقطوعة لإدارة الأملاك يتم إضافتها على هيئة مصروفات للعقار
+                        </p>
+                        <a href="masrofat.hnt" class="btn btn-sm btn-warning">
+                            <i class="bi bi-plus-circle me-1"></i>
+                            إضافة مصروفات
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Data Tables Section -->
+            <div class="row mt-4">
+                <div class="col-12">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5>
+                            <i class="bi bi-table me-2"></i>
+                            الإيرادات والمصروفات
+                        </h5>
+                        <div class="btn-group" role="group">
+                            <button type="button" class="btn btn-sm btn-outline-primary" id="prevPage">
+                                <i class="bi bi-chevron-right"></i>
+                            </button>
+                            <input type="text" id="tajpagenum" class="form-control form-control-sm" value="1" style="width: 60px; text-align: center;">
+                            <button type="button" class="btn btn-sm btn-outline-primary" id="nextPage">
+                                <i class="bi bi-chevron-left"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="data-table-container">
+                                <h6 class="mb-3">
+                                    <i class="bi bi-cash-coin me-1 text-success"></i>
+                                    الإيرادات
+                                </h6>
+                                <div id="containerid"></div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="data-table-container">
+                                <h6 class="mb-3">
+                                    <i class="bi bi-wallet2 me-1 text-danger"></i>
+                                    المصروفات
+                                </h6>
+                                <div id="containerid2"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Modern ES6+ JavaScript
+
+// Toggle property section based on movement type
+const togglePropertySection = () => {
+    const movement = document.getElementById('movement').value;
+    const propertySection = document.getElementById('propertySection');
+
+    if (movement == '3' || movement == '4') {
+        propertySection.style.display = 'block';
+    } else {
+        propertySection.style.display = 'none';
+    }
+};
+
+// Toggle check details based on payment method
+const toggleCheckDetails = () => {
+    const checkDetails = document.getElementById('checkDetails');
+    const isCash = document.getElementById('nakdan').checked;
+
+    checkDetails.style.display = isCash ? 'none' : 'block';
+};
+
+// Calculate totals
+const calculateTotal = () => {
+    const allcollectedmony = floatval(document.getElementById('allcollectedmony').value);
+    const alldeleverdmony = floatval(document.getElementById('alldeleverdmony').value);
+    let alltameenmony = floatval(document.getElementById('alltameenmony').value);
+    let allwaterdmony = floatval(document.getElementById('allwaterdmony').value);
+    const alnesbamonytotal = floatval(document.getElementById('alnesbamonytotal').value);
+    const alnesbamony = floatval(document.getElementById('alnesbamony').value);
+    const allexpensesdmony = floatval(document.getElementById('allexpensesdmony').value);
+
+    const addtameento = document.getElementById('addtameento').value;
+    const addwaterto = document.getElementById('addwaterto').value;
+
+    // Adjust insurance if not for owner
+    if (addtameento !== 'المالك') {
+        document.getElementById('alltameenmony').value = -Math.abs(alltameenmony);
+        alltameenmony = 0;
+    }
+
+    // Adjust water if not for owner
+    if (addwaterto !== 'المالك') {
+        document.getElementById('allwaterdmony').value = -Math.abs(allwaterdmony);
+        allwaterdmony = 0;
+    }
+
+    // Calculate reminder
+    let remindermony = allcollectedmony - alldeleverdmony;
+    remindermony = remindermony + alltameenmony + allwaterdmony;
+
+    // Calculate percentage
+    document.getElementById('alnesbamonytotal').value =
+        ((alnesbamony * (allcollectedmony + alltameenmony + allwaterdmony)) / 100).toFixed(2);
+
+    remindermony = remindermony - floatval(document.getElementById('alnesbamonytotal').value);
+    remindermony = remindermony - allexpensesdmony;
+
+    document.getElementById('allnotdeleverdmony').value = remindermony.toFixed(2);
+    document.getElementById('nonedeleverttomalek').value = remindermony.toFixed(2);
+};
+
+// Load property data
+const loadPropertyData = async (pageNum = 1) => {
+    const idaqar = document.getElementById('idaqar').value;
+
+    if (!idaqar) {
+        return;
+    }
+
+    // Build SQL for revenues
+    let sql = `SELECT iderad as 'رقم',
+               pymentdesription as 'بيـــــان الإيــراد',
+               (amount - mysa3ee) as 'المبلغ',
+               FROM_UNIXTIME(paymentdate,'%Y-%m-%d') as 'التاريخ',
+               tasfia as 'تصفية'
+               FROM eradat
+               WHERE tasfia='' AND idaqar='${idaqar}'`;
+
+    // Load insurance destination
+    const sqlAddTameen = `SELECT IF(addtameento='malek','المالك','المكتب') FROM amlak WHERE idaqar='${idaqar}'`;
+    ajaxmysqlrow(sqlAddTameen, 'addtameento');
+
+    // Load water destination
+    const sqlAddWater = `SELECT IF(addwaterto='malek','المالك','المكتب') FROM amlak WHERE idaqar='${idaqar}'`;
+    ajaxmysqlrow(sqlAddWater, 'addwaterto');
+
+    // Load collected money
+    const sqlCollected = `SELECT SUM(amount - mysa3ee - tamen - mywater) FROM eradat WHERE tasfia='' AND idaqar='${idaqar}'`;
+    ajaxmysqlrow(sqlCollected, 'allcollectedmony');
+
+    // Load delivered money
+    const sqlDelivered = `SELECT SUM(amount) FROM sanadsarf WHERE tasfia='' AND aqarid='${idaqar}'`;
+    ajaxmysqlrow(sqlDelivered, 'alldeleverdmony');
+
+    // Load expenses
+    const sqlExpenses = `SELECT SUM(amount) FROM masrofat WHERE tasfia='' AND idaqar='${idaqar}'`;
+    ajaxmysqlrow(sqlExpenses, 'allexpensesdmony');
+
+    // Load insurance
+    const sqlTameen = `SELECT SUM(tamen) FROM eradat WHERE tasfia='' AND idaqar='${idaqar}'`;
+    ajaxmysqlrow(sqlTameen, 'alltameenmony');
+
+    // Load water
+    const sqlWater = `SELECT SUM(mywater) FROM eradat WHERE tasfia='' AND idaqar='${idaqar}'`;
+    ajaxmysqlrow(sqlWater, 'allwaterdmony');
+
+    // Load percentage
+    const sqlNesba = `SELECT IF(persentage < 3000, persentage/100, 0) FROM amlak WHERE idaqar='${idaqar}'`;
+    ajaxmysqlrow(sqlNesba, 'alnesbamony');
+
+    // Fill revenue grid
+    ajaxfillgrid(sql, 'containerid', true, pageNum);
+
+    // Build SQL for expenses
+    let sqlExpense = `SELECT idmasrof as 'رقم',
+                      (SELECT masrofkind FROM masrofattakweed WHERE masrofattakweed.idmasrofcod=masrofat.idmasrofcod) as 'النوع',
+                      payeddue as 'بيــــان المصــروف',
+                      amount as 'القيمة',
+                      FROM_UNIXTIME(payeddate,'%Y-%m-%d') as 'التاريخ'
+                      FROM masrofat
+                      WHERE tasfia='' AND idaqar='${idaqar}'`;
+
+    ajaxfillgrid(sqlExpense, 'containerid2', true, pageNum);
+
+    // Calculate totals after a delay
+    setTimeout(calculateTotal, 1000);
+};
+
+// Form submission handler
+document.addEventListener('DOMContentLoaded', () => {
+    const form = document.getElementById('formsandsarf');
+    const movement = document.getElementById('movement');
+    const idaqar = document.getElementById('idaqar');
+    const nakdan = document.getElementById('nakdan');
+    const checkan = document.getElementById('checkan');
+    const showConfirmBtn = document.getElementById('showConfirmBtn');
+    const cancelConfirmBtn = document.getElementById('cancelConfirmBtn');
+    const initialButtons = document.getElementById('initialButtons');
+    const confirmButtons = document.getElementById('confirmButtons');
+    const prevPage = document.getElementById('prevPage');
+    const nextPage = document.getElementById('nextPage');
+    const tajpagenum = document.getElementById('tajpagenum');
+    const viewSystemPoints = document.getElementById('viewSystemPoints');
+
+    // Movement change handler - Use jQuery for Select2
+    $('#movement').on('change', togglePropertySection);
+
+    // Property change handler - Use jQuery for Select2
+    $('#idaqar').on('change', function() {
+        loadPropertyData();
+    });
+
+    // Payment method change handlers
+    nakdan.addEventListener('change', toggleCheckDetails);
+    checkan.addEventListener('change', toggleCheckDetails);
+
+    // Show confirmation buttons
+    showConfirmBtn.addEventListener('click', () => {
+        initialButtons.style.display = 'none';
+        confirmButtons.style.display = 'flex';
+    });
+
+    // Cancel confirmation
+    cancelConfirmBtn.addEventListener('click', () => {
+        confirmButtons.style.display = 'none';
+        initialButtons.style.display = 'flex';
+    });
+
+    // Pagination handlers
+    prevPage.addEventListener('click', () => {
+        let page = intval(tajpagenum.value) - 1;
+        if (page < 1) return;
+        tajpagenum.value = page;
+        loadPropertyData(page);
+    });
+
+    nextPage.addEventListener('click', () => {
+        const containerid = document.getElementById('containerid');
+        if (!containerid.innerHTML) return;
+
+        let page = intval(tajpagenum.value) + 1;
+        tajpagenum.value = page;
+        loadPropertyData(page);
+    });
+
+    tajpagenum.addEventListener('keyup', (e) => {
+        if (e.key === 'Enter') {
+            loadPropertyData(intval(tajpagenum.value));
+        }
+    });
+
+    // View system points handler
+    viewSystemPoints.addEventListener('click', (e) => {
+        e.preventDefault();
+        const aqarId = idaqar.value;
+        const aqarName = idaqar.options[idaqar.selectedIndex].text;
+
+        if (aqarId) {
+            window.location.href = `stat_point.hnt?idaqar=${aqarId}&aqarname=${encodeURIComponent(aqarName)}`;
+        } else {
+            alert('الرجاء اختيار عقار أولاً');
+        }
+    });
+
+    // Form submission
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        // Validation
+        const amount = floatval(document.getElementById('amount').value);
+        if (amount < 1) {
+            alert('لم تقم بإدخال مبلغ');
+            return;
+        }
+
+        const movementVal = intval(movement.value);
+        if (movementVal == 3 || movementVal == 4) {
+            const allnotdeleverdmony = floatval(document.getElementById('allnotdeleverdmony').value);
+            if (amount > allnotdeleverdmony) {
+                alert('المبلغ المدخل أكبر من المبلغ المتاح في حساب العميل');
+                return;
+            }
+        }
+
+        // Submit via AJAX
+        const formData = new FormData(form);
+
+        try {
+            const response = await fetch(window.location.href, {
+                method: 'POST',
+                body: formData
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                // Redirect to success page
+                let redirectUrl = `sanad_sarf.hnt?shwome=${result.sanad_id}`;
+                if (result.reminder) {
+                    redirectUrl += `&reminder=${result.reminder}`;
+                }
+                if (result.nethampoint) {
+                    redirectUrl += `&nethampoint=${result.nethampoint}`;
+                }
+                window.location.href = redirectUrl;
+            } else {
+                alert(result.message || 'حدث خطأ أثناء الحفظ');
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            alert('حدث خطأ أثناء الحفظ');
+        }
+    });
+
+    // Auto-calculate totals every 2 seconds
+    setInterval(calculateTotal, 2000);
+
+    // Initialize
+    togglePropertySection();
+    toggleCheckDetails();
+});
+</script>
+
+
+<?php require('../../../foter.hnt'); ?>
