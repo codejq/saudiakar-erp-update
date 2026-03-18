@@ -1,0 +1,166 @@
+<?php
+
+/**
+ * Edit Tenant Information - Modernized
+ * @version 2.0
+ * @updated 2025-11-18
+ */
+
+$sc_id = "96";
+$sc_title = "تعديل بيانات مستأجر";
+extract($_REQUEST);
+
+// Initialize variables
+$mostagerid = isset($mostagerid) ? intval($mostagerid) : 0;
+$idsubaqar = isset($idsubaqar) ? intval($idsubaqar) : 0;
+
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+if (!$mostagerid && !$idsubaqar) {
+	if ($is_ajax_request) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode(['success' => false, 'message' => 'معرف المستأجر غير صالح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+		exit;
+	} else {
+		include_once "../../../nocash.hnt";
+		include_once "../../../header.hnt";
+		echo '<div class="alert alert-danger text-center m-4" dir="rtl"><i class="bi bi-exclamation-triangle-fill me-2"></i>معرف المستأجر غير صالح. <a href="egarstatus.hnt" class="alert-link">العودة للقائمة</a></div>';
+		require('../../../foter.hnt');
+		exit;
+	}
+}
+
+if (!$is_ajax_request) {
+	include_once "../../../nocash.hnt";
+	$_SERVER['HTTP_REFERER'] = "egarstatus.hnt";
+	include_once "../../../header.hnt";
+} else {
+	include_once "../../../reqloginajax.hnt";
+}
+
+require '../arabicTools.class.hnt';
+@mysql_query("ALTER TABLE mostagereen ADD mostagervatnumber VARCHAR(100) NOT NULL", $link);
+
+if (!$mostagerid && $idsubaqar) {
+	$idaqar = mysql_fetch_array(mysql_query("SELECT hnt_dll_type, mostagerid FROM amlakdetails WHERE idsubaqar='" . intval($idsubaqar) . "'", $link));
+	$mostagerid = $idaqar['mostagerid'];
+	$hnt_dll_type = $idaqar['hnt_dll_type'];
+}
+
+// Handle tenant deletion
+if (isset($_REQUEST['deletemostagerid'])) {
+	$deletemostagerid = intval($_REQUEST['deletemostagerid']);
+	$rentedAqarcount = mysql_fetch_array(mysql_query("SELECT COUNT(mostagerid) as dd FROM amlakdetails WHERE mostagerid='{$deletemostagerid}'", $link));
+
+	if ($rentedAqarcount['dd'] > 0) {
+		if ($is_ajax_request) {
+			header('Content-Type: application/json; charset=utf-8');
+			echo json_encode(['success' => false, 'message' => "لا يمكن حذف المستأجر لوجود {$rentedAqarcount['dd']} عقار مؤجر باسمه"], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+			exit;
+		} else {
+			$error_message = "لا يمكن حذف المستأجر لوجود {$rentedAqarcount['dd']} عقار مؤجر باسمه";
+		}
+	} else {
+		mysql_query("DELETE FROM mostagereen WHERE mostagerid='{$deletemostagerid}'", $link);
+		if ($is_ajax_request) {
+			header('Content-Type: application/json; charset=utf-8');
+			echo json_encode(['success' => true, 'message' => 'تم حذف بيانات المستأجر بنجاح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+			exit;
+		} else {
+			$success_message = "تم حذف بيانات المستأجر بنجاح";
+		}
+	}
+}
+
+// Handle file deletion
+if (isset($deletefile) && $deletefile) {
+	@unlink("data/" . $deletefile);
+	mysql_query("DELETE FROM upfiles WHERE filename='" . addslashes($deletefile) . "' LIMIT 1", $link);
+	if ($is_ajax_request) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode(['success' => true, 'message' => 'تم حذف الملف بنجاح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+		exit;
+	}
+}
+
+// Handle file upload
+if (isset($_FILES["pictures"]["name"]) && $_FILES["pictures"]["name"]) {
+	$tmp_name = $_FILES["pictures"]["tmp_name"];
+	$exten = strtolower(strrchr($_FILES["pictures"]["name"], '.'));
+	$filename = md5($mostagerid . rand() . time()) . $exten;
+	move_uploaded_file($tmp_name, "data/$filename");
+	if (!$filedescription) {
+		$filedescription = "وثيقة بدون عنوان";
+	}
+
+	$sql = "INSERT INTO upfiles SET filename = '" . addslashes($filename) . "', filedescription = '" . addslashes($filedescription) . "',
+        ownerid = '" . intval($mostagerid) . "', userid = '" . intval($user_data['userid']) . "', category = 'amlak'";
+	mysql_query($sql, $link);
+
+	if ($is_ajax_request) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode(['success' => true, 'message' => 'تم رفع الملف بنجاح', 'reload' => true], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+		exit;
+	} else {
+		echo "<script>parent.location.reload();</script>";
+	}
+}
+
+// Handle form update
+if (isset($updateme) && $updateme == 2) {
+	$myfile = addslashes($myfile);
+	$sql = "SELECT mostagername FROM mostagereen WHERE mostagerid='" . intval($mostagerid) . "'";
+	$row = mysql_fetch_array(mysql_query($sql, $link));
+	$oldmostagername = $row['mostagername'];
+
+	$sql = "UPDATE mostagereen SET mostageremail = '" . addslashes($mostageremail) . "', mostagerwebsite = '" . addslashes($mostagerwebsite) . "',
+        mostageragent = '" . addslashes($mostageragent) . "', mostageridtype = '" . addslashes($mostageridtype) . "',
+        mostageridplace = '" . addslashes($mostageridplace) . "', mostageriddate = '" . addslashes($mostageriddate) . "',
+        mostagername = '" . addslashes($mostagername) . "', mostageraddress = '" . addslashes($mostageraddress) . "',
+        mostageridnumber = '" . addslashes($mostageridnumber) . "', mostagergensia = '" . addslashes($mostagergensia) . "',
+        mostagertel = '" . addslashes($mostagertel) . "', workaddress = '" . addslashes($workaddress) . "',
+        kafelname = '" . addslashes($kafelname) . "', kafeladdress = '" . addslashes($kafeladdress) . "',
+        mostagervatnumber = '" . addslashes($mostagervatnumber) . "', kafelphone = '" . addslashes($kafelphone) . "',
+        mostagerpic = '" . $myfile . "', work = '" . addslashes($work) . "', note = '" . addslashes($note) . "'
+        WHERE mostagerid = '" . intval($mostagerid) . "'";
+	mysql_query($sql, $link);
+
+	$sql = "UPDATE sanad SET mostagername = '" . addslashes($mostagername) . "' WHERE mostagername = '" . addslashes(trim($oldmostagername)) . "'";
+	mysql_query($sql, $link);
+
+	if ($is_ajax_request) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode(['success' => true, 'message' => 'تم تحديث بيانات المستأجر بنجاح', 'mostagerid' => $mostagerid], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+		exit;
+	} else {
+		$success_message = "تم تحديث بيانات المستأجر بنجاح";
+	}
+}
+
+$sql = "SELECT * FROM mostagereen WHERE mostagerid='" . intval($mostagerid) . "'";
+$row = mysql_fetch_array(mysql_query($sql, $link));
+
+if (!$row) {
+	if ($is_ajax_request) {
+		header('Content-Type: application/json; charset=utf-8');
+		echo json_encode(['success' => false, 'message' => 'المستأجر غير موجود'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+		exit;
+	} else {
+		echo '<div class="alert alert-danger text-center m-4" dir="rtl"><i class="bi bi-exclamation-triangle-fill me-2"></i>المستأجر غير موجود أو تم حذفه. <a href="egarstatus.hnt" class="alert-link">العودة للقائمة</a></div>';
+		require('../../../foter.hnt');
+		exit;
+	}
+}
+
+$sql = "CREATE TABLE IF NOT EXISTS `upfiles` (`id` INT(11) NOT NULL AUTO_INCREMENT PRIMARY KEY, `filename` VARCHAR(1000) NOT NULL,
+    `filedescription` VARCHAR(1000) NOT NULL, `ownerid` INT(11) NOT NULL, `userid` INT(11) NOT NULL, `category` VARCHAR(500) NOT NULL) ENGINE = MYISAM";
+mysql_query($sql, $link);
+
+if (!is_dir("data")) {
+	mkdir("data");
+}
+
+if (!$is_ajax_request) {
+	include 'editmostager_view.hnt';
+	require('../../../foter.hnt');
+}

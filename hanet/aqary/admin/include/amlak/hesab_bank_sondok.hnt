@@ -1,0 +1,579 @@
+<?php
+// Set page variables
+$sc_title = "تقرير حساب الصندوق والبنك";
+$sc_id = "53";
+
+// Extract request variables
+extract($_REQUEST);
+
+// Initialize variables
+$hesabkind = isset($hesabkind) ? $hesabkind : 'sondok';
+$startfrom = isset($startfrom) ? $startfrom : null;
+$startfromx = isset($startfromx) ? intval($startfromx) : 10000;
+$report = isset($report) && $report == 1 ? 1 : 0;
+
+// Set title based on account type
+if ($hesabkind == "bank") {
+    $sc_title = "تقرير حساب البنك";
+} else {
+    $sc_title = "تقرير حساب الصندوق";
+}
+
+// Include authentication and database
+if ($report == 1) {
+    include_once "../../../nocash.hnt";
+    include_once "../../../report_header.hnt";
+} else {
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+}
+
+// Include required files
+require '../arabicTools.class.hnt';
+$arabicTools = new ArabicTools();
+include_once "arabic_num.class.hnt";
+
+// Get current date in Arabic
+$daxx_now = date("H/i/s/m/d/Y");
+$daxx_now = explode("/", $daxx_now);
+$h_date = mktime($daxx_now[0], $daxx_now[1], $daxx_now[2], $daxx_now[3], $daxx_now[4], $daxx_now[5]);
+$h_date2 = arabicDate("ar:l d/F -Y h:iA", $h_date);
+$h_date1 = arabicDate('hj:l d-F-Y هـ', $h_date);
+$display_date_gregorian = $h_date2;
+$display_date_hijri = $h_date1;
+
+// Calculate default date range (6 months)
+if (!$hnt_dll && $hnt_supper_dll != 5) {
+    $ers = 15277248; // Hijri 6 months
+} else {
+    $ers = 15768000; // Gregorian 6 months
+}
+
+// Process date range
+if ($startfrom) {
+    $daxx = explode("-", "0-0-0-" . $startfrom);
+
+    // Check if Hijri date
+    if (($daxx[5] < 1500) && ($daxx[5] > 1400)) {
+        $startfrom = str_replace("-", "/", $startfrom);
+        $startfrom = $arabicTools->dateHejri2Geo($startfrom);
+    }
+
+    $daxx = explode("-", "0-0-0-" . $startfrom);
+    $startfrom = mktime(0, 0, 0, $daxx[4], $daxx[3], $daxx[5]);
+} else {
+    $startfrom = time() - $ers;
+}
+
+// Format dates for display
+if (!$hnt_dll && $hnt_supper_dll != 5) {
+    $daxx = explode("-", arabicDate('hj:s-i-h-d-m-Y', $startfrom));
+} else {
+    $daxx = explode("-", arabicDate('ar:s-i-h-d-m-Y', $startfrom));
+}
+
+if ($startfromx && $startfromx != 10000) {
+    $startfrom = $startfromx;
+}
+
+// Get financial data based on account type
+if ($hesabkind == "sondok") {
+    // Cash box calculations (payment_type = 1)
+    $sql1 = "SELECT SUM(depositeamount) as dd FROM sanad WHERE payment_type='1' AND sanaddate > '" . $startfrom . "'";
+    $row1 = mysql_fetch_array(mysql_query($sql1, $link));
+    $wrd1 = isset($row1['dd']) ? $row1['dd'] : 0;
+
+    $sql2 = "SELECT SUM(amount) as dd FROM masrofat WHERE payeddate > '" . $startfrom . "'";
+    $row2 = mysql_fetch_array(mysql_query($sql2, $link));
+    $wrd2 = isset($row2['dd']) ? $row2['dd'] : 0;
+
+    $sql3 = "SELECT SUM(amount) as dd FROM sanadsarf WHERE (qayedtype='5' OR qayedtype='7' OR qayedtype='9') AND sanadate > '" . $startfrom . "'";
+    $row3 = mysql_fetch_array(mysql_query($sql3, $link));
+    $wrd3 = isset($row3['dd']) ? $row3['dd'] : 0;
+
+    $sql4 = "SELECT SUM(amount) as dd FROM sanadsarf WHERE qayedtype='1' AND sanadate > '" . $startfrom . "'";
+    $row4 = mysql_fetch_array(mysql_query($sql4, $link));
+    $wrd4 = isset($row4['dd']) ? $row4['dd'] : 0;
+
+    $sql5 = "SELECT SUM(amount) as dd FROM sanadsarf WHERE qayedtype='2' AND sanadate > '" . $startfrom . "'";
+    $row5 = mysql_fetch_array(mysql_query($sql5, $link));
+    $wrd5 = isset($row5['dd']) ? $row5['dd'] : 0;
+
+    $sql6 = "SELECT SUM(amount) as dd FROM sanadsarf WHERE qayedtype='3' AND sanadate > '" . $startfrom . "'";
+    $row6 = mysql_fetch_array(mysql_query($sql6, $link));
+    $wrd6 = isset($row6['dd']) ? $row6['dd'] : 0;
+
+    // Calculate balance
+    $wrd7 = $wrd1 - $wrd2 - $wrd3 - $wrd4 + $wrd5 - $wrd6;
+
+} else {
+    // Bank calculations (payment_type != 1, i.e., 2=check, 4=transfer, 5=network)
+    $sql1 = "SELECT SUM(depositeamount) as dd FROM sanad WHERE payment_type!='1' AND sanaddate > '" . $startfrom . "'";
+    $row1 = mysql_fetch_array(mysql_query($sql1, $link));
+    $wrd1 = isset($row1['dd']) ? $row1['dd'] : 0;
+
+    $sql4 = "SELECT SUM(amount) as dd FROM sanadsarf WHERE qayedtype='1' AND sanadate > '" . $startfrom . "'";
+    $row4 = mysql_fetch_array(mysql_query($sql4, $link));
+    $wrd4 = isset($row4['dd']) ? $row4['dd'] : 0;
+
+    $sql3 = "SELECT SUM(amount) as dd FROM sanadsarf WHERE (qayedtype='6' OR qayedtype='8' OR qayedtype='10') AND sanadate > '" . $startfrom . "'";
+    $row3 = mysql_fetch_array(mysql_query($sql3, $link));
+    $wrd3 = isset($row3['dd']) ? $row3['dd'] : 0;
+
+    $sql5 = "SELECT SUM(amount) as dd FROM sanadsarf WHERE qayedtype='2' AND sanadate > '" . $startfrom . "'";
+    $row5 = mysql_fetch_array(mysql_query($sql5, $link));
+    $wrd5 = isset($row5['dd']) ? $row5['dd'] : 0;
+
+    $sql6 = "SELECT SUM(amount) as dd FROM sanadsarf WHERE qayedtype='4' AND sanadate > '" . $startfrom . "'";
+    $row6 = mysql_fetch_array(mysql_query($sql6, $link));
+    $wrd6 = isset($row6['dd']) ? $row6['dd'] : 0;
+
+    $wrd2 = 0; // Not used in bank calculation
+
+    // Calculate balance
+    $wrd7 = $wrd1 + $wrd4 - $wrd3 - $wrd2 - $wrd5 - $wrd6;
+}
+
+// Only render HTML if NOT in report mode
+if ($report != 1) {
+?>
+
+<style>
+.account-card {
+    background: white;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    margin-bottom: 2rem;
+}
+
+.account-table {
+    width: 100%;
+    margin: 0;
+}
+
+.account-table thead {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+}
+
+.account-table thead th {
+    padding: 1rem;
+    font-weight: 600;
+    text-align: center;
+    border: none;
+}
+
+.account-table tbody tr {
+    transition: background-color 0.2s;
+}
+
+.account-table tbody tr:hover {
+    background-color: #f0f9ff;
+}
+
+.account-table tbody td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.account-table tbody td:first-child {
+    text-align: right;
+    font-weight: 500;
+}
+
+.account-table tbody td:last-child {
+    text-align: center;
+    font-weight: 600;
+    color: #0891b2;
+}
+
+.balance-row {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    font-weight: bold;
+    font-size: 1.1rem;
+}
+
+.balance-row td {
+    padding: 1rem !important;
+    border: none !important;
+}
+
+.stats-card {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    text-align: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.stats-card .number {
+    font-size: 2rem;
+    font-weight: bold;
+    margin-bottom: 0.5rem;
+}
+
+.stats-card .label {
+    font-size: 1rem;
+    opacity: 0.9;
+}
+
+.account-type-badge {
+    display: inline-block;
+    padding: 0.5rem 1.5rem;
+    border-radius: 20px;
+    font-weight: 600;
+    margin-bottom: 1rem;
+}
+
+.badge-sondok {
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    color: white;
+}
+
+.badge-bank {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+}
+
+@media print {
+    .no-print {
+        display: none !important;
+    }
+}
+</style>
+
+<div class="container-fluid py-3">
+    <!-- Page Header -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="<?= ($hesabkind == 'bank') ? 'bi bi-bank' : 'bi bi-cash-stack' ?> me-2"></i>
+                <?= $sc_title ?>
+            </h4>
+        </div>
+        <div class="card-body p-4">
+            <!-- Date Display -->
+            <div class="text-center mb-4">
+                <span class="account-type-badge <?= ($hesabkind == 'bank') ? 'badge-bank' : 'badge-sondok' ?>">
+                    <i class="<?= ($hesabkind == 'bank') ? 'bi bi-bank' : 'bi bi-cash-coin' ?> me-2"></i>
+                    <?= ($hesabkind == 'bank') ? 'حساب البنك' : 'حساب الصندوق' ?>
+                </span>
+                <h5 class="text-muted mt-3">
+                    <i class="bi bi-calendar3 me-2"></i>
+                    بتاريخ: <?= $display_date_gregorian ?>
+                </h5>
+                <p class="text-muted mb-0">
+                    <small>الموافق: <?= $display_date_hijri ?></small>
+                </p>
+            </div>
+
+            <!-- Balance Card -->
+            <div class="row mb-4">
+                <div class="col-md-6 offset-md-3">
+                    <div class="stats-card">
+                        <div class="number"><?= number_format($wrd7, 2) ?></div>
+                        <div class="label">
+                            <i class="bi bi-wallet2 me-1"></i>
+                            <?= ($hesabkind == 'bank') ? 'رصيد البنك الحالي' : 'رصيد الصندوق الحالي' ?> (<?= $myomla ?>)
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Account Details Table -->
+            <div class="account-card">
+                <table class="table account-table mb-0">
+                    <thead>
+                        <tr>
+                            <th>البيــــــــــــــان</th>
+                            <th style="width: 200px;">المبلغ (<?= $myomla ?>)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if ($hesabkind == "sondok") { ?>
+                        <tr>
+                            <td>
+                                <i class="bi bi-arrow-down-circle text-success me-2"></i>
+                                وارد التحصيل لحساب الصندوق
+                            </td>
+                            <td><?= number_format($wrd1, 2) ?></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <i class="bi bi-arrow-up-circle text-danger me-2"></i>
+                                إجمالي مصروفات العقارات
+                            </td>
+                            <td><?= number_format($wrd2, 2) ?></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <i class="bi bi-arrow-up-circle text-danger me-2"></i>
+                                إجمالي مصروفات المكتب والإجور والنثريات
+                            </td>
+                            <td><?= number_format($wrd3, 2) ?></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <i class="bi bi-arrow-up-circle text-danger me-2"></i>
+                                إجمالي محول من الصندوق إلى البنك
+                            </td>
+                            <td><?= number_format($wrd4, 2) ?></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <i class="bi bi-arrow-down-circle text-success me-2"></i>
+                                إجمالي وارد إلى الصندوق من البنك
+                            </td>
+                            <td><?= number_format($wrd5, 2) ?></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <i class="bi bi-arrow-up-circle text-danger me-2"></i>
+                                إجمالي مبالغ مدفوعة لأصحاب العقار
+                            </td>
+                            <td><?= number_format($wrd6, 2) ?></td>
+                        </tr>
+                        <?php } else { ?>
+                        <tr>
+                            <td>
+                                <i class="bi bi-arrow-down-circle text-success me-2"></i>
+                                وارد التحصيل لحساب البنك
+                            </td>
+                            <td><?= number_format($wrd1, 2) ?></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <i class="bi bi-arrow-down-circle text-success me-2"></i>
+                                إجمالي وارد إلى البنك من الصندوق
+                            </td>
+                            <td><?= number_format($wrd4, 2) ?></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <i class="bi bi-arrow-up-circle text-danger me-2"></i>
+                                إجمالي مصروفات المكتب والإجور والنثريات عن طريق البنك
+                            </td>
+                            <td><?= number_format($wrd3, 2) ?></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <i class="bi bi-arrow-up-circle text-danger me-2"></i>
+                                إجمالي محول من البنك إلى الصندوق
+                            </td>
+                            <td><?= number_format($wrd5, 2) ?></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <i class="bi bi-arrow-up-circle text-danger me-2"></i>
+                                إجمالي مبالغ مدفوعة لأصحاب العقار عن طريق البنك
+                            </td>
+                            <td><?= number_format($wrd6, 2) ?></td>
+                        </tr>
+                        <?php } ?>
+                        <tr class="balance-row">
+                            <td>
+                                <i class="bi bi-calculator me-2"></i>
+                                <?= ($hesabkind == 'bank') ? 'رصيد البنك الحالي' : 'رصيد الصندوق الحالي' ?>
+                            </td>
+                            <td>
+                                <?= number_format($wrd7, 2) ?>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="text-center mt-4 no-print">
+                <button type="button" class="btn btn-primary btn-lg me-2"
+                        onclick="window.location.href='hesab_bank_sondok.hnt?hesabkind=<?= $hesabkind ?>&report=1&startfromx=<?= $startfrom ?>'">
+                    <i class="bi bi-printer-fill me-2"></i>
+                    عرض تقرير صالح للطباعة
+                </button>
+                <button type="button" class="btn btn-outline-secondary btn-lg" onclick="window.location.href='reports.hnt'">
+                    <i class="bi bi-x-circle me-2"></i>
+                    إلغاء الأمر
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<?php
+    require('../../../foter.hnt');
+} else {
+    // Report Mode (Print Layout)
+?>
+
+<style>
+@media print {
+    body {
+        font-family: 'Arial', sans-serif;
+    }
+}
+
+.report-container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+.report-header {
+    text-align: center;
+    margin-bottom: 30px;
+    border-bottom: 3px solid #189c2a;
+    padding-bottom: 20px;
+}
+
+.report-title {
+    font-size: 24px;
+    font-weight: bold;
+    color: #189c2a;
+    margin-bottom: 10px;
+}
+
+.report-date {
+    font-size: 14px;
+    color: #666;
+    margin-bottom: 5px;
+}
+
+.report-balance {
+    background: #f8f9fa;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 30px;
+    text-align: center;
+}
+
+.report-balance-number {
+    font-size: 32px;
+    font-weight: bold;
+    color: #189c2a;
+}
+
+.report-balance-label {
+    font-size: 14px;
+    color: #666;
+}
+
+.report-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 20px;
+}
+
+.report-table thead {
+    background: #189c2a;
+    color: white;
+}
+
+.report-table th,
+.report-table td {
+    padding: 12px;
+    text-align: center;
+    border: 1px solid #ddd;
+}
+
+.report-table tbody tr:nth-child(even) {
+    background: #f8f9fa;
+}
+
+.report-table tfoot {
+    background: #189c2a;
+    color: white;
+    font-weight: bold;
+    font-size: 16px;
+}
+
+.report-table tfoot td {
+    padding: 15px;
+}
+</style>
+
+<div class="report-container">
+    <div class="report-header">
+        <div class="report-title"><?= $sc_title ?></div>
+        <div class="report-date">بتاريخ: <?= $display_date_gregorian ?></div>
+        <div class="report-date">الموافق: <?= $display_date_hijri ?></div>
+    </div>
+
+    <div class="report-balance">
+        <div class="report-balance-number"><?= number_format($wrd7, 2) ?> <?= $myomla ?></div>
+        <div class="report-balance-label">
+            <?= ($hesabkind == 'bank') ? 'رصيد البنك الحالي' : 'رصيد الصندوق الحالي' ?>
+        </div>
+    </div>
+
+    <table class="report-table">
+        <thead>
+            <tr>
+                <th>البيــــــــــــــان</th>
+                <th style="width: 200px;">المبلغ (<?= $myomla ?>)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <?php if ($hesabkind == "sondok") { ?>
+            <tr>
+                <td style="text-align: right;">وارد التحصيل لحساب الصندوق</td>
+                <td><?= number_format($wrd1, 2) ?></td>
+            </tr>
+            <tr>
+                <td style="text-align: right;">إجمالي مصروفات العقارات</td>
+                <td><?= number_format($wrd2, 2) ?></td>
+            </tr>
+            <tr>
+                <td style="text-align: right;">إجمالي مصروفات المكتب والإجور والنثريات</td>
+                <td><?= number_format($wrd3, 2) ?></td>
+            </tr>
+            <tr>
+                <td style="text-align: right;">إجمالي محول من الصندوق إلى البنك</td>
+                <td><?= number_format($wrd4, 2) ?></td>
+            </tr>
+            <tr>
+                <td style="text-align: right;">إجمالي وارد إلى الصندوق من البنك</td>
+                <td><?= number_format($wrd5, 2) ?></td>
+            </tr>
+            <tr>
+                <td style="text-align: right;">إجمالي مبالغ مدفوعة لأصحاب العقار</td>
+                <td><?= number_format($wrd6, 2) ?></td>
+            </tr>
+            <?php } else { ?>
+            <tr>
+                <td style="text-align: right;">وارد التحصيل لحساب البنك</td>
+                <td><?= number_format($wrd1, 2) ?></td>
+            </tr>
+            <tr>
+                <td style="text-align: right;">إجمالي وارد إلى البنك من الصندوق</td>
+                <td><?= number_format($wrd4, 2) ?></td>
+            </tr>
+            <tr>
+                <td style="text-align: right;">إجمالي مصروفات المكتب والإجور والنثريات عن طريق البنك</td>
+                <td><?= number_format($wrd3, 2) ?></td>
+            </tr>
+            <tr>
+                <td style="text-align: right;">إجمالي محول من البنك إلى الصندوق</td>
+                <td><?= number_format($wrd5, 2) ?></td>
+            </tr>
+            <tr>
+                <td style="text-align: right;">إجمالي مبالغ مدفوعة لأصحاب العقار عن طريق البنك</td>
+                <td><?= number_format($wrd6, 2) ?></td>
+            </tr>
+            <?php } ?>
+        </tbody>
+        <tfoot>
+            <tr>
+                <td><?= ($hesabkind == 'bank') ? 'رصيد البنك الحالي' : 'رصيد الصندوق الحالي' ?></td>
+                <td><?= number_format($wrd7, 2) ?></td>
+            </tr>
+        </tfoot>
+    </table>
+</div>
+
+<?php
+    require("../../../reportfooter.hnt");
+}
+?>

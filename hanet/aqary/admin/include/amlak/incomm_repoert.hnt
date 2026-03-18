@@ -1,0 +1,502 @@
+<?php
+/**
+ * Owner Account Statement
+ * Modern refactored version with Bootstrap 5
+ */
+
+// Extract POST variables
+extract($_REQUEST);
+
+// Initialize variables
+$idaqar = isset($idaqar) ? intval($idaqar) : 0;
+$aqarname = isset($aqarname) ? trim($aqarname) : '';
+$report = isset($report) ? intval($report) : 0;
+$startfrom = isset($startfrom) ? trim($startfrom) : '';
+$enddate = isset($enddate) ? trim($enddate) : '';
+$startfromx = isset($startfromx) ? intval($startfromx) : 0;
+$enddatex = isset($enddatex) ? intval($enddatex) : 0;
+$dd = isset($dd) ? intval($dd) : 0;
+$mm = isset($mm) ? intval($mm) : 0;
+$yy = isset($yy) ? intval($yy) : 0;
+$dd2 = isset($dd2) ? intval($dd2) : 0;
+$mm2 = isset($mm2) ? intval($mm2) : 0;
+$yy2 = isset($yy2) ? intval($yy2) : 0;
+$showtasfia = isset($showtasfia) ? intval($showtasfia) : 0;
+$hidecommision = isset($hidecommision) ? intval($hidecommision) : 0;
+$bankid = isset($bankid) ? intval($bankid) : 0;
+$payment_type = isset($payment_type) ? intval($payment_type) : 0;
+
+// AJAX handler to fetch all bank accounts
+if (isset($_POST['ajax_action']) && $_POST['ajax_action'] == 'get_all_bank_accounts') {
+    include_once "../../../reqloginajax.hnt";
+    header('Content-Type: application/json; charset=utf-8');
+    
+    // Fetch all bank accounts
+    $sql = "SELECT id, bankname, acountholder, acountnumber 
+            FROM bankacounts 
+            ORDER BY bankname, id DESC";
+    $result = mysql_query($sql, $link);
+    
+    $accounts = [];
+    while ($row = mysql_fetch_assoc($result)) {
+        $accounts[] = $row;
+    }
+    
+    echo json_encode(['success' => true, 'accounts' => $accounts], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+
+$sc_title = "  تقرير اجمالي الإيرادات  ";
+$sc_id = "50";
+
+include_once "../../../nocash.hnt";
+$canscroll = 1;
+
+if ($report == 1) {
+    include_once "../../../report_header.hnt";
+} else {
+    include_once "../../../header.hnt";
+}
+
+require '../arabicTools.class.hnt';
+include_once "arabic_num.class.hnt";
+require '../uCal.class.hnt';
+$dcal = new uCal;
+$arabicTools = new ArabicTools();
+include_once "amlakfunctions.hnt";
+
+if ($idaqar) {
+    $sql = "SELECT * FROM amlak WHERE idaqar = '" . intval($idaqar) . "'";
+    $aqinfo = mysql_fetch_array(mysql_query($sql, $link));
+    $aqarname = isset($aqinfo['aqarname']) ? $aqinfo['aqarname'] : '';
+}
+
+// Calculate dates
+$daxx = date("H/i/s/m/d/Y");
+$daxx = explode("/", $daxx);
+$h_date = mktime($daxx[0], $daxx[1], $daxx[2], $daxx[3], $daxx[4], $daxx[5]);
+$h_date2 = arabicDate("ar:l d/F -Y h:iA", $h_date);
+$h_date1 = arabicDate('hj:l d-F-Y هـ', $h_date);
+
+// Set default date range
+if (!isset($hnt_dll) || (!$hnt_dll && (!isset($hnt_supper_dll) || $hnt_supper_dll != 5))) {
+    $ers = 15277248; // ~6 months
+} else {
+    $ers = 15768000; // ~6 months
+}
+
+if ($startfromx) {
+    $startfrom = date("d-m-Y", $startfromx);
+    $enddate = date("d-m-Y", $enddatex);
+}
+
+if ($startfrom) {
+    $daxx = explode("-", "0-0-0-" . $startfrom);
+    $dax2 = explode("-", "0-0-0-" . $enddate);
+
+    if (($daxx[5] < 1900) && ($daxx[5] > 1400)) {
+        $dateo = $dcal->u2g($daxx[3], $daxx[4], $daxx[5]);
+        $startfrom = $dateo['day'] . "-" . $dateo['month'] . "-" . $dateo['year'];
+        $dateo = $dcal->u2g($dax2[3], $dax2[4], $dax2[5]);
+        $enddate = $dateo['day'] . "-" . $dateo['month'] . "-" . $dateo['year'];
+    }
+
+    $daxx = explode("-", "0-0-0-" . $startfrom);
+    $startfrom = mktime(0, 0, 0, $daxx[4], $daxx[3], $daxx[5]);
+    $dax2 = explode("-", "0-0-0-" . $enddate);
+    $enddate = mktime(0, 0, 0, $dax2[4], $dax2[3], $dax2[5]);
+} else {
+    $startfrom = time() - $ers;
+    $enddate = time() + 86400;
+}
+
+if (!isset($hnt_dll) || (!$hnt_dll && (!isset($hnt_supper_dll) || $hnt_supper_dll != 5))) {
+    $dateo = $dcal->g2u(date("d", $startfrom), date("m", $startfrom), date("Y", $startfrom));
+    $daxx[3] = $dateo['day'];
+    $daxx[4] = $dateo['month'];
+    $daxx[5] = $dateo['year'];
+    $dateo = $dcal->g2u(date("d", $enddate), date("m", $enddate), date("Y", $enddate));
+    $dax2[3] = $dateo['day'];
+    $dax2[4] = $dateo['month'];
+    $dax2[5] = $dateo['year'];
+} else {
+    $daxx[3] = date("d", $startfrom);
+    $daxx[4] = date("m", $startfrom);
+    $daxx[5] = date("Y", $startfrom);
+    $dax2[3] = date("d", $enddate);
+    $dax2[4] = date("m", $enddate);
+    $dax2[5] = date("Y", $enddate);
+}
+
+if ($startfromx) {
+    $startfrom = $startfromx;
+    $enddate = $enddatex;
+}
+
+$checked1 = " checked ";
+$checked2 = "";
+if ($showtasfia == 1) {
+    $checked1 = "";
+    $checked2 = " checked ";
+}
+
+// Initialize totals
+$totalincome = 0;
+$totaloutcome = 0;
+?>
+
+<?php if ($hidecommision): ?>
+<style>
+.hidecommision { display: none !important; }
+</style>
+<?php endif; ?>
+
+<!-- Main Content -->
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <!-- Page Header -->
+            <div class="card mb-4 shadow-sm border-0">
+                <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+                    <h4 class="mb-0">
+                        <i class="bi bi-person-badge me-2"></i>
+                        <?= $sc_title ?>
+                    </h4>
+                </div>
+                <div class="card-body p-4">
+                    <div class="alert alert-info mb-4">
+                        <i class="bi bi-calendar-event me-2"></i>
+                        <strong> تقرير اجمالي الإيرادات بتاريخ:</strong>
+                        <?php
+                        if (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) {
+            echo $h_date2;
+                        } else {
+                            echo $h_date1;
+                        }
+                        ?>
+                        <br>
+                        <strong>الفترة:</strong> من <?= $daxx[3] ?>/<?= $daxx[4] ?>/<?= $daxx[5] ?> إلى <?= $dax2[3] ?>/<?= $dax2[4] ?>/<?= $dax2[5] ?>
+                    </div>
+
+<?php if ($report != 1): ?>
+                    <form name="form" method="get" action="?">
+                        <input type="hidden" name="formuid" id="formuid"
+                               value="<?= str_replace('.', '', microtime(true) . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+                        <input type="hidden" name="bankid" id="bankid" value="<?= $bankid ?>">
+
+                        <div class="row g-3 mb-3">
+                            <div class="col-md-6">
+                                <label for="bank_account_filter" class="form-label fw-bold">
+                                    <i class="bi bi-bank me-1"></i>
+                                    الحساب البنكي
+                                </label>
+                                <select class="form-select form-select-sm" id="bank_account_filter" name="bankid_select">
+                                    <option value="0">الكل</option>
+                                </select>
+                            </div>
+
+                            <div class="col-md-6">
+                                <label for="payment_type_filter" class="form-label fw-bold">
+                                    <i class="bi bi-credit-card me-1"></i>
+                                    طريقة الدفع
+                                </label>
+                                <select class="form-select form-select-sm" id="payment_type_filter" name="payment_type">
+                                    <option value="0" <?= $payment_type == 0 ? 'selected' : '' ?>>الكل</option>
+                                    <option value="1" <?= $payment_type == 1 ? 'selected' : '' ?>>نقداً</option>
+                                    <option value="2" <?= $payment_type == 2 ? 'selected' : '' ?>>شيك</option>
+                                    <option value="3" <?= $payment_type == 3 ? 'selected' : '' ?>>طريقة أخرى</option>
+                                    <option value="4" <?= $payment_type == 4 ? 'selected' : '' ?>>تحويل</option>
+                                    <option value="5" <?= $payment_type == 5 ? 'selected' : '' ?>>شبكة</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-12">
+                                <label class="form-label fw-bold">
+                                    <i class="bi bi-calendar-range me-1"></i>
+                                    الفترة الزمنية
+                                </label>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="row g-2">
+                                    <div class="col-12 mb-1"><small class="text-muted">من تاريخ</small></div>
+                                    <div class="col-4">
+                                        <input type="text" class="form-control form-control-sm" name="dd" id="dd" value="<?= $daxx[3] ?>" placeholder="يوم">
+                                    </div>
+                                    <div class="col-4">
+                                        <input type="text" class="form-control form-control-sm" name="mm" id="mm" value="<?= $daxx[4] ?>" placeholder="شهر">
+                                    </div>
+                                    <div class="col-4">
+                                        <input type="text" class="form-control form-control-sm" name="yy" id="yy" value="<?= $daxx[5] ?>" placeholder="سنة">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="row g-2">
+                                    <div class="col-12 mb-1"><small class="text-muted">إلى تاريخ</small></div>
+                                    <div class="col-4">
+                                        <input type="text" class="form-control form-control-sm" name="dd2" id="dd2" value="<?= $dax2[3] ?>" placeholder="يوم">
+                                    </div>
+                                    <div class="col-4">
+                                        <input type="text" class="form-control form-control-sm" name="mm2" id="mm2" value="<?= $dax2[4] ?>" placeholder="شهر">
+                                    </div>
+                                    <div class="col-4">
+                                        <input type="text" class="form-control form-control-sm" name="yy2" id="yy2" value="<?= $dax2[5] ?>" placeholder="سنة">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="showtasfia" id="k1" <?= $checked1 ?>
+                                       onclick="applyFilters(0);">
+                                <label class="form-check-label" for="k1">عرض جميع المبالغ والمصروفات</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="showtasfia" id="k2" <?= $checked2 ?>
+                                       onclick="applyFilters(1);">
+                                <label class="form-check-label" for="k2">عرض المبالغ والمصروفات غير المسلمة للمالك</label>
+                            </div>
+                        </div>
+
+                        <div class="d-flex gap-2 flex-wrap">
+                            <button type="button" class="btn btn-success" onclick="recalculate();">
+                                <i class="bi bi-calculator me-1"></i>
+                                عرض التقرير
+                            </button>
+                            <button type="button" class="btn btn-info" onclick="printReport(0);">
+                                <i class="bi bi-printer me-1"></i>
+                                عرض للطباعة
+                            </button>
+                            <button type="button" class="btn btn-outline-info" onclick="printReport(1);">
+                                <i class="bi bi-printer me-1"></i>
+                                طباعة بدون العمولة
+                            </button>
+                            <button type="button" class="btn btn-secondary" onclick="window.location.href='reports.hnt';">
+                                <i class="bi bi-x-circle me-1"></i>
+                                إلغاء
+                            </button>
+                        </div>
+                    </form>
+<?php endif; ?>
+                </div>
+            </div>
+
+<?php
+// Build filters for bankid and payment_type
+$tasfia_filter = "";
+if ($showtasfia) {
+    $tasfia_filter = " AND e.tasfia = '' ";
+}
+
+$bankid_filter = "";
+$payment_type_filter = "";
+
+if ($bankid > 0) {
+    $bankid_filter = " AND e.sanadrakam IN (SELECT sanadrakam FROM sanad WHERE bankid = '" . intval($bankid) . "')";
+}
+
+if ($payment_type > 0) {
+    $payment_type_filter = " AND e.sanadrakam IN (SELECT sanadrakam FROM sanad WHERE payment_type = '" . intval($payment_type) . "')";
+}
+
+// Query to get aggregated income by building
+$sql = "SELECT 
+            a.idaqar,
+            a.aqarname,
+            a.addwaterto,
+            a.addtameento,
+            COUNT(DISTINCT e.sanadrakam) as transaction_count,
+            SUM(e.amount) as total_amount,
+            SUM(e.tamen) as total_tamen,
+            SUM(e.mywater) as total_water,
+            SUM(e.mysa3ee) as total_commission,
+            SUM(e.services) as total_services
+        FROM amlak a
+        LEFT JOIN eradat e ON a.idaqar = e.idaqar
+            AND e.paymentdate > '" . intval($startfrom) . "'
+            AND e.paymentdate < '" . intval($enddate) . "'
+            $tasfia_filter
+            $bankid_filter
+            $payment_type_filter
+        GROUP BY a.idaqar, a.aqarname, a.addwaterto, a.addtameento
+        HAVING transaction_count > 0
+        ORDER BY a.aqarname";
+
+$result = mysql_query($sql, $link);
+?>
+            <!-- Income by Building Report Table -->
+            <div class="card shadow-sm">
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-hover table-striped align-middle" style="width:100%">
+                            <thead class="table-light">
+                                <tr class="text-center">
+                                    <th><i class="bi bi-building me-1"></i>اسم العقار</th>
+                                    <th><i class="bi bi-hash me-1"></i>عدد المعاملات</th>
+                                    <th>إجمالي المبالغ</th>
+                                    <th>التأمين</th>
+                                    <th>المياه</th>
+                                    <th class="hidecommision">العمولة</th>
+                                    <th>خدمات</th>
+                                    <th><i class="bi bi-cash-stack me-1"></i>صافي الإيراد</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+<?php
+    $grand_total_amount = 0;
+    $grand_total_tamen = 0;
+    $grand_total_water = 0;
+    $grand_total_commission = 0;
+    $grand_total_services = 0;
+    $grand_total_net = 0;
+
+    while ($row = mysql_fetch_array($result)) {
+        // Calculate net income based on property settings
+        $water_deduction = 0;
+        $tamen_deduction = 0;
+        
+        if (!($row['addwaterto'] == "" || $row['addwaterto'] == "malek")) {
+            $water_deduction = $row['total_water'];
+        }
+        
+        if (!($row['addtameento'] == "" || $row['addtameento'] == "malek")) {
+            $tamen_deduction = $row['total_tamen'];
+        }
+        
+        $net_income = $row['total_amount'] - $row['total_commission'] - $row['total_services'] - $water_deduction - $tamen_deduction;
+        
+        $grand_total_amount += $row['total_amount'];
+        $grand_total_tamen += $row['total_tamen'];
+        $grand_total_water += $row['total_water'];
+        $grand_total_commission += $row['total_commission'];
+        $grand_total_services += $row['total_services'];
+        $grand_total_net += $net_income;
+?>
+                                <tr class="text-center">
+                                    <td class="text-start"><strong><?= htmlspecialchars($row['aqarname']) ?></strong></td>
+                                    <td><?= number_format($row['transaction_count']) ?></td>
+                                    <td><?= number_format($row['total_amount'], 2) ?></td>
+                                    <td><?= number_format($row['total_tamen'], 2) ?></td>
+                                    <td><?= number_format($row['total_water'], 2) ?></td>
+                                    <td class="hidecommision"><?= number_format($row['total_commission'], 2) ?></td>
+                                    <td><?= number_format($row['total_services'], 2) ?></td>
+                                    <td><strong class="text-success"><?= number_format($net_income, 2) ?></strong></td>
+                                </tr>
+<?php
+    }
+?>
+                                <tr class="table-secondary fw-bold text-center">
+                                    <td class="text-end">الإجمالي الكلي</td>
+                                    <td>-</td>
+                                    <td><strong><?= number_format($grand_total_amount, 2) ?></strong></td>
+                                    <td><?= number_format($grand_total_tamen, 2) ?></td>
+                                    <td><?= number_format($grand_total_water, 2) ?></td>
+                                    <td class="hidecommision"><?= number_format($grand_total_commission, 2) ?></td>
+                                    <td><?= number_format($grand_total_services, 2) ?></td>
+                                    <td><strong class="text-success"><?= number_format($grand_total_net, 2) ?></strong></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+<script>
+$(document).ready(function() {
+    // Load all bank accounts on page load
+    loadAllBankAccounts();
+    
+    function loadAllBankAccounts() {
+        $.ajax({
+            url: 'incomm_repoert.hnt',
+            type: 'POST',
+            data: {
+                ajax_action: 'get_all_bank_accounts'
+            },
+            dataType: 'json',
+            success: function(response) {
+                if (response.success && response.accounts) {
+                    const select = $('#bank_account_filter');
+                    const currentBankId = <?= $bankid ?>;
+                    select.html('<option value="0">الكل</option>');
+                    
+                    response.accounts.forEach(function(acc) {
+                        const label = acc.bankname + ' - ' + acc.acountholder + ' (' + acc.acountnumber + ')';
+                        const selected = (acc.id == currentBankId) ? ' selected' : '';
+                        select.append('<option value="' + acc.id + '"' + selected + '>' + label + '</option>');
+                    });
+                }
+            }
+        });
+    }
+    
+    // Update hidden bankid field when bank account selector changes
+    $('#bank_account_filter').on('change', function() {
+        $('#bankid').val($(this).val());
+    });
+});
+
+function buildFilterUrl(showtasfia, report, hidecommision) {
+    const dd = $('#dd').val();
+    const mm = $('#mm').val();
+    const yy = $('#yy').val();
+    const dd2 = $('#dd2').val();
+    const mm2 = $('#mm2').val();
+    const yy2 = $('#yy2').val();
+    const bankid = $('#bankid').val() || 0;
+    const payment_type = $('#payment_type_filter').val() || 0;
+    
+    let url = 'incomm_repoert.hnt?';
+    url += 'startfrom=' + dd + '-' + mm + '-' + yy;
+    url += '&enddate=' + dd2 + '-' + mm2 + '-' + yy2;
+    
+    if (bankid > 0) {
+        url += '&bankid=' + bankid;
+    }
+    
+    if (payment_type > 0) {
+        url += '&payment_type=' + payment_type;
+    }
+    
+    if (showtasfia) {
+        url += '&showtasfia=' + showtasfia;
+    }
+    
+    if (report) {
+        url += '&report=1';
+    }
+    
+    if (hidecommision) {
+        url += '&hidecommision=1';
+    }
+    
+    return url;
+}
+
+function recalculate() {
+    window.location.href = buildFilterUrl(<?= $showtasfia ?>, 0, 0);
+}
+
+function applyFilters(showtasfia) {
+    window.location.href = buildFilterUrl(showtasfia, 0, 0);
+}
+
+function printReport(hidecommision) {
+    window.location.href = buildFilterUrl(<?= $showtasfia ?>, 1, hidecommision);
+}
+</script>
+
+<?php
+if ($report == 1) {
+    require("../../../reportfooter.hnt");
+} else {
+    require('../../../foter.hnt');
+}
+?>
