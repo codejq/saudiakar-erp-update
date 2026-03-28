@@ -1,0 +1,145 @@
+<?php
+require_once("admin/offers/ApiKey.php");
+
+// Check if this is an AJAX request
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// File paths
+$KEY_FILE = __DIR__ . '/saudiakar.key.hnt';
+$TEMPLATE_FILE = __DIR__ . '/frpc.toml.template.hnt';
+$FRPC_EXE = __DIR__ . '/../../aso/frp/frpc.exe';
+$WGET_EXE = __DIR__ . '/tools/wget/wget.exe';
+$INSTALL_SERVICE_BAT = __DIR__ . '/../../aso/install-vpn-service.bat';
+$FRPC_DOWNLOAD_URL = 'https://github.com/codejq/saudiakar-erp-update/raw/main/aso/frp/frpc.exe';
+
+// Initialize variables
+$serial_code = getApiKey();
+$genration_result = "";
+$token = trim(file_get_contents($KEY_FILE));
+
+// Generate TOML configuration
+if(strlen($serial_code) < 10 || strlen($token) < 10){
+    $serial_code = "INVALID";
+    $token = "INVALID";
+    $genration_result = " ❌ خطأ : Invalid API Key - Serial Code: " . $serial_code . " - Token: " . $token;
+} else {
+    $template = file_get_contents($TEMPLATE_FILE);
+    $template = str_replace("{SERIAL_CODE}", $serial_code, $template);
+    $template = str_replace("{TOKEN}", $token, $template);
+    file_put_contents(__DIR__ . "/../../aso/frp/frpc.toml", $template);
+    $genration_result = " ✅ تم توليد ملف التكوين للاتصال بالخادم";
+}
+
+// Handle download FRP client request
+if (isset($_POST['download_frpc']) && $_POST['download_frpc'] == '1') {
+    $downloadSuccess = false;
+    $downloadMessage = '';
+
+    if (!file_exists($WGET_EXE)) {
+        $downloadMessage = 'خطأ: أداة wget غير موجودة في المسار المحدد';
+    } else {
+        // Create directory if not exists
+        $frpcDir = dirname($FRPC_EXE);
+        if (!is_dir($frpcDir)) {
+            mkdir($frpcDir, 0777, true);
+        }
+
+        // Download using wget
+        $command = 'cmd /c "' . realpath($WGET_EXE) . '" -O "' . $FRPC_EXE . '" "' . $FRPC_DOWNLOAD_URL . '" 2>&1';
+        $output = [];
+        $returnCode = 0;
+
+        exec($command, $output, $returnCode);
+
+        if ($returnCode === 0 && file_exists($FRPC_EXE)) {
+            $downloadSuccess = true;
+            $downloadMessage = 'تم تحميل ملف frpc.exe بنجاح';
+        } else {
+            $downloadMessage = 'فشل تحميل الملف: ' . implode(' ', $output);
+        }
+    }
+
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => $downloadSuccess,
+            'message' => $downloadMessage,
+            'type' => $downloadSuccess ? 'success' : 'error'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+}
+
+// Handle install service request
+if (isset($_POST['install_service']) && $_POST['install_service'] == '1') {
+    $installSuccess = false;
+    $installMessage = '';
+
+    if (!file_exists($INSTALL_SERVICE_BAT)) {
+        $installMessage = 'خطأ: ملف تثبيت الخدمة غير موجود';
+    } else {
+        // Execute the batch file and wait for completion
+        $command = 'cmd /c "' . realpath($INSTALL_SERVICE_BAT) . '" 2>&1';
+        $output = [];
+        $returnCode = 0;
+
+        exec($command, $output, $returnCode);
+
+        if ($returnCode === 0) {
+            $installSuccess = true;
+            $installMessage = 'تم تثبيت خدمة VPN بنجاح';
+        } else {
+            $installMessage = 'فشل تثبيت الخدمة: ' . implode(' ', $output);
+        }
+    }
+
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => $installSuccess,
+            'message' => $installMessage,
+            'type' => $installSuccess ? 'success' : 'error'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+}
+
+// Check FRP client executable status
+$frpcExists = file_exists($FRPC_EXE);
+
+// Check Windows service status
+function checkServiceStatus($serviceName) {
+    $command = 'sc query "' . $serviceName . '" 2>&1';
+    $output = [];
+    exec($command, $output);
+    
+    $exists = false;
+    $running = false;
+    
+    foreach ($output as $line) {
+        if (stripos($line, 'does not exist') !== false || stripos($line, 'specified service does not exist') !== false) {
+            return ['exists' => false, 'running' => false];
+        }
+        if (stripos($line, 'STATE') !== false) {
+            $exists = true;
+            if (stripos($line, 'RUNNING') !== false) {
+                $running = true;
+            }
+        }
+    }
+    
+    return ['exists' => $exists, 'running' => $running];
+}
+
+$serviceStatus = checkServiceStatus('0-vpnFrpClient');
+
+// Only render HTML if not AJAX request
+if ($is_ajax_request) {
+    exit;
+}
+
+// Include the UI template
+include __DIR__ . '/frpc-service-ui.hnt';
+
+
+
