@@ -2,7 +2,7 @@
 /**
  * Amlak (Property Management) Integration
  * تكامل نظام إدارة العقارات مع المحاسبة
- * 
+ *
  * @charset UTF-8
  * @version 1.0
  */
@@ -10,19 +10,19 @@
 class AmlakAccountingIntegration {
     private $db;
     private $accountingManager;
-    
+
     public function __construct($db, $accountingManager) {
         $this->db = $db;
         $this->accountingManager = $accountingManager;
     }
-    
+
     /**
      * Create invoice from rental contract (egar)
      * إنشاء فاتورة من عقد الإيجار
      */
     public function createInvoiceFromEgar($egarId) {
         // Get contract details
-        $egarQuery = "SELECT e.*, m.mostagername, m.mostagervatnumber, 
+        $egarQuery = "SELECT e.*, m.mostagername, m.mostagervatnumber,
                       ad.aqarname, a.aqarname as main_aqar
                       FROM egar e
                       LEFT JOIN mostagereen m ON e.mostagerid = m.mostagerid
@@ -33,16 +33,16 @@ class AmlakAccountingIntegration {
         $stmt->bind_param('i', $egarId);
         $stmt->execute();
         $egar = $stmt->get_result()->fetch_assoc();
-        
+
         if (!$egar) {
             return ['success' => false, 'message' => 'Contract not found'];
         }
-        
+
         // Calculate amounts
         $annualPrice = $egar['annualprice'] ?? 0;
         $subtotal = $annualPrice / 1.15; // Remove VAT
         $vatAmount = $annualPrice - $subtotal;
-        
+
         // Prepare invoice data
         $invoiceData = [
             'invoice_type' => 'standard',
@@ -54,7 +54,7 @@ class AmlakAccountingIntegration {
             'payment_method' => 'bank_transfer',
             'notes' => "إيجار {$egar['aqarname']} - عقد رقم {$egar['rakam3akdid']}"
         ];
-        
+
         // Prepare items
         $items = [
             [
@@ -66,10 +66,10 @@ class AmlakAccountingIntegration {
                 'total_amount' => $annualPrice
             ]
         ];
-        
+
         // Create invoice
         $result = $this->accountingManager->createInvoice($invoiceData, $items);
-        
+
         if ($result['success']) {
             // Update egar with invoice reference
             $updateQuery = "UPDATE egar SET invoice_id = ? WHERE rakam3akdid = ?";
@@ -77,10 +77,10 @@ class AmlakAccountingIntegration {
             $stmt->bind_param('ii', $result['invoice_id'], $egarId);
             $stmt->execute();
         }
-        
+
         return $result;
     }
-    
+
     /**
      * Create journal entry from payment voucher (sanad)
      * إنشاء قيد من سند القبض
@@ -171,25 +171,25 @@ class AmlakAccountingIntegration {
 
         return $this->accountingManager->createJournalEntry($entryData, $lines);
     }
-    
+
     /**
      * Create journal entry from expense (masrofat)
      * إنشاء قيد من المصروفات
      */
     public function createEntryFromMasrofat($masrofatId) {
         // Get expense details
-        $masrofatQuery = "SELECT * FROM masrofat WHERE masrofatid = ?";
+        $masrofatQuery = "SELECT * FROM masrofat WHERE fund_source = 0  AND masrofatid = ?";
         $stmt = $this->db->prepare($masrofatQuery);
         $stmt->bind_param('i', $masrofatId);
         $stmt->execute();
         $masrofat = $stmt->get_result()->fetch_assoc();
-        
+
         if (!$masrofat) {
             return ['success' => false, 'error' => 'Expense not found'];
         }
-        
+
         $amount = $masrofat['masrofatamount'] ?? 0;
-        
+
         // Prepare journal entry
         $entryData = [
             'entry_date' => $masrofat['masrofatdate'] ?? date('Y-m-d'),
@@ -199,11 +199,11 @@ class AmlakAccountingIntegration {
             'description' => $masrofat['masrofatdescription'] ?? "مصروف رقم {$masrofatId}",
             'status' => 'posted'
         ];
-        
+
         // Determine accounts
         $cashAccountId = 2; // Cash account
         $expenseAccountId = 10; // Expenses account (5000)
-        
+
         $lines = [
             [
                 'account_id' => $expenseAccountId,
@@ -218,10 +218,10 @@ class AmlakAccountingIntegration {
                 'credit_amount' => $amount
             ]
         ];
-        
+
         return $this->accountingManager->createJournalEntry($entryData, $lines);
     }
-    
+
     /**
      * Sync property owner as customer
      * مزامنة مالك العقار كعميل
@@ -233,11 +233,11 @@ class AmlakAccountingIntegration {
         $stmt->bind_param('i', $malekId);
         $stmt->execute();
         $malek = $stmt->get_result()->fetch_assoc();
-        
+
         if (!$malek) {
             return ['success' => false, 'message' => 'Owner not found'];
         }
-        
+
         // Check if customer already exists
         $checkQuery = "SELECT customer_id FROM acc_customers WHERE customer_name = ?";
         $stmt = $this->db->prepare($checkQuery);
@@ -245,26 +245,26 @@ class AmlakAccountingIntegration {
         $stmt->bind_param('s', $malekName);
         $stmt->execute();
         $existing = $stmt->get_result()->fetch_assoc();
-        
+
         if ($existing) {
             return ['success' => true, 'customer_id' => $existing['customer_id'], 'message' => 'Customer already exists'];
         }
-        
+
         // Create customer
-        $insertQuery = "INSERT INTO acc_customers (customer_name, phone, address, is_active, created_at) 
+        $insertQuery = "INSERT INTO acc_customers (customer_name, phone, address, is_active, created_at)
                        VALUES (?, ?, ?, 1, NOW())";
         $stmt = $this->db->prepare($insertQuery);
         $phone = $malek['malekbayan2'] ?? null; // malekbayan2 might be phone
         $address = $malek['malekbayan3'] ?? null; // malekbayan3 might be address
         $stmt->bind_param('sss', $malekName, $phone, $address);
-        
+
         if ($stmt->execute()) {
             return ['success' => true, 'customer_id' => $this->db->insert_id];
         }
-        
+
         return ['success' => false, 'message' => 'Failed to create customer: ' . $this->db->error];
     }
-    
+
     /**
      * Sync tenant as customer
      * مزامنة المستأجر كعميل
@@ -276,11 +276,11 @@ class AmlakAccountingIntegration {
         $stmt->bind_param('i', $mostagerId);
         $stmt->execute();
         $mostager = $stmt->get_result()->fetch_assoc();
-        
+
         if (!$mostager) {
             return ['success' => false, 'error' => 'Tenant not found'];
         }
-        
+
         // Check if customer already exists
         $checkQuery = "SELECT customer_id FROM acc_customers WHERE customer_name = ?";
         $stmt = $this->db->prepare($checkQuery);
@@ -288,13 +288,13 @@ class AmlakAccountingIntegration {
         $stmt->bind_param('s', $mostagerName);
         $stmt->execute();
         $existing = $stmt->get_result()->fetch_assoc();
-        
+
         if ($existing) {
             return ['success' => true, 'customer_id' => $existing['customer_id'], 'message' => 'Customer already exists'];
         }
-        
+
         // Create customer
-        $insertQuery = "INSERT INTO acc_customers (customer_name, vat_number, phone, email, address, is_active, created_at) 
+        $insertQuery = "INSERT INTO acc_customers (customer_name, vat_number, phone, email, address, is_active, created_at)
                        VALUES (?, ?, ?, ?, ?, 1, NOW())";
         $stmt = $this->db->prepare($insertQuery);
         $vatNumber = $mostager['mostagervatnumber'] ?? null;
@@ -302,14 +302,14 @@ class AmlakAccountingIntegration {
         $email = $mostager['mostageremail'] ?? null;
         $address = $mostager['mostageraddress'] ?? null;
         $stmt->bind_param('sssss', $mostagerName, $vatNumber, $phone, $email, $address);
-        
+
         if ($stmt->execute()) {
             return ['success' => true, 'customer_id' => $this->db->insert_id];
         }
-        
+
         return ['success' => false, 'error' => 'Failed to create customer'];
     }
-    
+
     /**
      * Get property financial summary
      * ملخص مالي للعقار
@@ -317,31 +317,31 @@ class AmlakAccountingIntegration {
     public function getPropertyFinancialSummary($idaqar, $dateFrom = null, $dateTo = null) {
         if (!$dateFrom) $dateFrom = date('Y-01-01');
         if (!$dateTo) $dateTo = date('Y-m-d');
-        
+
         // Get total rental income
-        $incomeQuery = "SELECT SUM(annualprice) as total_income 
-                       FROM egar 
-                       WHERE idaqar = ? 
+        $incomeQuery = "SELECT SUM(annualprice) as total_income
+                       FROM egar
+                       WHERE idaqar = ?
                        AND egarstartdate BETWEEN ? AND ?";
         $stmt = $this->db->prepare($incomeQuery);
         $stmt->bind_param('iss', $idaqar, $dateFrom, $dateTo);
         $stmt->execute();
         $income = $stmt->get_result()->fetch_assoc();
-        
+
         // Get total expenses
-        $expenseQuery = "SELECT SUM(masrofatamount) as total_expense 
-                        FROM masrofat 
-                        WHERE idaqar = ? 
+        $expenseQuery = "SELECT SUM(masrofatamount) as total_expense
+                        FROM masrofat
+                        WHERE idaqar = ?
                         AND masrofatdate BETWEEN ? AND ?";
         $stmt = $this->db->prepare($expenseQuery);
         $stmt->bind_param('iss', $idaqar, $dateFrom, $dateTo);
         $stmt->execute();
         $expense = $stmt->get_result()->fetch_assoc();
-        
+
         $totalIncome = $income['total_income'] ?? 0;
         $totalExpense = $expense['total_expense'] ?? 0;
         $netIncome = $totalIncome - $totalExpense;
-        
+
         return [
             'total_income' => $totalIncome,
             'total_expense' => $totalExpense,

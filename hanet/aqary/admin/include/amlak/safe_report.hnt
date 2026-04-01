@@ -1,0 +1,421 @@
+<?php
+// Set page variables
+$sc_title = "بيان صافي الإيراد";
+$sc_id = "103";
+
+// Extract request variables
+extract($_REQUEST);
+
+// Initialize variables
+$idaqar = isset($idaqar) ? intval($idaqar) : 0;
+$report = isset($report) ? intval($report) : 0;
+$tasfia = isset($tasfia) ? intval($tasfia) : 0;
+$startfrom = isset($startfrom) ? trim($startfrom) : '';
+$enddate = isset($enddate) ? trim($enddate) : '';
+$startfromx = isset($startfromx) ? intval($startfromx) : 0;
+$enddatex = isset($enddatex) ? intval($enddatex) : 0;
+
+// Check if this is an AJAX request
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Include authentication and database
+if ($is_ajax_request) {
+    include_once "../../../reqloginajax.hnt";
+} else {
+    include_once "../../../nocash.hnt";
+    $_SERVER['HTTP_REFERER'] = "showeditaqar.hnt?idaqar=$idaqar";
+    $canscroll = 1;
+
+    if ($report == 1) {
+        include_once "../../../report_header.hnt";
+    } else {
+        include_once "../../../header.hnt";
+    }
+}
+
+// Include required classes
+require_once '../arabicTools.class.hnt';
+include_once "arabic_num.class.hnt";
+
+// Instantiate classes
+$arabicTools = new ArabicTools();
+$arabicNum = new Arabic_num();
+
+// Handle liquidation request
+if ($tasfia == 1 && $idaqar > 0) {
+    $sql = "UPDATE eradat SET idaqar='-" . intval($idaqar) . "' WHERE idaqar='" . intval($idaqar) . "'";
+    mysql_query($sql, $link);
+    $sql = "UPDATE masrofat SET idaqar='-" . intval($idaqar) . "' WHERE idaqar='" . intval($idaqar) . "'";
+    mysql_query($sql, $link);
+
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم تصفية الموقف المالي للعقار بنجاح'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+}
+
+// Only render HTML if NOT an AJAX request
+if (!$is_ajax_request) {
+?>
+
+<style>
+.report-card {
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    margin-bottom: 1.5rem;
+}
+
+.report-header {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px 8px 0 0;
+    text-align: center;
+}
+
+.report-row {
+    display: flex;
+    padding: 1rem;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.report-row:last-child {
+    border-bottom: none;
+}
+
+.report-row:nth-child(even) {
+    background-color: #f8f9fa;
+}
+
+.report-label {
+    flex: 0 0 300px;
+    font-weight: 600;
+    color: #495057;
+}
+
+.report-value {
+    flex: 1;
+    color: #212529;
+}
+
+.net-income-row {
+    background: linear-gradient(135deg, #0a7047 0%, #0d9488 100%) !important;
+    color: white !important;
+    font-size: 1.1rem;
+    font-weight: 700;
+}
+
+.net-income-row .report-label,
+.net-income-row .report-value {
+    color: white;
+}
+
+@media print {
+    .no-print {
+        display: none !important;
+    }
+}
+</style>
+
+<div class="container-fluid py-3">
+    <?php if ($report != 1) { ?>
+    <!-- Page Header -->
+    <div class="card shadow-sm border-0 mb-4 no-print">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-calculator me-2"></i>
+                <?= $sc_title ?>
+            </h4>
+        </div>
+    </div>
+    <?php } ?>
+
+
+    <?php
+    // Get property data
+    $sql = "SELECT aqarname, persentage FROM amlak WHERE idaqar='" . intval($idaqar) . "'";
+    $property_result = mysql_query($sql, $link);
+    $property_data = mysql_fetch_array($property_result);
+    $property_name = $property_data['aqarname'] ?? 'غير محدد';
+    $persentage = $property_data['persentage'] ?? 0;
+
+    // Calculate date range
+    if (!$hnt_dll && $hnt_supper_dll != 5) {
+        $ers = 15277248; // Hijri year in seconds
+    } else {
+        $ers = 15768000; // Gregorian year in seconds
+    }
+
+    if ($startfrom) {
+        $daxx = explode("-", "0-0-0-" . $startfrom);
+        if (($daxx[5] < 1500) && ($daxx[5] > 1400)) {
+            $startfrom = str_replace("-", "/", $startfrom);
+            $startfrom = $arabicTools->dateHejri2Geo($startfrom);
+            $enddate = str_replace("-", "/", $enddate);
+            $enddate = $arabicTools->dateHejri2Geo($enddate);
+        }
+        $daxx = explode("-", "0-0-0-" . $startfrom);
+        $startfrom = mktime(0, 0, 0, $daxx[4], $daxx[3], $daxx[5]);
+        $dax2 = explode("-", "0-0-0-" . $enddate);
+        $enddate = mktime(0, 0, 0, $dax2[4], $dax2[3], $dax2[5]);
+    } else {
+        $startfrom = time() - $ers;
+        $enddate = time();
+    }
+
+    if (!$hnt_dll && $hnt_supper_dll != 5) {
+        $daxx = explode("-", $arabicTools->arabicDate('hj:s-i-h-d-m-Y', $startfrom));
+        $dax2 = explode("-", $arabicTools->arabicDate('hj:s-i-h-d-m-Y', $enddate));
+    } else {
+        $daxx = explode("-", date('s-i-h-d-m-Y', $startfrom));
+        $dax2 = explode("-", date('s-i-h-d-m-Y', $enddate));
+    }
+
+    if ($startfromx) {
+        $startfrom = $startfromx;
+        $enddate = $enddatex;
+    }
+
+    // Get current date for report header
+    $current_time = time();
+    if (!$hnt_dll && $hnt_supper_dll != 5) {
+        $current_date_hijri = $arabicTools->arabicDate('hj:l d-F-Y هـ', $current_time);
+        $current_date_gregorian = date('d/m/Y', $current_time);
+    } else {
+        $current_date_gregorian = date('d/m/Y', $current_time);
+        $current_date_hijri = $arabicTools->arabicDate('hj:l d-F-Y هـ', $current_time);
+    }
+    ?>
+
+    <!-- Report Header -->
+    <div class="report-card">
+        <div class="report-header">
+            <h3 class="mb-2">
+                <i class="bi bi-file-earmark-bar-graph me-2"></i>
+                تقرير صافي الإيرادات
+            </h3>
+            <h4 class="mb-3"><?= htmlspecialchars($property_name, ENT_QUOTES, 'UTF-8') ?></h4>
+            <p class="mb-1">بتاريخ : <?= $current_date_gregorian ?></p>
+            <p class="mb-0">الموافق: <?= $current_date_hijri ?></p>
+        </div>
+    </div>
+
+    <?php if ($report != 1) { ?>
+    <!-- Action Buttons and Date Range -->
+    <div class="card shadow-sm border-0 mb-4 no-print">
+        <div class="card-body p-4">
+            <div class="text-center mb-4">
+                <button type="button" class="btn btn-primary" onclick="window.open('safe_report.hnt?idaqar=<?= $idaqar ?>&report=1&startfromx=<?= $startfrom ?>&enddatex=<?= $enddate ?>', '_blank');">
+                    <i class="bi bi-printer me-2"></i>
+                    عرض تقرير للطباعة
+                </button>
+                <button type="button" class="btn btn-success" onclick="window.print();">
+                    <i class="bi bi-file-pdf me-2"></i>
+                    طباعة / حفظ PDF
+                </button>
+                <a href="reports.hnt" class="btn btn-outline-secondary">
+                    <i class="bi bi-arrow-right me-2"></i>
+                    العودة للتقارير
+                </a>
+            </div>
+
+            <div class="row g-2 align-items-end justify-content-center">
+                <div class="col-auto">
+                    <label class="form-label mb-1">من تاريخ</label>
+                    <div class="input-group input-group-sm">
+                        <input type="text" class="form-control text-center" id="dd" value="<?= $daxx[3] ?>" placeholder="يوم" style="width: 60px;">
+                        <span class="input-group-text">/</span>
+                        <input type="text" class="form-control text-center" id="mm" value="<?= $daxx[4] ?>" placeholder="شهر" style="width: 60px;">
+                        <span class="input-group-text">/</span>
+                        <input type="text" class="form-control text-center" id="yy" value="<?= $daxx[5] ?>" placeholder="سنة" style="width: 80px;">
+                    </div>
+                </div>
+                <div class="col-auto">
+                    <label class="form-label mb-1">إلى تاريخ</label>
+                    <div class="input-group input-group-sm">
+                        <input type="text" class="form-control text-center" id="dd2" value="<?= $dax2[3] ?>" placeholder="يوم" style="width: 60px;">
+                        <span class="input-group-text">/</span>
+                        <input type="text" class="form-control text-center" id="mm2" value="<?= $dax2[4] ?>" placeholder="شهر" style="width: 60px;">
+                        <span class="input-group-text">/</span>
+                        <input type="text" class="form-control text-center" id="yy2" value="<?= $dax2[5] ?>" placeholder="سنة" style="width: 80px;">
+                    </div>
+                </div>
+                <div class="col-auto">
+                    <button type="button" class="btn btn-info btn-sm" onclick="recalculateReport();">
+                        <i class="bi bi-arrow-clockwise me-1"></i>
+                        إعادة الحساب
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <?php } ?>
+
+
+    <?php
+    // Calculate revenues
+    $sql = "SELECT SUM(amount) as total_amount, SUM(mysa3ee) as total_sa3ee, SUM(mywater) as total_water
+            FROM eradat
+            WHERE idaqar='" . intval($idaqar) . "'
+            AND paymentdate > '" . intval($startfrom) . "'
+            AND paymentdate < '" . intval($enddate) . "'";
+    $revenue_result = mysql_query($sql, $link);
+    $revenue_data = mysql_fetch_array($revenue_result);
+    $erad = $revenue_data['total_amount'] ?? 0;
+    $sa3ee = $revenue_data['total_sa3ee'] ?? 0;
+    $water = $revenue_data['total_water'] ?? 0;
+
+    // Calculate expenses
+    $sql = "SELECT SUM(amount) as total_expenses
+            FROM masrofat
+            WHERE idaqar='" . intval($idaqar) . "'
+            AND payeddate > '" . intval($startfrom) . "'
+            AND payeddate < '" . intval($enddate) . "'";
+    $expense_result = mysql_query($sql, $link);
+    $expense_data = mysql_fetch_array($expense_result);
+    $masrof = $expense_data['total_expenses'] ?? 0;
+
+    // Calculate commission
+    $per = $persentage / 100;
+    if ($per < 100) {
+        if ($per < 1) {
+            $per = $per * 100;
+        }
+        $myper = $per * $erad / 100;
+        $commission_formula = "($per% × " . number_format($erad) . ")/100 = ";
+    } else {
+        $myper = $per;
+        $commission_formula = "";
+    }
+
+    // Calculate net income
+    $net_income = $erad - $masrof - $myper;
+    ?>
+
+    <!-- Financial Report -->
+    <div class="report-card">
+        <div class="report-row">
+            <div class="report-label">
+                <i class="bi bi-cash-stack text-success me-2"></i>
+                إجمالي الإيرادات الخاصة بالعقار
+            </div>
+            <div class="report-value">
+                <strong><?= number_format($erad, 2) ?> <?= $myomla ?></strong>
+                <br>
+                <small class="text-muted">(<?= $arabicNum->numtostr($erad) ?> <?= $myomla ?> فقط لا غير)</small>
+            </div>
+        </div>
+
+        <div class="report-row">
+            <div class="report-label">
+                <i class="bi bi-wallet2 text-info me-2"></i>
+                الإيرادات بدون السعي
+            </div>
+            <div class="report-value">
+                <strong><?= number_format($erad - $sa3ee, 2) ?> <?= $myomla ?></strong>
+                <br>
+                <small class="text-muted">(<?= $arabicNum->numtostr($erad - $sa3ee) ?> <?= $myomla ?> فقط لا غير)</small>
+            </div>
+        </div>
+
+        <div class="report-row">
+            <div class="report-label">
+                <i class="bi bi-droplet text-primary me-2"></i>
+                إجمالي المياه
+            </div>
+            <div class="report-value">
+                <strong><?= number_format($water, 2) ?> <?= $myomla ?></strong>
+                <br>
+                <small class="text-muted">(<?= $arabicNum->numtostr($water) ?> <?= $myomla ?> فقط لا غير)</small>
+            </div>
+        </div>
+
+        <div class="report-row">
+            <div class="report-label">
+                <i class="bi bi-receipt text-danger me-2"></i>
+                إجمالي المصروفات الخاصة بالعقار
+            </div>
+            <div class="report-value">
+                <strong><?= number_format($masrof, 2) ?> <?= $myomla ?></strong>
+                <br>
+                <small class="text-muted">(<?= $arabicNum->numtostr($masrof) ?> <?= $myomla ?> فقط لا غير)</small>
+            </div>
+        </div>
+
+        <div class="report-row">
+            <div class="report-label">
+                <i class="bi bi-percent text-warning me-2"></i>
+                إجمالي عمولة متحصلة من التجديد
+            </div>
+            <div class="report-value">
+                <strong><?= number_format($sa3ee, 2) ?> <?= $myomla ?></strong>
+                <br>
+                <small class="text-muted">(<?= $arabicNum->numtostr($sa3ee) ?> <?= $myomla ?> فقط لا غير)</small>
+            </div>
+        </div>
+
+        <div class="report-row">
+            <div class="report-label">
+                <i class="bi bi-calculator text-secondary me-2"></i>
+                النسبة المستحقة على التحصيل
+            </div>
+            <div class="report-value">
+                <?php if ($commission_formula) { ?>
+                <small class="text-muted d-block"><?= $commission_formula ?></small>
+                <?php } ?>
+                <strong><?= number_format($myper, 2) ?> <?= $myomla ?></strong>
+                <br>
+                <small class="text-muted">(<?= $arabicNum->numtostr(intval($myper)) ?> <?= $myomla ?> فقط لا غير)</small>
+            </div>
+        </div>
+
+        <div class="report-row net-income-row">
+            <div class="report-label">
+                <i class="bi bi-graph-up-arrow me-2"></i>
+                صافي الإيراد
+            </div>
+            <div class="report-value">
+                <strong><?= number_format($net_income, 2) ?> <?= $myomla ?></strong>
+                <br>
+                <small>(<?= $arabicNum->numtostr(intval($net_income)) ?> <?= $myomla ?> فقط لا غير)</small>
+            </div>
+        </div>
+    </div>
+
+    <?php if ($report == 1) { ?>
+    <!-- Report Footer -->
+    <div class="text-center mt-4" style="border-top: 2px solid #000; padding-top: 1rem;">
+        <p>
+            <strong>ت:</strong> <?= htmlspecialchars($bayantel ?? '', ENT_QUOTES, 'UTF-8') ?>
+            &nbsp;&nbsp;&nbsp;&nbsp;
+            <strong>العنوان:</strong> <?= htmlspecialchars($bayanaddress ?? '', ENT_QUOTES, 'UTF-8') ?>
+        </p>
+    </div>
+    <?php } ?>
+</div>
+
+<?php if ($report != 1) { ?>
+<script>
+// Modern JavaScript for report recalculation
+function recalculateReport() {
+    const dd = document.getElementById('dd').value;
+    const mm = document.getElementById('mm').value;
+    const yy = document.getElementById('yy').value;
+    const dd2 = document.getElementById('dd2').value;
+    const mm2 = document.getElementById('mm2').value;
+    const yy2 = document.getElementById('yy2').value;
+
+    window.location.href = `safe_report.hnt?idaqar=<?= $idaqar ?>&startfrom=${dd}-${mm}-${yy}&enddate=${dd2}-${mm2}-${yy2}`;
+}
+</script>
+<?php } ?>
+
+<?php
+    require('../../../foter.hnt');
+} // End if (!$is_ajax_request)
+?>

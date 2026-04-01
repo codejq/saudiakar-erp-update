@@ -125,15 +125,19 @@ class OpenSSLCommandLine {
         $serialNumber = $this->generateDynamicSerialNumber();
         $commonName = "TST-$serialNumber";
 
-        // Main DN with standard attributes ONLY
-        // OID attributes will be added via subjectAltName dirName in config
+        $industry = ZatcaPhase2Config::$CERT_INDUSTRY ?? 'software';
+        $orgIdentifier = ZatcaPhase2Config::$CERT_ORGANIZATION_IDENTIFIER;
+
+        // Main DN — must include L, businessCategory, and organizationIdentifier for simulation
         $dn = sprintf(
-            '/C=%s/L=%s/O=%s/OU=%s/CN=%s',
+            '/C=%s/L=%s/O=%s/OU=%s/CN=%s/businessCategory=%s/organizationIdentifier=%s',
             $country,
             $location,
             $orgName,
             $orgUnit,
-            $commonName
+            $commonName,
+            $industry,
+            $orgIdentifier
         );
 
         ZatcaPhase2Config::log("Built subject DN: $dn", 'DEBUG');
@@ -164,45 +168,73 @@ class OpenSSLCommandLine {
         $invoiceType = ZatcaPhase2Config::$CERT_INVOICE_TYPE;
         $orgName = ZatcaPhase2Config::$CERT_ORGANIZATION_NAME ?? 'Your Company Name';
         $orgUnit = ZatcaPhase2Config::$CERT_ORGANIZATIONAL_UNIT ?? 'IT Department';
+        $location = ZatcaPhase2Config::$CERT_LOCATION ?? 'Riyadh';
+        $industry = ZatcaPhase2Config::$CERT_INDUSTRY ?? 'software';
 
-        // CN format: TST-<serial number> (quantum-billing format)
-        $commonName = "TST-$serialNumber";
+        // registeredAddress = building number from data.hnt ($zatca_company_building_number)
+        global $zatca_company_building_number, $zatca_company_postal_code;
+        $buildingNumber = $zatca_company_building_number ?? $zatca_company_postal_code ?? '0000';
 
-        ZatcaPhase2Config::log("Creating OpenSSL config with quantum-billing approach", 'INFO');
-        ZatcaPhase2Config::log("  Serial Number: $serialNumber", 'DEBUG');
+        // certificateTemplateName (OID 1.3.6.1.4.1.311.20.2) is ENVIRONMENT-SPECIFIC:
+        //   sandbox    → TSTZATCA-Code-Signing
+        //   simulation → PREZATCA-Code-Signing
+        //   production → ZATCA-Code-Signing
+        $env = ZatcaPhase2Config::$ENVIRONMENT ?? 'sandbox';
+        switch ($env) {
+            case 'production':
+                $certTemplateName = 'ZATCA-Code-Signing';
+                break;
+            case 'simulation':
+                $certTemplateName = 'PREZATCA-Code-Signing';
+                break;
+            default: // sandbox
+                $certTemplateName = 'TSTZATCA-Code-Signing';
+                break;
+        }
+
+        // CN is just the environment-specific template name (no serial number appended)
+        $commonName = $certTemplateName;
+
+        ZatcaPhase2Config::log("Creating OpenSSL config for ZATCA environment: $env", 'INFO');
+        ZatcaPhase2Config::log("  Certificate Template: $certTemplateName", 'DEBUG');
         ZatcaPhase2Config::log("  Common Name (CN): $commonName", 'DEBUG');
         ZatcaPhase2Config::log("  Organization ID: $orgIdentifier", 'DEBUG');
         ZatcaPhase2Config::log("  Invoice Type: $invoiceType", 'DEBUG');
+        ZatcaPhase2Config::log("  Location (L): $location", 'DEBUG');
+        ZatcaPhase2Config::log("  Building Number (registeredAddress): $buildingNumber", 'DEBUG');
 
-        // QUANTUM-BILLING APPROACH: OID attributes in subjectAltName dirName structure
-        // This is the working approach that includes proper OID encoding
         $config = <<<EOT
+oid_section = OIDs
+
+[ OIDs ]
+certificateTemplateName = 1.3.6.1.4.1.311.20.2
+
 [ req ]
 prompt             = no
 default_md         = sha256
+req_extensions     = reqExt
 distinguished_name = dn
-req_extensions     = v3_req
 
 [ dn ]
 C  = SA
-O  = $orgName
 OU = $orgUnit
+O  = $orgName
 CN = $commonName
 
 [ v3_req ]
-# ZATCA-Code-Signing extension with specific OID
-1.3.6.1.4.1.311.20.2  = ASN1:UTF8String:ZATCA-Code-Signing
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, nonRepudiation, keyEncipherment
 
-# Include OID attributes as subjectAltName dirName (quantum-billing approach)
-subjectAltName        = dirName:dir_sect
+[ reqExt ]
+certificateTemplateName = ASN1:PRINTABLESTRING:$certTemplateName
+subjectAltName          = dirName:alt_names
 
-[ dir_sect ]
-# OID attributes as directoryName content
-# These will be properly encoded in the certificate
-OID.2.5.4.4                     = $serialNumber
-OID.0.9.2342.19200300.100.1.1   = $orgIdentifier
-OID.2.5.4.12                    = $invoiceType
-OID.2.5.4.26                    = RRRD2929
+[ alt_names ]
+SN                = $serialNumber
+UID               = $orgIdentifier
+title             = $invoiceType
+registeredAddress = $buildingNumber
+businessCategory  = $industry
 
 EOT;
 
@@ -254,15 +286,14 @@ EOT;
             mkdir($dir, 0700, true);
         }
 
-        // ZATCA REQUIRES ECDSA with secp256k1 curve - NOT RSA!
-        // Generate ECDSA private key using OpenSSL command
+        // ZATCA requires ECDSA with secp256k1 curve (per official ZATCA SDK)
         $command = sprintf(
             '"%s" ecparam -name secp256k1 -genkey -noout -out "%s" 2>&1',
             $this->opensslPath,
             $keyPath
         );
 
-        ZatcaPhase2Config::log("Generating ECDSA secp256k1 private key (ZATCA requirement)...", 'INFO');
+        ZatcaPhase2Config::log("Generating ECDSA secp256k1 private key (ZATCA SDK requirement)...", 'INFO');
         ZatcaPhase2Config::log("Executing: $command", 'DEBUG');
 
         $output = [];
@@ -297,12 +328,11 @@ EOT;
         $keyPath = $keyPath ?? ZatcaPhase2Config::PRIVATE_KEY_FILE;
         $csrPath = $csrPath ?? ZatcaPhase2Config::CSR_FILE;
 
-        // Check if private key exists
-        if (!file_exists($keyPath)) {
-            $result = $this->generatePrivateKey($keyPath);
-            if (!$result['success']) {
-                return $result;
-            }
+        // Always regenerate private key to ensure correct curve (prime256v1)
+        // Old keys may have been generated with secp256k1 which simulation rejects
+        $result = $this->generatePrivateKey($keyPath);
+        if (!$result['success']) {
+            return $result;
         }
 
         ZatcaPhase2Config::log('', 'INFO');
@@ -337,8 +367,11 @@ EOT;
 
         if (file_exists($csrPath)) {
             $csrContent = file_get_contents($csrPath);
-            ZatcaPhase2Config::log("✅ CSR generated successfully using quantum-billing approach: $csrPath", 'INFO');
-            ZatcaPhase2Config::log("OID attributes included via subjectAltName dirName structure", 'INFO');
+            // Normalize to LF line endings — CRLF (Windows) causes Invalid-CSR in ZATCA simulation
+            $csrContent = str_replace("\r\n", "\n", $csrContent);
+            $csrContent = str_replace("\r", "\n", $csrContent);
+            file_put_contents($csrPath, $csrContent);
+            ZatcaPhase2Config::log("✅ CSR generated successfully (LF line endings): $csrPath", 'INFO');
             return [
                 'success' => true,
                 'csr' => $csrContent,

@@ -1,0 +1,473 @@
+<?php
+/**
+ * Accounting Module - Main Dashboard
+ * نظام المحاسبة المتكامل
+ *
+ * @charset UTF-8
+ * @version 1.0
+ * @author Real Estate System
+ */
+
+$sc_title = "نظام المحاسبة";
+$sc_id = "200";
+include_once "../../nocash.hnt";
+
+$canscroll = 0;
+$showdhmltazkeer = 0;
+include_once "../../header.hnt";
+
+include_once "../../connectdb.hnt";
+
+// Get current user
+$currentUserId = $_SESSION['userid'] ?? 1;
+$currentUsername = $_SESSION['username'] ?? 'Admin';
+
+// Get current fiscal year
+$fiscalYearQuery = "SELECT * FROM acc_fiscal_years WHERE status = 'open' ORDER BY fiscal_year DESC LIMIT 1";
+$fiscalYearResult = $db->query($fiscalYearQuery);
+$currentFiscalYear = $fiscalYearResult ? $fiscalYearResult->fetch_assoc() : null;
+
+// Get dashboard statistics
+$stats = [
+    'total_revenue' => 0,
+    'total_expenses' => 0,
+    'net_profit' => 0,
+    'total_assets' => 0,
+    'total_liabilities' => 0,
+    'pending_invoices' => 0,
+    'pending_payments' => 0,
+    'zatca_pending' => 0
+];
+
+// Calculate revenue (this month)
+$revenueQuery = "SELECT COALESCE(SUM(credit_amount), 0) as total
+                 FROM acc_journal_entry_lines jel
+                 JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+                 JOIN acc_chart_of_accounts acc ON jel.account_id = acc.account_id
+                 WHERE acc.account_type = 'revenue'
+                 AND je.status = 'posted'
+                 AND MONTH(je.entry_date) = MONTH(CURDATE())
+                 AND YEAR(je.entry_date) = YEAR(CURDATE())";
+$revenueResult = $db->query($revenueQuery);
+if ($revenueResult) {
+    $stats['total_revenue'] = $revenueResult->fetch_assoc()['total'];
+}
+
+// Calculate expenses (this month)
+$expenseQuery = "SELECT COALESCE(SUM(debit_amount), 0) as total
+                 FROM acc_journal_entry_lines jel
+                 JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+                 JOIN acc_chart_of_accounts acc ON jel.account_id = acc.account_id
+                 WHERE acc.account_type = 'expense'
+                 AND je.status = 'posted'
+                 AND MONTH(je.entry_date) = MONTH(CURDATE())
+                 AND YEAR(je.entry_date) = YEAR(CURDATE())";
+$expenseResult = $db->query($expenseQuery);
+if ($expenseResult) {
+    $stats['total_expenses'] = $expenseResult->fetch_assoc()['total'];
+}
+
+$stats['net_profit'] = $stats['total_revenue'] - $stats['total_expenses'];
+
+// Get pending invoices count
+$pendingInvoicesQuery = "SELECT COUNT(*) as count FROM acc_invoices WHERE status IN ('draft', 'approved') AND payment_status != 'paid'";
+$pendingInvoicesResult = $db->query($pendingInvoicesQuery);
+if ($pendingInvoicesResult) {
+    $stats['pending_invoices'] = $pendingInvoicesResult->fetch_assoc()['count'];
+}
+
+// Get ZATCA pending count
+$zatcaPendingQuery = "SELECT COUNT(*) as count FROM acc_invoices WHERE zatca_status = 'pending' AND status = 'posted'";
+$zatcaPendingResult = $db->query($zatcaPendingQuery);
+if ($zatcaPendingResult) {
+    $stats['zatca_pending'] = $zatcaPendingResult->fetch_assoc()['count'];
+}
+?>
+
+<style>
+:root {
+    --primary-color: #0d6efd;
+    --success-color: #198754;
+    --danger-color: #dc3545;
+    --warning-color: #ffc107;
+    --info-color: #0dcaf0;
+}
+
+body {
+    background: #f8f9fa;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.dashboard-header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 2rem;
+    border-radius: 15px;
+    margin-bottom: 2rem;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+}
+
+.stat-card {
+    background: white;
+    border-radius: 15px;
+    padding: 1.5rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    transition: all 0.3s ease;
+    border: none;
+    height: 100%;
+}
+
+.stat-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+}
+
+.stat-icon {
+    width: 60px;
+    height: 60px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.8rem;
+    margin-bottom: 1rem;
+}
+
+.stat-icon.success { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+.stat-icon.danger { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; }
+.stat-icon.info { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: white; }
+.stat-icon.warning { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); color: white; }
+
+.stat-value {
+    font-size: 2rem;
+    font-weight: bold;
+    margin: 0.5rem 0;
+}
+
+.stat-label {
+    color: #6c757d;
+    font-size: 0.95rem;
+    font-weight: 500;
+}
+
+.module-card {
+    background: white;
+    border-radius: 15px;
+    padding: 1.5rem;
+    text-align: center;
+    transition: all 0.3s ease;
+    border: none;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    cursor: pointer;
+    height: 100%;
+    text-decoration: none;
+    color: inherit;
+    display: block;
+}
+
+.module-card:hover {
+    transform: translateY(-8px);
+    box-shadow: 0 12px 30px rgba(0,0,0,0.15);
+    color: inherit;
+}
+
+.module-icon {
+    width: 80px;
+    height: 80px;
+    margin: 0 auto 1rem;
+    border-radius: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2.5rem;
+}
+
+.module-icon.purple { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+.module-icon.blue { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: white; }
+.module-icon.green { background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); color: white; }
+.module-icon.orange { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); color: white; }
+.module-icon.red { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; }
+.module-icon.teal { background: linear-gradient(135deg, #30cfd0 0%, #330867 100%); color: white; }
+
+.module-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}
+
+.module-desc {
+    font-size: 0.85rem;
+    color: #6c757d;
+}
+
+.quick-action-btn {
+    border-radius: 10px;
+    padding: 0.75rem 1.5rem;
+    font-weight: 600;
+    border: none;
+    transition: all 0.3s ease;
+}
+
+.quick-action-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+}
+
+.section-title {
+    font-size: 1.5rem;
+    font-weight: bold;
+    margin-bottom: 1.5rem;
+    color: #2c3e50;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.badge-custom {
+    padding: 0.5rem 1rem;
+    border-radius: 20px;
+    font-weight: 600;
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="dashboard-header">
+        <div class="d-flex justify-content-between align-items-center flex-wrap">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-calculator-fill me-2"></i>
+                    نظام المحاسبة المتكامل
+                </h1>
+                <p class="mb-0 opacity-75">
+                    <i class="bi bi-person-circle me-2"></i><?php echo $currentUsername; ?>
+                    <?php if ($currentFiscalYear): ?>
+                    <span class="ms-3">
+                        <i class="bi bi-calendar-check me-2"></i>
+                        السنة المالية: <?php echo $currentFiscalYear['fiscal_year']; ?>
+                    </span>
+                    <?php endif; ?>
+                </p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="location.reload()">
+                    <i class="bi bi-arrow-clockwise me-2"></i>تحديث
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Statistics Cards -->
+    <div class="row g-4 mb-4">
+        <div class="col-12">
+            <h2 class="section-title">
+                <i class="bi bi-graph-up"></i>
+                الإحصائيات المالية
+            </h2>
+        </div>
+
+        <div class="col-md-6 col-lg-3">
+            <div class="stat-card">
+                <div class="stat-icon success">
+                    <i class="bi bi-currency-dollar"></i>
+                </div>
+                <div class="stat-label">إجمالي الإيرادات</div>
+                <div class="stat-value text-success">
+                    <?php echo number_format($stats['total_revenue'], 2); ?> ر.س
+                </div>
+                <small class="text-muted">هذا الشهر</small>
+            </div>
+        </div>
+
+        <div class="col-md-6 col-lg-3">
+            <div class="stat-card">
+                <div class="stat-icon danger">
+                    <i class="bi bi-cart-dash"></i>
+                </div>
+                <div class="stat-label">إجمالي المصروفات</div>
+                <div class="stat-value text-danger">
+                    <?php echo number_format($stats['total_expenses'], 2); ?> ر.س
+                </div>
+                <small class="text-muted">هذا الشهر</small>
+            </div>
+        </div>
+
+        <div class="col-md-6 col-lg-3">
+            <div class="stat-card">
+                <div class="stat-icon info">
+                    <i class="bi bi-cash-stack"></i>
+                </div>
+                <div class="stat-label">صافي الربح</div>
+                <div class="stat-value <?php echo $stats['net_profit'] >= 0 ? 'text-success' : 'text-danger'; ?>">
+                    <?php echo number_format($stats['net_profit'], 2); ?> ر.س
+                </div>
+                <small class="text-muted">هذا الشهر</small>
+            </div>
+        </div>
+
+        <div class="col-md-6 col-lg-3">
+            <div class="stat-card">
+                <div class="stat-icon warning">
+                    <i class="bi bi-file-earmark-text"></i>
+                </div>
+                <div class="stat-label">الفواتير المعلقة</div>
+                <div class="stat-value text-warning">
+                    <?php echo $stats['pending_invoices']; ?>
+                </div>
+                <small class="text-muted">تحتاج معالجة</small>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Modules -->
+    <div class="row g-4 mb-4">
+        <div class="col-12">
+            <h2 class="section-title">
+                <i class="bi bi-grid-3x3-gap"></i>
+                الأقسام الرئيسية
+            </h2>
+        </div>
+
+        <!-- Chart of Accounts -->
+        <div class="col-md-6 col-lg-4 col-xl-3">
+            <a href="modules/chart_of_accounts/" class="module-card">
+                <div class="module-icon purple">
+                    <i class="bi bi-diagram-3"></i>
+                </div>
+                <div class="module-title">دليل الحسابات</div>
+                <div class="module-desc">إدارة شجرة الحسابات والأرصدة</div>
+            </a>
+        </div>
+
+        <!-- Journal Entries -->
+        <div class="col-md-6 col-lg-4 col-xl-3">
+            <a href="modules/journal_entries/" class="module-card">
+                <div class="module-icon blue">
+                    <i class="bi bi-journal-text"></i>
+                </div>
+                <div class="module-title">القيود اليومية</div>
+                <div class="module-desc">إدخال وإدارة القيود المحاسبية</div>
+            </a>
+        </div>
+
+        <!-- Invoices -->
+        <div class="col-md-6 col-lg-4 col-xl-3">
+            <a href="modules/invoices/" class="module-card">
+                <div class="module-icon green">
+                    <i class="bi bi-receipt"></i>
+                </div>
+                <div class="module-title">الفواتير الإلكترونية</div>
+                <div class="module-desc">فواتير متوافقة مع ZATCA</div>
+                <?php if ($stats['zatca_pending'] > 0): ?>
+                <span class="badge bg-danger mt-2"><?php echo $stats['zatca_pending']; ?> معلقة</span>
+                <?php endif; ?>
+            </a>
+        </div>
+
+        <!-- Payments -->
+        <div class="col-md-6 col-lg-4 col-xl-3">
+            <a href="modules/payments/" class="module-card">
+                <div class="module-icon orange">
+                    <i class="bi bi-credit-card"></i>
+                </div>
+                <div class="module-title">المدفوعات</div>
+                <div class="module-desc">إدارة المقبوضات والمدفوعات</div>
+            </a>
+        </div>
+
+        <!-- Customers -->
+        <div class="col-md-6 col-lg-4 col-xl-3">
+            <a href="modules/customers/" class="module-card">
+                <div class="module-icon red">
+                    <i class="bi bi-people"></i>
+                </div>
+                <div class="module-title">العملاء</div>
+                <div class="module-desc">إدارة حسابات العملاء</div>
+            </a>
+        </div>
+
+        <!-- Suppliers -->
+        <div class="col-md-6 col-lg-4 col-xl-3">
+            <a href="modules/suppliers/" class="module-card">
+                <div class="module-icon teal">
+                    <i class="bi bi-truck"></i>
+                </div>
+                <div class="module-title">الموردين</div>
+                <div class="module-desc">إدارة حسابات الموردين</div>
+            </a>
+        </div>
+
+        <!-- Reports -->
+        <div class="col-md-6 col-lg-4 col-xl-3">
+            <a href="modules/reports/" class="module-card">
+                <div class="module-icon purple">
+                    <i class="bi bi-bar-chart"></i>
+                </div>
+                <div class="module-title">التقارير المالية</div>
+                <div class="module-desc">ميزان المراجعة والقوائم المالية</div>
+            </a>
+        </div>
+
+        <!-- Settings -->
+        <div class="col-md-6 col-lg-4 col-xl-3">
+            <a href="modules/settings/" class="module-card">
+                <div class="module-icon blue">
+                    <i class="bi bi-gear"></i>
+                </div>
+                <div class="module-title">الإعدادات</div>
+                <div class="module-desc">إعدادات النظام والصلاحيات</div>
+            </a>
+        </div>
+    </div>
+
+    <!-- Quick Actions -->
+    <div class="row g-4">
+        <div class="col-12">
+            <h2 class="section-title">
+                <i class="bi bi-lightning"></i>
+                إجراءات سريعة
+            </h2>
+        </div>
+
+        <div class="col-12">
+            <div class="card border-0 shadow-sm" style="border-radius: 15px;">
+                <div class="card-body p-4">
+                    <div class="row g-3">
+                        <div class="col-md-6 col-lg-3">
+                            <button class="btn btn-primary quick-action-btn w-100" onclick="window.location='modules/invoices/'">
+                                <i class="bi bi-plus-circle me-2"></i>فاتورة جديدة
+                            </button>
+                        </div>
+                        <div class="col-md-6 col-lg-3">
+                            <button class="btn btn-success quick-action-btn w-100" onclick="window.location='modules/payments/'">
+                                <i class="bi bi-cash me-2"></i>تسجيل مدفوعات
+                            </button>
+                        </div>
+                        <div class="col-md-6 col-lg-3">
+                            <button class="btn btn-info quick-action-btn w-100 text-white" onclick="window.location='modules/journal_entries/'">
+                                <i class="bi bi-journal-plus me-2"></i>قيد يومية
+                            </button>
+                        </div>
+                        <div class="col-md-6 col-lg-3">
+                            <button class="btn btn-warning quick-action-btn w-100" onclick="window.location='modules/reports/trial_balance.hnt'">
+                                <i class="bi bi-file-earmark-spreadsheet me-2"></i>ميزان المراجعة
+                            </button>
+                        </div>
+                        <div class="col-md-6 col-lg-3">
+                            <button class="btn btn-secondary quick-action-btn w-100" onclick="window.location='sync_amlak.hnt'" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border: none;">
+                                <i class="bi bi-arrow-repeat me-2"></i>مزامنة العقارات
+                            </button>
+                        </div>
+                        <div class="col-md-6 col-lg-3">
+                            <button class="btn btn-danger quick-action-btn w-100" onclick="window.location='reset_accounting.hnt'">
+                                <i class="bi bi-arrow-counterclockwise me-2"></i>إعادة تعيين المحاسبة
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<?php require("../../foter.hnt"); ?>

@@ -39,12 +39,21 @@ $arabicNum = new Arabic_num();
 
 // Handle delete expense
 if ($delidmasrof > 0) {
-    $rid = mysql_fetch_array(mysql_query("SELECT idmasrof FROM masrofat WHERE idmasrof='" . intval($delidmasrof) . "'", $link));
-    if ($rid['idmasrof']) {
-        loginfo("critical", "delete", "تم حذف المصروف رقم $delidmasrof", "", "masrofat", $delidmasrof, $link);
+    $rid = mysql_fetch_array(mysql_query("SELECT idmasrof, tasfia FROM masrofat WHERE idmasrof='" . intval($delidmasrof) . "'", $link));
+    if ($rid['idmasrof'] && $rid['tasfia'] != '') {
+        // Settled — cannot delete
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['success' => false, 'message' => 'لا يمكن حذف هذا المصروف لأنه مرتبط بتسوية'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    } else {
+        if ($rid['idmasrof']) {
+            loginfo("critical", "delete", "تم حذف المصروف رقم $delidmasrof", "", "masrofat", $delidmasrof, $link);
+        }
+        $sql = "DELETE FROM masrofat WHERE idmasrof='" . intval($delidmasrof) . "' AND tasfia=''";
+        mysql_query($sql, $link);
     }
-    $sql = "DELETE FROM masrofat WHERE idmasrof='" . intval($delidmasrof) . "'";
-    mysql_query($sql, $link);
 
     if ($is_ajax_request) {
         header('Content-Type: application/json; charset=utf-8');
@@ -249,12 +258,13 @@ if (!$is_ajax_request) {
                 <table class="table expense-table">
                     <thead>
                         <tr>
-                            <th style="width: 40%;"><i class="bi bi-card-text me-1"></i>البيان</th>
-                            <th style="width: 15%;"><i class="bi bi-cash me-1"></i>المبلغ المدفوع</th>
-                            <th style="width: 15%;"><i class="bi bi-credit-card me-1"></i>مدفوع عن طريق</th>
-                            <th style="width: 15%;"><i class="bi bi-calendar-check me-1"></i>تاريخ الصيانة</th>
+                            <th style="width: 35%;"><i class="bi bi-card-text me-1"></i>البيان</th>
+                            <th style="width: 13%;"><i class="bi bi-cash me-1"></i>المبلغ المدفوع</th>
+                            <th style="width: 13%;"><i class="bi bi-credit-card me-1"></i>مدفوع عن طريق</th>
+                            <th style="width: 12%;"><i class="bi bi-wallet2 me-1"></i>مصدر الصرف</th>
+                            <th style="width: 13%;"><i class="bi bi-calendar-check me-1"></i>تاريخ الصيانة</th>
                             <?php if ($report != 1) { ?>
-                            <th style="width: 15%;" class="no-print"><i class="bi bi-gear me-1"></i>إجراءات</th>
+                            <th style="width: 14%;" class="no-print"><i class="bi bi-gear me-1"></i>إجراءات</th>
                             <?php } ?>
                         </tr>
                     </thead>
@@ -268,6 +278,13 @@ if (!$is_ajax_request) {
                                 $date_display = $arabicTools->arabicDate('hj:d/m/Y', $row['payeddate']);
                             }
                         ?>
+                        <?php
+                            $fs = isset($row['fund_source']) ? intval($row['fund_source']) : 0;
+                            $fsBadge = $fs === 1
+                                ? '<span class="badge bg-warning text-dark"><i class="bi bi-person-fill me-1"></i>المالك</span>'
+                                : '<span class="badge bg-primary"><i class="bi bi-building me-1"></i>المكتب</span>';
+                            $isSettled = isset($row['tasfia']) && $row['tasfia'] != '';
+                        ?>
                         <tr>
                             <td><?= htmlspecialchars($row['payeddue'], ENT_QUOTES, 'UTF-8') ?></td>
                             <td>
@@ -276,14 +293,23 @@ if (!$is_ajax_request) {
                                 </span>
                             </td>
                             <td><?= htmlspecialchars($row['payedby'], ENT_QUOTES, 'UTF-8') ?></td>
+                            <td><?= $fsBadge ?></td>
                             <td><?= $date_display ?></td>
                             <?php if ($report != 1) { ?>
                             <td class="no-print">
+                                <?php if ($isSettled): ?>
+                                <button type="button" class="btn btn-sm btn-outline-secondary border-0"
+                                        disabled title="لا يمكن الحذف — المصروف مرتبط بتسوية">
+                                    <i class="bi bi-trash opacity-25"></i>
+                                </button>
+                                <i class="bi bi-lock-fill text-warning small" title="مرتبط بتسوية"></i>
+                                <?php else: ?>
                                 <button type="button" class="btn btn-sm btn-danger <?= "policy_" . $sc_id . "_deleetes" ?> delete-expense-btn"
                                         data-expense-id="<?= $row['idmasrof'] ?>"
                                         data-property-id="<?= $idaqar ?>">
                                     <i class="bi bi-trash"></i>
                                 </button>
+                                <?php endif; ?>
                             </td>
                             <?php } ?>
                         </tr>
@@ -294,7 +320,7 @@ if (!$is_ajax_request) {
                             <td style="text-align: right;">
                                 <strong><i class="bi bi-calculator me-2"></i>إجمالي المصروفات</strong>
                             </td>
-                            <td colspan="<?= $report != 1 ? '4' : '3' ?>">
+                            <td colspan="<?= $report != 1 ? '5' : '4' ?>">
                                 <strong><?= number_format($total_amount, 2) ?> <?= $myomla ?></strong>
                                 <br>
                                 <small>(<?= $arabicNum->numtostr($total_amount) ?> <?= $myomla ?> فقط لا غير)</small>

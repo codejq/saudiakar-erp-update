@@ -1,0 +1,376 @@
+<?php
+/**
+ * Accounting Reset - resets selected accounting tables
+ * Same pattern as restoreallamlaktabel.hnt
+ */
+
+$sc_title = "إعادة تعيين المحاسبة";
+$sc_id = "200";
+
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+if ($is_ajax_request) {
+    include_once "../../reqloginajax.hnt";
+} else {
+    include_once "../../nocash.hnt";
+    $_SERVER['HTTP_REFERER'] = "index.hnt";
+    include_once "../../header.hnt";
+}
+
+include_once "../../connectdb.hnt";
+
+// All resettable accounting tables
+$allTables = [
+    'acc_customers'           => 'العملاء',
+    'acc_fiscal_years'        => 'السنوات المالية',
+    'acc_invoices'            => 'الفواتير',
+    'acc_invoice_items'       => 'بنود الفواتير',
+    'acc_journal_entries'     => 'القيود اليومية',
+    'acc_journal_entry_lines' => 'بنود القيود اليومية',
+    'acc_suppliers'           => 'الموردين',
+];
+
+// ── Backup only ───────────────────────────────────────────────
+if (isset($_POST['backup_only']) && $_POST['backup_only'] == '1') {
+    $batchFile = '../../mysqldump.bat';
+    $backupSuccess = false;
+    $backupMessage = '';
+
+    if (file_exists($batchFile)) {
+        $command = 'cmd /c "' . realpath($batchFile) . '" 2>&1';
+        $output = []; $returnCode = 0;
+        exec($command, $output, $returnCode);
+        if ($returnCode === 0) {
+            $backupSuccess = true;
+            $backupMessage = 'تم إنشاء نسخة احتياطية بنجاح في ' . date('Y-m-d H:i:s');
+        } else {
+            $backupMessage = 'فشل النسخ الاحتياطي: ' . implode(' ', $output);
+        }
+    } else {
+        $backupMessage = 'خطأ: لم يتم العثور على mysqldump.bat';
+    }
+
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['success' => $backupSuccess, 'message' => $backupMessage], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
+
+// ── Reset selected tables ─────────────────────────────────────
+if (isset($_POST['codeacc']) && isset($_POST['selected_tables'])) {
+    $codeacc = trim($_POST['codeacc']);
+    $selectedTables = is_array($_POST['selected_tables']) ? $_POST['selected_tables'] : [];
+
+    // Whitelist — only allow known tables
+    $selectedTables = array_filter($selectedTables, fn($t) => array_key_exists($t, $allTables));
+
+    if ($codeacc !== '99381144accounting') {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['success' => false, 'message' => 'رمز التأكيد غير صحيح'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        $error_message = 'رمز التأكيد غير صحيح';
+    } elseif (empty($selectedTables)) {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['success' => false, 'message' => 'لم تحدد أي جدول'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        $error_message = 'لم تحدد أي جدول';
+    } else {
+        // Backup first
+        $batchFile = '../../mysqldump.bat';
+        $backupSuccess = false;
+        $backupMessage = '';
+
+        if (file_exists($batchFile)) {
+            $command = 'cmd /c "' . realpath($batchFile) . '" 2>&1';
+            $output = []; $returnCode = 0;
+            exec($command, $output, $returnCode);
+            if ($returnCode === 0) {
+                $backupSuccess = true;
+                $backupMessage = 'تم إنشاء نسخة احتياطية بنجاح';
+            } else {
+                $backupMessage = 'فشل النسخ الاحتياطي: ' . implode(' ', $output);
+                if ($is_ajax_request) {
+                    header('Content-Type: application/json; charset=utf-8');
+                    echo json_encode(['success' => false, 'message' => $backupMessage], JSON_UNESCAPED_UNICODE);
+                    exit;
+                }
+            }
+        } else {
+            $backupMessage = 'تحذير: لم يتم العثور على ملف النسخ الاحتياطي';
+            $backupSuccess = true; // proceed anyway
+        }
+
+        if ($backupSuccess) {
+            $failedTables = [];
+            foreach ($selectedTables as $table) {
+                $result = @mysql_query("TRUNCATE TABLE `$table`", $link);
+                if (!$result) $failedTables[] = $allTables[$table];
+            }
+
+            if (empty($failedTables)) {
+                $successMessage = 'تم إعادة تعيين ' . count($selectedTables) . ' جدول بنجاح';
+                if ($is_ajax_request) {
+                    header('Content-Type: application/json; charset=utf-8');
+                    echo json_encode(['success' => true, 'message' => $successMessage, 'backupMessage' => $backupMessage], JSON_UNESCAPED_UNICODE);
+                    exit;
+                }
+            } else {
+                $errorMessage = 'فشل مسح: ' . implode('، ', $failedTables);
+                if ($is_ajax_request) {
+                    header('Content-Type: application/json; charset=utf-8');
+                    echo json_encode(['success' => false, 'message' => $errorMessage], JSON_UNESCAPED_UNICODE);
+                    exit;
+                }
+            }
+        }
+    }
+}
+
+if ($is_ajax_request) exit;
+?>
+
+<div class="container-fluid px-4 py-4">
+  <div class="row justify-content-center">
+    <div class="col-12 col-lg-8 col-xl-7">
+
+      <!-- Header card -->
+      <div class="card shadow border-0 mb-4">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%);">
+          <h4 class="mb-0">
+            <i class="bi bi-arrow-counterclockwise me-2"></i>
+            إعادة تعيين المحاسبة
+          </h4>
+        </div>
+        <div class="card-body p-4">
+
+          <?php if (isset($successMessage)): ?>
+          <div class="text-center py-3">
+            <i class="bi bi-check-circle-fill text-success" style="font-size:4rem;"></i>
+            <h5 class="mt-3"><?= $successMessage ?></h5>
+            <p class="text-muted small"><?= $backupMessage ?></p>
+            <a href="index.hnt" class="btn btn-primary mt-2">
+              <i class="bi bi-arrow-right me-2"></i>العودة للمحاسبة
+            </a>
+          </div>
+          <?php else: ?>
+
+          <?php if (isset($error_message)): ?>
+          <div class="alert alert-danger"><i class="bi bi-x-circle me-2"></i><?= $error_message ?></div>
+          <?php endif; ?>
+
+          <!-- Warning -->
+          <div class="alert alert-warning border-0 mb-4">
+            <div class="d-flex align-items-start gap-3">
+              <i class="bi bi-exclamation-triangle-fill text-warning fs-3 flex-shrink-0"></i>
+              <div>
+                <strong>تحذير:</strong> ستُحذف جميع البيانات في الجداول المحددة بشكل نهائي.
+                سيتم إنشاء نسخة احتياطية تلقائياً قبل البدء.
+                <br><span class="text-danger fw-bold">هذه العملية لا يمكن التراجع عنها!</span>
+              </div>
+            </div>
+          </div>
+
+          <form id="resetAccForm" method="post" action="?">
+
+            <!-- Table selection -->
+            <div class="card bg-light border-0 mb-4">
+              <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <h6 class="mb-0 fw-bold"><i class="bi bi-table me-2"></i>اختر الجداول المراد إعادة تعيينها</h6>
+                  <div class="d-flex gap-2">
+                    <button type="button" class="btn btn-sm btn-outline-danger" id="selectAll">تحديد الكل</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" id="deselectAll">إلغاء الكل</button>
+                  </div>
+                </div>
+                <div class="row g-2">
+                  <?php foreach ($allTables as $tableName => $tableLabel): ?>
+                  <div class="col-md-6">
+                    <label for="tbl_<?= $tableName ?>" class="table-check-item d-flex justify-content-between align-items-center gap-3 border rounded-3 px-3 py-2 cursor-pointer" style="background:#fff7ed; border-color:#fed7aa !important; cursor:pointer;">
+                      <div class="d-flex align-items-center gap-2">
+                        <input class="form-check-input table-checkbox flex-shrink-0" type="checkbox"
+                               name="selected_tables[]"
+                               value="<?= $tableName ?>"
+                               id="tbl_<?= $tableName ?>"
+                               style="width:1.2em;height:1.2em;accent-color:#dc3545;">
+                        <span class="fw-semibold"><?= $tableLabel ?></span>
+                      </div>
+                      <small class="text-muted font-monospace"><?= $tableName ?></small>
+                    </label>
+                  </div>
+                  <?php endforeach; ?>
+                </div>
+              </div>
+            </div>
+
+            <!-- Security code -->
+            <div class="card bg-light border-0 mb-4">
+              <div class="card-body text-center py-4">
+                <p class="mb-3"><i class="bi bi-key-fill me-2"></i>انقل رمز التأكيد إلى المربع واضغط على زر إعادة التعيين</p>
+                <div class="mb-3">
+                  <input type="text" class="form-control form-control-lg text-center"
+                         id="codeacc" name="codeacc"
+                         placeholder="أدخل الرمز هنا" required autocomplete="off">
+                </div>
+                <div class="alert alert-dark d-inline-block mb-0">
+                  <strong>رمز التأكيد:</strong>
+                  <h3 class="mb-0 mt-2 font-monospace">99381144accounting</h3>
+                </div>
+              </div>
+            </div>
+
+            <!-- Buttons -->
+            <div class="d-flex justify-content-center gap-3 flex-wrap">
+              <button type="button" class="btn btn-info btn-lg text-white" id="backupOnlyBtn">
+                <i class="bi bi-database-fill-down me-2"></i>نسخة احتياطية فقط
+              </button>
+              <button type="submit" class="btn btn-danger btn-lg" id="resetBtn">
+                <i class="bi bi-arrow-counterclockwise me-2"></i>إعادة التعيين
+              </button>
+              <a href="index.hnt" class="btn btn-secondary btn-lg">
+                <i class="bi bi-x-circle me-2"></i>إلغاء
+              </a>
+            </div>
+
+          </form>
+          <?php endif; ?>
+
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- Confirm Modal -->
+<div class="modal fade" id="confirmAccModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header bg-danger text-white border-0">
+        <h5 class="modal-title"><i class="bi bi-exclamation-triangle-fill me-2"></i>تأكيد إعادة التعيين</h5>
+      </div>
+      <div class="modal-body text-center py-4">
+        <i class="bi bi-exclamation-octagon text-danger" style="font-size:4rem;"></i>
+        <h5 class="mt-3">سيتم حذف البيانات المحددة نهائياً</h5>
+        <div id="selectedTablesList" class="mt-3 text-start"></div>
+      </div>
+      <div class="modal-footer border-0 justify-content-center">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+          <i class="bi bi-x-circle me-2"></i>إلغاء
+        </button>
+        <button type="button" class="btn btn-danger" id="confirmResetAccBtn">
+          <i class="bi bi-trash-fill me-2"></i>نعم، إعادة التعيين
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Loading Overlay -->
+<div id="loadingOverlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:9999;">
+  <div class="d-flex justify-content-center align-items-center h-100">
+    <div class="text-center text-white">
+      <div class="spinner-border mb-3" style="width:4rem;height:4rem;" role="status"></div>
+      <h4 id="loadingMsg">جاري التنفيذ...</h4>
+      <p class="text-white-50">الرجاء الانتظار، لا تغلق الصفحة</p>
+    </div>
+  </div>
+</div>
+
+<script>
+$(function () {
+  const confirmModal = new bootstrap.Modal(document.getElementById('confirmAccModal'));
+
+  // Highlight checked rows
+  function updateHighlight() {
+    $('.table-checkbox').each(function () {
+      var $label = $(this).closest('.table-check-item');
+      if ($(this).is(':checked')) {
+        $label.css({ background: '#fee2e2', borderColor: '#dc3545' });
+      } else {
+        $label.css({ background: '#fff7ed', borderColor: '#fed7aa' });
+      }
+    });
+  }
+  $(document).on('change', '.table-checkbox', updateHighlight);
+
+  // Select / Deselect all
+  $('#selectAll').on('click', function () { $('.table-checkbox').prop('checked', true); updateHighlight(); });
+  $('#deselectAll').on('click', function () { $('.table-checkbox').prop('checked', false); updateHighlight(); });
+
+  // Backup only
+  $('#backupOnlyBtn').on('click', function () {
+    $('#loadingOverlay').fadeIn();
+    $('#loadingMsg').text('جاري إنشاء النسخة الاحتياطية...');
+    $.post('reset_accounting.hnt', { backup_only: '1', ajax_submit: '1' }, function (r) {
+      $('#loadingOverlay').fadeOut();
+      showBootstrapNotification(r.message, r.success ? 'success' : 'error', 5000);
+    }, 'json').fail(function () {
+      $('#loadingOverlay').fadeOut();
+      showBootstrapNotification('خطأ في الاتصال', 'error');
+    });
+  });
+
+  // Form submit — show confirm modal
+  $('#resetAccForm').on('submit', function (e) {
+    e.preventDefault();
+
+    if ($('.table-checkbox:checked').length === 0) {
+      showBootstrapNotification('يرجى تحديد جدول واحد على الأقل', 'error');
+      return;
+    }
+
+    if ($('#codeacc').val().trim() !== '99381144accounting') {
+      showBootstrapNotification('رمز التأكيد غير صحيح', 'error');
+      return;
+    }
+
+    // List selected tables in modal
+    let list = '<ul class="list-group">';
+    $('.table-checkbox:checked').each(function () {
+      list += '<li class="list-group-item list-group-item-danger py-2">' +
+              '<i class="bi bi-table me-2"></i>' + $(this).next('label').find('span:first').text() +
+              '</li>';
+    });
+    list += '</ul>';
+    $('#selectedTablesList').html(list);
+    confirmModal.show();
+  });
+
+  // Confirmed — submit via AJAX
+  $('#confirmResetAccBtn').on('click', function () {
+    confirmModal.hide();
+    $('#loadingOverlay').fadeIn();
+    $('#loadingMsg').text('جاري إنشاء النسخة الاحتياطية...');
+
+    setTimeout(function () { $('#loadingMsg').text('جاري مسح البيانات...'); }, 4000);
+
+    $.ajax({
+      url: 'reset_accounting.hnt',
+      type: 'POST',
+      data: $('#resetAccForm').serialize() + '&ajax_submit=1',
+      dataType: 'json',
+      timeout: 120000,
+      success: function (r) {
+        $('#loadingOverlay').fadeOut();
+        if (r.success) {
+          showBootstrapNotification(r.message + (r.backupMessage ? ' — ' + r.backupMessage : ''), 'success', 6000);
+          setTimeout(function () { window.location.href = 'index.hnt'; }, 3000);
+        } else {
+          showBootstrapNotification(r.message, 'error', 8000);
+        }
+      },
+      error: function (xhr, status) {
+        $('#loadingOverlay').fadeOut();
+        showBootstrapNotification(status === 'timeout' ? 'انتهت مهلة الانتظار' : 'خطأ في الاتصال', 'error');
+      }
+    });
+  });
+});
+</script>
+
+<?php require("../../foter.hnt"); ?>
