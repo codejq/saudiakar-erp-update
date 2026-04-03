@@ -216,10 +216,13 @@ req_extensions     = reqExt
 distinguished_name = dn
 
 [ dn ]
-C  = SA
-OU = $orgUnit
-O  = $orgName
-CN = $commonName
+C                      = SA
+L                      = $location
+O                      = $orgName
+OU                     = $orgUnit
+CN                     = $commonName
+organizationIdentifier = $orgIdentifier
+businessCategory       = $industry
 
 [ v3_req ]
 basicConstraints = CA:FALSE

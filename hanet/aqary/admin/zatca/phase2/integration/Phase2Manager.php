@@ -156,22 +156,40 @@ class Phase2Manager {
      * Constructor
      *
      * @param resource $dbLink Database connection
+     * @param string|null $environment Override environment (uses global $zatca_environment if not specified)
      */
-    public function __construct($dbLink) {
+    public function __construct($dbLink, $environment = null) {
         $this->dbLink = $dbLink;
         $this->xmlGenerator = new UBLInvoiceGenerator();
         $this->counter = new InvoiceCounter($dbLink);
 
-        // CRITICAL: Detect production mode FIRST, then use same cert for signing AND API
-        $environment = ZatcaPhase2Config::$ENVIRONMENT;
-        $complianceCertFile = ZatcaPhase2Config::CERT_DIR . '/' . $environment . '_certificate.pem';
-        $complianceSecretFile = ZatcaPhase2Config::CERT_DIR . '/' . $environment . '_secret.txt';
+        // CRITICAL: Load environment from global $zatca_environment (from data.hnt)
+        // This ensures we use the correct certificate for the current environment
+        global $zatca_environment;
+
+        // Priority: 1) Explicit parameter, 2) Global $zatca_environment, 3) Config default
+        if ($environment !== null) {
+            $selectedEnvironment = $environment;
+        } elseif (isset($zatca_environment)) {
+            $selectedEnvironment = $zatca_environment;
+        } else {
+            $selectedEnvironment = ZatcaPhase2Config::$ENVIRONMENT;
+        }
+
+        // Log which environment we're using
+        ZatcaPhase2Config::log("Phase2Manager initializing with environment: " . strtoupper($selectedEnvironment) .
+            (isset($zatca_environment) ? " (global=\$zatca_environment)" : " (config default)"), 'INFO');
+
+        // CRITICAL: Detect production mode — must match processInvoice() logic exactly
+        $complianceCertFile = ZatcaPhase2Config::CERT_DIR . '/' . $selectedEnvironment . '_certificate.pem';
+        $complianceSecretFile = ZatcaPhase2Config::CERT_DIR . '/' . $selectedEnvironment . '_secret.txt';
         $productionCertFile = ZatcaPhase2Config::CERT_DIR . '/certificate.pem';
         $productionSecretFile = ZatcaPhase2Config::CERT_DIR . '/secret.txt';
         $productionFlagFile = ZatcaPhase2Config::CERT_DIR . '/production_mode.flag';
 
-        // Detect production mode
         $useProductionCert = false;
+
+        // Same logic as processInvoice: flag file is the authoritative signal
         if (file_exists($productionFlagFile) && file_exists($productionCertFile) && file_exists($productionSecretFile)) {
             $useProductionCert = true;
         } elseif (file_exists($productionCertFile) && file_exists($productionSecretFile) && file_exists($complianceCertFile)) {
@@ -185,12 +203,12 @@ class Phase2Manager {
             $signerCertFile = $productionCertFile;
             $apiCertFile = $productionCertFile;
             $apiSecretFile = $productionSecretFile;
-            ZatcaPhase2Config::log("Using PRODUCTION certificate for signing and API", 'INFO');
+            ZatcaPhase2Config::log("Using PRODUCTION certificate (environment=$selectedEnvironment)", 'INFO');
         } else {
             $signerCertFile = $complianceCertFile;
             $apiCertFile = $complianceCertFile;
             $apiSecretFile = $complianceSecretFile;
-            ZatcaPhase2Config::log("Using COMPLIANCE certificate for signing and API", 'INFO');
+            ZatcaPhase2Config::log("Using " . strtoupper($selectedEnvironment) . " certificate (environment=$selectedEnvironment)", 'INFO');
         }
 
         // Initialize signer with the CORRECT certificate
@@ -263,9 +281,17 @@ class Phase2Manager {
                 }
                 require_once $autoload;
 
-                // CRITICAL: Must use the SAME certificate for signing that will be used for API authentication
-                // Detect production mode and use appropriate certificate
-                $env = ZatcaPhase2Config::$ENVIRONMENT;
+                // CRITICAL: Use the SAME environment detection as constructor (global $zatca_environment)
+                // This ensures we use the correct certificate for the current environment
+                global $zatca_environment;
+
+                // Use global $zatca_environment from data.hnt (same logic as constructor)
+                if (isset($zatca_environment)) {
+                    $env = $zatca_environment;
+                } else {
+                    $env = ZatcaPhase2Config::$ENVIRONMENT;
+                }
+
                 $complianceCertFile = ZatcaPhase2Config::CERT_DIR . '/' . $env . '_certificate.pem';
                 $complianceSecretFile = ZatcaPhase2Config::CERT_DIR . '/' . $env . '_secret.txt';
                 $productionCertFile = ZatcaPhase2Config::CERT_DIR . '/certificate.pem';
@@ -320,44 +346,78 @@ class Phase2Manager {
                     throw new Exception('Secret file not found: ' . $secretFile);
                 }
 
-                // Read certificate and extract RAW base64 (library expects no PEM headers)
+                // Read certificate and prepare for library (library expects PEM format WITH headers)
                 $certContent = file_get_contents($certFile);
+                ZatcaPhase2Config::log('[CERT DEBUG] Certificate file: ' . $certFile, 'INFO');
+                ZatcaPhase2Config::log('[CERT DEBUG] Certificate content length: ' . strlen($certContent) . ' bytes', 'INFO');
 
                 // Extract base64 content from PEM
                 if (preg_match('/-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----/s', $certContent, $m)) {
                     $layer1_decoded = base64_decode(str_replace(["\n", "\r", " "], '', $m[1]));
+                    ZatcaPhase2Config::log('[CERT DEBUG] Layer 1 decoded length: ' . strlen($layer1_decoded) . ' bytes', 'INFO');
+                    ZatcaPhase2Config::log('[CERT DEBUG] Layer 1 starts with: ' . substr($layer1_decoded, 0, 20), 'INFO');
 
                     // ZATCA certificates are double-encoded: check if Layer 1 decodes to another base64 string
-                    if (substr($layer1_decoded, 0, 4) === 'MIIC' || substr($layer1_decoded, 0, 4) === 'MIID') {
-                        // Use Layer 2 (inner base64 string) - this is what the library expects
-                        $cleanCert = $layer1_decoded;
+                    // MII* indicates ASN.1 DER sequence (double-encoded certificate)
+                    if (strlen($layer1_decoded) > 100 && substr($layer1_decoded, 0, 3) === 'MII') {
+                        // Double-encoded: use Layer 2 (inner base64 string) and wrap in PEM headers for library
+                        $cleanCert = "-----BEGIN CERTIFICATE-----\n" . chunk_split($layer1_decoded, 64, "\n") . "-----END CERTIFICATE-----";
+                        ZatcaPhase2Config::log('[CERT DEBUG] Using double-encoded certificate (Layer 2) with PEM headers', 'INFO');
                     } else {
-                        // Single-encoded: use the cleaned PEM content
-                        $cleanCert = str_replace(["\n", "\r", " "], '', $m[1]);
+                        // Single-encoded: use original PEM content with headers
+                        $cleanCert = $certContent;
+                        ZatcaPhase2Config::log('[CERT DEBUG] Using single-encoded certificate (Layer 1) with PEM headers', 'INFO');
                     }
+
+                    ZatcaPhase2Config::log('[CERT DEBUG] Clean cert length: ' . strlen($cleanCert) . ' chars', 'INFO');
                 } else {
+                    ZatcaPhase2Config::log('[CERT ERROR] Certificate PEM parsing failed', 'ERROR');
                     throw new Exception('Invalid certificate format - missing PEM headers');
                 }
 
-                // Extract RAW base64 from private key (already correct in original code)
+                // Validate certificate content (PEM format should be at least 200 chars)
+                if (empty($cleanCert) || strlen($cleanCert) < 200 || strpos($cleanCert, '-----BEGIN CERTIFICATE-----') === false) {
+                    ZatcaPhase2Config::log('[CERT ERROR] Certificate content is invalid: ' . strlen($cleanCert) . ' chars', 'ERROR');
+                    throw new Exception('Invalid certificate content - too short or missing PEM headers');
+                }
+
+                // Extract and validate private key (library expects PEM format WITH headers)
                 $privateKeyPem = ZatcaPhase2Config::getPrivateKey();
-                $cleanPrivateKey = trim(str_replace([
-                    "-----BEGIN PRIVATE KEY-----",
-                    "-----END PRIVATE KEY-----",
-                    "-----BEGIN EC PRIVATE KEY-----",
-                    "-----END EC PRIVATE KEY-----",
-                    "\r",
-                    "\n"
-                ], '', $privateKeyPem));
+
+                // Ensure private key has PEM headers for library
+                if (strpos($privateKeyPem, '-----BEGIN') === false) {
+                    // Raw base64, wrap in PEM headers
+                    $privateKeyPem = "-----BEGIN PRIVATE KEY-----\n" . chunk_split($privateKeyPem, 64, "\n") . "-----END PRIVATE KEY-----";
+                }
+
+                // Validate private key (PEM format should be at least 200 chars)
+                if (empty($privateKeyPem) || strlen($privateKeyPem) < 200 || strpos($privateKeyPem, '-----BEGIN') === false) {
+                    ZatcaPhase2Config::log('[KEY ERROR] Private key is invalid: ' . strlen($privateKeyPem) . ' chars', 'ERROR');
+                    throw new Exception('Invalid private key - too short or missing PEM headers');
+                }
+                ZatcaPhase2Config::log('[KEY DEBUG] Private key length: ' . strlen($privateKeyPem) . ' chars', 'INFO');
 
                 $secret = trim(file_get_contents($secretFile));
 
-                // Pass RAW base64 strings to library (NO PEM headers)
-                $certificate = new \Saleh7\Zatca\Helpers\Certificate(
-                    $cleanCert,        // ✅ RAW base64 without headers
-                    $cleanPrivateKey,  // ✅ RAW base64 without headers
-                    $secret            // ✅ Plain text secret
-                );
+                // Validate secret
+                if (empty($secret) || strlen($secret) < 10) {
+                    ZatcaPhase2Config::log('[SECRET ERROR] Secret is empty or too short: ' . strlen($secret) . ' chars', 'ERROR');
+                    throw new Exception('Invalid secret - too short or empty');
+                }
+                ZatcaPhase2Config::log('[SECRET DEBUG] Secret length: ' . strlen($secret) . ' chars', 'INFO');
+
+                // Pass PEM-formatted certificate and key to library (phpseclib expects PEM format)
+                try {
+                    $certificate = new \Saleh7\Zatca\Helpers\Certificate(
+                        $cleanCert,        // ✅ PEM format with headers
+                        $privateKeyPem,    // ✅ PEM format with headers
+                        $secret            // ✅ Plain text secret
+                    );
+                    ZatcaPhase2Config::log('[CERT] Certificate object created successfully', 'INFO');
+                } catch (Exception $e) {
+                    ZatcaPhase2Config::log('[CERT ERROR] Failed to create Certificate object: ' . $e->getMessage(), 'ERROR');
+                    throw new Exception('Failed to create Certificate object: ' . $e->getMessage());
+                }
 
                 // DEBUG: Log certificate issuer DN for troubleshooting signed-properties-hashing errors
                 ZatcaPhase2Config::log('[CERT DEBUG] Issuer DN: ' . $certificate->getFormattedIssuer(), 'INFO');

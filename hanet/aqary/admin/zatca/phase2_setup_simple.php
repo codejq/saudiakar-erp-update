@@ -301,7 +301,7 @@ if (isset($_POST['action'])) {
             ZatcaPhase2Config::log('=== RAW HTTP REQUEST START ===', 'INFO');
             ZatcaPhase2Config::log('================================', 'INFO');
             ZatcaPhase2Config::log('', 'INFO');
-            ZatcaPhase2Config::log('POST ' . parse_url($apiUrl, PHP_URL_PATH) . ($endpoint === 'production/csids' ? '/production/csids' : '/compliance') . ' HTTP/1.1', 'INFO');
+            ZatcaPhase2Config::log('POST ' . parse_url($apiUrl, PHP_URL_PATH) . ' HTTP/1.1', 'INFO');
             ZatcaPhase2Config::log('Host: gw-fatoora.zatca.gov.sa', 'INFO');
             foreach ($headers as $header) {
                 ZatcaPhase2Config::log($header, 'INFO');
@@ -1136,7 +1136,7 @@ if (isset($_POST['action'])) {
 
                 const selectedValue = $(this).val();
 
-                if (selectedValue === '/production/csids') {
+                if (selectedValue === 'production/csids') {
                     console.log('→ Switching to PRODUCTION mode');
                     $productionFields.removeClass('hidden');
                     $complianceFields.addClass('hidden');

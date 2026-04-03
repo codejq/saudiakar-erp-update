@@ -18,6 +18,8 @@ else {
 include_once "../../../../reqloginajax.hnt";
 }
 include_once "../../includes/accounting_class.hnt";
+// Include data.hnt to get $zatca_environment global variable
+include_once __DIR__ . '/../../../../data.hnt';
 $accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
 
 // Handle ZATCA submission
@@ -102,7 +104,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['a
             $items[] = $item;
         }
 
-        // Initialize Phase2Manager
+        // Initialize Phase2Manager (uses global $zatca_environment)
         $phase2Manager = new Phase2Manager($db);
 
         // Prepare invoice data for ZATCA
@@ -353,20 +355,20 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
             $vatNumber = trim($_POST['vat_number'] ?? '');
             $phone = trim($_POST['phone'] ?? '');
             $address = trim($_POST['address'] ?? '');
-            
+
             if (empty($name)) {
                 $response = ['success' => false, 'error' => 'Customer name is required', 'message' => 'اسم العميل مطلوب'];
                 break;
             }
-            
+
             $query = "INSERT INTO acc_customers (customer_name, vat_number, phone, address, is_active, created_at, formuid) VALUES (?, ?, ?, ?, 1, NOW(), UUID())";
             $stmt = $db->prepare($query);
             $stmt->bind_param('ssss', $name, $vatNumber, $phone, $address);
-            
+
             if ($stmt->execute()) {
                 $customerId = $stmt->insert_id;
                 $response = [
-                    'success' => true, 
+                    'success' => true,
                     'message' => 'تم إضافة العميل بنجاح',
                     'customer' => [
                         'customer_id' => $customerId,
@@ -383,12 +385,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
 
         case 'create_invoice':
             $customerId = intval($_POST['customer_id'] ?? 0);
-            
+
             if (empty($customerId)) {
                 $response = ['success' => false, 'error' => 'Customer ID is required', 'message' => 'معرف العميل مطلوب'];
                 break;
             }
-            
+
             $invoiceData = [
                 'invoice_type' => $_POST['invoice_type'],
                 'customer_id' => $customerId,
@@ -403,7 +405,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
             ];
 
             $items = json_decode($_POST['items'], true);
-            
+
             if (empty($items) || !is_array($items)) {
                 $response = ['success' => false, 'error' => 'No items provided', 'message' => 'يجب إضافة بنود للفاتورة'];
                 break;
@@ -807,7 +809,7 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
                             <div id="customerDropdown" class="list-group position-absolute" style="z-index: 1000; max-height: 300px; overflow-y: auto; display: none; width: calc(100% - 30px);"></div>
                             <input type="hidden" id="selectedCustomerId" name="customer_id">
                         </div>
-                        
+
                         <!-- Customer Details (shown when customer is selected or new) -->
                         <div id="customerDetails" class="row" style="display: none;">
                             <div class="col-md-6">
@@ -1225,14 +1227,14 @@ let isNewCustomer = false;
 
 customerSearchInput.addEventListener('input', function() {
     const searchTerm = this.value.trim();
-    
+
     clearTimeout(searchTimeout);
-    
+
     if (searchTerm.length < 2) {
         customerDropdown.style.display = 'none';
         return;
     }
-    
+
     searchTimeout = setTimeout(() => {
         searchCustomers(searchTerm);
     }, 300);
@@ -1242,7 +1244,7 @@ function searchCustomers(searchTerm) {
     const formData = new FormData();
     formData.append('ajax_action', 'search_customers');
     formData.append('search', searchTerm);
-    
+
     fetch('index.hnt', {
         method: 'POST',
         body: formData
@@ -1262,7 +1264,7 @@ function searchCustomers(searchTerm) {
 
 function displayCustomerDropdown(customers) {
     customerDropdown.innerHTML = '';
-    
+
     customers.forEach(customer => {
         const item = document.createElement('a');
         item.href = '#';
@@ -1276,40 +1278,40 @@ function displayCustomerDropdown(customers) {
                 </div>
             </div>
         `;
-        
+
         item.addEventListener('click', function(e) {
             e.preventDefault();
             selectCustomer(customer);
         });
-        
+
         customerDropdown.appendChild(item);
     });
-    
+
     customerDropdown.style.display = 'block';
 }
 
 function selectCustomer(customer) {
     isNewCustomer = false;
-    
+
     // Fill customer fields
     document.getElementById('selectedCustomerId').value = customer.customer_id;
     document.getElementById('customer_name').value = customer.customer_name;
     document.getElementById('customer_vat_number').value = customer.vat_number || '';
     document.getElementById('customer_phone').value = customer.phone || '';
     document.getElementById('customer_address').value = customer.address || '';
-    
+
     // Update search input
     customerSearchInput.value = customer.customer_name;
-    
+
     // Show customer details
     customerDetails.style.display = 'block';
     customerDetails.querySelectorAll('.col-md-6, .col-md-12').forEach(el => {
         el.style.display = 'block';
     });
-    
+
     // Hide dropdown
     customerDropdown.style.display = 'none';
-    
+
     // Make fields readonly for existing customer
     document.getElementById('customer_name').readOnly = true;
     document.getElementById('customer_vat_number').readOnly = true;
@@ -1320,29 +1322,29 @@ function selectCustomer(customer) {
 // Add new customer button
 document.getElementById('addNewCustomerBtn').addEventListener('click', function() {
     isNewCustomer = true;
-    
+
     // Clear all fields
     document.getElementById('selectedCustomerId').value = '';
     document.getElementById('customer_name').value = customerSearchInput.value;
     document.getElementById('customer_vat_number').value = '';
     document.getElementById('customer_phone').value = '';
     document.getElementById('customer_address').value = '';
-    
+
     // Show customer details
     customerDetails.style.display = 'block';
     customerDetails.querySelectorAll('.col-md-6, .col-md-12').forEach(el => {
         el.style.display = 'block';
     });
-    
+
     // Hide dropdown
     customerDropdown.style.display = 'none';
-    
+
     // Make fields editable for new customer
     document.getElementById('customer_name').readOnly = false;
     document.getElementById('customer_vat_number').readOnly = false;
     document.getElementById('customer_phone').readOnly = false;
     document.getElementById('customer_address').readOnly = false;
-    
+
     // Focus on customer name
     document.getElementById('customer_name').focus();
 });
@@ -1363,12 +1365,12 @@ submitInvoice = function() {
         const vatNumber = document.getElementById('customer_vat_number').value.trim();
         const phone = document.getElementById('customer_phone').value.trim();
         const address = document.getElementById('customer_address').value.trim();
-        
+
         if (!customerName) {
             showResultModal(false, 'اسم العميل مطلوب');
             return;
         }
-        
+
         // Create customer first
         const formData = new FormData();
         formData.append('ajax_action', 'add_customer_quick');
@@ -1376,7 +1378,7 @@ submitInvoice = function() {
         formData.append('vat_number', vatNumber);
         formData.append('phone', phone);
         formData.append('address', address);
-        
+
         fetch('index.hnt', {
             method: 'POST',
             body: formData
@@ -1387,7 +1389,7 @@ submitInvoice = function() {
                 // Customer created, set the ID and proceed with invoice
                 document.getElementById('selectedCustomerId').value = data.customer.customer_id;
                 isNewCustomer = false;
-                
+
                 // Now create the invoice
                 originalSubmitInvoice();
             } else {
