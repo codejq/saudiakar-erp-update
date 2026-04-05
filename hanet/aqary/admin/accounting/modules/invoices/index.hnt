@@ -383,6 +383,44 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
             }
             break;
 
+        case 'update_customer_quick':
+            $customerId = intval($_POST['customer_id'] ?? 0);
+            $name = trim($_POST['customer_name'] ?? '');
+            $vatNumber = trim($_POST['vat_number'] ?? '');
+            $phone = trim($_POST['phone'] ?? '');
+            $address = trim($_POST['address'] ?? '');
+
+            if (empty($customerId)) {
+                $response = ['success' => false, 'error' => 'Customer ID is required', 'message' => 'معرف العميل مطلوب'];
+                break;
+            }
+
+            if (empty($name)) {
+                $response = ['success' => false, 'error' => 'Customer name is required', 'message' => 'اسم العميل مطلوب'];
+                break;
+            }
+
+            $query = "UPDATE acc_customers SET customer_name = ?, vat_number = ?, phone = ?, address = ? WHERE customer_id = ?";
+            $stmt = $db->prepare($query);
+            $stmt->bind_param('ssssi', $name, $vatNumber, $phone, $address, $customerId);
+
+            if ($stmt->execute()) {
+                $response = [
+                    'success' => true,
+                    'message' => 'تم حفظ بيانات العميل بنجاح',
+                    'customer' => [
+                        'customer_id' => $customerId,
+                        'customer_name' => $name,
+                        'vat_number' => $vatNumber,
+                        'phone' => $phone,
+                        'address' => $address
+                    ]
+                ];
+            } else {
+                $response = ['success' => false, 'error' => $db->error, 'message' => 'فشل في حفظ بيانات العميل: ' . $db->error];
+            }
+            break;
+
         case 'create_invoice':
             $customerId = intval($_POST['customer_id'] ?? 0);
 
@@ -828,6 +866,12 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
                                 <label class="form-label">عنوان العميل</label>
                                 <textarea class="form-control" id="customer_address" name="customer_address" rows="1"></textarea>
                             </div>
+                            <div class="col-12" id="saveCustomerInfoContainer" style="display: none;">
+                                <button type="button" class="btn btn-outline-success btn-sm mt-2" id="saveCustomerInfoBtn" onclick="saveCustomerInfo()">
+                                    <i class="bi bi-save me-1"></i>حفظ بيانات العميل
+                                </button>
+                                
+                            </div>
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">طريقة الدفع</label>
@@ -1037,6 +1081,140 @@ function printInvoice(invoiceId) {
     window.open('print.hnt?id=' + invoiceId, '_blank');
 }
 
+let selectedExistingCustomerSnapshot = null;
+
+function getCustomerFormState() {
+    return {
+        customer_name: document.getElementById('customer_name').value.trim(),
+        vat_number: document.getElementById('customer_vat_number').value.trim(),
+        phone: document.getElementById('customer_phone').value.trim(),
+        address: document.getElementById('customer_address').value.trim()
+    };
+}
+
+function resetCustomerSaveState() {
+    selectedExistingCustomerSnapshot = null;
+    document.getElementById('saveCustomerInfoContainer').style.display = 'none';
+}
+
+function updateSaveCustomerButtonVisibility() {
+    const customerId = document.getElementById('selectedCustomerId').value;
+    const container = document.getElementById('saveCustomerInfoContainer');
+    const button = document.getElementById('saveCustomerInfoBtn');
+    const current = getCustomerFormState();
+
+    if (isNewCustomer && !customerId) {
+        const hasNewCustomerData = current.customer_name || current.vat_number || current.phone || current.address;
+        button.innerHTML = '<i class="bi bi-save me-1"></i>حفظ العميل';
+        container.style.display = hasNewCustomerData ? 'block' : 'none';
+        return;
+    }
+
+    button.innerHTML = '<i class="bi bi-save me-1"></i>حفظ بيانات العميل';
+
+    if (!customerId || !selectedExistingCustomerSnapshot) {
+        container.style.display = 'none';
+        return;
+    }
+
+    const hasChanges = current.customer_name !== selectedExistingCustomerSnapshot.customer_name ||
+        current.vat_number !== selectedExistingCustomerSnapshot.vat_number ||
+        current.phone !== selectedExistingCustomerSnapshot.phone ||
+        current.address !== selectedExistingCustomerSnapshot.address;
+
+    container.style.display = hasChanges ? 'block' : 'none';
+}
+
+function createCustomerQuick(current, successMessage) {
+    const formData = new FormData();
+    formData.append('ajax_action', 'add_customer_quick');
+    formData.append('customer_name', current.customer_name);
+    formData.append('vat_number', current.vat_number);
+    formData.append('phone', current.phone);
+    formData.append('address', current.address);
+
+    return fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            throw new Error(data.message || 'فشل في إضافة العميل');
+        }
+
+        document.getElementById('selectedCustomerId').value = data.customer.customer_id;
+        customerSearchInput.value = current.customer_name;
+        isNewCustomer = false;
+        selectedExistingCustomerSnapshot = {
+            customer_name: current.customer_name,
+            vat_number: current.vat_number,
+            phone: current.phone,
+            address: current.address
+        };
+        updateSaveCustomerButtonVisibility();
+
+        if (successMessage) {
+            showResultModal(true, successMessage);
+        }
+
+        return data;
+    });
+}
+
+function saveCustomerInfo() {
+    const customerId = document.getElementById('selectedCustomerId').value;
+
+    const current = getCustomerFormState();
+
+    if (!current.customer_name) {
+        showResultModal(false, 'اسم العميل مطلوب');
+        return;
+    }
+
+    if (isNewCustomer && !customerId) {
+        createCustomerQuick(current, 'تم حفظ العميل بنجاح')
+            .catch(error => {
+                console.error('Error:', error);
+                showResultModal(false, error.message || 'حدث خطأ أثناء حفظ العميل');
+            });
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('ajax_action', 'update_customer_quick');
+    formData.append('customer_id', customerId);
+    formData.append('customer_name', current.customer_name);
+    formData.append('vat_number', current.vat_number);
+    formData.append('phone', current.phone);
+    formData.append('address', current.address);
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            selectedExistingCustomerSnapshot = {
+                customer_name: current.customer_name,
+                vat_number: current.vat_number,
+                phone: current.phone,
+                address: current.address
+            };
+            customerSearchInput.value = current.customer_name;
+            updateSaveCustomerButtonVisibility();
+            showResultModal(true, data.message || 'تم حفظ بيانات العميل بنجاح');
+        } else {
+            showResultModal(false, data.message || 'فشل في حفظ بيانات العميل');
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showResultModal(false, 'حدث خطأ أثناء حفظ بيانات العميل');
+    });
+}
+
 function submitToZatca(invoiceId) {
     console.log('submitToZatca called with invoice ID:', invoiceId);
 
@@ -1081,8 +1259,6 @@ function performZatcaSubmission(invoiceId) {
     })
     .then(response => response.json())
     .then(data => {
-        loadingModal.hide();
-
         // Build detailed error message
         let errorMessage = data.message || data.error || 'خطأ غير معروف';
 
@@ -1158,33 +1334,43 @@ function performZatcaSubmission(invoiceId) {
                 }
             }
 
-            successMessage += '\n\n⏳ سيتم تحديث الصفحة خلال 6 ثواني...';
-
-            showResultModal(true, successMessage, null);
-
-            // Wait 6 seconds before reload so user can see the success message
-            setTimeout(() => location.reload(), 6000);
+            showResultModal(true, successMessage, null, {
+                autoReloadSeconds: 6
+            });
         } else {
             showResultModal(false, errorMessage, data.technical_details);
         }
     })
     .catch(error => {
-        loadingModal.hide();
         console.error('Error:', error);
         showResultModal(false, 'حدث خطأ أثناء الإرسال إلى ZATCA');
     });
 }
 
-function recordPayment(invoiceId) {
-    window.location = '../payments/record.hnt?invoice_id=' + invoiceId;
+let resultModalReloadTimer = null;
+let resultModalCountdownTimer = null;
+
+function clearResultModalTimers() {
+    if (resultModalReloadTimer) {
+        clearTimeout(resultModalReloadTimer);
+        resultModalReloadTimer = null;
+    }
+
+    if (resultModalCountdownTimer) {
+        clearInterval(resultModalCountdownTimer);
+        resultModalCountdownTimer = null;
+    }
 }
 
-function showResultModal(success, message, technicalDetails) {
+function showResultModal(success, message, technicalDetails, options = {}) {
     const modalElement = document.getElementById('resultModal');
     const modal = new bootstrap.Modal(modalElement);
     const header = document.getElementById('resultModalHeader');
     const title = document.getElementById('resultModalTitle');
     const messageEl = document.getElementById('resultModalMessage');
+    const autoReloadSeconds = options.autoReloadSeconds || 0;
+
+    clearResultModalTimers();
 
     if (success) {
         header.style.background = 'linear-gradient(135deg, #28a745, #20c997)';
@@ -1200,11 +1386,40 @@ function showResultModal(success, message, technicalDetails) {
                               message.replace(/</g, '&lt;').replace(/>/g, '&gt;') +
                               '</div>';
     } else {
-        messageEl.textContent = message;
+        messageEl.innerHTML = '<div style="white-space: pre-wrap;">' + message.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>';
+
+        if (success && autoReloadSeconds > 0) {
+            const countdownWrapper = document.createElement('div');
+            countdownWrapper.className = 'mt-3 alert alert-info mb-0';
+            countdownWrapper.innerHTML = 'سيتم تحديث الصفحة خلال <strong id="resultModalCountdownValue">' + autoReloadSeconds + '</strong> ثانية. يمكنك إغلاق هذه النافذة لإلغاء التحديث التلقائي.';
+            messageEl.appendChild(countdownWrapper);
+
+            let remainingSeconds = autoReloadSeconds;
+            const countdownValue = document.getElementById('resultModalCountdownValue');
+
+            resultModalCountdownTimer = setInterval(() => {
+                remainingSeconds -= 1;
+                if (remainingSeconds <= 0) {
+                    clearInterval(resultModalCountdownTimer);
+                    resultModalCountdownTimer = null;
+                    return;
+                }
+
+                if (countdownValue) {
+                    countdownValue.textContent = remainingSeconds;
+                }
+            }, 1000);
+
+            resultModalReloadTimer = setTimeout(() => {
+                clearResultModalTimers();
+                location.reload();
+            }, autoReloadSeconds * 1000);
+        }
     }
 
     // Clean up modal and backdrop when hidden
     modalElement.addEventListener('hidden.bs.modal', function() {
+        clearResultModalTimers();
         modal.dispose();
         // Remove any remaining backdrops
         const backdrops = document.querySelectorAll('.modal-backdrop');
@@ -1310,17 +1525,22 @@ function selectCustomer(customer) {
     // Show customer details
     customerDetails.style.display = 'block';
     customerDetails.querySelectorAll('.col-md-6, .col-md-12').forEach(el => {
+        if (el.id === 'saveCustomerInfoContainer') {
+            return;
+        }
         el.style.display = 'block';
     });
 
     // Hide dropdown
     customerDropdown.style.display = 'none';
 
-    // Make fields readonly for existing customer
-    document.getElementById('customer_name').readOnly = true;
-    document.getElementById('customer_vat_number').readOnly = true;
-    document.getElementById('customer_phone').readOnly = true;
-    document.getElementById('customer_address').readOnly = true;
+    selectedExistingCustomerSnapshot = {
+        customer_name: customer.customer_name || '',
+        vat_number: customer.vat_number || '',
+        phone: customer.phone || '',
+        address: customer.address || ''
+    };
+    updateSaveCustomerButtonVisibility();
 }
 
 // Add new customer button
@@ -1337,6 +1557,9 @@ document.getElementById('addNewCustomerBtn').addEventListener('click', function(
     // Show customer details
     customerDetails.style.display = 'block';
     customerDetails.querySelectorAll('.col-md-6, .col-md-12').forEach(el => {
+        if (el.id === 'saveCustomerInfoContainer') {
+            return;
+        }
         el.style.display = 'block';
     });
 
@@ -1349,8 +1572,15 @@ document.getElementById('addNewCustomerBtn').addEventListener('click', function(
     document.getElementById('customer_phone').readOnly = false;
     document.getElementById('customer_address').readOnly = false;
 
+    resetCustomerSaveState();
+    updateSaveCustomerButtonVisibility();
+
     // Focus on customer name
     document.getElementById('customer_name').focus();
+});
+
+['customer_name', 'customer_vat_number', 'customer_phone', 'customer_address'].forEach(function(fieldId) {
+    document.getElementById(fieldId).addEventListener('input', updateSaveCustomerButtonVisibility);
 });
 
 // Hide dropdown when clicking outside
@@ -1375,34 +1605,18 @@ submitInvoice = function() {
             return;
         }
 
-        // Create customer first
-        const formData = new FormData();
-        formData.append('ajax_action', 'add_customer_quick');
-        formData.append('customer_name', customerName);
-        formData.append('vat_number', vatNumber);
-        formData.append('phone', phone);
-        formData.append('address', address);
-
-        fetch('index.hnt', {
-            method: 'POST',
-            body: formData
+        createCustomerQuick({
+            customer_name: customerName,
+            vat_number: vatNumber,
+            phone: phone,
+            address: address
         })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                // Customer created, set the ID and proceed with invoice
-                document.getElementById('selectedCustomerId').value = data.customer.customer_id;
-                isNewCustomer = false;
-
-                // Now create the invoice
-                originalSubmitInvoice();
-            } else {
-                showResultModal(false, data.message || 'فشل في إضافة العميل');
-            }
+        .then(() => {
+            originalSubmitInvoice();
         })
         .catch(error => {
             console.error('Error:', error);
-            showResultModal(false, 'حدث خطأ أثناء إضافة العميل');
+            showResultModal(false, error.message || 'حدث خطأ أثناء إضافة العميل');
         });
     } else {
         // Customer already exists or selected, proceed normally
