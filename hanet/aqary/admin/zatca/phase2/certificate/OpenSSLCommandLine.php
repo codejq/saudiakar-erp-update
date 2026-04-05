@@ -16,6 +16,40 @@ class OpenSSLCommandLine {
     private $opensslPath;
     private $configFile;
 
+    private function normalizeUtf8($value) {
+        if (!is_string($value) || $value === '') {
+            return $value;
+        }
+
+        if (function_exists('mb_check_encoding') && mb_check_encoding($value, 'UTF-8')) {
+            return $value;
+        }
+
+        if (function_exists('mb_convert_encoding')) {
+            $converted = @mb_convert_encoding($value, 'UTF-8', 'Windows-1256,CP1256,ISO-8859-6,Windows-1252,UTF-8');
+            if (is_string($converted) && $converted !== '') {
+                return $converted;
+            }
+        }
+
+        if (function_exists('iconv')) {
+            foreach (['Windows-1256', 'CP1256', 'ISO-8859-6', 'Windows-1252'] as $encoding) {
+                $converted = @iconv($encoding, 'UTF-8//IGNORE', $value);
+                if (is_string($converted) && $converted !== '') {
+                    return $converted;
+                }
+            }
+        }
+
+        return $value;
+    }
+
+    private function escapeConfigValue($value) {
+        $value = $this->normalizeUtf8($value);
+        $value = str_replace(["\r\n", "\r", "\n"], ' ', $value);
+        return trim($value);
+    }
+
     /**
      * Constructor
      *
@@ -166,10 +200,10 @@ class OpenSSLCommandLine {
         $serialNumber = $this->generateDynamicSerialNumber();
         $orgIdentifier = ZatcaPhase2Config::$CERT_ORGANIZATION_IDENTIFIER;
         $invoiceType = ZatcaPhase2Config::$CERT_INVOICE_TYPE;
-        $orgName = ZatcaPhase2Config::$CERT_ORGANIZATION_NAME ?? 'Your Company Name';
-        $orgUnit = ZatcaPhase2Config::$CERT_ORGANIZATIONAL_UNIT ?? 'IT Department';
-        $location = ZatcaPhase2Config::$CERT_LOCATION ?? 'Riyadh';
-        $industry = ZatcaPhase2Config::$CERT_INDUSTRY ?? 'software';
+        $orgName = $this->escapeConfigValue(ZatcaPhase2Config::$CERT_ORGANIZATION_NAME ?? 'Your Company Name');
+        $orgUnit = $this->escapeConfigValue(ZatcaPhase2Config::$CERT_ORGANIZATIONAL_UNIT ?? 'IT Department');
+        $location = $this->escapeConfigValue(ZatcaPhase2Config::$CERT_LOCATION ?? 'Riyadh');
+        $industry = $this->escapeConfigValue(ZatcaPhase2Config::$CERT_INDUSTRY ?? 'software');
 
         // registeredAddress = building number from data.hnt ($zatca_company_building_number)
         global $zatca_company_building_number, $zatca_company_postal_code;
@@ -214,6 +248,8 @@ prompt             = no
 default_md         = sha256
 req_extensions     = reqExt
 distinguished_name = dn
+utf8               = yes
+string_mask        = utf8only
 
 [ dn ]
 C                      = SA
