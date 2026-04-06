@@ -1,0 +1,290 @@
+<?php
+$sc_title = "قالب الفاتورة";
+$sc_id = "204";
+include_once "../../../../nocash.hnt";
+include_once "../../../../report_header.hnt";
+
+$invoiceId = isset($_GET['id']) ? intval($_GET['id']) : 0;
+
+if (!$invoiceId) {
+    echo '<div class="alert alert-danger m-4">لم يتم تحديد رقم الفاتورة</div>';
+    require("../../../../reportfooter.hnt");
+    exit;
+}
+
+$stmt = $db->prepare("SELECT * FROM acc_invoices WHERE invoice_id = ?");
+$stmt->bind_param('i', $invoiceId);
+$stmt->execute();
+$invoice = $stmt->get_result()->fetch_assoc();
+
+if (!$invoice) {
+    echo '<div class="alert alert-danger m-4">الفاتورة غير موجودة</div>';
+    require("../../../../reportfooter.hnt");
+    exit;
+}
+
+$itemsStmt = $db->prepare("SELECT * FROM acc_invoice_items WHERE invoice_id = ? ORDER BY item_id ASC");
+$itemsStmt->bind_param('i', $invoiceId);
+$itemsStmt->execute();
+$itemsResult = $itemsStmt->get_result();
+$items = [];
+while ($item = $itemsResult->fetch_assoc()) {
+    $items[] = $item;
+}
+
+$sellerName = 'اسم الشركة';
+$sellerVat = '300000000000003';
+$sellerAddress = 'المملكة العربية السعودية';
+
+if (file_exists(__DIR__ . '/../../../zatca/config/zatca_config.php')) {
+    require_once __DIR__ . '/../../../zatca/config/zatca_config.php';
+    if (defined('ZATCA_SELLER_NAME')) {
+        $sellerName = constant('ZATCA_SELLER_NAME');
+    }
+    if (defined('ZATCA_VAT_NUMBER')) {
+        $sellerVat = constant('ZATCA_VAT_NUMBER');
+    }
+    if (defined('ZATCA_SELLER_ADDRESS')) {
+        $sellerAddress = constant('ZATCA_SELLER_ADDRESS');
+    }
+}
+
+function accountingNumberToArabicWords($number)
+{
+    $ones = ['', 'واحد', 'اثنان', 'ثلاثة', 'أربعة', 'خمسة', 'ستة', 'سبعة', 'ثمانية', 'تسعة', 'عشرة', 'أحد عشر', 'اثنا عشر', 'ثلاثة عشر', 'أربعة عشر', 'خمسة عشر', 'ستة عشر', 'سبعة عشر', 'ثمانية عشر', 'تسعة عشر'];
+    $tens = ['', '', 'عشرون', 'ثلاثون', 'أربعون', 'خمسون', 'ستون', 'سبعون', 'ثمانون', 'تسعون'];
+    $hundreds = ['', 'مائة', 'مائتان', 'ثلاثمائة', 'أربعمائة', 'خمسمائة', 'ستمائة', 'سبعمائة', 'ثمانمائة', 'تسعمائة'];
+    $thousands = ['', 'ألف', 'ألفان', 'ثلاثة آلاف', 'أربعة آلاف', 'خمسة آلاف', 'ستة آلاف', 'سبعة آلاف', 'ثمانية آلاف', 'تسعة آلاف'];
+
+    $number = intval($number);
+    if ($number === 0) {
+        return 'صفر';
+    }
+    if ($number < 20) {
+        return $ones[$number];
+    }
+
+    $result = '';
+
+    if ($number >= 1000) {
+        $th = intval($number / 1000);
+        if ($th < 10) {
+            $result .= $thousands[$th];
+        } else {
+            $result .= accountingNumberToArabicWords($th) . ' ألف';
+        }
+        $number %= 1000;
+        if ($number > 0) {
+            $result .= ' و ';
+        }
+    }
+
+    if ($number >= 100) {
+        $result .= $hundreds[intval($number / 100)];
+        $number %= 100;
+        if ($number > 0) {
+            $result .= ' و ';
+        }
+    }
+
+    if ($number >= 20) {
+        $t = intval($number / 10);
+        $o = $number % 10;
+        if ($o > 0) {
+            $result .= $ones[$o] . ' و ';
+        }
+        $result .= $tens[$t];
+    } elseif ($number > 0) {
+        $result .= $ones[$number];
+    }
+
+    return $result;
+}
+
+$totalAmount = floatval($invoice['total_amount'] ?? 0);
+$subtotal = floatval($invoice['subtotal'] ?? 0);
+$vatAmount = floatval($invoice['vat_amount'] ?? 0);
+$dueDate = !empty($invoice['due_date']) && $invoice['due_date'] !== '0000-00-00'
+    ? $invoice['due_date']
+    : date('Y-m-d', strtotime($invoice['invoice_date'] . ' +30 days'));
+$paidAmount = floatval($invoice['paid_amount'] ?? 0);
+$remainingAmount = isset($invoice['remaining_amount']) && $invoice['remaining_amount'] !== '' && $invoice['remaining_amount'] !== null
+    ? floatval($invoice['remaining_amount'])
+    : max($totalAmount - $paidAmount, 0);
+$paymentStatus = trim((string)($invoice['payment_status'] ?? ''));
+if ($paymentStatus === '') {
+    if ($remainingAmount <= 0 && $totalAmount > 0) {
+        $paymentStatus = 'paid';
+    } elseif ($paidAmount > 0) {
+        $paymentStatus = 'partial';
+    } else {
+        $paymentStatus = 'unpaid';
+    }
+}
+$paymentStatusAr = 'غير مدفوعة';
+if ($paymentStatus === 'paid') {
+    $paymentStatusAr = 'مدفوعة';
+} elseif ($paymentStatus === 'partial') {
+    $paymentStatusAr = 'مدفوعة جزئياً';
+}
+
+$totalInWords = accountingNumberToArabicWords(intval($totalAmount)) . ' ريال';
+$halalas = intval(round(($totalAmount - intval($totalAmount)) * 100));
+if ($halalas > 0) {
+    $totalInWords .= ' و ' . accountingNumberToArabicWords($halalas) . ' هللة';
+}
+
+$repl = [];
+for ($i = 0; $i < 10; $i++) {
+    $repl["{_بيان_السند_$i}"] = '';
+    $repl["{كود_القسط_$i}"] = '';
+    $repl["{_المبلغ_$i}"] = '';
+    $repl["{_المبلغ_{$i}_}"] = '';
+    $repl["{_ضريبة_القيمة_المضافة_$i}"] = '';
+}
+
+foreach (array_slice($items, 0, 10) as $index => $item) {
+    $lineAmount = floatval($item['quantity']) * floatval($item['unit_price']);
+    $lineVat = $lineAmount * (floatval($item['vat_rate']) / 100);
+    $lineTotal = floatval($item['line_total']);
+
+    $repl["{كود_القسط_$index}"] = htmlspecialchars($invoice['invoice_number']);
+    $repl["{_بيان_السند_$index}"] = htmlspecialchars($item['item_description']);
+    $repl["{_المبلغ_$index}"] = number_format($lineAmount, 2);
+    $repl["{_ضريبة_القيمة_المضافة_$index}"] = number_format($lineVat, 2);
+    $repl["{_المبلغ_{$index}_}"] = number_format($lineTotal, 2);
+}
+
+if (empty($items)) {
+    $repl['{كود_القسط_0}'] = htmlspecialchars($invoice['invoice_number']);
+    $repl['{_بيان_السند_0}'] = 'بنود الفاتورة';
+    $repl['{_المبلغ_0}'] = number_format($subtotal, 2);
+    $repl['{_ضريبة_القيمة_المضافة_0}'] = number_format($vatAmount, 2);
+    $repl['{_المبلغ_0_}'] = number_format($totalAmount, 2);
+}
+
+$repl['{العنوان}'] = '';
+$repl['{تاريخ_الإستحقاق}'] = htmlspecialchars($dueDate);
+$repl['{حساب_العميل}'] = intval($invoice['customer_id']);
+$repl['{رقم_العميل_الضريبي}'] = htmlspecialchars($invoice['customer_vat_number'] ?? '');
+$repl['{كود_القسط}'] = htmlspecialchars($invoice['invoice_number']);
+$repl['{_الرقم_الضريبي_}'] = htmlspecialchars($sellerVat);
+$repl['{_اجمالي_المبلغ_}'] = number_format($totalAmount, 2);
+$repl['{_ضريبة_القيمة_المضافة_}'] = number_format($vatAmount, 2);
+$repl['{_العملة_}'] = ' ريال ';
+$repl['{_المبلغ_}'] = number_format($subtotal, 2);
+$repl['{_اجمالي_الفاتورة_}'] = number_format($subtotal, 2);
+$repl['{_رقم_السند_}'] = htmlspecialchars($invoice['invoice_number']);
+$repl['{_التاريخ_}'] = htmlspecialchars($invoice['invoice_date']);
+$repl['{اسم_المستلم}'] = htmlspecialchars($invoice['customer_name']);
+$repl['{المبلغ_حروف}'] = htmlspecialchars($totalInWords);
+$repl['{_هل_المبلغ_نقدا_}'] = '';
+$repl['{_هل_شيك_}'] = '';
+$repl['{_رقم_الشيك_}'] = '';
+$repl['{_اسم_البنك_}'] = '';
+$repl['{_تاريخ_الشيك_}'] = '';
+$repl['{_بيان_السند_}'] = '';
+$repl['{_الحسابات_}'] = htmlspecialchars($_SESSION['name'] ?? 'الحسابات');
+$repl['اسم_المحاسب'] = htmlspecialchars($_SESSION['name'] ?? 'الحسابات');
+$repl['{_ملحوظات_}'] = htmlspecialchars($invoice['notes'] ?? '');
+$repl['{_هل_طريقة_اخرى_}'] = '';
+$repl['{اسم_البائع}'] = htmlspecialchars($sellerName);
+$repl['{الرقم_الضريبي_للبائع}'] = htmlspecialchars($sellerVat);
+$repl['{عنوان_البائع}'] = htmlspecialchars($sellerAddress);
+$repl['{عنوان_العميل}'] = htmlspecialchars($invoice['customer_address'] ?? '');
+$repl['{rentValue}'] = '0.00';
+$repl['{rentVat}'] = '0.00';
+$repl['{water}'] = '0.00';
+$repl['{comision}'] = '0.00';
+$repl['{comisionVat}'] = '0.00';
+$repl['{services}'] = '0.00';
+$repl['{requiredamound}'] = number_format($totalAmount, 2);
+$repl['{paid}'] = number_format($paidAmount, 2);
+$repl['{remaining}'] = number_format($remainingAmount, 2);
+$repl['{payment_status_ar}'] = htmlspecialchars($paymentStatusAr);
+$repl['{payment_type}'] = htmlspecialchars($invoice['payment_method'] ?? '');
+$repl['{payment_type_en}'] = htmlspecialchars($invoice['payment_method'] ?? '');
+$repl['{stalemtDataTable}'] = 'none';
+
+$templatePath = __DIR__ . '/templates/accounting_vat_invoice.tpl';
+$html = file_get_contents($templatePath);
+$html = str_replace(array_keys($repl), array_values($repl), $html);
+
+$qrDateTime = $invoice['invoice_date'] . 'T' . date('H:i:s', strtotime($invoice['created_at'] ?? 'now'));
+?>
+<style>
+@media print {
+    @page {
+        size: A4 portrait;
+        margin: 0mm;
+        padding: 10mm!important;
+         zoom: 1.0;
+    }
+
+    html,
+    body#myP {
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 190mm !important;
+        zoom: 1.0;
+    }
+
+    .pagepaper {
+        width: 190mm !important;
+        min-height: 250mm !important;
+        max-width: 190mm !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        box-shadow: none !important;
+        overflow: visible !important;
+    }
+
+    #main_report_data {
+        width: 100% !important;
+        margin: 0 !important;
+        border-collapse: collapse !important;
+        table-layout: fixed !important;
+    }
+
+    #reportpagedata {
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 100% !important;
+    }
+
+    #reportpagedata > div {
+        padding: 0 !important;
+        margin: 0 !important;
+        width: 100% !important;
+    }
+}
+</style>
+<div style="background:#fff; padding:20px 10px 40px;">
+    <?php echo $html; ?>
+</div>
+
+<script src="/aqary/js/qrcode.min.js"></script>
+<script src="/aqary/js/sauditax.js?id=123"></script>
+<script>
+const accountingSaudiCode = GenerateSaudiTaxCode(
+    <?php echo json_encode($sellerName, JSON_UNESCAPED_UNICODE); ?>,
+    <?php echo json_encode($sellerVat, JSON_UNESCAPED_UNICODE); ?>,
+    <?php echo json_encode($qrDateTime, JSON_UNESCAPED_UNICODE); ?>,
+    <?php echo json_encode(number_format($totalAmount, 2, '.', ''), JSON_UNESCAPED_UNICODE); ?>,
+    <?php echo json_encode(number_format($vatAmount, 2, '.', ''), JSON_UNESCAPED_UNICODE); ?>
+);
+
+new QRCode("qrcode", {
+    text: accountingSaudiCode,
+    width: 90,
+    height: 90,
+    colorDark: "#10286e",
+    colorLight: "#ffffff",
+    correctLevel: QRCode.CorrectLevel.L
+});
+</script>
+
+<?php
+$forceprintfooter = 1;
+require("../../../../reportfooter.hnt");
+?>

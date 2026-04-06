@@ -1,0 +1,905 @@
+<?php
+/**
+ * Invoice View - ZATCA Compliant
+ * عرض تفاصيل الفاتورة - تصميم احترافي
+ *
+ * @charset UTF-8
+ * @version 2.0
+ * @zatca Phase 2 Compliant
+ */
+
+$sc_title = "عرض الفاتورة";
+$sc_id = "204";
+include_once "../../../../header.hnt";
+include_once "../../includes/accounting_class.hnt";
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+
+// Get invoice ID
+$invoiceId = isset($_GET['id']) ? intval($_GET['id']) : 0;
+
+if (!$invoiceId) {
+    echo '<div class="alert alert-danger m-4">لم يتم تحديد رقم الفاتورة</div>';
+    require("../../../../foter.hnt");
+    exit;
+}
+
+// Get invoice details
+$stmt = $db->prepare("SELECT * FROM acc_invoices WHERE invoice_id = ?");
+$stmt->bind_param('i', $invoiceId);
+$stmt->execute();
+$invoice = $stmt->get_result()->fetch_assoc();
+
+if (!$invoice) {
+    echo '<div class="alert alert-danger m-4">الفاتورة غير موجودة</div>';
+    require("../../../../foter.hnt");
+    exit;
+}
+
+// Get invoice items
+$itemsStmt = $db->prepare("SELECT * FROM acc_invoice_items WHERE invoice_id = ?");
+$itemsStmt->bind_param('i', $invoiceId);
+$itemsStmt->execute();
+$itemsResult = $itemsStmt->get_result();
+$items = [];
+while ($item = $itemsResult->fetch_assoc()) {
+    $items[] = $item;
+}
+
+// Get submission log with full API response
+$submissionLog = null;
+$logStmt = $db->prepare("SELECT * FROM zatca_submission_log WHERE invoice_id = ? ORDER BY submission_date DESC LIMIT 1");
+if ($logStmt) {
+    $logStmt->bind_param('i', $invoiceId);
+    $logStmt->execute();
+    $submissionLog = $logStmt->get_result()->fetch_assoc();
+}
+
+// Get seller info from config or defaults
+$sellerName = 'اسم الشركة';
+$sellerVat = '300000000000003';
+$sellerAddress = 'المملكة العربية السعودية';
+
+// Try to get from ZATCA config
+if (file_exists(__DIR__ . '/../../../../admin/zatca/config/zatca_config.php')) {
+    require_once __DIR__ . '/../../../../admin/zatca/config/zatca_config.php';
+    if (defined('ZATCA_SELLER_NAME')) $sellerName = constant('ZATCA_SELLER_NAME');
+    if (defined('ZATCA_VAT_NUMBER')) $sellerVat = constant('ZATCA_VAT_NUMBER');
+    if (defined('ZATCA_SELLER_ADDRESS')) $sellerAddress = constant('ZATCA_SELLER_ADDRESS');
+}
+
+// Calculate totals
+$subtotal = $invoice['subtotal'] ?? 0;
+$vatAmount = $invoice['vat_amount'] ?? 0;
+$totalAmount = $invoice['total_amount'] ?? 0;
+$paidAmount = floatval($invoice['paid_amount'] ?? 0);
+$remainingAmount = isset($invoice['remaining_amount']) && $invoice['remaining_amount'] !== '' && $invoice['remaining_amount'] !== null
+    ? floatval($invoice['remaining_amount'])
+    : max(floatval($totalAmount) - $paidAmount, 0);
+$paymentStatus = trim((string)($invoice['payment_status'] ?? ''));
+if ($paymentStatus === '') {
+    if ($remainingAmount <= 0 && floatval($totalAmount) > 0) {
+        $paymentStatus = 'paid';
+    } elseif ($paidAmount > 0) {
+        $paymentStatus = 'partial';
+    } else {
+        $paymentStatus = 'unpaid';
+    }
+}
+$paymentStatusAr = 'غير مدفوعة';
+if ($paymentStatus === 'paid') {
+    $paymentStatusAr = 'مدفوعة';
+} elseif ($paymentStatus === 'partial') {
+    $paymentStatusAr = 'مدفوعة جزئياً';
+}
+$invoiceNotes = trim((string)($invoice['notes'] ?? ''));
+
+// Convert number to Arabic words (simplified)
+function numberToArabicWords($number) {
+    $ones = ['', 'واحد', 'اثنان', 'ثلاثة', 'أربعة', 'خمسة', 'ستة', 'سبعة', 'ثمانية', 'تسعة', 'عشرة',
+             'أحد عشر', 'اثنا عشر', 'ثلاثة عشر', 'أربعة عشر', 'خمسة عشر', 'ستة عشر', 'سبعة عشر', 'ثمانية عشر', 'تسعة عشر'];
+    $tens = ['', '', 'عشرون', 'ثلاثون', 'أربعون', 'خمسون', 'ستون', 'سبعون', 'ثمانون', 'تسعون'];
+    $hundreds = ['', 'مائة', 'مائتان', 'ثلاثمائة', 'أربعمائة', 'خمسمائة', 'ستمائة', 'سبعمائة', 'ثمانمائة', 'تسعمائة'];
+    $thousands = ['', 'ألف', 'ألفان', 'ثلاثة آلاف', 'أربعة آلاف', 'خمسة آلاف', 'ستة آلاف', 'سبعة آلاف', 'ثمانية آلاف', 'تسعة آلاف'];
+
+    $number = intval($number);
+    if ($number == 0) return 'صفر';
+    if ($number < 20) return $ones[$number];
+
+    $result = '';
+
+    if ($number >= 1000) {
+        $th = intval($number / 1000);
+        if ($th < 10) $result .= $thousands[$th];
+        else $result .= numberToArabicWords($th) . ' ألف';
+        $number %= 1000;
+        if ($number > 0) $result .= ' و ';
+    }
+
+    if ($number >= 100) {
+        $result .= $hundreds[intval($number / 100)];
+        $number %= 100;
+        if ($number > 0) $result .= ' و ';
+    }
+
+    if ($number >= 20) {
+        $t = intval($number / 10);
+        $o = $number % 10;
+        if ($o > 0) $result .= $ones[$o] . ' و ';
+        $result .= $tens[$t];
+    } elseif ($number > 0) {
+        $result .= $ones[$number];
+    }
+
+    return $result;
+}
+
+$totalInWords = numberToArabicWords(intval($totalAmount)) . ' ريال';
+$halalas = intval(($totalAmount - intval($totalAmount)) * 100);
+if ($halalas > 0) {
+    $totalInWords .= ' و ' . numberToArabicWords($halalas) . ' هللة';
+}
+$totalInWords .= ' فقط لا غير';
+?>
+
+<style>
+@media print {
+    .no-print { display: none !important; }
+    .invoice-container { box-shadow: none !important; }
+}
+
+.invoice-container {
+    max-width: 1100px;
+    margin: 20px auto;
+    background: white;
+    padding: 30px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.invoice-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 20px;
+}
+
+.invoice-table th,
+.invoice-table td {
+    border: 1px solid #b8d4e8;
+    padding: 10px 12px;
+    text-align: right;
+}
+
+.invoice-table th {
+    background: linear-gradient(180deg, #d4e8f5 0%, #b8d4e8 100%);
+    color: #2c5282;
+    font-weight: 600;
+}
+
+.invoice-table td {
+    background: #fff;
+}
+
+.invoice-table .label-cell {
+    background: #f0f7fc;
+    color: #2c5282;
+    font-weight: 600;
+    width: 150px;
+}
+
+.invoice-title {
+    background: linear-gradient(180deg, #d4e8f5 0%, #b8d4e8 100%);
+    color: #2c5282;
+    text-align: center;
+    padding: 15px;
+    font-size: 1.3rem;
+    font-weight: 700;
+    border: 1px solid #b8d4e8;
+}
+
+.items-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 20px;
+}
+
+.items-table th {
+    background: linear-gradient(180deg, #d4e8f5 0%, #b8d4e8 100%);
+    color: #2c5282;
+    font-weight: 600;
+    padding: 12px 10px;
+    border: 1px solid #b8d4e8;
+    text-align: center;
+}
+
+.items-table td {
+    border: 1px solid #b8d4e8;
+    padding: 10px;
+    text-align: center;
+    background: #fff;
+}
+
+.items-table tbody tr:nth-child(even) td {
+    background: #f8fbfd;
+}
+
+.total-row {
+    background: linear-gradient(180deg, #d4e8f5 0%, #b8d4e8 100%) !important;
+}
+
+.total-row td {
+    background: linear-gradient(180deg, #d4e8f5 0%, #b8d4e8 100%) !important;
+    font-weight: 700;
+    color: #2c5282;
+    font-size: 1.1rem;
+}
+
+.amount-box {
+    display: inline-block;
+    border: 2px solid #b8d4e8;
+    padding: 8px 20px;
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: #2c5282;
+    background: #fff;
+    min-width: 120px;
+    text-align: center;
+}
+
+.sum-section {
+    margin: 25px 0;
+    padding: 15px;
+    border-top: 1px solid #ddd;
+}
+
+.sum-section .label {
+    color: #2c5282;
+    font-weight: 600;
+}
+
+.sum-section .value {
+    color: #c53030;
+    font-weight: 600;
+}
+
+.signature-section {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 40px;
+    padding-top: 20px;
+}
+
+.signature-box {
+    text-align: center;
+    width: 45%;
+}
+
+.signature-box .title {
+    color: #2c5282;
+    font-weight: 600;
+    margin-bottom: 40px;
+}
+
+.signature-box .line {
+    border-bottom: 1px solid #333;
+    width: 80%;
+    margin: 0 auto;
+}
+
+.qr-section {
+    margin-top: 30px;
+}
+
+.qr-code {
+    width: 120px;
+    height: 120px;
+}
+
+.zatca-badge {
+    display: inline-block;
+    background: #48bb78;
+    color: white;
+    padding: 5px 15px;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.zatca-badge.pending {
+    background: #ed8936;
+}
+
+.zatca-badge.error {
+    background: #e53e3e;
+}
+
+.action-buttons {
+    margin-bottom: 20px;
+    padding: 15px;
+    background: #f7fafc;
+    border-radius: 8px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.btn-action {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-action:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+.btn-print {
+    background: #48bb78;
+    color: white;
+}
+
+.btn-zatca {
+    background: #4299e1;
+    color: white;
+}
+
+.btn-template {
+    background: #805ad5;
+    color: white;
+}
+
+.btn-back {
+    background: #718096;
+    color: white;
+}
+
+.zatca-result-box {
+    margin: 20px 0;
+    padding: 15px;
+    border-radius: 8px;
+    border-left: 4px solid;
+}
+
+.zatca-result-box.success {
+    background: #f0fff4;
+    border-color: #48bb78;
+}
+
+.zatca-result-box.error {
+    background: #fff5f5;
+    border-color: #e53e3e;
+}
+
+.zatca-details {
+    background: #f7fafc;
+    padding: 15px;
+    border-radius: 8px;
+    margin-top: 20px;
+}
+
+.zatca-details .detail-row {
+    display: flex;
+    margin-bottom: 8px;
+}
+
+.zatca-details .detail-label {
+    width: 120px;
+    color: #4a5568;
+    font-weight: 600;
+}
+
+.zatca-details .detail-value {
+    flex: 1;
+    font-family: 'Courier New', monospace;
+    font-size: 0.85rem;
+    word-break: break-all;
+    color: #2d3748;
+}
+
+.notes-editor-card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 18px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+}
+
+.notes-editor-title {
+    color: #2c5282;
+    font-weight: 700;
+    margin-bottom: 10px;
+}
+
+.notes-editor-textarea {
+    width: 100%;
+    min-height: 110px;
+    border: 1px solid #cbd5e0;
+    border-radius: 8px;
+    padding: 12px;
+    resize: vertical;
+    font-size: 1rem;
+    line-height: 1.6;
+}
+
+.notes-editor-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.btn-save-note {
+    background: #2b6cb0;
+    color: white;
+}
+
+.note-save-status {
+    color: #4a5568;
+    font-size: 0.95rem;
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Action Buttons -->
+    <div class="action-buttons no-print">
+        <button class="btn-action btn-print" onclick="window.open('legacy_template_view.hnt?id=<?php echo $invoiceId; ?>', '_blank')">
+            <i class="bi bi-printer me-2"></i>طباعة
+        </button>
+        <button class="btn-action btn-template" onclick="window.open('legacy_template_view.hnt?id=<?php echo $invoiceId; ?>', '_blank')">
+            <i class="bi bi-file-earmark-richtext me-2"></i>فتح بالقالب  
+        </button>
+        <?php if (empty($invoice['zatca_status']) || $invoice['zatca_status'] != 'submitted'): ?>
+        <button class="btn-action btn-zatca" onclick="submitToZatca(<?php echo $invoiceId; ?>)">
+            <i class="bi bi-send me-2"></i>إرسال لـ ZATCA
+        </button>
+        <?php endif; ?>
+        <button class="btn-action btn-back" onclick="window.location='index.hnt'">
+            <i class="bi bi-arrow-right me-2"></i>العودة للقائمة
+        </button>
+
+        <?php if (!empty($invoice['zatca_status'])): ?>
+        <span class="zatca-badge <?php echo $invoice['zatca_status'] == 'submitted' ? '' : 'pending'; ?>" style="margin-right: auto;">
+            <?php if ($invoice['zatca_status'] == 'submitted'): ?>
+                <i class="bi bi-check-circle me-1"></i>ZATCA Submitted
+            <?php else: ?>
+                <i class="bi bi-clock me-1"></i>Signed Locally
+            <?php endif; ?>
+        </span>
+        <?php endif; ?>
+    </div>
+
+    <div class="notes-editor-card no-print">
+        <div class="notes-editor-title">ملاحظات الفاتورة</div>
+        <textarea id="invoiceNotes" class="notes-editor-textarea"><?php echo htmlspecialchars($invoiceNotes); ?></textarea>
+        <div class="notes-editor-actions">
+            <button class="btn-action btn-save-note" type="button" onclick="saveInvoiceNote(<?php echo $invoiceId; ?>)">
+                <i class="bi bi-save me-2"></i>حفظ الملاحظات
+            </button>
+            <span id="invoiceNotesStatus" class="note-save-status"></span>
+        </div>
+    </div>
+
+    <!-- Invoice Container -->
+    <div class="invoice-container">
+        <!-- Invoice Header -->
+        <div class="invoice-title">
+            فاتورة ضريبية رقم: <?php echo htmlspecialchars($invoice['invoice_number']); ?>
+        </div>
+
+        <!-- Header Info Table -->
+        <table class="invoice-table">
+            <tr>
+                <td class="label-cell">التاريخ:</td>
+                <td><?php echo date('Y-m-d', strtotime($invoice['invoice_date'])); ?></td>
+                <td class="label-cell">تاريخ الاستحقاق:</td>
+                <td><?php echo date('Y-m-d', strtotime($invoice['invoice_date'] . ' +30 days')); ?></td>
+            </tr>
+            <tr>
+                <td class="label-cell">اسم المورد:</td>
+                <td><?php echo htmlspecialchars($sellerName); ?></td>
+                <td class="label-cell">الرقم الضريبي للمورد:</td>
+                <td><?php echo htmlspecialchars($sellerVat); ?></td>
+            </tr>
+            <tr>
+                <td class="label-cell">عنوان المورد:</td>
+                <td colspan="3"><?php echo htmlspecialchars($sellerAddress); ?></td>
+            </tr>
+            <tr>
+                <td class="label-cell">اسم العميل:</td>
+                <td><?php echo htmlspecialchars($invoice['customer_name']); ?></td>
+                <td class="label-cell">الرقم الضريبي للعميل:</td>
+                <td><?php echo htmlspecialchars($invoice['customer_vat_number'] ?? '-'); ?></td>
+            </tr>
+            <tr>
+                <td class="label-cell">عنوان العميل:</td>
+                <td colspan="3"><?php echo htmlspecialchars($invoice['customer_address'] ?? '-'); ?></td>
+            </tr>
+            <tr>
+                <td class="label-cell">حالة السداد:</td>
+                <td><?php echo htmlspecialchars($paymentStatusAr); ?></td>
+                <td class="label-cell">المدفوع / المتبقي:</td>
+                <td><?php echo number_format($paidAmount, 2) . ' / ' . number_format($remainingAmount, 2); ?></td>
+            </tr>
+        </table>
+
+        <!-- Items Table -->
+        <table class="items-table">
+            <thead>
+                <tr>
+                    <th style="width: 8%;">سند</th>
+                    <th style="width: 42%;">البيان</th>
+                    <th style="width: 15%;">المبلغ</th>
+                    <th style="width: 15%;">الضريبة 15%</th>
+                    <th style="width: 20%;">الإجمالي</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (!empty($items)): ?>
+                    <?php foreach ($items as $index => $item):
+                        $lineAmount = $item['quantity'] * $item['unit_price'];
+                        $lineVat = $lineAmount * ($item['vat_rate'] / 100);
+                        $lineTotal = $item['line_total'];
+                    ?>
+                    <tr>
+                        <td><?php echo $invoice['invoice_number']; ?></td>
+                        <td style="text-align: right;"><?php echo htmlspecialchars($item['item_description']); ?></td>
+                        <td><?php echo number_format($lineAmount, 2); ?></td>
+                        <td><?php echo number_format($lineVat, 2); ?></td>
+                        <td><strong><?php echo number_format($lineTotal, 2); ?></strong></td>
+                    </tr>
+                    <?php endforeach; ?>
+                <?php else: ?>
+                    <tr>
+                        <td><?php echo $invoice['invoice_number']; ?></td>
+                        <td style="text-align: right;">بنود الفاتورة</td>
+                        <td><?php echo number_format($subtotal, 2); ?></td>
+                        <td><?php echo number_format($vatAmount, 2); ?></td>
+                        <td><strong><?php echo number_format($totalAmount, 2); ?></strong></td>
+                    </tr>
+                <?php endif; ?>
+
+                <!-- Empty rows for traditional invoice look -->
+                <?php for ($i = count($items); $i < 5; $i++): ?>
+                <tr>
+                    <td>&nbsp;</td>
+                    <td>&nbsp;</td>
+                    <td>&nbsp;</td>
+                    <td>&nbsp;</td>
+                    <td>&nbsp;</td>
+                </tr>
+                <?php endfor; ?>
+            </tbody>
+        </table>
+
+        <!-- Total Section -->
+        <table class="invoice-table" style="margin-bottom: 0;">
+            <tr class="total-row">
+                <td colspan="4" style="text-align: center; font-size: 1.1rem;">الاجمالي شامل الضريبة</td>
+                <td style="width: 150px;">
+                    <div class="amount-box"><?php echo number_format($totalAmount, 2); ?></div>
+                </td>
+            </tr>
+        </table>
+
+        <!-- Sum in Words -->
+        <div class="sum-section">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <span class="label">The Sum Of:</span>
+                    <span class="label" style="margin-right: 20px;">مبلغ وقدرة</span>
+                </div>
+                <div class="value" style="flex: 1; text-align: center; color: #c53030;">
+                    <?php echo $totalInWords; ?>
+                </div>
+            </div>
+            <div style="margin-top: 10px;">
+                <span class="label">Notes</span>
+                <span class="label" style="margin-right: 20px;">ملحوظات</span>
+                <span style="border-bottom: 1px solid #ddd; display: inline-block; width: 70%; padding: 6px 10px; min-height: 32px; vertical-align: middle;"><?php echo htmlspecialchars($invoiceNotes !== '' ? $invoiceNotes : '-'); ?></span>
+            </div>
+        </div>
+
+        <!-- Signature Section -->
+        <div class="signature-section">
+            <div class="signature-box">
+                <div class="title">توقيع المستلم</div>
+                <div class="line"></div>
+            </div>
+            <div class="signature-box">
+                <div class="title">الحسابات</div>
+                <div class="line"></div>
+            </div>
+        </div>
+
+        <!-- QR Code Section -->
+        <div class="qr-section" style="display: flex; gap: 40px; align-items: flex-start;">
+            <?php if (!empty($invoice['zatca_qr_code'])): ?>
+            <div>
+                <div style="color: #2c5282; font-weight: 600; margin-bottom: 8px;">ZATCA QR Code</div>
+                <div id="qrcode-zatca"></div>
+            </div>
+            <?php endif; ?>
+
+            <?php if (!empty($invoice['zatca_hash'])): ?>
+            <div>
+                <div style="color: #2c5282; font-weight: 600; margin-bottom: 8px;">Invoice Hash QR</div>
+                <div id="qrcode-hash"></div>
+            </div>
+            <?php endif; ?>
+        </div>
+
+        <!-- ZATCA Result -->
+        <?php if (!empty($invoice['zatca_error'])): ?>
+        <div class="zatca-result-box <?php echo strpos($invoice['zatca_error'], 'SUCCESS:') === 0 ? 'success' : 'error'; ?> no-print">
+            <?php if (strpos($invoice['zatca_error'], 'SUCCESS:') === 0): ?>
+                <i class="bi bi-check-circle-fill text-success me-2"></i>
+                <strong>نتيجة ZATCA:</strong>
+            <?php else: ?>
+                <i class="bi bi-exclamation-triangle-fill text-danger me-2"></i>
+                <strong>خطأ ZATCA:</strong>
+            <?php endif; ?>
+            <div style="margin-top: 8px; font-size: 0.9rem; white-space: pre-wrap; font-family: monospace;"><?php echo htmlspecialchars($invoice['zatca_error']); ?></div>
+        </div>
+        <?php endif; ?>
+
+        <!-- ZATCA Details -->
+        <?php if (!empty($invoice['zatca_uuid']) || !empty($invoice['zatca_hash'])): ?>
+        <div class="zatca-details no-print">
+            <strong style="color: #2c5282; margin-bottom: 10px; display: block;">
+                <i class="bi bi-shield-check me-2"></i>بيانات ZATCA
+            </strong>
+            <?php if (!empty($invoice['zatca_uuid'])): ?>
+            <div class="detail-row">
+                <span class="detail-label">UUID:</span>
+                <span class="detail-value"><?php echo htmlspecialchars($invoice['zatca_uuid']); ?></span>
+            </div>
+            <?php endif; ?>
+            <?php if (!empty($invoice['zatca_hash'])): ?>
+            <div class="detail-row">
+                <span class="detail-label">Hash:</span>
+                <span class="detail-value"><?php echo htmlspecialchars($invoice['zatca_hash']); ?></span>
+            </div>
+            <?php endif; ?>
+            <?php if (!empty($invoice['zatca_submission_date'])): ?>
+            <div class="detail-row">
+                <span class="detail-label">تاريخ الإرسال:</span>
+                <span class="detail-value"><?php echo $invoice['zatca_submission_date']; ?></span>
+            </div>
+            <?php endif; ?>
+        </div>
+        <?php endif; ?>
+
+        <!-- ZATCA Validation Messages from API Response -->
+        <?php
+        if (!empty($submissionLog['api_response'])):
+            $apiResponse = json_decode($submissionLog['api_response'], true);
+            $validationResults = $apiResponse['validation_results'] ?? [];
+            $warningMessages = $validationResults['warningMessages'] ?? [];
+            $errorMessages = $validationResults['errorMessages'] ?? [];
+
+            if (!empty($warningMessages) || !empty($errorMessages)):
+        ?>
+        <div class="zatca-details no-print" style="margin-top: 20px;">
+            <?php if (!empty($warningMessages)): ?>
+            <div style="margin-bottom: 15px;">
+                <strong style="color: #c05621; margin-bottom: 10px; display: block;">
+                    <i class="bi bi-exclamation-triangle me-2"></i>تحذيرات ZATCA (<?php echo count($warningMessages); ?>)
+                </strong>
+                <ol style="margin: 0; padding-right: 20px; font-size: 0.9rem;">
+                    <?php foreach ($warningMessages as $msg): ?>
+                    <li style="margin-bottom: 8px;">
+                        <strong>[<?php echo htmlspecialchars($msg['code'] ?? ''); ?>]</strong>
+                        <?php echo htmlspecialchars($msg['message'] ?? ''); ?>
+                    </li>
+                    <?php endforeach; ?>
+                </ol>
+            </div>
+            <?php endif; ?>
+
+            <?php if (!empty($errorMessages)): ?>
+            <div>
+                <strong style="color: #c53030; margin-bottom: 10px; display: block;">
+                    <i class="bi bi-x-circle me-2"></i>أخطاء ZATCA (<?php echo count($errorMessages); ?>)
+                </strong>
+                <ol style="margin: 0; padding-right: 20px; font-size: 0.9rem;">
+                    <?php foreach ($errorMessages as $msg): ?>
+                    <li style="margin-bottom: 8px;">
+                        <strong>[<?php echo htmlspecialchars($msg['code'] ?? ''); ?>]</strong>
+                        <?php echo htmlspecialchars($msg['message'] ?? ''); ?>
+                    </li>
+                    <?php endforeach; ?>
+                </ol>
+            </div>
+            <?php endif; ?>
+        </div>
+        <?php
+            endif;
+        endif;
+        ?>
+    </div>
+</div>
+
+<!-- Result Modal -->
+<div class="modal fade" id="resultModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="border-radius: 10px; overflow: hidden;">
+            <div class="modal-header border-0" id="resultModalHeader" style="background: #48bb78;">
+                <h5 class="modal-title text-white" id="resultModalTitle">
+                    <i class="bi bi-check-circle me-2"></i>نتيجة العملية
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-4">
+                <p id="resultModalMessage" style="white-space: pre-wrap;"></p>
+            </div>
+            <div class="modal-footer border-0">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إغلاق</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function submitToZatca(invoiceId) {
+    if (window.confirm('هل تريد إرسال هذه الفاتورة إلى ZATCA؟')) {
+        performZatcaSubmission(invoiceId);
+    }
+}
+
+function performZatcaSubmission(invoiceId) {
+    const loadingModal = new bootstrap.Modal(document.getElementById('resultModal'));
+    const header = document.getElementById('resultModalHeader');
+    const title = document.getElementById('resultModalTitle');
+    const messageEl = document.getElementById('resultModalMessage');
+
+    header.style.background = '#4299e1';
+    title.innerHTML = '<i class="bi bi-hourglass-split me-2"></i>جاري الإرسال';
+    messageEl.textContent = 'جاري إرسال الفاتورة إلى ZATCA...';
+    loadingModal.show();
+
+    const formData = new FormData();
+    formData.append('action', 'submit_to_zatca');
+    formData.append('invoice_id', invoiceId);
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        loadingModal.hide();
+
+        if (data.success) {
+            let successMessage = data.message || 'تم إرسال الفاتورة بنجاح';
+
+            if (data.zatca_uuid) {
+                successMessage += '\n\nUUID: ' + data.zatca_uuid;
+            }
+            if (data.zatca_hash) {
+                successMessage += '\nHash: ' + data.zatca_hash.substring(0, 40) + '...';
+            }
+            if (data.api_result) {
+                if (data.api_result.status) {
+                    successMessage += '\nStatus: ' + data.api_result.status;
+                }
+            }
+
+            successMessage += '\n\nسيتم تحديث الصفحة خلال 6 ثواني...';
+
+            showResultModal(true, successMessage);
+            setTimeout(() => location.reload(), 6000);
+        } else {
+            let errorMessage = data.message || data.error || 'خطأ غير معروف';
+
+            if (data.technical_details) {
+                errorMessage += '\n\n--- تفاصيل تقنية ---';
+                if (data.technical_details.error) {
+                    errorMessage += '\nError: ' + data.technical_details.error;
+                }
+                if (data.technical_details.http_code) {
+                    errorMessage += '\nHTTP Code: ' + data.technical_details.http_code;
+                }
+            }
+
+            showResultModal(false, errorMessage);
+        }
+    })
+    .catch(error => {
+        loadingModal.hide();
+        console.error('Error:', error);
+        showResultModal(false, 'حدث خطأ أثناء الإرسال إلى ZATCA');
+    });
+}
+
+function saveInvoiceNote(invoiceId) {
+    const notesField = document.getElementById('invoiceNotes');
+    const statusEl = document.getElementById('invoiceNotesStatus');
+    const notes = notesField.value;
+
+    statusEl.textContent = 'جاري الحفظ...';
+
+    const formData = new FormData();
+    formData.append('ajax_action', 'update_invoice_note');
+    formData.append('invoice_id', invoiceId);
+    formData.append('notes', notes);
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            statusEl.textContent = data.message || 'تم حفظ الملاحظات بنجاح';
+            setTimeout(() => {
+                location.reload();
+            }, 500);
+        } else {
+            statusEl.textContent = data.message || data.error || 'فشل في حفظ الملاحظات';
+        }
+    })
+    .catch(() => {
+        statusEl.textContent = 'حدث خطأ أثناء حفظ الملاحظات';
+    });
+}
+
+function showResultModal(success, message) {
+    const modalElement = document.getElementById('resultModal');
+    const modal = new bootstrap.Modal(modalElement);
+    const header = document.getElementById('resultModalHeader');
+    const title = document.getElementById('resultModalTitle');
+    const messageEl = document.getElementById('resultModalMessage');
+
+    if (success) {
+        header.style.background = 'linear-gradient(135deg, #28a745, #20c997)';
+        title.innerHTML = '<i class="bi bi-check-circle me-2"></i>نجحت العملية';
+    } else {
+        header.style.background = 'linear-gradient(135deg, #dc3545, #c82333)';
+        title.innerHTML = '<i class="bi bi-x-circle me-2"></i>فشلت العملية';
+    }
+
+    messageEl.textContent = message;
+
+    modalElement.addEventListener('hidden.bs.modal', function() {
+        modal.dispose();
+        const backdrops = document.querySelectorAll('.modal-backdrop');
+        backdrops.forEach(backdrop => backdrop.remove());
+        document.body.classList.remove('modal-open');
+        document.body.style.removeProperty('overflow');
+        document.body.style.removeProperty('padding-right');
+    }, { once: true });
+
+    modal.show();
+}
+</script>
+
+<script src="/aqary/js/qrcode.min.js"></script>
+<script>
+<?php if (!empty($invoice['zatca_qr_code'])): ?>
+var qrcodeZatca = new QRCode("qrcode-zatca", {
+    text: "<?php echo addslashes($invoice['zatca_qr_code']); ?>",
+    width: 120,
+    height: 120,
+    colorDark: "#10286e",
+    colorLight: "#ffffff",
+    correctLevel: QRCode.CorrectLevel.L
+});
+<?php endif; ?>
+
+<?php if (!empty($invoice['zatca_hash'])): ?>
+var qrcodeHash = new QRCode("qrcode-hash", {
+    text: "<?php echo addslashes($invoice['zatca_hash']); ?>",
+    width: 120,
+    height: 120,
+    colorDark: "#2c5282",
+    colorLight: "#ffffff",
+    correctLevel: QRCode.CorrectLevel.L
+});
+<?php endif; ?>
+</script>
+
+<?php require("../../../../foter.hnt"); ?>
