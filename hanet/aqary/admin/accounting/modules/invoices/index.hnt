@@ -13,6 +13,30 @@ $sc_id = "204";
 if ($_SERVER['REQUEST_METHOD'] != 'POST' && !isset($_POST['ajax_action'])) {
 include_once "../../../../header.hnt";
 
+// Add seller columns to acc_invoices (safe - checks if column exists first)
+$checkCol = mysql_query("SHOW COLUMNS FROM acc_invoices LIKE 'seller_source'", $link);
+if ($checkCol && mysql_num_rows($checkCol) == 0) {
+    mysql_query("ALTER TABLE acc_invoices ADD COLUMN seller_source VARCHAR(150) DEFAULT NULL", $link);
+}
+$checkCol = mysql_query("SHOW COLUMNS FROM acc_invoices LIKE 'seller_supplier_id'", $link);
+if ($checkCol && mysql_num_rows($checkCol) == 0) {
+    mysql_query("ALTER TABLE acc_invoices ADD COLUMN seller_supplier_id INT(11) DEFAULT NULL", $link);
+}
+$checkCol = mysql_query("SHOW COLUMNS FROM acc_invoices LIKE 'seller_name'", $link);
+if ($checkCol && mysql_num_rows($checkCol) == 0) {
+    mysql_query("ALTER TABLE acc_invoices ADD COLUMN seller_name VARCHAR(255) DEFAULT NULL", $link);
+}
+$checkCol = mysql_query("SHOW COLUMNS FROM acc_invoices LIKE 'seller_vat_number'", $link);
+if ($checkCol && mysql_num_rows($checkCol) == 0) {
+    mysql_query("ALTER TABLE acc_invoices ADD COLUMN seller_vat_number VARCHAR(50) DEFAULT NULL", $link);
+}
+$checkCol = mysql_query("SHOW COLUMNS FROM acc_invoices LIKE 'seller_address'", $link);
+if ($checkCol && mysql_num_rows($checkCol) == 0) {
+    mysql_query("ALTER TABLE acc_invoices ADD COLUMN seller_address TEXT DEFAULT NULL", $link);
+}
+
+
+
 }
 else {
 include_once "../../../../reqloginajax.hnt";
@@ -94,6 +118,40 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['a
             exit;
         }
 
+        $invoiceSellerSource = trim((string)($invoice['seller_source'] ?? 'company'));
+        $invoiceSellerVat = trim((string)($invoice['seller_vat_number'] ?? ''));
+        $companyCertificateVat = trim((string)($zatca_vat_number ?? $vat_number ?? ''));
+
+        if ($invoiceSellerSource !== 'company') {
+            echo json_encode([
+                'success' => false,
+                'error' => 'لا يمكن إرسال الفاتورة إلى ZATCA لمورد آخر باستخدام شهادة المؤسسة الحالية',
+                'technical_details' => [
+                    'error' => 'certificate-permissions',
+                    'error_detail' => 'Current ZATCA certificate can only be used for the company seller profile',
+                    'invoice_seller_source' => $invoiceSellerSource,
+                    'invoice_seller_vat_number' => $invoiceSellerVat,
+                    'certificate_vat_number' => $companyCertificateVat
+                ]
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        if ($invoiceSellerVat !== '' && $companyCertificateVat !== '' && $invoiceSellerVat !== $companyCertificateVat) {
+            echo json_encode([
+                'success' => false,
+                'error' => 'لا يمكن إرسال الفاتورة إلى ZATCA لأن الرقم الضريبي للبائع لا يطابق شهادة المؤسسة الحالية',
+                'technical_details' => [
+                    'error' => 'certificate-permissions',
+                    'error_detail' => 'Invoice seller VAT number does not match the VAT number bound to the active ZATCA certificate',
+                    'invoice_seller_source' => $invoiceSellerSource,
+                    'invoice_seller_vat_number' => $invoiceSellerVat,
+                    'certificate_vat_number' => $companyCertificateVat
+                ]
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
         // Get invoice items
         $itemsStmt = $db->prepare("SELECT * FROM acc_invoice_items WHERE invoice_id = ?");
         $itemsStmt->bind_param('i', $invoiceId);
@@ -108,17 +166,27 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['a
         $phase2Manager = new Phase2Manager($db);
 
         // Prepare invoice data for ZATCA
-        $isStandardInvoice = $invoice['invoice_type'] == 'standard';
+        $invoiceTypeKey = trim((string)($invoice['invoice_type'] ?? 'standard'));
+        $isSimplifiedInvoice = $invoiceTypeKey === 'simplified';
+        $isCreditNote = $invoiceTypeKey === 'credit_note';
+        $isDebitNote = $invoiceTypeKey === 'debit_note';
 
         $zatcaInvoice = [
             'invoice_number' => $invoice['invoice_number'],
             'invoice_date' => $invoice['invoice_date'],
-            'invoice_type' => $isStandardInvoice ? '388' : '0200000',
-            'is_standard' => $isStandardInvoice, // Required for API endpoint selection
+            'profile' => 'reporting:1.0',
+            'invoice_type' => $isCreditNote ? '381' : ($isDebitNote ? '383' : '388'),
+            'is_standard' => !$isSimplifiedInvoice,
+            'is_credit' => $isCreditNote,
+            'is_debit' => $isDebitNote,
             'currency' => 'SAR',
             'base_amount' => $invoice['subtotal'],
             'vat_amount' => $invoice['vat_amount'],
             'total_amount' => $invoice['total_amount'],
+            'seller_name' => $invoice['seller_name'] ?? ($zatca_company_name_ar ?? $bayanmaktabname ?? ''),
+            'seller_vat_number' => $invoice['seller_vat_number'] ?? ($zatca_vat_number ?? $vat_number ?? ''),
+            'seller_address' => $invoice['seller_address'] ?? ($zatca_company_address_ar ?? $bayanaddress ?? ''),
+            'note' => $invoice['notes'] ?? '',
             'customer' => [
                 'name' => $invoice['customer_name'],
                 'vat_number' => $invoice['customer_vat_number'] ?? '',
@@ -151,7 +219,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['a
         $db->query($createLogTable);
 
         // Submit to ZATCA
-        $invoiceType = $invoice['invoice_type'] == 'standard' ? 'standard' : 'simplified';
+        $invoiceType = $isSimplifiedInvoice ? 'simplified' : 'standard';
         $result = $phase2Manager->processInvoice($zatcaInvoice, $invoiceType, true);
 
         // Check if local processing (XML + signing) succeeded
@@ -421,6 +489,77 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
             }
             break;
 
+        case 'add_supplier_quick':
+            $name = trim($_POST['supplier_name'] ?? '');
+            $vatNumber = trim($_POST['vat_number'] ?? '');
+            $phone = trim($_POST['phone'] ?? '');
+            $address = trim($_POST['address'] ?? '');
+
+            if (empty($name)) {
+                $response = ['success' => false, 'error' => 'Supplier name is required', 'message' => 'اسم المورد مطلوب'];
+                break;
+            }
+
+            $query = "INSERT INTO acc_suppliers (supplier_name, vat_number, phone, email, address, contact_person, is_active, formuid) VALUES (?, ?, ?, '', ?, '', 1, UUID())";
+            $stmt = $db->prepare($query);
+            $stmt->bind_param('ssss', $name, $vatNumber, $phone, $address);
+
+            if ($stmt->execute()) {
+                $supplierId = $stmt->insert_id;
+                $response = [
+                    'success' => true,
+                    'message' => 'تم إضافة المورد بنجاح',
+                    'supplier' => [
+                        'supplier_id' => $supplierId,
+                        'supplier_name' => $name,
+                        'vat_number' => $vatNumber,
+                        'phone' => $phone,
+                        'address' => $address
+                    ]
+                ];
+            } else {
+                $response = ['success' => false, 'error' => $db->error, 'message' => 'فشل في إضافة المورد: ' . $db->error];
+            }
+            break;
+
+        case 'update_supplier_quick':
+            $supplierId = intval($_POST['supplier_id'] ?? 0);
+            $name = trim($_POST['supplier_name'] ?? '');
+            $vatNumber = trim($_POST['vat_number'] ?? '');
+            $phone = trim($_POST['phone'] ?? '');
+            $address = trim($_POST['address'] ?? '');
+
+            if (empty($supplierId)) {
+                $response = ['success' => false, 'error' => 'Supplier ID is required', 'message' => 'معرف المورد مطلوب'];
+                break;
+            }
+
+            if (empty($name)) {
+                $response = ['success' => false, 'error' => 'Supplier name is required', 'message' => 'اسم المورد مطلوب'];
+                break;
+            }
+
+            $query = "UPDATE acc_suppliers SET supplier_name = ?, vat_number = ?, phone = ?, address = ? WHERE supplier_id = ?";
+            $stmt = $db->prepare($query);
+            $stmt->bind_param('ssssi', $name, $vatNumber, $phone, $address, $supplierId);
+
+            if ($stmt->execute()) {
+                $response = [
+                    'success' => true,
+                    'message' => 'تم حفظ بيانات المورد بنجاح',
+                    'supplier' => [
+                        'supplier_id' => $supplierId,
+                        'supplier_name' => $name,
+                        'vat_number' => $vatNumber,
+                        'phone' => $phone,
+                        'address' => $address
+                    ]
+                ];
+            } else {
+                $response = ['success' => false, 'error' => $db->error, 'message' => 'فشل في حفظ بيانات المورد: ' . $db->error];
+            }
+            break;
+
         case 'create_invoice':
             $customerId = intval($_POST['customer_id'] ?? 0);
 
@@ -439,7 +578,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                 'invoice_date' => $_POST['invoice_date'],
                 'due_date' => $_POST['due_date'] ?? null,
                 'payment_method' => $_POST['payment_method'] ?? 'cash',
-                'notes' => $_POST['notes'] ?? null
+                'notes' => $_POST['notes'] ?? null,
+                'seller_source' => $_POST['seller_source'] ?? 'company',
+                'seller_supplier_id' => !empty($_POST['seller_supplier_id']) ? intval($_POST['seller_supplier_id']) : null,
+                'seller_name' => $_POST['seller_name'] ?? null,
+                'seller_vat_number' => $_POST['seller_vat_number'] ?? null,
+                'seller_address' => $_POST['seller_address'] ?? null
             ];
 
             $items = json_decode($_POST['items'], true);
@@ -493,6 +637,127 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                 $response['invoice'] = $invoice;
             }
             break;
+
+        case 'get_invoice_with_items':
+            $invoiceId = intval($_POST['invoice_id'] ?? 0);
+            if (empty($invoiceId)) {
+                $response = ['success' => false, 'error' => 'معرف الفاتورة مطلوب'];
+                break;
+            }
+            $stmt = $db->prepare("SELECT * FROM acc_invoices WHERE invoice_id = ?");
+            $stmt->bind_param('i', $invoiceId);
+            $stmt->execute();
+            $inv = $stmt->get_result()->fetch_assoc();
+            if (!$inv) {
+                $response = ['success' => false, 'error' => 'الفاتورة غير موجودة'];
+                break;
+            }
+            $itemsStmt = $db->prepare("SELECT * FROM acc_invoice_items WHERE invoice_id = ? ORDER BY item_id ASC");
+            $itemsStmt->bind_param('i', $invoiceId);
+            $itemsStmt->execute();
+            $itemsResult = $itemsStmt->get_result();
+            $invItems = [];
+            while ($itm = $itemsResult->fetch_assoc()) {
+                $invItems[] = $itm;
+            }
+            $customerPhone = '';
+            if (!empty($inv['customer_id'])) {
+                $phoneStmt = $db->prepare("SELECT phone FROM acc_customers WHERE customer_id = ?");
+                if ($phoneStmt) {
+                    $phoneStmt->bind_param('i', $inv['customer_id']);
+                    $phoneStmt->execute();
+                    $phoneRow = $phoneStmt->get_result()->fetch_assoc();
+                    if ($phoneRow) $customerPhone = $phoneRow['phone'] ?? '';
+                }
+            }
+            $supplierPhone = '';
+            if (!empty($inv['seller_supplier_id'])) {
+                $supplierPhoneStmt = $db->prepare("SELECT phone FROM acc_suppliers WHERE supplier_id = ?");
+                if ($supplierPhoneStmt) {
+                    $supplierPhoneStmt->bind_param('i', $inv['seller_supplier_id']);
+                    $supplierPhoneStmt->execute();
+                    $supplierPhoneRow = $supplierPhoneStmt->get_result()->fetch_assoc();
+                    if ($supplierPhoneRow) $supplierPhone = $supplierPhoneRow['phone'] ?? '';
+                }
+            }
+            $response = ['success' => true, 'invoice' => $inv, 'items' => $invItems, 'customer_phone' => $customerPhone, 'supplier_phone' => $supplierPhone];
+            break;
+
+        case 'update_invoice':
+            $invoiceId = intval($_POST['invoice_id'] ?? 0);
+            if (empty($invoiceId)) {
+                $response = ['success' => false, 'message' => 'معرف الفاتورة مطلوب'];
+                break;
+            }
+            $checkStmt = $db->prepare("SELECT zatca_status FROM acc_invoices WHERE invoice_id = ?");
+            $checkStmt->bind_param('i', $invoiceId);
+            $checkStmt->execute();
+            $checkRow = $checkStmt->get_result()->fetch_assoc();
+            if (!$checkRow) {
+                $response = ['success' => false, 'message' => 'الفاتورة غير موجودة'];
+                break;
+            }
+            if ($checkRow['zatca_status'] === 'submitted') {
+                $response = ['success' => false, 'message' => 'لا يمكن تعديل فاتورة تم إرسالها لـ ZATCA'];
+                break;
+            }
+            $updItems = json_decode($_POST['items'], true);
+            if (empty($updItems) || !is_array($updItems)) {
+                $response = ['success' => false, 'message' => 'يجب إضافة بنود للفاتورة'];
+                break;
+            }
+            $updSubtotal = 0;
+            $updVatTotal = 0;
+            foreach ($updItems as $ui) {
+                $uQty = floatval($ui['quantity'] ?? 0);
+                $uPrice = floatval($ui['unit_price'] ?? 0);
+                $uLineSub = $uQty * $uPrice;
+                $uLineVat = $uLineSub * (floatval($ui['vat_rate'] ?? 15) / 100);
+                $updSubtotal += $uLineSub;
+                $updVatTotal += $uLineVat;
+            }
+            $updTotal = $updSubtotal + $updVatTotal;
+            $updInvoiceType = $_POST['invoice_type'] ?? 'standard';
+            $updInvoiceDate = $_POST['invoice_date'] ?? date('Y-m-d');
+            $updDueDate = !empty($_POST['due_date']) ? $_POST['due_date'] : null;
+            $updCustomerId = intval($_POST['customer_id'] ?? 0);
+            $updCustomerType = $_POST['customer_type'] ?? 'tenant';
+            $updCustomerName = $_POST['customer_name'] ?? '';
+            $updCustomerVat = $_POST['customer_vat_number'] ?? null;
+            $updCustomerAddr = $_POST['customer_address'] ?? null;
+            $updPayMethod = $_POST['payment_method'] ?? 'cash';
+            $updNotes = $_POST['notes'] ?? null;
+            $updSellerSrc = $_POST['seller_source'] ?? 'company';
+            $updSellerSid = !empty($_POST['seller_supplier_id']) ? intval($_POST['seller_supplier_id']) : null;
+            $updSellerName = $_POST['seller_name'] ?? null;
+            $updSellerVatN = $_POST['seller_vat_number'] ?? null;
+            $updSellerAddr = $_POST['seller_address'] ?? null;
+            $db->begin_transaction();
+            try {
+                $updStmt = $db->prepare("UPDATE acc_invoices SET invoice_type=?, invoice_date=?, due_date=?, customer_id=?, customer_type=?, customer_name=?, customer_vat_number=?, customer_address=?, subtotal=?, vat_amount=?, total_amount=?, payment_method=?, notes=?, seller_source=?, seller_supplier_id=?, seller_name=?, seller_vat_number=?, seller_address=? WHERE invoice_id=?");
+                $updStmt->bind_param('sssissssdddsssisssi', $updInvoiceType, $updInvoiceDate, $updDueDate, $updCustomerId, $updCustomerType, $updCustomerName, $updCustomerVat, $updCustomerAddr, $updSubtotal, $updVatTotal, $updTotal, $updPayMethod, $updNotes, $updSellerSrc, $updSellerSid, $updSellerName, $updSellerVatN, $updSellerAddr, $invoiceId);
+                $updStmt->execute();
+                $delStmt = $db->prepare("DELETE FROM acc_invoice_items WHERE invoice_id = ?");
+                $delStmt->bind_param('i', $invoiceId);
+                $delStmt->execute();
+                $insStmt = $db->prepare("INSERT INTO acc_invoice_items (invoice_id, item_description, quantity, unit_price, vat_rate, discount, line_total) VALUES (?, ?, ?, ?, ?, ?, ?)");
+                foreach ($updItems as $ui) {
+                    $uDesc = $ui['description'] ?? '';
+                    $uQty = floatval($ui['quantity'] ?? 0);
+                    $uPrice = floatval($ui['unit_price'] ?? 0);
+                    $uVatR = floatval($ui['vat_rate'] ?? 15);
+                    $uDisc = floatval($ui['discount'] ?? 0);
+                    $uLineT = $uQty * $uPrice * (1 + $uVatR / 100) - $uDisc;
+                    $insStmt->bind_param('isddddd', $invoiceId, $uDesc, $uQty, $uPrice, $uVatR, $uDisc, $uLineT);
+                    $insStmt->execute();
+                }
+                $db->commit();
+                $response = ['success' => true, 'message' => 'تم تعديل الفاتورة بنجاح'];
+            } catch (Exception $e) {
+                $db->rollback();
+                $response = ['success' => false, 'message' => 'فشل في تعديل الفاتورة: ' . $e->getMessage()];
+            }
+            break;
     }
 
     echo json_encode($response, JSON_UNESCAPED_UNICODE);
@@ -503,14 +768,36 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
 $invoicesQuery = "SELECT * FROM acc_invoices ORDER BY invoice_date DESC, invoice_id DESC LIMIT 50";
 $invoicesResult = $db->query($invoicesQuery);
 $invoices = [];
+$invoicesQueryError = '';
+$invoiceTableCount = 0;
 if ($invoicesResult) {
     while ($row = $invoicesResult->fetch_assoc()) {
         $invoices[] = $row;
     }
+} else {
+    $invoicesQueryError = $db->error;
+}
+
+$invoiceCountResult = $db->query("SELECT COUNT(*) AS total FROM acc_invoices");
+if ($invoiceCountResult) {
+    $invoiceCountRow = $invoiceCountResult->fetch_assoc();
+    $invoiceTableCount = isset($invoiceCountRow['total']) ? (int)$invoiceCountRow['total'] : 0;
 }
 
 // Get VAT rate from settings
 $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
+
+$defaultSellerName = $zatca_company_name_ar ?? $bayanmaktabname ?? 'اسم الشركة';
+$defaultSellerVat = $zatca_vat_number ?? $vat_number ?? '300000000000003';
+$defaultSellerAddress = $zatca_company_address_ar ?? $bayanaddress ?? 'المملكة العربية السعودية';
+
+$suppliers = [];
+$suppliersResult = $db->query("SELECT supplier_id, supplier_name, vat_number, phone, address, city, country, is_active FROM acc_suppliers WHERE is_active = 1 ORDER BY supplier_name ASC");
+if ($suppliersResult) {
+    while ($supplierRow = $suppliersResult->fetch_assoc()) {
+        $suppliers[] = $supplierRow;
+    }
+}
 ?>
 
 
@@ -631,24 +918,50 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
     color: var(--primary-color);
 }
 
-#customerDropdown {
+.seller-preview {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px;
+    margin-top: 10px;
+}
+
+.seller-preview-title {
+    font-weight: 700;
+    color: #2d3748;
+    margin-bottom: 6px;
+}
+
+.selection-panel {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 14px;
+    height: 100%;
+}
+
+#customerDropdown,
+#sellerDropdown {
     box-shadow: 0 4px 15px rgba(0,0,0,0.15);
     border-radius: 8px;
     margin-top: 5px;
 }
 
-#customerDropdown .list-group-item {
+#customerDropdown .list-group-item,
+#sellerDropdown .list-group-item {
     border: none;
     border-bottom: 1px solid #f0f0f0;
     transition: all 0.2s ease;
 }
 
-#customerDropdown .list-group-item:hover {
+#customerDropdown .list-group-item:hover,
+#sellerDropdown .list-group-item:hover {
     background: #f8f9fa;
     transform: translateX(-3px);
 }
 
-#customerDropdown .list-group-item:last-child {
+#customerDropdown .list-group-item:last-child,
+#sellerDropdown .list-group-item:last-child {
     border-bottom: none;
 }
 
@@ -684,16 +997,25 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
     <div class="row g-3 mb-4">
         <?php
         $totalInvoices = count($invoices);
-        $totalAmount = array_sum(array_column($invoices, 'total_amount'));
+        $totalAmount = array_reduce($invoices, function($carry, $inv) {
+            $sign = (($inv['invoice_type'] ?? 'standard') === 'credit_note') ? -1 : 1;
+            return $carry + ($sign * floatval($inv['total_amount'] ?? 0));
+        }, 0);
         $paidInvoices = count(array_filter($invoices, function($inv) {
-            return isset($inv['payment_status']) && $inv['payment_status'] == 'paid';
+            $invoiceType = $inv['invoice_type'] ?? 'standard';
+            return !in_array($invoiceType, ['credit_note', 'debit_note'], true)
+                && isset($inv['payment_status']) && $inv['payment_status'] == 'paid';
         }));
-        $pendingInvoices = $totalInvoices - $paidInvoices;
+        $pendingInvoices = count(array_filter($invoices, function($inv) {
+            $invoiceType = $inv['invoice_type'] ?? 'standard';
+            return !in_array($invoiceType, ['credit_note', 'debit_note'], true)
+                && (!isset($inv['payment_status']) || $inv['payment_status'] != 'paid');
+        }));
         ?>
         <div class="col-md-3">
             <div class="stats-card">
                 <div class="stats-value"><?php echo $totalInvoices; ?></div>
-                <div class="text-muted">إجمالي الفواتير</div>
+                <div class="text-muted">إجمالي المستندات</div>
             </div>
         </div>
         <div class="col-md-3">
@@ -722,6 +1044,17 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
             <?php if (empty($invoices)): ?>
             <div class="card border-0 shadow-sm" style="border-radius: 15px;">
                 <div class="card-body text-center p-5">
+                    <?php if (!empty($invoicesQueryError)): ?>
+                    <div class="alert alert-danger text-start mb-4">
+                        <strong>خطأ في قراءة الفواتير:</strong><br>
+                        <small><?php echo htmlspecialchars($invoicesQueryError); ?></small>
+                    </div>
+                    <?php elseif ($invoiceTableCount > 0): ?>
+                    <div class="alert alert-warning text-start mb-4">
+                        <strong>تنبيه:</strong><br>
+                        <small>يوجد <?php echo $invoiceTableCount; ?> فاتورة في الجدول ولكن لم يتم عرضها في القائمة الحالية.</small>
+                    </div>
+                    <?php endif; ?>
                     <div class="mb-4">
                         <i class="bi bi-receipt" style="font-size: 5rem; color: #667eea;"></i>
                     </div>
@@ -740,11 +1073,25 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
             </div>
             <?php else: ?>
             <?php foreach ($invoices as $invoice): ?>
+            <?php
+                $invoiceTypeKey = trim((string)($invoice['invoice_type'] ?? 'standard'));
+                $invoiceTypeLabel = 'فاتورة ضريبية';
+                if ($invoiceTypeKey === 'simplified') {
+                    $invoiceTypeLabel = 'فاتورة مبسطة';
+                } elseif ($invoiceTypeKey === 'credit_note') {
+                    $invoiceTypeLabel = 'إشعار دائن';
+                } elseif ($invoiceTypeKey === 'debit_note') {
+                    $invoiceTypeLabel = 'إشعار مدين';
+                }
+                $isCreditNote = $invoiceTypeKey === 'credit_note';
+                $isAccountingNote = $invoiceTypeKey === 'credit_note' || $invoiceTypeKey === 'debit_note';
+                $displaySign = $isCreditNote ? -1 : 1;
+            ?>
             <div class="invoice-card">
                 <div class="invoice-header">
                     <div>
                         <span class="invoice-number"><?php echo $invoice['invoice_number']; ?></span>
-                        <span class="text-muted ms-3"><?php echo date('Y-m-d', strtotime($invoice['invoice_date'])); ?></span>
+                        <span class="text-muted ms-3"><?php echo date('d/m/Y', strtotime($invoice['invoice_date'])); ?></span>
                     </div>
                     <div>
                         <?php if (isset($invoice['zatca_status']) && $invoice['zatca_status'] == 'submitted'): ?>
@@ -755,14 +1102,16 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
 
                         <?php if (isset($invoice['payment_status']) && $invoice['payment_status'] == 'paid'): ?>
                         <span class="badge badge-paid ms-2">مدفوعة</span>
-                        <?php elseif (isset($invoice['payment_status'])): ?>
+                        <?php elseif (!$isAccountingNote && isset($invoice['payment_status'])): ?>
                         <span class="badge badge-pending ms-2">معلقة</span>
                         <?php endif; ?>
+                        <span class="badge bg-secondary ms-2"><?php echo $invoiceTypeLabel; ?></span>
                     </div>
                 </div>
 
                 <div class="row mb-3">
                     <div class="col-md-6">
+                        <strong>النوع:</strong> <?php echo $invoiceTypeLabel; ?><br>
                         <strong>العميل:</strong> <?php echo $invoice['customer_name']; ?><br>
                         <?php if ($invoice['customer_vat_number']): ?>
                         <small class="text-muted">الرقم الضريبي: <?php echo $invoice['customer_vat_number']; ?></small>
@@ -771,15 +1120,15 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
                     <div class="col-md-6 text-end">
                         <div class="mb-2">
                             <strong>المبلغ قبل الضريبة:</strong>
-                            <?php echo number_format($invoice['subtotal'], 2); ?> ر.س
+                            <?php echo number_format($displaySign * floatval($invoice['subtotal']), 2); ?> ر.س
                         </div>
                         <div class="mb-2">
                             <strong>ضريبة القيمة المضافة:</strong>
-                            <?php echo number_format($invoice['vat_amount'], 2); ?> ر.س
+                            <?php echo number_format($displaySign * floatval($invoice['vat_amount']), 2); ?> ر.س
                         </div>
                         <div class="h5 mb-0">
                             <strong>الإجمالي:</strong>
-                            <span class="text-primary"><?php echo number_format($invoice['total_amount'], 2); ?> ر.س</span>
+                            <span class="text-primary"><?php echo number_format($displaySign * floatval($invoice['total_amount']), 2); ?> ر.س</span>
                         </div>
                     </div>
                 </div>
@@ -808,11 +1157,14 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
                         <i class="bi bi-printer me-1"></i>طباعة
                     </button>
                     <?php if (empty($invoice['zatca_status']) || $invoice['zatca_status'] != 'submitted'): ?>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="editInvoice(<?php echo $invoice['invoice_id']; ?>)">
+                        <i class="bi bi-pencil me-1"></i>تعديل
+                    </button>
                     <button class="btn btn-sm btn-outline-info" onclick="submitToZatca(<?php echo $invoice['invoice_id']; ?>)">
                         <i class="bi bi-send me-1"></i>إرسال لـ ZATCA
                     </button>
                     <?php endif; ?>
-                    <?php if (isset($invoice['payment_status']) && $invoice['payment_status'] != 'paid'): ?>
+                    <?php if (!$isAccountingNote && isset($invoice['payment_status']) && $invoice['payment_status'] != 'paid'): ?>
                     <button class="btn btn-sm btn-outline-warning" onclick="recordPayment(<?php echo $invoice['invoice_id']; ?>)">
                         <i class="bi bi-cash me-1"></i>تسجيل دفعة
                     </button>
@@ -830,13 +1182,14 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
     <div class="modal-dialog modal-xl">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">
+                <h5 class="modal-title" id="addInvoiceModalLabel">
                     <i class="bi bi-plus-circle me-2"></i>فاتورة جديدة
                 </h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
                 <form id="addInvoiceForm">
+                    <input type="hidden" id="edit_invoice_id" value="">
                     <div class="row g-3 mb-4">
                         <div class="col-md-6">
                             <label class="form-label">نوع الفاتورة *</label>
@@ -849,52 +1202,109 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">تاريخ الفاتورة *</label>
-                            <input type="date" class="form-control" name="invoice_date" value="<?php echo date('Y-m-d'); ?>" required>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">نوع العميل *</label>
-                            <select class="form-select" name="customer_type" id="customer_type" required>
-                                <option value="tenant">مستأجر</option>
-                                <option value="buyer">مشتري</option>
-                                <option value="owner">مالك</option>
-                                <option value="supplier">مورد</option>
-                            </select>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">العميل *</label>
                             <div class="input-group">
-                                <input type="text" class="form-control" id="customerSearch" placeholder="ابحث عن عميل أو أدخل اسم جديد..." autocomplete="off">
-                                <button type="button" class="btn btn-outline-primary" id="addNewCustomerBtn">
-                                    <i class="bi bi-plus-circle me-1"></i>عميل جديد
-                                </button>
+                                <input type="text" class="form-control datepicker-input" name="invoice_date" value="<?php echo date('d/m/Y'); ?>" placeholder="dd/mm/yyyy" inputmode="numeric" dir="ltr" autocomplete="off" required>
+                                <span class="input-group-text invoice-date-picker-trigger"><i class="bi bi-calendar3"></i></span>
                             </div>
-                            <div id="customerDropdown" class="list-group position-absolute" style="z-index: 1000; max-height: 300px; overflow-y: auto; display: none; width: calc(100% - 30px);"></div>
-                            <input type="hidden" id="selectedCustomerId" name="customer_id">
+                        </div>
+                        <div class="col-md-6">
+                            <div class="selection-panel position-relative">
+                                <div class="row g-3">
+                                    <div class="col-12">
+                                        <label class="form-label">نوع العميل *</label>
+                                        <select class="form-select" name="customer_type" id="customer_type" required>
+                                            <option value="tenant">مستأجر</option>
+                                            <option value="buyer">مشتري</option>
+                                            <option value="owner">مالك</option>
+                                            <option value="supplier">مورد</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-12">
+                                        <label class="form-label">العميل *</label>
+                                        <div class="input-group">
+                                            <input type="text" class="form-control" id="customerSearch" placeholder="ابحث عن عميل أو أدخل اسم جديد..." autocomplete="off">
+                                            <button type="button" class="btn btn-outline-primary" id="addNewCustomerBtn">
+                                                <i class="bi bi-plus-circle me-1"></i>عميل جديد
+                                            </button>
+                                        </div>
+                                        <div id="customerDropdown" class="list-group position-absolute" style="z-index: 1000; max-height: 300px; overflow-y: auto; display: none; width: calc(100% - 28px);"></div>
+                                        <input type="hidden" id="selectedCustomerId" name="customer_id">
+                                    </div>
+
+                                    <div id="customerDetails" class="row g-3 mt-1" style="display: none;">
+                                        <div class="col-12">
+                                            <label class="form-label">اسم العميل *</label>
+                                            <input type="text" class="form-control" id="customer_name" name="customer_name" required>
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label">الرقم الضريبي للعميل</label>
+                                            <input type="text" class="form-control" id="customer_vat_number" name="customer_vat_number" placeholder="3xxxxxxxxxx15">
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label">رقم الهاتف</label>
+                                            <input type="text" class="form-control" id="customer_phone" name="customer_phone">
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label">عنوان العميل</label>
+                                            <textarea class="form-control" id="customer_address" name="customer_address" rows="2"></textarea>
+                                        </div>
+                                        <div class="col-12" id="saveCustomerInfoContainer" style="display: none;">
+                                            <button type="button" class="btn btn-outline-success btn-sm mt-2" id="saveCustomerInfoBtn" onclick="saveCustomerInfo()">
+                                                <i class="bi bi-save me-1"></i>حفظ بيانات العميل
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
 
-                        <!-- Customer Details (shown when customer is selected or new) -->
-                        <div id="customerDetails" class="row" style="display: none;">
-                            <div class="col-md-6">
-                                <label class="form-label">اسم العميل *</label>
-                                <input type="text" class="form-control" id="customer_name" name="customer_name" required>
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label">الرقم الضريبي للعميل</label>
-                                <input type="text" class="form-control" id="customer_vat_number" name="customer_vat_number" placeholder="3xxxxxxxxxx15">
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label">رقم الهاتف</label>
-                                <input type="text" class="form-control" id="customer_phone" name="customer_phone">
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label">عنوان العميل</label>
-                                <textarea class="form-control" id="customer_address" name="customer_address" rows="1"></textarea>
-                            </div>
-                            <div class="col-12" id="saveCustomerInfoContainer" style="display: none;">
-                                <button type="button" class="btn btn-outline-success btn-sm mt-2" id="saveCustomerInfoBtn" onclick="saveCustomerInfo()">
-                                    <i class="bi bi-save me-1"></i>حفظ بيانات العميل
-                                </button>
-                                
+                        <div class="col-md-6">
+                            <div class="selection-panel position-relative">
+                                <div class="row g-3">
+                                    <div class="col-12">
+                                        <label class="form-label">البائع في الفاتورة *</label>
+                                        <div class="input-group">
+                                            <input type="text" class="form-control" id="sellerSearch" placeholder="ابحث عن مورد أو استخدم مؤسستنا..." autocomplete="off" value="<?php echo htmlspecialchars($defaultSellerName); ?>">
+                                            <button type="button" class="btn btn-outline-primary" id="addNewSupplierBtn">
+                                                <i class="bi bi-plus-circle me-1"></i>مورد جديد
+                                            </button>
+                                            <button type="button" class="btn btn-outline-secondary" id="useCompanySellerBtn">
+                                                <i class="bi bi-building me-1"></i>مؤسستنا
+                                            </button>
+                                        </div>
+                                        <div id="sellerDropdown" class="list-group position-absolute" style="z-index: 1000; max-height: 300px; overflow-y: auto; display: none; width: calc(100% - 28px);"></div>
+                                        <input type="hidden" name="seller_source" id="seller_source" value="company">
+                                        <input type="hidden" name="seller_supplier_id" id="seller_supplier_id">
+                                        <input type="hidden" name="seller_name" id="seller_name" value="<?php echo htmlspecialchars($defaultSellerName); ?>">
+                                        <input type="hidden" name="seller_vat_number" id="seller_vat_number" value="<?php echo htmlspecialchars($defaultSellerVat); ?>">
+                                        <input type="hidden" name="seller_address" id="seller_address" value="<?php echo htmlspecialchars($defaultSellerAddress); ?>">
+                                    </div>
+                                    <div class="col-12">
+                                        <div class="row g-3 mt-1">
+                                            <div class="col-12">
+                                                <label class="form-label">اسم المورد *</label>
+                                                <input type="text" class="form-control" id="seller_display_name" value="<?php echo htmlspecialchars($defaultSellerName); ?>">
+                                            </div>
+                                            <div class="col-12">
+                                                <label class="form-label">الرقم الضريبي للمورد</label>
+                                                <input type="text" class="form-control" id="seller_display_vat_number" value="<?php echo htmlspecialchars($defaultSellerVat); ?>">
+                                            </div>
+                                            <div class="col-12">
+                                                <label class="form-label">رقم الهاتف</label>
+                                                <input type="text" class="form-control" id="seller_display_phone">
+                                            </div>
+                                            <div class="col-12">
+                                                <label class="form-label">عنوان المورد</label>
+                                                <textarea class="form-control" id="seller_display_address" rows="2"><?php echo htmlspecialchars($defaultSellerAddress); ?></textarea>
+                                            </div>
+                                            <div class="col-12" id="saveSupplierInfoContainer" style="display: none;">
+                                                <button type="button" class="btn btn-outline-success btn-sm mt-2" id="saveSupplierInfoBtn" onclick="saveSupplierInfo()">
+                                                    <i class="bi bi-save me-1"></i>حفظ بيانات المورد
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         <div class="col-md-6">
@@ -908,7 +1318,10 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">تاريخ الاستحقاق</label>
-                            <input type="date" class="form-control" name="due_date">
+                            <div class="input-group">
+                                <input type="text" class="form-control datepicker-input" name="due_date" value="<?php echo date('d/m/Y'); ?>" placeholder="dd/mm/yyyy" inputmode="numeric" dir="ltr" autocomplete="off">
+                                <span class="input-group-text invoice-date-picker-trigger"><i class="bi bi-calendar3"></i></span>
+                            </div>
                         </div>
                         <div class="col-12">
                             <label class="form-label">ملاحظات</label>
@@ -945,7 +1358,7 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
-                <button type="button" class="btn btn-primary" onclick="submitInvoice()">
+                <button type="button" class="btn btn-primary" id="submitInvoiceBtn" onclick="submitInvoice()">
                     <i class="bi bi-check-circle me-2"></i>حفظ الفاتورة
                 </button>
             </div>
@@ -976,6 +1389,175 @@ $vatRate = $accountingManager->getSetting('default_vat_rate', 15);
 <script>
 const vatRate = <?php echo $vatRate; ?>;
 let itemCounter = 0;
+const suppliersData = <?php echo json_encode(array_map(function($supplier) {
+    $supplierAddress = trim(($supplier['address'] ?? '') . (!empty($supplier['city']) ? ' - ' . $supplier['city'] : '') . (!empty($supplier['country']) ? ' - ' . $supplier['country'] : ''));
+    return [
+        'supplier_id' => (int)$supplier['supplier_id'],
+        'supplier_name' => $supplier['supplier_name'],
+        'vat_number' => $supplier['vat_number'] ?? '',
+        'phone' => $supplier['phone'] ?? '',
+        'address' => $supplierAddress
+    ];
+}, $suppliers), JSON_UNESCAPED_UNICODE); ?>;
+const defaultSeller = {
+    source: 'company',
+    supplier_id: '',
+    name: <?php echo json_encode($defaultSellerName, JSON_UNESCAPED_UNICODE); ?>,
+    vat_number: <?php echo json_encode($defaultSellerVat, JSON_UNESCAPED_UNICODE); ?>,
+    phone: '',
+    address: <?php echo json_encode($defaultSellerAddress, JSON_UNESCAPED_UNICODE); ?>
+};
+
+const invoiceTypeLabels = {
+    standard: 'فاتورة ضريبية',
+    simplified: 'فاتورة مبسطة',
+    credit_note: 'إشعار دائن',
+    debit_note: 'إشعار مدين'
+};
+
+function setInvoiceTypeValue(type) {
+    const invoiceTypeSelect = document.querySelector('[name="invoice_type"]');
+    const normalizedType = type || 'standard';
+
+    if (!invoiceTypeSelect) {
+        return;
+    }
+
+    invoiceTypeSelect.value = normalizedType;
+
+    if (window.jQuery) {
+        window.jQuery(invoiceTypeSelect).val(normalizedType).trigger('change');
+        return;
+    }
+
+    invoiceTypeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function getInvoiceTypeLabel(type) {
+    return invoiceTypeLabels[type] || invoiceTypeLabels.standard;
+}
+
+function formatDateForDisplay(isoDate) {
+    if (!isoDate) {
+        return '';
+    }
+
+    const parts = String(isoDate).split('-');
+    if (parts.length !== 3) {
+        return isoDate;
+    }
+
+    return parts[2] + '/' + parts[1] + '/' + parts[0];
+}
+
+function normalizeDisplayDateValue(value) {
+    return String(value || '').trim().replace(/[-.]/g, '/');
+}
+
+function parseDisplayDateToIso(value) {
+    const normalized = normalizeDisplayDateValue(value);
+
+    if (!normalized) {
+        return '';
+    }
+
+    const displayMatch = normalized.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (displayMatch) {
+        const day = displayMatch[1].padStart(2, '0');
+        const month = displayMatch[2].padStart(2, '0');
+        const year = displayMatch[3];
+        return year + '-' + month + '-' + day;
+    }
+
+    const isoMatch = normalized.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+    if (isoMatch) {
+        const year = isoMatch[1];
+        const month = isoMatch[2].padStart(2, '0');
+        const day = isoMatch[3].padStart(2, '0');
+        return year + '-' + month + '-' + day;
+    }
+
+    return null;
+}
+
+function getTodayDisplayDate() {
+    return formatDateForDisplay(new Date().toISOString().split('T')[0]);
+}
+
+function setDateInputDisplayValue(fieldName, isoDate) {
+    const input = document.querySelector('[name="' + fieldName + '"]');
+    if (!input) {
+        return;
+    }
+
+    input.value = formatDateForDisplay(isoDate);
+}
+
+function initInvoiceDatepickers() {
+    if (!window.jQuery || !window.jQuery.fn || !window.jQuery.fn.datepicker) {
+        return;
+    }
+
+    const $dateInputs = window.jQuery('.datepicker-input');
+    if (!$dateInputs.length) {
+        return;
+    }
+
+    $dateInputs.each(function() {
+        const $input = window.jQuery(this);
+        if ($input.data('datepicker')) {
+            $input.datepicker('destroy');
+        }
+
+        $input.data('calendartype', 'gregorian');
+        $input.attr('data-calendartype', 'gregorian');
+    });
+
+    $dateInputs.datepicker({
+        format: 'dd/mm/yyyy',
+        language: 'ar',
+        rtl: true,
+        autoclose: true,
+        todayHighlight: true,
+        calendarType: 'gregorian',
+        container: '#addInvoiceModal',
+        orientation: 'bottom auto',
+        weekStart: 0,
+        zIndexOffset: 2050
+    });
+
+    window.jQuery('.invoice-date-picker-trigger').off('click').on('click', function() {
+        const $input = window.jQuery(this).siblings('input.datepicker-input');
+        $input.focus();
+        $input.datepicker('show');
+    });
+
+    $dateInputs.off('click.invoiceDatepicker').on('click.invoiceDatepicker', function() {
+        window.jQuery(this).datepicker('show');
+    });
+}
+
+function isCreditNoteTypeSelected() {
+    return (document.querySelector('[name="invoice_type"]')?.value || 'standard') === 'credit_note';
+}
+
+function updateInvoiceModalLabels() {
+    const invoiceType = document.querySelector('[name="invoice_type"]')?.value || 'standard';
+    const invoiceTypeLabel = getInvoiceTypeLabel(invoiceType);
+    const editInvoiceField = document.getElementById('edit_invoice_id');
+    const invoiceNumber = editInvoiceField.getAttribute('data-invoice-number') || '';
+    const isEditing = !!editInvoiceField.value;
+
+    document.getElementById('addInvoiceModalLabel').innerHTML = isEditing
+        ? '<i class="bi bi-pencil me-2"></i>تعديل ' + invoiceTypeLabel + (invoiceNumber ? ' - ' + invoiceNumber : '')
+        : '<i class="bi bi-plus-circle me-2"></i>' + (invoiceType === 'credit_note'
+            ? 'إشعار دائن جديد'
+            : (invoiceType === 'debit_note'
+                ? 'إشعار مدين جديد'
+                : (invoiceType === 'simplified' ? 'فاتورة مبسطة جديدة' : 'فاتورة جديدة')));
+
+    document.getElementById('submitInvoiceBtn').innerHTML = '<i class="bi bi-check-circle me-2"></i>' + (isEditing ? 'حفظ التعديلات' : 'حفظ ' + invoiceTypeLabel);
+}
 
 function addItem() {
     itemCounter++;
@@ -1026,9 +1608,10 @@ function calculateTotals() {
             const quantity = parseFloat(quantityInput.value) || 0;
             const price = parseFloat(priceInput.value) || 0;
             const itemTotal = quantity * price;
+            const itemDisplayTotal = isCreditNoteTypeSelected() ? -itemTotal : itemTotal;
 
             if (totalInput) {
-                totalInput.value = itemTotal.toFixed(2);
+                totalInput.value = itemDisplayTotal.toFixed(2);
             }
 
             subtotal += itemTotal;
@@ -1037,15 +1620,312 @@ function calculateTotals() {
 
     const vat = subtotal * (vatRate / 100);
     const total = subtotal + vat;
+    const summaryDisplaySign = isCreditNoteTypeSelected() ? -1 : 1;
 
-    document.getElementById('subtotalDisplay').textContent = subtotal.toFixed(2);
-    document.getElementById('vatDisplay').textContent = vat.toFixed(2);
-    document.getElementById('totalDisplay').textContent = total.toFixed(2);
+    document.getElementById('subtotalDisplay').textContent = (summaryDisplaySign * subtotal).toFixed(2);
+    document.getElementById('vatDisplay').textContent = (summaryDisplaySign * vat).toFixed(2);
+    document.getElementById('totalDisplay').textContent = (summaryDisplaySign * total).toFixed(2);
+}
+
+function applySellerSnapshot(seller) {
+    document.getElementById('seller_source').value = seller.source || 'company';
+    document.getElementById('seller_supplier_id').value = seller.supplier_id || '';
+    document.getElementById('seller_name').value = seller.name || '';
+    document.getElementById('seller_vat_number').value = seller.vat_number || '';
+    document.getElementById('seller_address').value = seller.address || '';
+    document.getElementById('sellerSearch').value = seller.name || '';
+    document.getElementById('seller_display_name').value = seller.name || '';
+    document.getElementById('seller_display_vat_number').value = seller.vat_number || '';
+    document.getElementById('seller_display_phone').value = seller.phone || '';
+    document.getElementById('seller_display_address').value = seller.address || '';
+}
+
+let selectedExistingSupplierSnapshot = null;
+let isNewSupplier = false;
+
+function getSupplierFormState() {
+    return {
+        supplier_name: document.getElementById('seller_display_name').value.trim(),
+        vat_number: document.getElementById('seller_display_vat_number').value.trim(),
+        phone: document.getElementById('seller_display_phone').value.trim(),
+        address: document.getElementById('seller_display_address').value.trim()
+    };
+}
+
+function syncSellerSnapshotFromForm() {
+    const current = getSupplierFormState();
+    document.getElementById('seller_name').value = current.supplier_name;
+    document.getElementById('seller_vat_number').value = current.vat_number;
+    document.getElementById('seller_address').value = current.address;
+    document.getElementById('sellerSearch').value = current.supplier_name;
+}
+
+function resetSupplierSaveState() {
+    selectedExistingSupplierSnapshot = null;
+    document.getElementById('saveSupplierInfoContainer').style.display = 'none';
+}
+
+function updateSaveSupplierButtonVisibility() {
+    syncSellerSnapshotFromForm();
+    const supplierId = document.getElementById('seller_supplier_id').value;
+    const source = document.getElementById('seller_source').value;
+    const container = document.getElementById('saveSupplierInfoContainer');
+    const button = document.getElementById('saveSupplierInfoBtn');
+    const current = getSupplierFormState();
+
+    if (source === 'company') {
+        container.style.display = 'none';
+        return;
+    }
+
+    if (isNewSupplier && !supplierId) {
+        const hasNewSupplierData = current.supplier_name || current.vat_number || current.phone || current.address;
+        button.innerHTML = '<i class="bi bi-save me-1"></i>حفظ المورد';
+        container.style.display = hasNewSupplierData ? 'block' : 'none';
+        return;
+    }
+
+    button.innerHTML = '<i class="bi bi-save me-1"></i>حفظ بيانات المورد';
+
+    if (!supplierId || !selectedExistingSupplierSnapshot) {
+        container.style.display = 'none';
+        return;
+    }
+
+    const hasChanges = current.supplier_name !== selectedExistingSupplierSnapshot.supplier_name ||
+        current.vat_number !== selectedExistingSupplierSnapshot.vat_number ||
+        current.phone !== selectedExistingSupplierSnapshot.phone ||
+        current.address !== selectedExistingSupplierSnapshot.address;
+
+    container.style.display = hasChanges ? 'block' : 'none';
+}
+
+function createSupplierQuick(current, successMessage) {
+    const formData = new FormData();
+    formData.append('ajax_action', 'add_supplier_quick');
+    formData.append('supplier_name', current.supplier_name);
+    formData.append('vat_number', current.vat_number);
+    formData.append('phone', current.phone);
+    formData.append('address', current.address);
+
+    return fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            throw new Error(data.message || 'فشل في إضافة المورد');
+        }
+
+        suppliersData.push({
+            supplier_id: data.supplier.supplier_id,
+            supplier_name: data.supplier.supplier_name,
+            vat_number: data.supplier.vat_number || '',
+            phone: data.supplier.phone || '',
+            address: data.supplier.address || ''
+        });
+
+        document.getElementById('seller_source').value = 'supplier';
+        document.getElementById('seller_supplier_id').value = data.supplier.supplier_id;
+        isNewSupplier = false;
+        selectedExistingSupplierSnapshot = {
+            supplier_name: current.supplier_name,
+            vat_number: current.vat_number,
+            phone: current.phone,
+            address: current.address
+        };
+        syncSellerSnapshotFromForm();
+        updateSaveSupplierButtonVisibility();
+
+        if (successMessage) {
+            showResultModal(true, successMessage);
+        }
+
+        return data;
+    });
+}
+
+function saveSupplierInfo() {
+    const supplierId = document.getElementById('seller_supplier_id').value;
+    const current = getSupplierFormState();
+
+    if (!current.supplier_name) {
+        showResultModal(false, 'اسم المورد مطلوب');
+        return;
+    }
+
+    if (isNewSupplier && !supplierId) {
+        createSupplierQuick(current, 'تم حفظ المورد بنجاح')
+            .catch(error => {
+                console.error('Error:', error);
+                showResultModal(false, error.message || 'حدث خطأ أثناء حفظ المورد');
+            });
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('ajax_action', 'update_supplier_quick');
+    formData.append('supplier_id', supplierId);
+    formData.append('supplier_name', current.supplier_name);
+    formData.append('vat_number', current.vat_number);
+    formData.append('phone', current.phone);
+    formData.append('address', current.address);
+
+    fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const supplierIndex = suppliersData.findIndex(function(item) {
+                return String(item.supplier_id) === String(supplierId);
+            });
+            if (supplierIndex !== -1) {
+                suppliersData[supplierIndex].supplier_name = current.supplier_name;
+                suppliersData[supplierIndex].vat_number = current.vat_number;
+                suppliersData[supplierIndex].phone = current.phone;
+                suppliersData[supplierIndex].address = current.address;
+            }
+            selectedExistingSupplierSnapshot = {
+                supplier_name: current.supplier_name,
+                vat_number: current.vat_number,
+                phone: current.phone,
+                address: current.address
+            };
+            syncSellerSnapshotFromForm();
+            updateSaveSupplierButtonVisibility();
+            showResultModal(true, data.message || 'تم حفظ بيانات المورد بنجاح');
+        } else {
+            showResultModal(false, data.message || 'فشل في حفظ بيانات المورد');
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showResultModal(false, 'حدث خطأ أثناء حفظ بيانات المورد');
+    });
+}
+
+function searchSellers(searchTerm) {
+    const term = searchTerm.trim().toLowerCase();
+    const sellerDropdown = document.getElementById('sellerDropdown');
+
+    const matches = suppliersData.filter(supplier => {
+        if (!term) {
+            return true;
+        }
+
+        return (supplier.supplier_name || '').toLowerCase().includes(term) ||
+            (supplier.vat_number || '').toLowerCase().includes(term) ||
+            (supplier.phone || '').toLowerCase().includes(term) ||
+            (supplier.address || '').toLowerCase().includes(term);
+    });
+
+    displaySellerDropdown(matches, term);
+}
+
+function displaySellerDropdown(suppliers, term) {
+    const sellerDropdown = document.getElementById('sellerDropdown');
+    sellerDropdown.innerHTML = '';
+
+    if (!term || defaultSeller.name.toLowerCase().includes(term) || defaultSeller.vat_number.toLowerCase().includes(term)) {
+        const companyItem = document.createElement('a');
+        companyItem.href = '#';
+        companyItem.className = 'list-group-item list-group-item-action';
+        companyItem.innerHTML = `
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <strong>${defaultSeller.name}</strong>
+                    <br><small class="text-primary">مؤسستنا - الافتراضي</small>
+                    ${defaultSeller.vat_number ? '<br><small class="text-muted">الرقم الضريبي: ' + defaultSeller.vat_number + '</small>' : ''}
+                </div>
+            </div>
+        `;
+        companyItem.addEventListener('click', function(e) {
+            e.preventDefault();
+            selectSeller(defaultSeller);
+        });
+        sellerDropdown.appendChild(companyItem);
+    }
+
+    suppliers.forEach(supplier => {
+        const item = document.createElement('a');
+        item.href = '#';
+        item.className = 'list-group-item list-group-item-action';
+        item.innerHTML = `
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <strong>${supplier.supplier_name}</strong>
+                    ${supplier.vat_number ? '<br><small class="text-muted">الرقم الضريبي: ' + supplier.vat_number + '</small>' : ''}
+                    ${supplier.phone ? '<br><small class="text-muted">الهاتف: ' + supplier.phone + '</small>' : ''}
+                    ${supplier.address ? '<br><small class="text-muted">' + supplier.address + '</small>' : ''}
+                </div>
+            </div>
+        `;
+
+        item.addEventListener('click', function(e) {
+            e.preventDefault();
+            selectSeller({
+                source: 'supplier',
+                supplier_id: supplier.supplier_id,
+                name: supplier.supplier_name,
+                vat_number: supplier.vat_number || '',
+                phone: supplier.phone || '',
+                address: supplier.address || ''
+            });
+        });
+
+        sellerDropdown.appendChild(item);
+    });
+
+    sellerDropdown.style.display = sellerDropdown.children.length ? 'block' : 'none';
+}
+
+function selectSeller(seller) {
+    isNewSupplier = false;
+    applySellerSnapshot(seller);
+    if ((seller.source || 'company') === 'supplier' && seller.supplier_id) {
+        selectedExistingSupplierSnapshot = {
+            supplier_name: seller.name || '',
+            vat_number: seller.vat_number || '',
+            phone: seller.phone || '',
+            address: seller.address || ''
+        };
+    } else {
+        resetSupplierSaveState();
+    }
+    updateSaveSupplierButtonVisibility();
+    document.getElementById('sellerDropdown').style.display = 'none';
 }
 
 function submitInvoice() {
     const form = document.getElementById('addInvoiceForm');
     const formData = new FormData(form);
+    syncSellerSnapshotFromForm();
+
+    const invoiceDateInput = document.querySelector('[name="invoice_date"]');
+    const dueDateInput = document.querySelector('[name="due_date"]');
+    const invoiceDateIso = parseDisplayDateToIso(invoiceDateInput ? invoiceDateInput.value : '');
+    const dueDateIso = parseDisplayDateToIso(dueDateInput ? dueDateInput.value : '');
+
+    if (!invoiceDateIso) {
+        showResultModal(false, 'يرجى إدخال تاريخ الفاتورة بصيغة dd/mm/yyyy');
+        return;
+    }
+
+    if (dueDateInput && dueDateInput.value.trim() !== '' && !dueDateIso) {
+        showResultModal(false, 'يرجى إدخال تاريخ الاستحقاق بصيغة dd/mm/yyyy');
+        return;
+    }
+
+    formData.set('invoice_date', invoiceDateIso);
+    formData.set('due_date', dueDateIso || '');
+
+    if (!document.getElementById('seller_name').value.trim()) {
+        showResultModal(false, 'بيانات البائع غير مكتملة');
+        return;
+    }
 
     // Collect items
     const items = [];
@@ -1072,7 +1952,13 @@ function submitInvoice() {
         return;
     }
 
-    formData.append('ajax_action', 'create_invoice');
+    const editInvoiceId = document.getElementById('edit_invoice_id').value;
+    if (editInvoiceId) {
+        formData.append('ajax_action', 'update_invoice');
+        formData.append('invoice_id', editInvoiceId);
+    } else {
+        formData.append('ajax_action', 'create_invoice');
+    }
     formData.append('items', JSON.stringify(items));
 
     fetch('index.hnt', {
@@ -1103,6 +1989,102 @@ function viewInvoice(invoiceId) {
 
 function printInvoice(invoiceId) {
     window.open('print.hnt?id=' + invoiceId, '_blank');
+}
+
+function editInvoice(invoiceId) {
+    const formData = new FormData();
+    formData.append('ajax_action', 'get_invoice_with_items');
+    formData.append('invoice_id', invoiceId);
+
+    fetch('index.hnt', { method: 'POST', body: formData })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (!data.success) {
+            showResultModal(false, data.error || 'فشل في تحميل بيانات الفاتورة');
+            return;
+        }
+        var inv = data.invoice;
+        var invItems = data.items;
+
+        document.getElementById('edit_invoice_id').value = inv.invoice_id;
+        document.getElementById('edit_invoice_id').setAttribute('data-invoice-number', inv.invoice_number || '');
+
+        setInvoiceTypeValue(inv.invoice_type || 'standard');
+        setDateInputDisplayValue('invoice_date', inv.invoice_date || '');
+        setDateInputDisplayValue('due_date', inv.due_date || inv.invoice_date || '');
+        document.querySelector('[name="customer_type"]').value = inv.customer_type || 'tenant';
+        document.querySelector('[name="payment_method"]').value = inv.payment_method || 'cash';
+        document.querySelector('[name="notes"]').value = inv.notes || '';
+
+        document.getElementById('selectedCustomerId').value = inv.customer_id || '';
+        document.getElementById('customerSearch').value = inv.customer_name || '';
+        document.getElementById('customer_name').value = inv.customer_name || '';
+        document.getElementById('customer_vat_number').value = inv.customer_vat_number || '';
+        document.getElementById('customer_phone').value = data.customer_phone || '';
+        document.getElementById('customer_address').value = inv.customer_address || '';
+        document.getElementById('customerDetails').style.display = 'block';
+        isNewCustomer = false;
+        selectedExistingCustomerSnapshot = {
+            customer_name: inv.customer_name || '',
+            vat_number: inv.customer_vat_number || '',
+            phone: data.customer_phone || '',
+            address: inv.customer_address || ''
+        };
+
+        selectSeller({
+            source: inv.seller_source || 'company',
+            supplier_id: inv.seller_supplier_id || '',
+            name: inv.seller_name || defaultSeller.name,
+            vat_number: inv.seller_vat_number || defaultSeller.vat_number,
+            phone: data.supplier_phone || '',
+            address: inv.seller_address || defaultSeller.address
+        });
+
+        document.getElementById('invoiceItems').innerHTML = '';
+        itemCounter = 0;
+        if (invItems && invItems.length > 0) {
+            invItems.forEach(function(item) {
+                addItem();
+                var idx = itemCounter;
+                document.querySelector('[name="item_description_' + idx + '"]').value = item.item_description || '';
+                document.querySelector('[name="quantity_' + idx + '"]').value = item.quantity || 1;
+                document.querySelector('[name="unit_price_' + idx + '"]').value = item.unit_price || 0;
+                document.querySelector('[name="vat_rate_' + idx + '"]').value = item.vat_rate || vatRate;
+            });
+        } else {
+            addItem();
+        }
+        calculateTotals();
+
+        var modal = new bootstrap.Modal(document.getElementById('addInvoiceModal'));
+        modal.show();
+    })
+    .catch(function(error) {
+        console.error('Error:', error);
+        showResultModal(false, 'حدث خطأ أثناء تحميل بيانات الفاتورة');
+    });
+}
+
+function resetInvoiceForm() {
+    document.getElementById('edit_invoice_id').value = '';
+    document.getElementById('edit_invoice_id').setAttribute('data-invoice-number', '');
+    document.getElementById('addInvoiceForm').reset();
+    setInvoiceTypeValue('standard');
+    var today = getTodayDisplayDate();
+    document.querySelector('[name="invoice_date"]').value = today;
+    document.querySelector('[name="due_date"]').value = today;
+    document.getElementById('selectedCustomerId').value = '';
+    document.getElementById('customerSearch').value = '';
+    document.getElementById('customerDetails').style.display = 'none';
+    document.getElementById('invoiceItems').innerHTML = '';
+    itemCounter = 0;
+    isNewCustomer = false;
+    selectedExistingCustomerSnapshot = null;
+    isNewSupplier = false;
+    resetSupplierSaveState();
+    applySellerSnapshot(defaultSeller);
+    addItem();
+    calculateTotals();
 }
 
 let selectedExistingCustomerSnapshot = null;
@@ -1466,6 +2448,8 @@ let searchTimeout;
 const customerSearchInput = document.getElementById('customerSearch');
 const customerDropdown = document.getElementById('customerDropdown');
 const customerDetails = document.getElementById('customerDetails');
+const sellerSearchInput = document.getElementById('sellerSearch');
+const sellerDropdown = document.getElementById('sellerDropdown');
 let isNewCustomer = false;
 
 customerSearchInput.addEventListener('input', function() {
@@ -1607,16 +2591,83 @@ document.getElementById('addNewCustomerBtn').addEventListener('click', function(
     document.getElementById(fieldId).addEventListener('input', updateSaveCustomerButtonVisibility);
 });
 
+document.getElementById('addNewSupplierBtn').addEventListener('click', function() {
+    isNewSupplier = true;
+    document.getElementById('seller_source').value = 'supplier';
+    document.getElementById('seller_supplier_id').value = '';
+    document.getElementById('seller_display_name').value = sellerSearchInput.value.trim();
+    document.getElementById('seller_display_vat_number').value = '';
+    document.getElementById('seller_display_phone').value = '';
+    document.getElementById('seller_display_address').value = '';
+    selectedExistingSupplierSnapshot = null;
+    updateSaveSupplierButtonVisibility();
+    document.getElementById('seller_display_name').focus();
+});
+
+['seller_display_name', 'seller_display_vat_number', 'seller_display_phone', 'seller_display_address'].forEach(function(fieldId) {
+    document.getElementById(fieldId).addEventListener('input', updateSaveSupplierButtonVisibility);
+});
+
+document.querySelector('[name="invoice_type"]').addEventListener('change', function() {
+    updateInvoiceModalLabels();
+    calculateTotals();
+});
+
+initInvoiceDatepickers();
+
+sellerSearchInput.addEventListener('input', function() {
+    searchSellers(this.value);
+});
+
+sellerSearchInput.addEventListener('focus', function() {
+    searchSellers(this.value);
+});
+
+document.getElementById('useCompanySellerBtn').addEventListener('click', function() {
+    selectSeller(defaultSeller);
+});
+
 // Hide dropdown when clicking outside
 document.addEventListener('click', function(e) {
     if (!customerSearchInput.contains(e.target) && !customerDropdown.contains(e.target)) {
         customerDropdown.style.display = 'none';
+    }
+
+    if (!sellerSearchInput.contains(e.target) && !sellerDropdown.contains(e.target) && !document.getElementById('useCompanySellerBtn').contains(e.target)) {
+        sellerDropdown.style.display = 'none';
     }
 });
 
 // Modified submitInvoice to handle new customer creation
 const originalSubmitInvoice = submitInvoice;
 submitInvoice = function() {
+    if (isNewSupplier && !document.getElementById('seller_supplier_id').value) {
+        const supplierName = document.getElementById('seller_display_name').value.trim();
+        const vatNumber = document.getElementById('seller_display_vat_number').value.trim();
+        const phone = document.getElementById('seller_display_phone').value.trim();
+        const address = document.getElementById('seller_display_address').value.trim();
+
+        if (!supplierName) {
+            showResultModal(false, 'اسم المورد مطلوب');
+            return;
+        }
+
+        createSupplierQuick({
+            supplier_name: supplierName,
+            vat_number: vatNumber,
+            phone: phone,
+            address: address
+        })
+        .then(() => {
+            originalSubmitInvoice();
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showResultModal(false, error.message || 'حدث خطأ أثناء إضافة المورد');
+        });
+        return;
+    }
+
     // If it's a new customer, create them first
     if (isNewCustomer && !document.getElementById('selectedCustomerId').value) {
         const customerName = document.getElementById('customer_name').value.trim();
@@ -1649,7 +2700,20 @@ submitInvoice = function() {
 };
 
 // Add initial item
+applySellerSnapshot(defaultSeller);
 addItem();
+
+document.getElementById('addInvoiceModal').addEventListener('hidden.bs.modal', function() {
+    if (document.getElementById('edit_invoice_id').value) {
+        resetInvoiceForm();
+    }
+});
+
+var urlParams = new URLSearchParams(window.location.search);
+var editParam = urlParams.get('edit');
+if (editParam) {
+    editInvoice(parseInt(editParam));
+}
 </script>
 
 <?php require("../../../../foter.hnt"); ?>

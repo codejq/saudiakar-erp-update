@@ -299,6 +299,14 @@ class UBLInvoiceGenerator {
      */
     private function addAccountingSupplierParty() {
         $companyInfo = ZatcaPhase2Config::getCompanyInfo();
+        $sellerName = $this->invoiceData['seller_name'] ?? $companyInfo['name_ar'];
+        $sellerVatNumber = $this->invoiceData['seller_vat_number'] ?? $companyInfo['vat_number'];
+        $sellerAddress = trim((string)($this->invoiceData['seller_address'] ?? ''));
+
+        $streetName = $companyInfo['street_name'];
+        if ($sellerAddress !== '') {
+            $streetName = $sellerAddress;
+        }
 
         $supplierParty = $this->createElement('cac:AccountingSupplierParty');
         $party = $this->createElement('cac:Party');
@@ -312,7 +320,7 @@ class UBLInvoiceGenerator {
 
         // Postal Address
         $postalAddress = $this->createElement('cac:PostalAddress');
-        $postalAddress->appendChild($this->createElement('cbc:StreetName', $companyInfo['street_name']));
+        $postalAddress->appendChild($this->createElement('cbc:StreetName', $streetName));
         $postalAddress->appendChild($this->createElement('cbc:BuildingNumber', $companyInfo['building_number']));
         $postalAddress->appendChild($this->createElement('cbc:PlotIdentification', '0000'));
         $postalAddress->appendChild($this->createElement('cbc:CitySubdivisionName', $companyInfo['district']));
@@ -326,7 +334,7 @@ class UBLInvoiceGenerator {
 
         // Party Tax Scheme (VAT)
         $partyTaxScheme = $this->createElement('cac:PartyTaxScheme');
-        $partyTaxScheme->appendChild($this->createElement('cbc:CompanyID', $companyInfo['vat_number']));
+        $partyTaxScheme->appendChild($this->createElement('cbc:CompanyID', $sellerVatNumber));
         $taxScheme = $this->createElement('cac:TaxScheme');
         $taxScheme->appendChild($this->createElement('cbc:ID', 'VAT'));
         $partyTaxScheme->appendChild($taxScheme);
@@ -334,7 +342,7 @@ class UBLInvoiceGenerator {
 
         // Party Legal Entity
         $partyLegalEntity = $this->createElement('cac:PartyLegalEntity');
-        $partyLegalEntity->appendChild($this->createElement('cbc:RegistrationName', $companyInfo['name_ar']));
+        $partyLegalEntity->appendChild($this->createElement('cbc:RegistrationName', $sellerName));
         $party->appendChild($partyLegalEntity);
 
         $supplierParty->appendChild($party);

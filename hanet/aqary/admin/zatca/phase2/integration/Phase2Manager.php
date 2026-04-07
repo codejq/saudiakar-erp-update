@@ -871,8 +871,8 @@ class Phase2Manager {
 
         // Prepare basic invoice data for Tags 1-5
         $basicInvoiceData = [
-            'seller_name' => $companyInfo['name_ar'],
-            'tax_id' => $companyInfo['vat_number'],
+            'seller_name' => $invoiceData['seller_name'] ?? $companyInfo['name_ar'],
+            'tax_id' => $invoiceData['seller_vat_number'] ?? $companyInfo['vat_number'],
             'invoice_date' => $invoiceData['invoice_date'],
             'invoice_time' => $invoiceData['invoice_time'] ?? date('H:i:s'),
             'total_amount' => $invoiceData['total_amount'],

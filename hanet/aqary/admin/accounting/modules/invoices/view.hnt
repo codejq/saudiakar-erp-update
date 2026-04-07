@@ -55,17 +55,33 @@ if ($logStmt) {
 }
 
 // Get seller info from config or defaults
-$sellerName = 'اسم الشركة';
-$sellerVat = '300000000000003';
-$sellerAddress = 'المملكة العربية السعودية';
+$sellerName = trim((string)($invoice['seller_name'] ?? ''));
+$sellerVat = trim((string)($invoice['seller_vat_number'] ?? ''));
+$sellerAddress = trim((string)($invoice['seller_address'] ?? ''));
 
-// Try to get from ZATCA config
-if (file_exists(__DIR__ . '/../../../../admin/zatca/config/zatca_config.php')) {
-    require_once __DIR__ . '/../../../../admin/zatca/config/zatca_config.php';
-    if (defined('ZATCA_SELLER_NAME')) $sellerName = constant('ZATCA_SELLER_NAME');
-    if (defined('ZATCA_VAT_NUMBER')) $sellerVat = constant('ZATCA_VAT_NUMBER');
-    if (defined('ZATCA_SELLER_ADDRESS')) $sellerAddress = constant('ZATCA_SELLER_ADDRESS');
+if ($sellerName === '') {
+    $sellerName = $zatca_company_name_ar ?? $bayanmaktabname ?? 'اسم الشركة';
 }
+if ($sellerVat === '') {
+    $sellerVat = $zatca_vat_number ?? $vat_number ?? '300000000000003';
+}
+if ($sellerAddress === '') {
+    $sellerAddress = $zatca_company_address_ar ?? $bayanaddress ?? 'المملكة العربية السعودية';
+}
+
+$invoiceTypeKey = trim((string)($invoice['invoice_type'] ?? 'standard'));
+$documentLabelAr = 'فاتورة ضريبية';
+if ($invoiceTypeKey === 'simplified') {
+    $documentLabelAr = 'فاتورة مبسطة';
+} elseif ($invoiceTypeKey === 'credit_note') {
+    $documentLabelAr = 'إشعار دائن';
+} elseif ($invoiceTypeKey === 'debit_note') {
+    $documentLabelAr = 'إشعار مدين';
+}
+
+$isCreditNote = $invoiceTypeKey === 'credit_note';
+$isAccountingNote = $invoiceTypeKey === 'credit_note' || $invoiceTypeKey === 'debit_note';
+$displaySign = $isCreditNote ? -1 : 1;
 
 // Calculate totals
 $subtotal = $invoice['subtotal'] ?? 0;
@@ -75,8 +91,11 @@ $paidAmount = floatval($invoice['paid_amount'] ?? 0);
 $remainingAmount = isset($invoice['remaining_amount']) && $invoice['remaining_amount'] !== '' && $invoice['remaining_amount'] !== null
     ? floatval($invoice['remaining_amount'])
     : max(floatval($totalAmount) - $paidAmount, 0);
+$invoiceDateDisplay = !empty($invoice['invoice_date']) ? date('d/m/Y', strtotime($invoice['invoice_date'])) : '-';
+$dueDateRaw = $invoice['due_date'] ?? $invoice['invoice_date'] ?? null;
+$dueDateDisplay = !empty($dueDateRaw) ? date('d/m/Y', strtotime($dueDateRaw)) : '-';
 $paymentStatus = trim((string)($invoice['payment_status'] ?? ''));
-if ($paymentStatus === '') {
+if (!$isAccountingNote && $paymentStatus === '') {
     if ($remainingAmount <= 0 && floatval($totalAmount) > 0) {
         $paymentStatus = 'paid';
     } elseif ($paidAmount > 0) {
@@ -86,11 +105,14 @@ if ($paymentStatus === '') {
     }
 }
 $paymentStatusAr = 'غير مدفوعة';
-if ($paymentStatus === 'paid') {
+if ($isAccountingNote) {
+    $paymentStatusAr = 'غير مطبق';
+} elseif ($paymentStatus === 'paid') {
     $paymentStatusAr = 'مدفوعة';
 } elseif ($paymentStatus === 'partial') {
     $paymentStatusAr = 'مدفوعة جزئياً';
 }
+$paymentAmountDisplay = $isAccountingNote ? '-' : number_format($paidAmount, 2) . ' / ' . number_format($remainingAmount, 2);
 $invoiceNotes = trim((string)($invoice['notes'] ?? ''));
 
 // Convert number to Arabic words (simplified)
@@ -133,8 +155,10 @@ function numberToArabicWords($number) {
     return $result;
 }
 
-$totalInWords = numberToArabicWords(intval($totalAmount)) . ' ريال';
-$halalas = intval(($totalAmount - intval($totalAmount)) * 100);
+$displayTotalAmount = $displaySign * floatval($totalAmount);
+$wordsAmount = abs(floatval($displayTotalAmount));
+$totalInWords = ($isCreditNote ? 'سالب ' : '') . numberToArabicWords(intval($wordsAmount)) . ' ريال';
+$halalas = intval(($wordsAmount - intval($wordsAmount)) * 100);
 if ($halalas > 0) {
     $totalInWords .= ' و ' . numberToArabicWords($halalas) . ' هللة';
 }
@@ -453,6 +477,9 @@ $totalInWords .= ' فقط لا غير';
             <i class="bi bi-file-earmark-richtext me-2"></i>فتح بالقالب  
         </button>
         <?php if (empty($invoice['zatca_status']) || $invoice['zatca_status'] != 'submitted'): ?>
+        <button class="btn-action" style="background: #ed8936; color: white;" onclick="window.location='index.hnt?edit=<?php echo $invoiceId; ?>'">
+            <i class="bi bi-pencil me-2"></i>تعديل <?php echo htmlspecialchars($documentLabelAr); ?>
+        </button>
         <button class="btn-action btn-zatca" onclick="submitToZatca(<?php echo $invoiceId; ?>)">
             <i class="bi bi-send me-2"></i>إرسال لـ ZATCA
         </button>
@@ -473,7 +500,7 @@ $totalInWords .= ' فقط لا غير';
     </div>
 
     <div class="notes-editor-card no-print">
-        <div class="notes-editor-title">ملاحظات الفاتورة</div>
+        <div class="notes-editor-title">ملاحظات <?php echo htmlspecialchars($documentLabelAr); ?></div>
         <textarea id="invoiceNotes" class="notes-editor-textarea"><?php echo htmlspecialchars($invoiceNotes); ?></textarea>
         <div class="notes-editor-actions">
             <button class="btn-action btn-save-note" type="button" onclick="saveInvoiceNote(<?php echo $invoiceId; ?>)">
@@ -487,16 +514,16 @@ $totalInWords .= ' فقط لا غير';
     <div class="invoice-container">
         <!-- Invoice Header -->
         <div class="invoice-title">
-            فاتورة ضريبية رقم: <?php echo htmlspecialchars($invoice['invoice_number']); ?>
+            <?php echo htmlspecialchars($documentLabelAr); ?> رقم: <?php echo htmlspecialchars($invoice['invoice_number']); ?>
         </div>
 
         <!-- Header Info Table -->
         <table class="invoice-table">
             <tr>
                 <td class="label-cell">التاريخ:</td>
-                <td><?php echo date('Y-m-d', strtotime($invoice['invoice_date'])); ?></td>
+                <td><?php echo $invoiceDateDisplay; ?></td>
                 <td class="label-cell">تاريخ الاستحقاق:</td>
-                <td><?php echo date('Y-m-d', strtotime($invoice['invoice_date'] . ' +30 days')); ?></td>
+                <td><?php echo $dueDateDisplay; ?></td>
             </tr>
             <tr>
                 <td class="label-cell">اسم المورد:</td>
@@ -522,7 +549,7 @@ $totalInWords .= ' فقط لا غير';
                 <td class="label-cell">حالة السداد:</td>
                 <td><?php echo htmlspecialchars($paymentStatusAr); ?></td>
                 <td class="label-cell">المدفوع / المتبقي:</td>
-                <td><?php echo number_format($paidAmount, 2) . ' / ' . number_format($remainingAmount, 2); ?></td>
+                <td><?php echo $paymentAmountDisplay; ?></td>
             </tr>
         </table>
 
@@ -547,18 +574,18 @@ $totalInWords .= ' فقط لا غير';
                     <tr>
                         <td><?php echo $invoice['invoice_number']; ?></td>
                         <td style="text-align: right;"><?php echo htmlspecialchars($item['item_description']); ?></td>
-                        <td><?php echo number_format($lineAmount, 2); ?></td>
-                        <td><?php echo number_format($lineVat, 2); ?></td>
-                        <td><strong><?php echo number_format($lineTotal, 2); ?></strong></td>
+                        <td><?php echo number_format($displaySign * floatval($lineAmount), 2); ?></td>
+                        <td><?php echo number_format($displaySign * floatval($lineVat), 2); ?></td>
+                        <td><strong><?php echo number_format($displaySign * floatval($lineTotal), 2); ?></strong></td>
                     </tr>
                     <?php endforeach; ?>
                 <?php else: ?>
                     <tr>
                         <td><?php echo $invoice['invoice_number']; ?></td>
-                        <td style="text-align: right;">بنود الفاتورة</td>
-                        <td><?php echo number_format($subtotal, 2); ?></td>
-                        <td><?php echo number_format($vatAmount, 2); ?></td>
-                        <td><strong><?php echo number_format($totalAmount, 2); ?></strong></td>
+                        <td style="text-align: right;">بنود <?php echo htmlspecialchars($documentLabelAr); ?></td>
+                        <td><?php echo number_format($displaySign * floatval($subtotal), 2); ?></td>
+                        <td><?php echo number_format($displaySign * floatval($vatAmount), 2); ?></td>
+                        <td><strong><?php echo number_format($displaySign * floatval($totalAmount), 2); ?></strong></td>
                     </tr>
                 <?php endif; ?>
 
@@ -580,7 +607,7 @@ $totalInWords .= ' فقط لا غير';
             <tr class="total-row">
                 <td colspan="4" style="text-align: center; font-size: 1.1rem;">الاجمالي شامل الضريبة</td>
                 <td style="width: 150px;">
-                    <div class="amount-box"><?php echo number_format($totalAmount, 2); ?></div>
+                    <div class="amount-box"><?php echo number_format($displayTotalAmount, 2); ?></div>
                 </td>
             </tr>
         </table>

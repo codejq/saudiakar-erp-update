@@ -401,14 +401,32 @@ class AccountingManager {
             }
         }
 
+        $sellerColumns = [
+            'seller_source' => "ALTER TABLE acc_invoices ADD COLUMN seller_source VARCHAR(20) NULL AFTER notes",
+            'seller_supplier_id' => "ALTER TABLE acc_invoices ADD COLUMN seller_supplier_id INT NULL AFTER seller_source",
+            'seller_name' => "ALTER TABLE acc_invoices ADD COLUMN seller_name VARCHAR(255) NULL AFTER seller_supplier_id",
+            'seller_vat_number' => "ALTER TABLE acc_invoices ADD COLUMN seller_vat_number VARCHAR(50) NULL AFTER seller_name",
+            'seller_address' => "ALTER TABLE acc_invoices ADD COLUMN seller_address TEXT NULL AFTER seller_vat_number"
+        ];
+
+        foreach ($sellerColumns as $columnName => $alterSql) {
+            $columnCheck = $this->db->query("SHOW COLUMNS FROM acc_invoices LIKE '{$columnName}'");
+            if ($columnCheck && $columnCheck->num_rows == 0) {
+                if (!$this->db->query($alterSql)) {
+                    return ['success' => false, 'error' => 'Failed to add seller columns: ' . $this->db->error];
+                }
+            }
+        }
+
         // Insert invoice
         $stmt = $this->db->prepare("
             INSERT INTO acc_invoices
             (invoice_number, invoice_type, invoice_date, due_date,
              customer_type, customer_id, customer_name, customer_vat_number, customer_address,
              subtotal, vat_amount, total_amount, paid_amount,
-             payment_status, payment_method, notes, created_by, formuid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'unpaid', ?, ?, ?, UUID())
+             payment_status, payment_method, notes, seller_source, seller_supplier_id,
+             seller_name, seller_vat_number, seller_address, created_by, formuid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'unpaid', ?, ?, ?, ?, ?, ?, ?, ?, UUID())
         ");
 
         if (!$stmt) {
@@ -421,7 +439,13 @@ class AccountingManager {
         $paymentMethod = $data['payment_method'] ?? '';
         $notes = $data['notes'] ?? '';
 
-        $stmt->bind_param("ssssissssdddssi",
+        $sellerSource = $data['seller_source'] ?? 'company';
+        $sellerSupplierId = !empty($data['seller_supplier_id']) ? intval($data['seller_supplier_id']) : null;
+        $sellerName = $data['seller_name'] ?? '';
+        $sellerVatNumber = $data['seller_vat_number'] ?? '';
+        $sellerAddress = $data['seller_address'] ?? '';
+
+        $stmt->bind_param("sssssisssdddsssisssi",
             $invoiceNumber,
             $data['invoice_type'],
             $data['invoice_date'],
@@ -436,6 +460,11 @@ class AccountingManager {
             $totalAmount,
             $paymentMethod,
             $notes,
+            $sellerSource,
+            $sellerSupplierId,
+            $sellerName,
+            $sellerVatNumber,
+            $sellerAddress,
             $this->userId
         );
         
