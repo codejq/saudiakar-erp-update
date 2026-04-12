@@ -48,23 +48,28 @@ if ($searchold) {
 }
 
 if ($search) {
-  if (is_numeric($search)) {
-    $where = "WHERE txt3akd='' AND rakam3akdid='" . addslashes($search) . "'";
-    if ($searchold) {
-      $where = "WHERE txt3akd!='' AND rakam3akdid='" . addslashes($search) . "'";
-    }
-  } else {
-    $where = "WHERE txt3akd='' AND txtcash LIKE BINARY '%" . addslashes($search) . "%'";
-    if ($searchold) {
-      $where = "WHERE txt3akd!='' AND txtcash LIKE BINARY '%" . addslashes($search) . "%'";
-    }
-  }
+  $search_safe = mysql_real_escape_string($search);
+  $baseWhere = $searchold ? "WHERE txt3akd!=''" : "WHERE txt3akd=''";
+  $where = $baseWhere . " AND ("
+    . "rakam3akdid LIKE '%" . $search_safe . "%'"
+    . " OR txtcash LIKE '%" . $search_safe . "%'"
+    . " OR txtcash_word LIKE '%" . $search_safe . "%'"
+    . " OR mostagerid IN (SELECT mostagerid FROM mostagereen WHERE mostagername LIKE '%" . $search_safe . "%')"
+    . " OR elect IN (SELECT mostagerid FROM mostagereen WHERE mostagername LIKE '%" . $search_safe . "%')"
+    . ")";
 }
 
 // Status filter
 if (isset($_REQUEST['status_filter']) && $_REQUEST['status_filter'] !== '') {
   $statusFilter = mysql_real_escape_string($_REQUEST['status_filter']);
-  $where .= " AND status = '" . $statusFilter . "'";
+  if ($statusFilter === 'expiring_soon') {
+    $now = time();
+    $expiringSoonDate = $now + (70 * 24 * 60 * 60);
+    $where .= " AND end3aqd BETWEEN " . intval($now) . " AND " . intval($expiringSoonDate);
+    $where .= " AND COALESCE(status, 'active') NOT IN ('expired', 'renewed', 'terminated', 'cancelled')";
+  } else {
+    $where .= " AND status = '" . $statusFilter . "'";
+  }
 }
 
 // Calculate pagination
@@ -365,7 +370,7 @@ if (!$is_ajax_request) {
                 <th>المياه</th>
                 <th>مرفقات</th>
                 <th>عرض</th>
-                <th>وورد</th>
+                <th>المدة</th>
                 <th>الحالة</th>
                 <th>إنهاء</th>
               </tr>
@@ -431,6 +436,14 @@ if (!$is_ajax_request) {
 
                 // Contract status - use new status system
                 $statusBadge = renderContractStatus($row);
+                $remainingDays = ceil(($row['end3aqd'] - time()) / (60 * 60 * 24));
+                if ($remainingDays > 0) {
+                  $remainingDaysLabel = $remainingDays . ' يوم';
+                } elseif ($remainingDays == 0) {
+                  $remainingDaysLabel = 'اليوم';
+                } else {
+                  $remainingDaysLabel = 'منتهي';
+                }
               ?>
                 <tr>
                   <td>
@@ -466,12 +479,7 @@ if (!$is_ajax_request) {
                       <i class="bi bi-eye me-1"></i>عرض
                     </a>
                   </td>
-                  <td>
-                    <button type="button" class='btn btn-sm btn-outline-info'
-                      onclick="openWordDocument('<?= $server ?>/aqary/admin/include/amlak/show3akdvb.hnt?rakam3akdid=<?= intval($row['rakam3akdid']) ?>');">
-                      <i class="bi bi-file-word me-1"></i>وورد
-                    </button>
-                  </td>
+                  <td><?= htmlspecialchars($remainingDaysLabel, ENT_QUOTES, 'UTF-8') ?></td>
                   <td><?= $statusBadge ?></td>
                   <td>
                     <?php if ($row['current_status'] != 'renewed' && $row['current_status'] != 'expired' && $row['current_status'] != 'terminated' && $row['current_status'] != 'cancelled') { ?>

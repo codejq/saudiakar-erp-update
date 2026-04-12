@@ -330,6 +330,8 @@ class AccountingManager {
         $entryNumber = $this->generateEntryNumber();
         
         // Insert entry header
+        $requestedStatus = $data['status'] ?? 'draft';
+        $status = $requestedStatus == 'posted' ? 'draft' : $requestedStatus;
         $stmt = $this->db->prepare("
             INSERT INTO acc_journal_entries 
             (entry_number, entry_date, entry_type, reference_type, reference_id,
@@ -339,7 +341,6 @@ class AccountingManager {
         ");
         
         $fiscalPeriod = (int)date('m', strtotime($data['entry_date']));
-        $status = $data['status'] ?? 'draft';
         
         $stmt->bind_param("ssssissdiisi",
             $entryNumber,
@@ -390,8 +391,13 @@ class AccountingManager {
         }
         
         // Auto-post if requested
-        if ($status == 'posted') {
-            $this->postJournalEntry($entryId);
+        if ($requestedStatus == 'posted') {
+            $postResult = $this->postJournalEntry($entryId);
+            if (!$postResult['success']) {
+                $this->db->query("DELETE FROM acc_journal_entry_lines WHERE entry_id = $entryId");
+                $this->db->query("DELETE FROM acc_journal_entries WHERE entry_id = $entryId");
+                return ['success' => false, 'error' => $postResult['error'] ?? 'لا يمكن ترحيل القيد'];
+            }
         }
         
         $this->logAudit('create', 'journal_entry', $entryId, null, $data);
@@ -499,6 +505,18 @@ class AccountingManager {
         }
         
         $totalAmount = $subtotal + $vatAmount;
+
+        $receivableAccountId = (int)$this->getSetting('default_invoice_receivable_account_id', 0);
+        $revenueAccountId = (int)$this->getSetting('default_invoice_revenue_account_id', 0);
+        $vatAccountId = (int)$this->getSetting('default_invoice_vat_account_id', 0);
+
+        if ($receivableAccountId <= 0 || $revenueAccountId <= 0 || ($vatAmount > 0 && $vatAccountId <= 0)) {
+            return [
+                'success' => false,
+                'error' => 'Invoice posting accounts are not configured',
+                'message' => 'يرجى تحديد الحسابات الافتراضية للفواتير من إعدادات المحاسبة قبل إنشاء الفاتورة'
+            ];
+        }
         
         // Generate invoice number
         $invoiceNumber = $this->generateInvoiceNumber($data['invoice_type'] ?? 'standard');
@@ -534,6 +552,8 @@ class AccountingManager {
             }
         }
 
+        $this->db->begin_transaction();
+
         // Insert invoice
         $stmt = $this->db->prepare("
             INSERT INTO acc_invoices
@@ -546,6 +566,7 @@ class AccountingManager {
         ");
 
         if (!$stmt) {
+            $this->db->rollback();
             return ['success' => false, 'error' => 'SQL Prepare Error: ' . $this->db->error];
         }
 
@@ -585,6 +606,7 @@ class AccountingManager {
         );
         
         if (!$stmt->execute()) {
+            $this->db->rollback();
             return ['success' => false, 'error' => $stmt->error];
         }
 
@@ -607,6 +629,7 @@ class AccountingManager {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
 
             if (!$this->db->query($createItemsTable)) {
+                $this->db->rollback();
                 return ['success' => false, 'error' => 'Failed to create invoice items table: ' . $this->db->error];
             }
         }
@@ -619,6 +642,7 @@ class AccountingManager {
         ");
 
         if (!$itemStmt) {
+            $this->db->rollback();
             return ['success' => false, 'error' => 'Failed to prepare item statement: ' . $this->db->error];
         }
 
@@ -637,9 +661,58 @@ class AccountingManager {
             );
 
             if (!$itemStmt->execute()) {
+                $this->db->rollback();
                 return ['success' => false, 'error' => 'Failed to insert item: ' . $itemStmt->error];
             }
         }
+
+        $entryData = [
+            'entry_date' => $data['invoice_date'],
+            'entry_type' => 'auto',
+            'reference_type' => 'invoice',
+            'reference_id' => $invoiceId,
+            'description' => "إثبات فاتورة {$invoiceNumber} - {$data['customer_name']}",
+            'status' => 'posted'
+        ];
+
+        $lines = [
+            [
+                'account_id' => $receivableAccountId,
+                'description' => "المدين - فاتورة {$invoiceNumber}",
+                'debit_amount' => $totalAmount,
+                'credit_amount' => 0,
+                'cost_center_id' => null
+            ],
+            [
+                'account_id' => $revenueAccountId,
+                'description' => "الإيراد - فاتورة {$invoiceNumber}",
+                'debit_amount' => 0,
+                'credit_amount' => $subtotal,
+                'cost_center_id' => null
+            ]
+        ];
+
+        if ($vatAmount > 0) {
+            $lines[] = [
+                'account_id' => $vatAccountId,
+                'description' => "ضريبة القيمة المضافة - فاتورة {$invoiceNumber}",
+                'debit_amount' => 0,
+                'credit_amount' => $vatAmount,
+                'cost_center_id' => null
+            ];
+        }
+
+        $journalResult = $this->createJournalEntry($entryData, $lines);
+        if (!$journalResult['success']) {
+            $this->db->rollback();
+            return [
+                'success' => false,
+                'error' => $journalResult['error'] ?? 'Failed to create journal entry',
+                'message' => 'فشل في إنشاء القيد المحاسبي للفاتورة'
+            ];
+        }
+
+        $this->db->commit();
 
         $this->logAudit('create', 'invoice', $invoiceId, null, $data);
 
