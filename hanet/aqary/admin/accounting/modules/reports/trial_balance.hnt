@@ -1,0 +1,225 @@
+<?php
+/**
+ * Trial Balance Report
+ * ميزان المراجعة
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "ميزان المراجعة";
+$sc_id = "203";
+$use_accounting_theme = true;
+include_once "../../../../nocash.hnt";
+include_once "../../../../connectdb.hnt";
+include_once "../../../../header.hnt";
+include_once "../../includes/accounting_class.hnt";
+
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+
+// Get date range
+$dateFrom = $_GET['date_from'] ?? date('Y-01-01');
+$dateTo = $_GET['date_to'] ?? date('Y-m-d');
+
+// Get trial balance
+$trialBalance = $accountingManager->getTrialBalance($dateTo);
+
+// Calculate totals
+$totalOpeningDebit = 0;
+$totalOpeningCredit = 0;
+$totalMovementDebit = 0;
+$totalMovementCredit = 0;
+$totalClosingDebit = 0;
+$totalClosingCredit = 0;
+
+foreach ($trialBalance as &$account) {
+    // Calculate opening balance
+    $openingBalance = $account['opening_balance'];
+    if (in_array($account['account_type'], ['asset', 'expense'])) {
+        $account['opening_debit'] = $openingBalance > 0 ? $openingBalance : 0;
+        $account['opening_credit'] = $openingBalance < 0 ? abs($openingBalance) : 0;
+    } else {
+        $account['opening_credit'] = $openingBalance > 0 ? $openingBalance : 0;
+        $account['opening_debit'] = $openingBalance < 0 ? abs($openingBalance) : 0;
+    }
+
+    // Movement
+    $account['movement_debit'] = $account['total_debit'];
+    $account['movement_credit'] = $account['total_credit'];
+
+    // Calculate closing balance
+    $closingBalance = $openingBalance + $account['total_debit'] - $account['total_credit'];
+    if (in_array($account['account_type'], ['asset', 'expense'])) {
+        $account['closing_debit'] = $closingBalance > 0 ? $closingBalance : 0;
+        $account['closing_credit'] = $closingBalance < 0 ? abs($closingBalance) : 0;
+    } else {
+        $closingBalance = $openingBalance + $account['total_credit'] - $account['total_debit'];
+        $account['closing_credit'] = $closingBalance > 0 ? $closingBalance : 0;
+        $account['closing_debit'] = $closingBalance < 0 ? abs($closingBalance) : 0;
+    }
+
+    // Add to totals
+    $totalOpeningDebit += $account['opening_debit'];
+    $totalOpeningCredit += $account['opening_credit'];
+    $totalMovementDebit += $account['movement_debit'];
+    $totalMovementCredit += $account['movement_credit'];
+    $totalClosingDebit += $account['closing_debit'];
+    $totalClosingCredit += $account['closing_credit'];
+}
+?>
+
+<style>
+:root {
+    --primary-color: #4e627f;
+}
+
+.report-card {
+    background: white;
+    border-radius: 15px;
+    padding: 2rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.report-table {
+    width: 100%;
+    margin-top: 1rem;
+}
+
+.report-table th {
+    padding: 1rem;
+    text-align: center;
+    font-weight: 600;
+}
+
+.report-table td {
+    padding: 0.75rem;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.report-table tbody tr:hover {
+    background: #f8f9fa;
+}
+
+.total-row {
+    background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+    color: white;
+    font-weight: 700;
+}
+
+.total-row td {
+    border: none;
+}
+
+@media print {
+    .no-print {
+        display: none !important;
+    }
+
+    .page-header {
+        background: #4e627f !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+    }
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header no-print">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-file-earmark-spreadsheet me-2"></i>ميزان المراجعة
+                </h1>
+                <p class="mb-0 opacity-75">Trial Balance</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-light btn-lg ms-2" onclick="window.print()">
+                    <i class="bi bi-printer me-2"></i>طباعة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="card mb-4 no-print" style="border-radius: 15px;">
+        <div class="card-body">
+            <form method="GET" class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label">من تاريخ</label>
+                    <input type="date" class="form-control" name="date_from" value="<?php echo $dateFrom; ?>">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">إلى تاريخ</label>
+                    <input type="date" class="form-control" name="date_to" value="<?php echo $dateTo; ?>">
+                </div>
+                <div class="col-md-4 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary w-100">
+                        <i class="bi bi-search me-2"></i>عرض
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Report -->
+    <div class="report-card">
+        <div class="text-center mb-4">
+            <h3>ميزان المراجعة</h3>
+            <p class="text-muted">من <?php echo $dateFrom; ?> إلى <?php echo $dateTo; ?></p>
+        </div>
+
+        <table class="report-table">
+            <thead>
+                <tr>
+                    <th rowspan="2">رمز الحساب</th>
+                    <th rowspan="2">اسم الحساب</th>
+                    <th colspan="2">الرصيد الافتتاحي</th>
+                    <th colspan="2">الحركة</th>
+                    <th colspan="2">الرصيد الختامي</th>
+                </tr>
+                <tr>
+                    <th>مدين</th>
+                    <th>دائن</th>
+                    <th>مدين</th>
+                    <th>دائن</th>
+                    <th>مدين</th>
+                    <th>دائن</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ($trialBalance as $account): ?>
+                <?php if ($account['opening_debit'] > 0 || $account['opening_credit'] > 0 ||
+                          $account['movement_debit'] > 0 || $account['movement_credit'] > 0): ?>
+                <tr>
+                    <td><?php echo $account['account_code']; ?></td>
+                    <td><?php echo $account['account_name_ar']; ?></td>
+                    <td class="text-end"><?php echo $account['opening_debit'] > 0 ? number_format($account['opening_debit'], 2) : '-'; ?></td>
+                    <td class="text-end"><?php echo $account['opening_credit'] > 0 ? number_format($account['opening_credit'], 2) : '-'; ?></td>
+                    <td class="text-end"><?php echo $account['movement_debit'] > 0 ? number_format($account['movement_debit'], 2) : '-'; ?></td>
+                    <td class="text-end"><?php echo $account['movement_credit'] > 0 ? number_format($account['movement_credit'], 2) : '-'; ?></td>
+                    <td class="text-end"><?php echo $account['closing_debit'] > 0 ? number_format($account['closing_debit'], 2) : '-'; ?></td>
+                    <td class="text-end"><?php echo $account['closing_credit'] > 0 ? number_format($account['closing_credit'], 2) : '-'; ?></td>
+                </tr>
+                <?php endif; ?>
+                <?php endforeach; ?>
+            </tbody>
+            <tfoot>
+                <tr class="total-row">
+                    <td colspan="2" class="text-center">الإجمالي</td>
+                    <td class="text-end"><?php echo number_format($totalOpeningDebit, 2); ?></td>
+                    <td class="text-end"><?php echo number_format($totalOpeningCredit, 2); ?></td>
+                    <td class="text-end"><?php echo number_format($totalMovementDebit, 2); ?></td>
+                    <td class="text-end"><?php echo number_format($totalMovementCredit, 2); ?></td>
+                    <td class="text-end"><?php echo number_format($totalClosingDebit, 2); ?></td>
+                    <td class="text-end"><?php echo number_format($totalClosingCredit, 2); ?></td>
+                </tr>
+            </tfoot>
+        </table>
+    </div>
+</div>
+
+<?php require("../../../../foter.hnt"); ?>

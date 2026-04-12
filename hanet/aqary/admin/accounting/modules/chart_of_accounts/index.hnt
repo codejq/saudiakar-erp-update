@@ -9,6 +9,7 @@
 
 $sc_title = "دليل الحسابات";
 $sc_id = "201";
+$use_accounting_theme = true;
 if(isset($_POST['ajax_action'])){
     include_once "../../../../reqloginajax.hnt";
     include_once "../../includes/accounting_class.hnt";
@@ -35,7 +36,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                 'parent_account_id' => $_POST['parent_account_id']?? null,
                 'account_type' => $_POST['account_type'],
                 'account_category' => $_POST['account_category'],
-                'account_level' => $_POST['account_level'],
                 'is_leaf' => $_POST['is_leaf'] ?? 1,
                 'opening_balance' => $_POST['opening_balance'] ?? 0,
                 'is_active' => 1,
@@ -50,10 +50,40 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
             }
             break;
 
+        case 'update_account':
+            $accountId = (int)($_POST['account_id'] ?? 0);
+            $data = [
+                'account_code' => $_POST['account_code'],
+                'account_name_ar' => $_POST['account_name_ar'],
+                'account_name_en' => $_POST['account_name_en'],
+                'parent_account_id' => $_POST['parent_account_id'] ?? null,
+                'account_type' => $_POST['account_type'],
+                'account_category' => $_POST['account_category'],
+                'is_leaf' => $_POST['is_leaf'] ?? 1,
+                'opening_balance' => $_POST['opening_balance'] ?? 0,
+                'vat_applicable' => $_POST['vat_applicable'] ?? 0,
+                'description' => $_POST['description'] ?? ''
+            ];
+
+            $result = $accountingManager->updateAccount($accountId, $data);
+            $response = $result;
+            if (!isset($response['message'])) {
+                $response['message'] = $result['success'] ? 'تم تحديث الحساب بنجاح' : 'فشل في تحديث الحساب';
+            }
+            break;
+
         case 'get_account':
             $accountId = $_POST['account_id'];
             $account = $accountingManager->getAccount($accountId);
             if ($account) {
+                $account['current_balance'] = $accountingManager->getAccountBalance($accountId);
+                if (!empty($account['parent_account_id'])) {
+                    $parentAccount = $accountingManager->getAccount($account['parent_account_id']);
+                    if ($parentAccount) {
+                        $account['parent_account_name'] = $parentAccount['account_name_ar'];
+                        $account['parent_account_code'] = $parentAccount['account_code'];
+                    }
+                }
                 $response['success'] = true;
                 $response['account'] = $account;
             }
@@ -121,16 +151,7 @@ foreach ($accountsByType as $type => $typeAccounts) {
 
 <style>
 :root {
-    --primary-color: #667eea;
-    --secondary-color: #764ba2;
-}
-
-.page-header {
-    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
-    color: white;
-    padding: 2rem;
-    border-radius: 15px;
-    margin-bottom: 2rem;
+    --primary-color: #4e627f;
 }
 
 .account-type-card {
@@ -277,7 +298,7 @@ foreach ($accountsByType as $type => $typeAccounts) {
                 <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
                     <i class="bi bi-arrow-right me-2"></i>العودة
                 </button>
-                <button class="btn btn-add-account btn-lg ms-2" data-bs-toggle="modal" data-bs-target="#addAccountModal">
+                <button class="btn btn-add-account btn-lg ms-2" onclick="openCreateAccountModal()">
                     <i class="bi bi-plus-circle me-2"></i>حساب جديد
                 </button>
             </div>
@@ -340,6 +361,9 @@ foreach ($accountsByType as $type => $typeAccounts) {
                     </div>
                     <div>
                         <span class="account-balance"><?php echo number_format($account['current_balance'], 2); ?> ر.س</span>
+                        <button class="btn btn-sm btn-outline-secondary ms-2" onclick="openEditAccountModal(<?php echo $account['account_id']; ?>)">
+                            <i class="bi bi-pencil-square"></i>
+                        </button>
                         <button class="btn btn-sm btn-outline-primary ms-2" onclick="viewAccount(<?php echo $account['account_id']; ?>)">
                             <i class="bi bi-eye"></i>
                         </button>
@@ -373,6 +397,9 @@ foreach ($accountsByType as $type => $typeAccounts) {
                     </div>
                     <div>
                         <span class="account-balance"><?php echo number_format($account['current_balance'], 2); ?> ر.س</span>
+                        <button class="btn btn-sm btn-outline-secondary ms-2" onclick="openEditAccountModal(<?php echo $account['account_id']; ?>)">
+                            <i class="bi bi-pencil-square"></i>
+                        </button>
                         <button class="btn btn-sm btn-outline-primary ms-2" onclick="viewAccount(<?php echo $account['account_id']; ?>)">
                             <i class="bi bi-eye"></i>
                         </button>
@@ -406,6 +433,9 @@ foreach ($accountsByType as $type => $typeAccounts) {
                     </div>
                     <div>
                         <span class="account-balance"><?php echo number_format($account['current_balance'], 2); ?> ر.س</span>
+                        <button class="btn btn-sm btn-outline-secondary ms-2" onclick="openEditAccountModal(<?php echo $account['account_id']; ?>)">
+                            <i class="bi bi-pencil-square"></i>
+                        </button>
                         <button class="btn btn-sm btn-outline-primary ms-2" onclick="viewAccount(<?php echo $account['account_id']; ?>)">
                             <i class="bi bi-eye"></i>
                         </button>
@@ -439,6 +469,9 @@ foreach ($accountsByType as $type => $typeAccounts) {
                     </div>
                     <div>
                         <span class="account-balance"><?php echo number_format($account['current_balance'], 2); ?> ر.س</span>
+                        <button class="btn btn-sm btn-outline-secondary ms-2" onclick="openEditAccountModal(<?php echo $account['account_id']; ?>)">
+                            <i class="bi bi-pencil-square"></i>
+                        </button>
                         <button class="btn btn-sm btn-outline-primary ms-2" onclick="viewAccount(<?php echo $account['account_id']; ?>)">
                             <i class="bi bi-eye"></i>
                         </button>
@@ -455,14 +488,30 @@ foreach ($accountsByType as $type => $typeAccounts) {
     <div class="modal-dialog modal-lg">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">
+                <h5 class="modal-title" id="accountModalTitle">
                     <i class="bi bi-plus-circle me-2"></i>إضافة حساب جديد
                 </h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
                 <form id="addAccountForm">
+                    <input type="hidden" name="account_id" value="">
+                    <input type="hidden" name="is_leaf" value="1">
                     <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">الحساب الرئيسي</label>
+                            <select class="form-select" name="parent_account_id">
+                                <option value="">لا يوجد (حساب رئيسي)</option>
+                                <?php foreach ($accounts as $acc): ?>
+                                <option value="<?php echo $acc['account_id']; ?>"
+                                        data-account-code="<?php echo htmlspecialchars($acc['account_code'], ENT_QUOTES, 'UTF-8'); ?>"
+                                        data-account-type="<?php echo htmlspecialchars($acc['account_type'], ENT_QUOTES, 'UTF-8'); ?>"
+                                        data-account-level="<?php echo (int)$acc['account_level']; ?>">
+                                    <?php echo $acc['account_code'] . ' - ' . $acc['account_name_ar']; ?>
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
                         <div class="col-md-6">
                             <label class="form-label">رمز الحساب *</label>
                             <input type="text" class="form-control" name="account_code" required>
@@ -479,27 +528,16 @@ foreach ($accountsByType as $type => $typeAccounts) {
                             </select>
                         </div>
                         <div class="col-md-6">
+                            <label class="form-label">التصنيف</label>
+                            <input type="text" class="form-control" name="account_category">
+                        </div>
+                        <div class="col-md-6">
                             <label class="form-label">اسم الحساب (عربي) *</label>
                             <input type="text" class="form-control" name="account_name_ar" required>
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">اسم الحساب (إنجليزي)</label>
                             <input type="text" class="form-control" name="account_name_en">
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">الحساب الرئيسي</label>
-                            <select class="form-select" name="parent_account_id">
-                                <option value="">لا يوجد (حساب رئيسي)</option>
-                                <?php foreach ($accounts as $acc): ?>
-                                <option value="<?php echo $acc['account_id']; ?>">
-                                    <?php echo $acc['account_code'] . ' - ' . $acc['account_name_ar']; ?>
-                                </option>
-                                <?php endforeach; ?>
-                            </select>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">التصنيف</label>
-                            <input type="text" class="form-control" name="account_category">
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">الرصيد الافتتاحي</label>
@@ -521,9 +559,28 @@ foreach ($accountsByType as $type => $typeAccounts) {
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
-                <button type="button" class="btn btn-primary" onclick="submitAccount()">
-                    <i class="bi bi-check-circle me-2"></i>حفظ
+                <button type="button" class="btn btn-primary" id="accountModalSubmitButton" onclick="submitAccount()">
+                    <i class="bi bi-check-circle me-2"></i><span>حفظ</span>
                 </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="viewAccountModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="viewAccountModalTitle">
+                    <i class="bi bi-eye me-2"></i>عرض الحساب
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-3" id="viewAccountModalBody"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إغلاق</button>
             </div>
         </div>
     </div>
@@ -550,10 +607,388 @@ foreach ($accountsByType as $type => $typeAccounts) {
  
 
 <script>
+const chartAccounts = <?php echo json_encode(array_map(function ($acc) {
+    return [
+        'account_id' => (int)$acc['account_id'],
+        'account_code' => (string)$acc['account_code'],
+        'account_name_ar' => (string)$acc['account_name_ar'],
+        'account_type' => (string)$acc['account_type'],
+        'account_level' => (int)$acc['account_level'],
+        'parent_account_id' => isset($acc['parent_account_id']) ? (int)$acc['parent_account_id'] : 0
+    ];
+}, $accounts), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+
+function getAccountFormElements() {
+    const form = document.getElementById('addAccountForm');
+    if (!form) {
+        return {};
+    }
+
+    return {
+        form,
+        accountIdInput: form.querySelector('[name="account_id"]'),
+        accountCodeInput: form.querySelector('[name="account_code"]'),
+        accountTypeSelect: form.querySelector('[name="account_type"]'),
+        parentAccountSelect: form.querySelector('[name="parent_account_id"]')
+    };
+}
+
+function getAccountModalElements() {
+    return {
+        modal: document.getElementById('addAccountModal'),
+        title: document.getElementById('accountModalTitle'),
+        submitButton: document.getElementById('accountModalSubmitButton')
+    };
+}
+
+function getViewModalElements() {
+    return {
+        modal: document.getElementById('viewAccountModal'),
+        title: document.getElementById('viewAccountModalTitle'),
+        body: document.getElementById('viewAccountModalBody')
+    };
+}
+
+function getAccountTypeLabel(accountType) {
+    const labels = {
+        asset: 'أصول',
+        liability: 'خصوم',
+        equity: 'حقوق ملكية',
+        revenue: 'إيرادات',
+        expense: 'مصروفات'
+    };
+
+    return labels[accountType] || accountType || '-';
+}
+
+function fetchAccountDetails(accountId) {
+    const formData = new FormData();
+    formData.append('ajax_action', 'get_account');
+    formData.append('account_id', accountId);
+
+    return fetch('index.hnt', {
+        method: 'POST',
+        body: formData
+    }).then(function (response) {
+        return response.json();
+    });
+}
+
+function getChildAccounts(parentAccountId, accountType) {
+    return chartAccounts.filter(function (account) {
+        return Number(account.parent_account_id) === Number(parentAccountId) && (!accountType || account.account_type === accountType);
+    });
+}
+
+function generateNextAccountCode(parentCode, childAccounts) {
+    const normalizedParentCode = String(parentCode || '').trim();
+    if (!normalizedParentCode) {
+        return '';
+    }
+
+    let maxSuffix = 0;
+
+    childAccounts.forEach(function (account) {
+        const childCode = String(account.account_code || '').trim();
+        if (!childCode.startsWith(normalizedParentCode)) {
+            return;
+        }
+
+        const suffix = childCode.slice(normalizedParentCode.length);
+        if (!/^\d+$/.test(suffix)) {
+            return;
+        }
+
+        maxSuffix = Math.max(maxSuffix, parseInt(suffix, 10));
+    });
+
+    const nextSuffix = String(maxSuffix + 1).padStart(2, '0');
+    return normalizedParentCode + nextSuffix;
+}
+
+function setSelectValueWithChange(selectElement, value) {
+    if (!selectElement) {
+        return;
+    }
+
+    if (window.jQuery && window.jQuery.fn && window.jQuery.fn.select2 && window.jQuery(selectElement).data('select2')) {
+        window.jQuery(selectElement).val(value).trigger('change');
+        return;
+    }
+
+    selectElement.value = value;
+    if (window.jQuery) {
+        window.jQuery(selectElement).trigger('change');
+    } else {
+        selectElement.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+}
+
+function initializeAddAccountModalSelects() {
+    if (!window.jQuery || !window.jQuery.fn || typeof window.jQuery.fn.select2 === 'undefined') {
+        return;
+    }
+
+    const $modal = window.jQuery('#addAccountModal');
+    if (!$modal.length) {
+        return;
+    }
+
+    $modal.find('select').each(function () {
+        const $select = window.jQuery(this);
+        if ($select.hasClass('select2-hidden-accessible')) {
+            $select.select2('destroy');
+        }
+
+        $select.select2({
+            theme: 'bootstrap-5',
+            width: '100%',
+            dir: 'rtl',
+            dropdownParent: $modal,
+            language: {
+                noResults: function() {
+                    return 'لا توجد نتائج';
+                },
+                searching: function() {
+                    return 'جاري البحث...';
+                }
+            }
+        });
+    });
+}
+
+function syncAccountTypeFromParent() {
+    const elements = getAccountFormElements();
+    const parentAccountSelect = elements.parentAccountSelect;
+    const accountTypeSelect = elements.accountTypeSelect;
+
+    if (!parentAccountSelect || !accountTypeSelect) {
+        return null;
+    }
+
+    const selectedOption = parentAccountSelect.options[parentAccountSelect.selectedIndex];
+    if (!selectedOption || !selectedOption.value) {
+        return null;
+    }
+
+    const parentType = selectedOption.getAttribute('data-account-type') || '';
+    if (parentType && accountTypeSelect.value !== parentType) {
+        setSelectValueWithChange(accountTypeSelect, parentType);
+    }
+
+    return selectedOption;
+}
+
+function updateGeneratedAccountCode() {
+    const elements = getAccountFormElements();
+    const form = elements.form;
+    const accountCodeInput = elements.accountCodeInput;
+    const accountTypeSelect = elements.accountTypeSelect;
+    const parentAccountSelect = elements.parentAccountSelect;
+
+    if (!form || !accountCodeInput || !accountTypeSelect || !parentAccountSelect) {
+        return;
+    }
+
+    const selectedOption = parentAccountSelect.options[parentAccountSelect.selectedIndex];
+    if (!selectedOption || !selectedOption.value) {
+        return;
+    }
+
+    if (form.dataset.mode === 'edit' && form.dataset.allowEditAutoCode !== 'true') {
+        return;
+    }
+
+    const parentCode = selectedOption.getAttribute('data-account-code') || '';
+    const accountType = accountTypeSelect.value || selectedOption.getAttribute('data-account-type') || '';
+    const childAccounts = getChildAccounts(selectedOption.value, accountType);
+    const generatedCode = generateNextAccountCode(parentCode, childAccounts);
+
+    if (generatedCode) {
+        accountCodeInput.value = generatedCode;
+    }
+}
+
+function resetAccountForm() {
+    const elements = getAccountFormElements();
+    const modalElements = getAccountModalElements();
+    if (!elements.form) {
+        return;
+    }
+
+    elements.form.reset();
+    elements.form.dataset.mode = 'create';
+    elements.form.dataset.allowEditAutoCode = 'true';
+
+    if (elements.accountIdInput) {
+        elements.accountIdInput.value = '';
+    }
+
+    if (modalElements.title) {
+        modalElements.title.innerHTML = '<i class="bi bi-plus-circle me-2"></i>إضافة حساب جديد';
+    }
+
+    if (modalElements.submitButton) {
+        const label = modalElements.submitButton.querySelector('span');
+        if (label) {
+            label.textContent = 'حفظ';
+        }
+    }
+
+    setSelectValueWithChange(elements.parentAccountSelect, '');
+    setSelectValueWithChange(elements.accountTypeSelect, '');
+    updateGeneratedAccountCode();
+}
+
+function populateAccountForm(account) {
+    const elements = getAccountFormElements();
+    const modalElements = getAccountModalElements();
+    if (!elements.form) {
+        return;
+    }
+
+    elements.form.dataset.mode = 'edit';
+    elements.form.dataset.allowEditAutoCode = 'false';
+
+    if (elements.accountIdInput) {
+        elements.accountIdInput.value = account.account_id || '';
+    }
+
+    elements.accountCodeInput.value = account.account_code || '';
+    elements.form.querySelector('[name="account_name_ar"]').value = account.account_name_ar || '';
+    elements.form.querySelector('[name="account_name_en"]').value = account.account_name_en || '';
+    elements.form.querySelector('[name="account_category"]').value = account.account_category || '';
+    elements.form.querySelector('[name="opening_balance"]').value = account.opening_balance || 0;
+    elements.form.querySelector('[name="vat_applicable"]').value = account.vat_applicable || 0;
+    elements.form.querySelector('[name="description"]').value = account.description || '';
+
+    setSelectValueWithChange(elements.parentAccountSelect, account.parent_account_id || '');
+    setSelectValueWithChange(elements.accountTypeSelect, account.account_type || '');
+
+    if (modalElements.title) {
+        modalElements.title.innerHTML = '<i class="bi bi-pencil-square me-2"></i>تعديل الحساب';
+    }
+
+    if (modalElements.submitButton) {
+        const label = modalElements.submitButton.querySelector('span');
+        if (label) {
+            label.textContent = 'تحديث';
+        }
+    }
+}
+
+function openCreateAccountModal() {
+    resetAccountForm();
+    initializeAddAccountModalSelects();
+    const modalElements = getAccountModalElements();
+    if (modalElements.modal) {
+        new bootstrap.Modal(modalElements.modal).show();
+    }
+}
+
+function openEditAccountModal(accountId) {
+    fetchAccountDetails(accountId)
+        .then(function (data) {
+            if (!data.success || !data.account) {
+                showResultModal(false, data.message || 'تعذر تحميل بيانات الحساب');
+                return;
+            }
+
+            populateAccountForm(data.account);
+            initializeAddAccountModalSelects();
+
+            const modalElements = getAccountModalElements();
+            if (modalElements.modal) {
+                new bootstrap.Modal(modalElements.modal).show();
+            }
+        })
+        .catch(function () {
+            showResultModal(false, 'حدث خطأ أثناء تحميل بيانات الحساب');
+        });
+}
+
+function renderViewAccountModal(account) {
+    const viewModalElements = getViewModalElements();
+    if (!viewModalElements.body || !viewModalElements.title) {
+        return;
+    }
+
+    viewModalElements.title.innerHTML = '<i class="bi bi-eye me-2"></i>' + (account.account_name_ar || 'عرض الحساب');
+    viewModalElements.body.innerHTML = [
+        ['رمز الحساب', account.account_code || '-'],
+        ['اسم الحساب (عربي)', account.account_name_ar || '-'],
+        ['اسم الحساب (إنجليزي)', account.account_name_en || '-'],
+        ['نوع الحساب', getAccountTypeLabel(account.account_type)],
+        ['الحساب الرئيسي', account.parent_account_code ? account.parent_account_code + ' - ' + (account.parent_account_name || '') : 'لا يوجد'],
+        ['التصنيف', account.account_category || '-'],
+        ['الرصيد الافتتاحي', Number(account.opening_balance || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ر.س'],
+        ['الرصيد الحالي', Number(account.current_balance || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ر.س'],
+        ['خاضع للضريبة', String(account.vat_applicable) === '1' ? 'نعم' : 'لا'],
+        ['الوصف', account.description || '-']
+    ].map(function (item) {
+        return '<div class="col-md-6"><div class="border rounded-3 p-3 h-100"><div class="text-muted small mb-1">' + item[0] + '</div><div class="fw-semibold">' + item[1] + '</div></div></div>';
+    }).join('');
+
+    if (viewModalElements.modal) {
+        new bootstrap.Modal(viewModalElements.modal).show();
+    }
+}
+
+function initializeAccountCodeGenerator() {
+    const elements = getAccountFormElements();
+    const form = elements.form;
+    const accountTypeSelect = elements.accountTypeSelect;
+    const parentAccountSelect = elements.parentAccountSelect;
+
+    if (!form || !accountTypeSelect || !parentAccountSelect) {
+        return;
+    }
+
+    parentAccountSelect.addEventListener('change', function () {
+        syncAccountTypeFromParent();
+        updateGeneratedAccountCode();
+    });
+
+    accountTypeSelect.addEventListener('change', function () {
+        updateGeneratedAccountCode();
+    });
+
+    if (window.jQuery) {
+        const $document = window.jQuery(document);
+        $document.off('change.accountCodeGenerator select2:select.accountCodeGenerator', '#addAccountForm [name="parent_account_id"]');
+        $document.on('change.accountCodeGenerator select2:select.accountCodeGenerator', '#addAccountForm [name="parent_account_id"]', function () {
+            syncAccountTypeFromParent();
+            updateGeneratedAccountCode();
+        });
+
+        $document.off('change.accountCodeGenerator select2:select.accountCodeGenerator', '#addAccountForm [name="account_type"]');
+        $document.on('change.accountCodeGenerator select2:select.accountCodeGenerator', '#addAccountForm [name="account_type"]', function () {
+            updateGeneratedAccountCode();
+        });
+    }
+
+    const modalElement = document.getElementById('addAccountModal');
+    if (modalElement) {
+        modalElement.addEventListener('shown.bs.modal', function () {
+            initializeAddAccountModalSelects();
+            updateGeneratedAccountCode();
+        });
+
+        modalElement.addEventListener('hidden.bs.modal', function () {
+            resetAccountForm();
+        });
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    initializeAddAccountModalSelects();
+    initializeAccountCodeGenerator();
+});
+
 function submitAccount() {
     const form = document.getElementById('addAccountForm');
     const formData = new FormData(form);
-    formData.append('ajax_action', 'create_account');
+    formData.append('ajax_action', form.dataset.mode === 'edit' ? 'update_account' : 'create_account');
 
     fetch('index.hnt', {
         method: 'POST',
@@ -595,7 +1030,18 @@ function showResultModal(success, message) {
 }
 
 function viewAccount(accountId) {
-    window.location = 'view.hnt?id=' + accountId;
+    fetchAccountDetails(accountId)
+        .then(function (data) {
+            if (!data.success || !data.account) {
+                showResultModal(false, data.message || 'تعذر تحميل بيانات الحساب');
+                return;
+            }
+
+            renderViewAccountModal(data.account);
+        })
+        .catch(function () {
+            showResultModal(false, 'حدث خطأ أثناء تحميل بيانات الحساب');
+        });
 }
 </script>
 

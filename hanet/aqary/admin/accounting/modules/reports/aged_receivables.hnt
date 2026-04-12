@@ -1,0 +1,413 @@
+<?php
+/**
+ * Aged Receivables Report
+ * تقرير أعمار الذمم المدينة
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "تقرير أعمار الذمم المدينة";
+$sc_id = "211";
+$use_accounting_theme = true;
+include_once "../../../../nocash.hnt";
+include_once "../../../../connectdb.hnt";
+include_once "../../../../header.hnt";
+
+// Get parameters
+$asOfDate = $_GET['as_of_date'] ?? date('Y-m-d');
+$showZeroBalance = isset($_GET['show_zero']) ? 1 : 0;
+
+// Get all invoices with outstanding amounts
+$invoicesQuery = "
+    SELECT
+        i.invoice_id,
+        i.invoice_number,
+        i.invoice_date,
+        i.customer_name,
+        i.total_amount,
+        i.paid_amount,
+        (i.total_amount - i.paid_amount) as outstanding,
+        DATEDIFF(?, i.invoice_date) as days_old
+    FROM acc_invoices i
+    WHERE i.total_amount > i.paid_amount
+    AND i.invoice_date <= ?
+    ORDER BY i.customer_name, i.invoice_date
+";
+$stmt = $db->prepare($invoicesQuery);
+$stmt->bind_param('ss', $asOfDate, $asOfDate);
+$stmt->execute();
+$invoices = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+// Group by customer and calculate aging
+$customerData = [];
+$totals = [
+    'current' => 0,
+    '30' => 0,
+    '60' => 0,
+    '90_plus' => 0,
+    'total' => 0
+];
+
+foreach ($invoices as $inv) {
+    $customer = $inv['customer_name'];
+
+    if (!isset($customerData[$customer])) {
+        $customerData[$customer] = [
+            'customer_name' => $customer,
+            'current' => 0,
+            '30' => 0,
+            '60' => 0,
+            '90_plus' => 0,
+            'total' => 0
+        ];
+    }
+
+    $outstanding = $inv['outstanding'];
+    $daysOld = $inv['days_old'];
+
+    // Categorize by age
+    if ($daysOld <= 30) {
+        $customerData[$customer]['current'] += $outstanding;
+        $totals['current'] += $outstanding;
+    } elseif ($daysOld <= 60) {
+        $customerData[$customer]['30'] += $outstanding;
+        $totals['30'] += $outstanding;
+    } elseif ($daysOld <= 90) {
+        $customerData[$customer]['60'] += $outstanding;
+        $totals['60'] += $outstanding;
+    } else {
+        $customerData[$customer]['90_plus'] += $outstanding;
+        $totals['90_plus'] += $outstanding;
+    }
+
+    $customerData[$customer]['total'] += $outstanding;
+    $totals['total'] += $outstanding;
+}
+
+// Filter out zero balances if requested
+if (!$showZeroBalance) {
+    $customerData = array_filter($customerData, function($data) {
+        return $data['total'] > 0;
+    });
+}
+
+// Sort by total outstanding (highest first)
+uasort($customerData, function($a, $b) {
+    return $b['total'] <=> $a['total'];
+});
+
+// Calculate counts
+$totalCustomers = count($customerData);
+$totalOutstanding = $totals['total'];
+?>
+
+<style>
+:root {
+    --primary-color: var(--accounting-primary-color, #4e627f);
+}
+
+.report-card {
+    background: white;
+    border-radius: 15px;
+    padding: 2rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.summary-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+    text-align: center;
+}
+
+.summary-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+}
+
+.aging-table {
+    width: 100%;
+    margin-top: 1rem;
+}
+
+.aging-table th {
+    padding: 1rem;
+    text-align: center;
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+.aging-table td {
+    padding: 0.75rem;
+    border-bottom: 1px solid #e9ecef;
+    text-align: end;
+}
+
+.aging-table td:first-child {
+    text-align: start;
+    font-weight: 600;
+}
+
+.aging-table tbody tr:hover {
+    background: #f8f9fa;
+}
+
+.aging-table tfoot tr {
+    background: #e9ecef;
+    font-weight: bold;
+    font-size: 1.05rem;
+}
+
+.aging-table tfoot td {
+    border-top: 2px solid var(--primary-color);
+    border-bottom: 2px solid var(--primary-color);
+}
+
+.age-current { color: #28a745; }
+.age-30 { color: #ffc107; }
+.age-60 { color: #fd7e14; }
+.age-90 { color: #dc3545; }
+
+.legend {
+    display: flex;
+    gap: 2rem;
+    justify-content: center;
+    margin: 1.5rem 0;
+    padding: 1rem;
+    background: #f8f9fa;
+    border-radius: 10px;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.legend-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+}
+
+@media print {
+    .no-print { display: none !important; }
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header no-print">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-calendar-range me-2"></i>تقرير أعمار الذمم المدينة
+                </h1>
+                <p class="mb-0 opacity-75">Aged Receivables Report</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.history.back()">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-light btn-lg ms-2" onclick="window.print()">
+                    <i class="bi bi-printer me-2"></i>طباعة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="card mb-4 no-print" style="border-radius: 15px;">
+        <div class="card-body">
+            <form method="GET" class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label">تاريخ التقرير (حتى)</label>
+                    <input type="date" class="form-control" name="as_of_date" value="<?php echo $asOfDate; ?>">
+                </div>
+                <div class="col-md-4">
+                    <div class="form-check mt-4">
+                        <input class="form-check-input" type="checkbox" name="show_zero" id="show_zero"
+                               <?php echo $showZeroBalance ? 'checked' : ''; ?>>
+                        <label class="form-check-label" for="show_zero">
+                            عرض العملاء بدون رصيد
+                        </label>
+                    </div>
+                </div>
+                <div class="col-md-4 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary w-100">
+                        <i class="bi bi-search me-2"></i>عرض
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Summary Cards -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-6">
+            <div class="summary-card" style="border-right: 4px solid #667eea;">
+                <div class="text-muted mb-2">إجمالي الذمم المستحقة</div>
+                <div class="summary-value text-primary"><?php echo number_format($totalOutstanding, 2); ?> ر.س</div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="summary-card" style="border-right: 4px solid #28a745;">
+                <div class="text-muted mb-2">عدد العملاء</div>
+                <div class="summary-value text-success"><?php echo $totalCustomers; ?></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Aging Legend -->
+    <div class="legend">
+        <div class="legend-item">
+            <div class="legend-dot" style="background: #28a745;"></div>
+            <span>الحالي (0-30 يوم)</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background: #ffc107;"></div>
+            <span>31-60 يوم</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background: #fd7e14;"></div>
+            <span>61-90 يوم</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background: #dc3545;"></div>
+            <span>أكثر من 90 يوم</span>
+        </div>
+    </div>
+
+    <!-- Report -->
+    <div class="report-card">
+        <div class="mb-3">
+            <h5 style="color: #667eea;">كشف أعمار الذمم حتى <?php echo $asOfDate; ?></h5>
+        </div>
+
+        <table class="aging-table">
+            <thead>
+                <tr>
+                    <th style="text-align: start;">اسم العميل</th>
+                    <th>الحالي<br><small>(0-30)</small></th>
+                    <th>31-60 يوم</th>
+                    <th>61-90 يوم</th>
+                    <th>+90 يوم</th>
+                    <th>الإجمالي</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($customerData)): ?>
+                <tr>
+                    <td colspan="6" class="text-center text-muted">لا توجد ذمم مستحقة</td>
+                </tr>
+                <?php else: ?>
+                <?php foreach ($customerData as $data): ?>
+                <tr>
+                    <td><?php echo htmlspecialchars($data['customer_name']); ?></td>
+                    <td class="age-current">
+                        <?php echo $data['current'] > 0 ? number_format($data['current'], 2) : '-'; ?>
+                    </td>
+                    <td class="age-30">
+                        <?php echo $data['30'] > 0 ? number_format($data['30'], 2) : '-'; ?>
+                    </td>
+                    <td class="age-60">
+                        <?php echo $data['60'] > 0 ? number_format($data['60'], 2) : '-'; ?>
+                    </td>
+                    <td class="age-90">
+                        <?php echo $data['90_plus'] > 0 ? number_format($data['90_plus'], 2) : '-'; ?>
+                    </td>
+                    <td style="font-weight: bold;">
+                        <?php echo number_format($data['total'], 2); ?>
+                    </td>
+                </tr>
+                <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+            <tfoot>
+                <tr>
+                    <td>الإجمالي</td>
+                    <td class="age-current"><?php echo number_format($totals['current'], 2); ?></td>
+                    <td class="age-30"><?php echo number_format($totals['30'], 2); ?></td>
+                    <td class="age-60"><?php echo number_format($totals['60'], 2); ?></td>
+                    <td class="age-90"><?php echo number_format($totals['90_plus'], 2); ?></td>
+                    <td><?php echo number_format($totals['total'], 2); ?></td>
+                </tr>
+                <tr>
+                    <td>النسبة المئوية</td>
+                    <td class="age-current">
+                        <?php echo $totals['total'] > 0 ? number_format(($totals['current'] / $totals['total']) * 100, 1) . '%' : '-'; ?>
+                    </td>
+                    <td class="age-30">
+                        <?php echo $totals['total'] > 0 ? number_format(($totals['30'] / $totals['total']) * 100, 1) . '%' : '-'; ?>
+                    </td>
+                    <td class="age-60">
+                        <?php echo $totals['total'] > 0 ? number_format(($totals['60'] / $totals['total']) * 100, 1) . '%' : '-'; ?>
+                    </td>
+                    <td class="age-90">
+                        <?php echo $totals['total'] > 0 ? number_format(($totals['90_plus'] / $totals['total']) * 100, 1) . '%' : '-'; ?>
+                    </td>
+                    <td>100%</td>
+                </tr>
+            </tfoot>
+        </table>
+
+        <!-- Analysis Section -->
+        <?php if ($totalOutstanding > 0): ?>
+        <div class="mt-4 p-3" style="background: #f8f9fa; border-radius: 10px;">
+            <h6 class="mb-3" style="color: #667eea;">
+                <i class="bi bi-graph-up me-2"></i>تحليل سريع
+            </h6>
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <div class="d-flex justify-content-between">
+                        <span>نسبة الذمم الحالية:</span>
+                        <strong class="age-current">
+                            <?php echo number_format(($totals['current'] / $totals['total']) * 100, 1); ?>%
+                        </strong>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="d-flex justify-content-between">
+                        <span>نسبة الذمم المتأخرة (+30):</span>
+                        <strong class="age-90">
+                            <?php
+                            $overdue = $totals['30'] + $totals['60'] + $totals['90_plus'];
+                            echo number_format(($overdue / $totals['total']) * 100, 1);
+                            ?>%
+                        </strong>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="d-flex justify-content-between">
+                        <span>متوسط العمر المرجح:</span>
+                        <strong>
+                            <?php
+                            $weightedAge = (
+                                ($totals['current'] * 15) +
+                                ($totals['30'] * 45) +
+                                ($totals['60'] * 75) +
+                                ($totals['90_plus'] * 120)
+                            ) / $totals['total'];
+                            echo number_format($weightedAge, 0);
+                            ?> يوم
+                        </strong>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="d-flex justify-content-between">
+                        <span>الذمم الخطرة (+90 يوم):</span>
+                        <strong class="age-90">
+                            <?php echo number_format($totals['90_plus'], 2); ?> ر.س
+                        </strong>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
+    </div>
+</div>
+
+<?php require("../../../../foter.hnt"); ?>

@@ -1,0 +1,326 @@
+<?php
+/**
+ * VAT Report
+ * تقرير ضريبة القيمة المضافة
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "تقرير ضريبة القيمة المضافة";
+$sc_id = "208";
+$use_accounting_theme = true;
+include_once "../../../../nocash.hnt";
+include_once "../../../../connectdb.hnt";
+include_once "../../../../header.hnt";
+
+// Get date range
+$dateFrom = $_GET['date_from'] ?? date('Y-m-01');
+$dateTo = $_GET['date_to'] ?? date('Y-m-t');
+
+// Get sales (output VAT)
+$salesQuery = "
+    SELECT
+        invoice_number,
+        customer_name,
+        invoice_date,
+        subtotal,
+        vat_amount,
+        total_amount
+    FROM acc_invoices
+    WHERE invoice_date BETWEEN ? AND ?
+    AND invoice_type IN ('standard', 'simplified')
+    ORDER BY invoice_date
+";
+$stmt = $db->prepare($salesQuery);
+$stmt->bind_param('ss', $dateFrom, $dateTo);
+$stmt->execute();
+$sales = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+// Get purchases (input VAT) - from journal entries with VAT
+$purchasesQuery = "
+    SELECT
+        je.entry_number,
+        je.entry_date,
+        je.description,
+        SUM(jel.debit_amount) as amount,
+        SUM(jel.debit_amount) * 0.15 as vat_amount
+    FROM acc_journal_entries je
+    JOIN acc_journal_entry_lines jel ON je.entry_id = jel.entry_id
+    JOIN acc_chart_of_accounts acc ON jel.account_id = acc.account_id
+    WHERE je.entry_date BETWEEN ? AND ?
+    AND je.status = 'posted'
+    AND acc.vat_applicable = 1
+    AND acc.account_type = 'expense'
+    GROUP BY je.entry_id
+    ORDER BY je.entry_date
+";
+$stmt = $db->prepare($purchasesQuery);
+$stmt->bind_param('ss', $dateFrom, $dateTo);
+$stmt->execute();
+$purchases = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+// Calculate totals
+$totalSalesAmount = array_sum(array_column($sales, 'subtotal'));
+$totalSalesVAT = array_sum(array_column($sales, 'vat_amount'));
+
+$totalPurchasesAmount = array_sum(array_column($purchases, 'amount'));
+$totalPurchasesVAT = array_sum(array_column($purchases, 'vat_amount'));
+
+$netVAT = $totalSalesVAT - $totalPurchasesVAT;
+?>
+
+
+<style>
+:root {
+    --primary-color: var(--accounting-primary-color, #4e627f);
+}
+
+.report-card {
+    background: white;
+    border-radius: 15px;
+    padding: 2rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.section-header {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+    font-weight: 600;
+}
+
+.vat-table {
+    width: 100%;
+    margin-bottom: 2rem;
+}
+
+.vat-table th {
+    padding: 0.75rem;
+    font-weight: 600;
+    border-bottom: 2px solid #dee2e6;
+}
+
+.vat-table td {
+    padding: 0.75rem;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.vat-table tbody tr:hover {
+    background: #f8f9fa;
+}
+
+.summary-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+    border-right: 4px solid;
+}
+
+.summary-card.sales { border-right-color: #28a745; }
+.summary-card.purchases { border-right-color: #dc3545; }
+.summary-card.net { border-right-color: #667eea; }
+
+.summary-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+}
+
+.net-vat {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    padding: 2rem;
+    border-radius: 12px;
+    text-align: center;
+    margin-top: 2rem;
+}
+
+@media print {
+    .no-print { display: none !important; }
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header no-print">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-receipt-cutoff me-2"></i>تقرير ضريبة القيمة المضافة
+                </h1>
+                <p class="mb-0 opacity-75">VAT Report</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-light btn-lg ms-2" onclick="window.print()">
+                    <i class="bi bi-printer me-2"></i>طباعة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="card mb-4 no-print" style="border-radius: 15px;">
+        <div class="card-body">
+            <form method="GET" class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label">من تاريخ</label>
+                    <input type="date" class="form-control" name="date_from" value="<?php echo $dateFrom; ?>">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">إلى تاريخ</label>
+                    <input type="date" class="form-control" name="date_to" value="<?php echo $dateTo; ?>">
+                </div>
+                <div class="col-md-4 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary w-100">
+                        <i class="bi bi-search me-2"></i>عرض
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Summary Cards -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-4">
+            <div class="summary-card sales">
+                <div class="text-muted mb-2">ضريبة المبيعات (المخرجات)</div>
+                <div class="summary-value text-success"><?php echo number_format($totalSalesVAT, 2); ?> ر.س</div>
+                <small class="text-muted">على مبيعات بقيمة <?php echo number_format($totalSalesAmount, 2); ?> ر.س</small>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="summary-card purchases">
+                <div class="text-muted mb-2">ضريبة المشتريات (المدخلات)</div>
+                <div class="summary-value text-danger"><?php echo number_format($totalPurchasesVAT, 2); ?> ر.س</div>
+                <small class="text-muted">على مشتريات بقيمة <?php echo number_format($totalPurchasesAmount, 2); ?> ر.س</small>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="summary-card net">
+                <div class="text-muted mb-2">صافي الضريبة المستحقة</div>
+                <div class="summary-value text-primary"><?php echo number_format($netVAT, 2); ?> ر.س</div>
+                <small class="text-muted"><?php echo $netVAT > 0 ? 'مستحق للحكومة' : 'مستحق من الحكومة'; ?></small>
+            </div>
+        </div>
+    </div>
+
+    <!-- Report -->
+    <div class="report-card">
+        <div class="text-center mb-4">
+            <h3>تقرير ضريبة القيمة المضافة</h3>
+            <p class="text-muted">من <?php echo $dateFrom; ?> إلى <?php echo $dateTo; ?></p>
+        </div>
+
+        <!-- Sales (Output VAT) -->
+        <div class="section-header">
+            <i class="bi bi-arrow-up-circle me-2"></i>ضريبة المبيعات (المخرجات)
+        </div>
+
+        <table class="vat-table">
+            <thead>
+                <tr>
+                    <th>رقم الفاتورة</th>
+                    <th>التاريخ</th>
+                    <th>العميل</th>
+                    <th class="text-end">المبلغ</th>
+                    <th class="text-end">الضريبة</th>
+                    <th class="text-end">الإجمالي</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($sales)): ?>
+                <tr>
+                    <td colspan="6" class="text-center text-muted">لا توجد مبيعات في هذه الفترة</td>
+                </tr>
+                <?php else: ?>
+                <?php foreach ($sales as $sale): ?>
+                <tr>
+                    <td><?php echo $sale['invoice_number']; ?></td>
+                    <td><?php echo $sale['invoice_date']; ?></td>
+                    <td><?php echo $sale['customer_name']; ?></td>
+                    <td class="text-end"><?php echo number_format($sale['subtotal'], 2); ?></td>
+                    <td class="text-end"><?php echo number_format($sale['vat_amount'], 2); ?></td>
+                    <td class="text-end"><?php echo number_format($sale['total_amount'], 2); ?></td>
+                </tr>
+                <?php endforeach; ?>
+                <tr class="fw-bold" style="background: #e9ecef;">
+                    <td colspan="3">الإجمالي</td>
+                    <td class="text-end"><?php echo number_format($totalSalesAmount, 2); ?></td>
+                    <td class="text-end"><?php echo number_format($totalSalesVAT, 2); ?></td>
+                    <td class="text-end"><?php echo number_format($totalSalesAmount + $totalSalesVAT, 2); ?></td>
+                </tr>
+                <?php endif; ?>
+            </tbody>
+        </table>
+
+        <!-- Purchases (Input VAT) -->
+        <div class="section-header mt-4">
+            <i class="bi bi-arrow-down-circle me-2"></i>ضريبة المشتريات (المدخلات)
+        </div>
+
+        <table class="vat-table">
+            <thead>
+                <tr>
+                    <th>رقم القيد</th>
+                    <th>التاريخ</th>
+                    <th>الوصف</th>
+                    <th class="text-end">المبلغ</th>
+                    <th class="text-end">الضريبة</th>
+                    <th class="text-end">الإجمالي</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($purchases)): ?>
+                <tr>
+                    <td colspan="6" class="text-center text-muted">لا توجد مشتريات في هذه الفترة</td>
+                </tr>
+                <?php else: ?>
+                <?php foreach ($purchases as $purchase): ?>
+                <tr>
+                    <td><?php echo $purchase['entry_number']; ?></td>
+                    <td><?php echo $purchase['entry_date']; ?></td>
+                    <td><?php echo $purchase['description']; ?></td>
+                    <td class="text-end"><?php echo number_format($purchase['amount'], 2); ?></td>
+                    <td class="text-end"><?php echo number_format($purchase['vat_amount'], 2); ?></td>
+                    <td class="text-end"><?php echo number_format($purchase['amount'] + $purchase['vat_amount'], 2); ?></td>
+                </tr>
+                <?php endforeach; ?>
+                <tr class="fw-bold" style="background: #e9ecef;">
+                    <td colspan="3">الإجمالي</td>
+                    <td class="text-end"><?php echo number_format($totalPurchasesAmount, 2); ?></td>
+                    <td class="text-end"><?php echo number_format($totalPurchasesVAT, 2); ?></td>
+                    <td class="text-end"><?php echo number_format($totalPurchasesAmount + $totalPurchasesVAT, 2); ?></td>
+                </tr>
+                <?php endif; ?>
+            </tbody>
+        </table>
+
+        <!-- Net VAT -->
+        <div class="net-vat">
+            <h4 class="mb-3">صافي ضريبة القيمة المضافة</h4>
+            <div class="row">
+                <div class="col-md-4">
+                    <div class="mb-2">ضريبة المبيعات</div>
+                    <div class="h3"><?php echo number_format($totalSalesVAT, 2); ?> ر.س</div>
+                </div>
+                <div class="col-md-4">
+                    <div class="mb-2">ضريبة المشتريات</div>
+                    <div class="h3"><?php echo number_format($totalPurchasesVAT, 2); ?> ر.س</div>
+                </div>
+                <div class="col-md-4">
+                    <div class="mb-2">الصافي <?php echo $netVAT > 0 ? '(مستحق)' : '(مسترد)'; ?></div>
+                    <div class="h2"><?php echo number_format(abs($netVAT), 2); ?> ر.س</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<?php require("../../../../foter.hnt"); ?>

@@ -1,0 +1,353 @@
+<?php
+/**
+ * Balance Sheet Report
+ * الميزانية العمومية
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "الميزانية العمومية";
+$sc_id = "207";
+$use_accounting_theme = true;
+include_once "../../../../nocash.hnt";
+include_once "../../../../connectdb.hnt";
+include_once "../../../../header.hnt";
+include_once "../../includes/accounting_class.hnt";
+
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+
+// Get date
+$asOfDate = $_GET['as_of_date'] ?? date('Y-m-d');
+
+// Get Assets
+$assetsQuery = "
+    SELECT
+        acc.account_id,
+        acc.account_code,
+        acc.account_name_ar,
+        acc.account_category,
+        acc.opening_balance + COALESCE(SUM(jel.debit_amount - jel.credit_amount), 0) as balance
+    FROM acc_chart_of_accounts acc
+    LEFT JOIN acc_journal_entry_lines jel ON acc.account_id = jel.account_id
+    LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+        AND je.status = 'posted'
+        AND je.entry_date <= ?
+    WHERE acc.account_type = 'asset' AND acc.is_active = 1
+    GROUP BY acc.account_id
+    HAVING balance != 0
+    ORDER BY acc.account_code
+";
+$stmt = $db->prepare($assetsQuery);
+$stmt->bind_param('s', $asOfDate);
+$stmt->execute();
+$assets = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+// Get Liabilities
+$liabilitiesQuery = "
+    SELECT
+        acc.account_id,
+        acc.account_code,
+        acc.account_name_ar,
+        acc.account_category,
+        acc.opening_balance + COALESCE(SUM(jel.credit_amount - jel.debit_amount), 0) as balance
+    FROM acc_chart_of_accounts acc
+    LEFT JOIN acc_journal_entry_lines jel ON acc.account_id = jel.account_id
+    LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+        AND je.status = 'posted'
+        AND je.entry_date <= ?
+    WHERE acc.account_type = 'liability' AND acc.is_active = 1
+    GROUP BY acc.account_id
+    HAVING balance != 0
+    ORDER BY acc.account_code
+";
+$stmt = $db->prepare($liabilitiesQuery);
+$stmt->bind_param('s', $asOfDate);
+$stmt->execute();
+$liabilities = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+// Get Equity
+$equityQuery = "
+    SELECT
+        acc.account_id,
+        acc.account_code,
+        acc.account_name_ar,
+        acc.account_category,
+        acc.opening_balance + COALESCE(SUM(jel.credit_amount - jel.debit_amount), 0) as balance
+    FROM acc_chart_of_accounts acc
+    LEFT JOIN acc_journal_entry_lines jel ON acc.account_id = jel.account_id
+    LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+        AND je.status = 'posted'
+        AND je.entry_date <= ?
+    WHERE acc.account_type = 'equity' AND acc.is_active = 1
+    GROUP BY acc.account_id
+    HAVING balance != 0
+    ORDER BY acc.account_code
+";
+$stmt = $db->prepare($equityQuery);
+$stmt->bind_param('s', $asOfDate);
+$stmt->execute();
+$equity = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+// Calculate totals
+$totalAssets = array_sum(array_column($assets, 'balance'));
+$totalLiabilities = array_sum(array_column($liabilities, 'balance'));
+$totalEquity = array_sum(array_column($equity, 'balance'));
+
+// Group assets by category
+$assetsByCategory = [];
+foreach ($assets as $asset) {
+    $category = $asset['account_category'] ?: 'أخرى';
+    if (!isset($assetsByCategory[$category])) {
+        $assetsByCategory[$category] = [];
+    }
+    $assetsByCategory[$category][] = $asset;
+}
+
+// Group liabilities by category
+$liabilitiesByCategory = [];
+foreach ($liabilities as $liability) {
+    $category = $liability['account_category'] ?: 'أخرى';
+    if (!isset($liabilitiesByCategory[$category])) {
+        $liabilitiesByCategory[$category] = [];
+    }
+    $liabilitiesByCategory[$category][] = $liability;
+}
+?>
+ 
+<style>
+:root {
+    --primary-color: var(--accounting-primary-color, #4e627f);
+}
+
+.report-card {
+    background: white;
+    border-radius: 15px;
+    padding: 2rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.balance-sheet-container {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+}
+
+.section {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+}
+
+.section-header {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+    font-weight: 600;
+    font-size: 1.1rem;
+}
+
+.category-header {
+    background: #f8f9fa;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    font-weight: 600;
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.account-line {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.account-line:hover {
+    background: #f8f9fa;
+}
+
+.subtotal {
+    display: flex;
+    justify-content: space-between;
+    padding: 1rem;
+    background: #e9ecef;
+    border-radius: 8px;
+    font-weight: 600;
+    margin-top: 1rem;
+}
+
+.total {
+    display: flex;
+    justify-content: space-between;
+    padding: 1.5rem;
+    background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+    color: white;
+    border-radius: 12px;
+    font-weight: 700;
+    font-size: 1.2rem;
+    margin-top: 2rem;
+}
+
+.balance-check {
+    text-align: center;
+    padding: 1.5rem;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border-radius: 12px;
+    margin-top: 2rem;
+}
+
+@media print {
+    .no-print { display: none !important; }
+    .balance-sheet-container { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 768px) {
+    .balance-sheet-container { grid-template-columns: 1fr; }
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header no-print">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-bar-chart-line me-2"></i>الميزانية العمومية
+                </h1>
+                <p class="mb-0 opacity-75">Balance Sheet</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-light btn-lg ms-2" onclick="window.print()">
+                    <i class="bi bi-printer me-2"></i>طباعة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="card mb-4 no-print" style="border-radius: 15px;">
+        <div class="card-body">
+            <form method="GET" class="row g-3">
+                <div class="col-md-8">
+                    <label class="form-label">كما في تاريخ</label>
+                    <input type="date" class="form-control" name="as_of_date" value="<?php echo $asOfDate; ?>">
+                </div>
+                <div class="col-md-4 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary w-100">
+                        <i class="bi bi-search me-2"></i>عرض
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Report -->
+    <div class="report-card">
+        <div class="text-center mb-4">
+            <h3>الميزانية العمومية</h3>
+            <p class="text-muted">كما في <?php echo $asOfDate; ?></p>
+        </div>
+
+        <div class="balance-sheet-container">
+            <!-- Assets -->
+            <div class="section">
+                <div class="section-header">
+                    <i class="bi bi-building me-2"></i>الأصول
+                </div>
+
+                <?php if (empty($assetsByCategory)): ?>
+                <div class="text-center text-muted py-3">لا توجد أصول</div>
+                <?php else: ?>
+                <?php foreach ($assetsByCategory as $category => $categoryAssets): ?>
+                <div class="category-header"><?php echo $category; ?></div>
+                <?php foreach ($categoryAssets as $asset): ?>
+                <div class="account-line">
+                    <span><?php echo $asset['account_code']; ?> - <?php echo $asset['account_name_ar']; ?></span>
+                    <span><?php echo number_format($asset['balance'], 2); ?></span>
+                </div>
+                <?php endforeach; ?>
+                <?php endforeach; ?>
+                <?php endif; ?>
+
+                <div class="total">
+                    <span>إجمالي الأصول</span>
+                    <span><?php echo number_format($totalAssets, 2); ?> ر.س</span>
+                </div>
+            </div>
+
+            <!-- Liabilities & Equity -->
+            <div class="section">
+                <div class="section-header">
+                    <i class="bi bi-credit-card me-2"></i>الخصوم وحقوق الملكية
+                </div>
+
+                <!-- Liabilities -->
+                <h6 class="mt-3 mb-2 fw-bold">الخصوم</h6>
+                <?php if (empty($liabilitiesByCategory)): ?>
+                <div class="text-center text-muted py-2">لا توجد خصوم</div>
+                <?php else: ?>
+                <?php foreach ($liabilitiesByCategory as $category => $categoryLiabilities): ?>
+                <div class="category-header"><?php echo $category; ?></div>
+                <?php foreach ($categoryLiabilities as $liability): ?>
+                <div class="account-line">
+                    <span><?php echo $liability['account_code']; ?> - <?php echo $liability['account_name_ar']; ?></span>
+                    <span><?php echo number_format($liability['balance'], 2); ?></span>
+                </div>
+                <?php endforeach; ?>
+                <?php endforeach; ?>
+                <?php endif; ?>
+
+                <div class="subtotal">
+                    <span>إجمالي الخصوم</span>
+                    <span><?php echo number_format($totalLiabilities, 2); ?> ر.س</span>
+                </div>
+
+                <!-- Equity -->
+                <h6 class="mt-3 mb-2 fw-bold">حقوق الملكية</h6>
+                <?php if (empty($equity)): ?>
+                <div class="text-center text-muted py-2">لا توجد حقوق ملكية</div>
+                <?php else: ?>
+                <?php foreach ($equity as $eq): ?>
+                <div class="account-line">
+                    <span><?php echo $eq['account_code']; ?> - <?php echo $eq['account_name_ar']; ?></span>
+                    <span><?php echo number_format($eq['balance'], 2); ?></span>
+                </div>
+                <?php endforeach; ?>
+                <?php endif; ?>
+
+                <div class="subtotal">
+                    <span>إجمالي حقوق الملكية</span>
+                    <span><?php echo number_format($totalEquity, 2); ?> ر.س</span>
+                </div>
+
+                <div class="total">
+                    <span>إجمالي الخصوم وحقوق الملكية</span>
+                    <span><?php echo number_format($totalLiabilities + $totalEquity, 2); ?> ر.س</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Balance Check -->
+        <div class="balance-check">
+            <?php if (abs($totalAssets - ($totalLiabilities + $totalEquity)) < 0.01): ?>
+            <i class="bi bi-check-circle me-2" style="font-size: 2rem;"></i>
+            <h5 class="mb-0">الميزانية متوازنة</h5>
+            <p class="mb-0 opacity-75">الأصول = الخصوم + حقوق الملكية</p>
+            <?php else: ?>
+            <i class="bi bi-exclamation-triangle me-2" style="font-size: 2rem;"></i>
+            <h5 class="mb-0">الميزانية غير متوازنة</h5>
+            <p class="mb-0">الفرق: <?php echo number_format(abs($totalAssets - ($totalLiabilities + $totalEquity)), 2); ?> ر.س</p>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<?php require("../../../../foter.hnt"); ?>

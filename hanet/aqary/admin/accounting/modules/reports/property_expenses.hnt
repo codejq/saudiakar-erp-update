@@ -1,14 +1,14 @@
 <?php
 /**
- * Property Income Report
- * تقرير إيرادات العقارات
+ * Property Expenses Report
+ * تقرير مصروفات العقارات
  *
  * @charset UTF-8
  * @version 1.0
  */
 
-$sc_title = "تقرير إيرادات العقارات";
-$sc_id = "212";
+$sc_title = "تقرير مصروفات العقارات";
+$sc_id = "213";
 $use_accounting_theme = true;
 include_once "../../../../nocash.hnt";
 include_once "../../../../connectdb.hnt";
@@ -18,37 +18,46 @@ include_once "../../../../header.hnt";
 $dateFrom = $_GET['date_from'] ?? date('Y-01-01');
 $dateTo = $_GET['date_to'] ?? date('Y-m-d');
 $propertyType = $_GET['property_type'] ?? 'all';
+$expenseCategory = $_GET['expense_category'] ?? 'all';
 
 // Convert dates to timestamps for comparison
 $timestampFrom = strtotime($dateFrom);
 $timestampTo = strtotime($dateTo . ' 23:59:59');
 
-// Get property income data from eradat table
+// Get expense categories for filter
+$categoriesQuery = "SELECT idmasrofcod, masrofkind FROM masrofattakweed ORDER BY masrofkind";
+$categoriesResult = $db->query($categoriesQuery);
+$expenseCategories = $categoriesResult ? $categoriesResult->fetch_all(MYSQLI_ASSOC) : [];
+
+// Build query
 $query = "
     SELECT
-        iderad,
-        idaqar,
-        idsubaqar,
-        mostagername,
-        recivername,
-        amount,
-        paymentdate,
-        pymentdesription,
-        sanadrakam,
-        mysa3ee,
-        mywater,
-        tamen,
-        services
-    FROM eradat
-    WHERE paymentdate >= ?
-    AND paymentdate <= ?
-    AND amount > 0
+        m.idmasrof,
+        m.idaqar,
+        m.idsubaqar,
+        m.idmasrofcod,
+        m.amount,
+        m.payedby,
+        m.payeddue,
+        m.payeddate,
+        mt.masrofkind
+    FROM masrofat m
+    LEFT JOIN masrofattakweed mt ON m.idmasrofcod = mt.idmasrofcod
+    WHERE m.payeddate >= ?
+    AND m.payeddate <= ?
+    AND m.amount > 0
 ";
 
 $params = [$timestampFrom, $timestampTo];
 $types = 'ii';
 
-$query .= " ORDER BY idaqar, paymentdate";
+if ($expenseCategory != 'all' && !empty($expenseCategory)) {
+    $query .= " AND m.idmasrofcod = ?";
+    $params[] = intval($expenseCategory);
+    $types .= 'i';
+}
+
+$query .= " ORDER BY m.idaqar, m.payeddate";
 
 $stmt = $db->prepare($query);
 $stmt->bind_param($types, ...$params);
@@ -58,13 +67,11 @@ $items = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 // Group data by property
 $propertyData = [];
 $totals = [
-    'amount' => 0,
-    'sa3ee' => 0,
-    'water' => 0,
-    'tamen' => 0,
-    'services' => 0,
     'total' => 0
 ];
+
+// Category totals
+$categoryTotals = [];
 
 // Get property details for each unique idaqar
 $propertyInfo = [];
@@ -78,36 +85,24 @@ foreach ($items as $item) {
 
         // Check emara (buildings) table
         $stmt = $db->prepare("SELECT emararakam, emaratype FROM emara WHERE emaraid = ?");
-        if ($stmt) {
+        $stmt->bind_param('i', $idaqar);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        if ($row = $result->fetch_assoc()) {
+            $propName = 'عمارة رقم ' . $row['emararakam'];
+            $propType = 'building';
+        } else {
+            // Check arady (lands) table
+            $stmt = $db->prepare("SELECT ardy_rakam FROM arady WHERE ardyid = ?");
             $stmt->bind_param('i', $idaqar);
             $stmt->execute();
             $result = $stmt->get_result();
             if ($row = $result->fetch_assoc()) {
-                $propName = 'عمارة رقم ' . $row['emararakam'];
-                $propType = 'building';
-            }
-            $stmt->close();
-        }
-
-        // Check arady (lands) table if not found
-        if ($propType === 'other') {
-            $stmt = $db->prepare("SELECT ardy_rakam FROM arady WHERE ardyid = ?");
-            if ($stmt) {
-                $stmt->bind_param('i', $idaqar);
-                $stmt->execute();
-                $result = $stmt->get_result();
-                if ($row = $result->fetch_assoc()) {
-                    $propName = 'أرض رقم ' . $row['ardy_rakam'];
-                    $propType = 'land';
-                }
-                $stmt->close();
-            }
-        }
-
-        // Check vila table if not found
-        if ($propType === 'other') {
-            $stmt = $db->prepare("SELECT vilarakam FROM vila WHERE vilaid = ?");
-            if ($stmt) {
+                $propName = 'أرض رقم ' . $row['ardy_rakam'];
+                $propType = 'land';
+            } else {
+                // Check vila table
+                $stmt = $db->prepare("SELECT vilarakam FROM vila WHERE vilaid = ?");
                 $stmt->bind_param('i', $idaqar);
                 $stmt->execute();
                 $result = $stmt->get_result();
@@ -115,7 +110,6 @@ foreach ($items as $item) {
                     $propName = 'فيلا رقم ' . $row['vilarakam'];
                     $propType = 'villa';
                 }
-                $stmt->close();
             }
         }
 
@@ -126,7 +120,7 @@ foreach ($items as $item) {
     }
 }
 
-// Group income by property
+// Group expenses by property
 foreach ($items as $item) {
     $idaqar = $item['idaqar'];
 
@@ -137,54 +131,42 @@ foreach ($items as $item) {
             'property_id' => $idaqar,
             'property_name' => $propertyInfo[$idaqar]['name'] ?? 'عقار #' . $idaqar,
             'property_type' => $propertyInfo[$idaqar]['type'] ?? 'other',
-            'revenues' => [],
-            'amount' => 0,
-            'sa3ee' => 0,
-            'water' => 0,
-            'tamen' => 0,
-            'services' => 0,
+            'expenses' => [],
             'total' => 0,
-            'count' => 0
+            'count' => 0,
+            'categories' => []
         ];
     }
 
-    // Calculate total for this revenue item
-    $itemTotal = floatval($item['amount']) +
-                 floatval($item['mysa3ee']) +
-                 floatval($item['mywater']) +
-                 floatval($item['tamen']) +
-                 floatval($item['services']);
+    $amount = floatval($item['amount']);
+    $category = $item['masrofkind'] ?? 'غير محدد';
 
-    // Add revenue entry
-    $propertyData[$idaqar]['revenues'][] = [
-        'date' => date('Y-m-d', $item['paymentdate']),
-        'description' => $item['pymentdesription'],
-        'tenant' => $item['mostagername'],
-        'receiver' => $item['recivername'],
-        'sanad' => $item['sanadrakam'],
-        'amount' => floatval($item['amount']),
-        'sa3ee' => floatval($item['mysa3ee']),
-        'water' => floatval($item['mywater']),
-        'tamen' => floatval($item['tamen']),
-        'services' => floatval($item['services']),
-        'total' => $itemTotal
+    // Add expense entry
+    $propertyData[$idaqar]['expenses'][] = [
+        'date' => date('Y-m-d', $item['payeddate']),
+        'category' => $category,
+        'description' => $item['payeddue'],
+        'paid_by' => $item['payedby'],
+        'amount' => $amount
     ];
 
     // Accumulate totals
-    $propertyData[$idaqar]['amount'] += floatval($item['amount']);
-    $propertyData[$idaqar]['sa3ee'] += floatval($item['mysa3ee']);
-    $propertyData[$idaqar]['water'] += floatval($item['mywater']);
-    $propertyData[$idaqar]['tamen'] += floatval($item['tamen']);
-    $propertyData[$idaqar]['services'] += floatval($item['services']);
-    $propertyData[$idaqar]['total'] += $itemTotal;
+    $propertyData[$idaqar]['total'] += $amount;
     $propertyData[$idaqar]['count']++;
 
-    $totals['amount'] += floatval($item['amount']);
-    $totals['sa3ee'] += floatval($item['mysa3ee']);
-    $totals['water'] += floatval($item['mywater']);
-    $totals['tamen'] += floatval($item['tamen']);
-    $totals['services'] += floatval($item['services']);
-    $totals['total'] += $itemTotal;
+    // Track by category
+    if (!isset($propertyData[$idaqar]['categories'][$category])) {
+        $propertyData[$idaqar]['categories'][$category] = 0;
+    }
+    $propertyData[$idaqar]['categories'][$category] += $amount;
+
+    // Overall category totals
+    if (!isset($categoryTotals[$category])) {
+        $categoryTotals[$category] = 0;
+    }
+    $categoryTotals[$category] += $amount;
+
+    $totals['total'] += $amount;
 }
 
 // Filter by property type if specified
@@ -194,28 +176,26 @@ if ($propertyType != 'all') {
     });
 
     // Recalculate totals after filtering
-    $totals = [
-        'amount' => 0,
-        'sa3ee' => 0,
-        'water' => 0,
-        'tamen' => 0,
-        'services' => 0,
-        'total' => 0
-    ];
+    $totals['total'] = 0;
+    $categoryTotals = [];
     foreach ($propertyData as $prop) {
-        $totals['amount'] += $prop['amount'];
-        $totals['sa3ee'] += $prop['sa3ee'];
-        $totals['water'] += $prop['water'];
-        $totals['tamen'] += $prop['tamen'];
-        $totals['services'] += $prop['services'];
         $totals['total'] += $prop['total'];
+        foreach ($prop['categories'] as $cat => $amt) {
+            if (!isset($categoryTotals[$cat])) {
+                $categoryTotals[$cat] = 0;
+            }
+            $categoryTotals[$cat] += $amt;
+        }
     }
 }
 
-// Sort by total income (highest first)
+// Sort by total expenses (highest first)
 uasort($propertyData, function($a, $b) {
     return $b['total'] <=> $a['total'];
 });
+
+// Sort category totals by amount
+arsort($categoryTotals);
 
 // Get property types for filter
 $propertyTypes = [
@@ -282,11 +262,11 @@ $propertyTypes = [
     border-bottom: 2px solid var(--primary-color);
 }
 
-.revenue-row {
+.expense-row {
     background: white;
 }
 
-.revenue-row td {
+.expense-row td {
     padding-right: 2rem;
 }
 
@@ -319,6 +299,14 @@ $propertyTypes = [
 .type-villa { background: #fff3cd; color: #856404; }
 .type-other { background: #e2e3e5; color: #383d41; }
 
+.category-badge {
+    padding: 3px 10px;
+    border-radius: 8px;
+    font-size: 0.8rem;
+    background: #e9ecef;
+    color: #495057;
+}
+
 @media print {
     .no-print { display: none !important; }
 }
@@ -330,9 +318,9 @@ $propertyTypes = [
         <div class="d-flex justify-content-between align-items-center">
             <div>
                 <h1 class="mb-2">
-                    <i class="bi bi-building me-2"></i>تقرير إيرادات العقارات
+                    <i class="bi bi-cash-coin me-2"></i>تقرير مصروفات العقارات
                 </h1>
-                <p class="mb-0 opacity-75">Property Income Report</p>
+                <p class="mb-0 opacity-75">Property Expenses Report</p>
             </div>
             <div>
                 <button class="btn btn-light btn-lg" onclick="window.history.back()">
@@ -357,7 +345,7 @@ $propertyTypes = [
                     <label class="form-label">إلى تاريخ</label>
                     <input type="date" class="form-control" name="date_to" value="<?php echo $dateTo; ?>">
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-2">
                     <label class="form-label">نوع العقار</label>
                     <select class="form-select" name="property_type">
                         <option value="all" <?php echo $propertyType == 'all' ? 'selected' : ''; ?>>الكل</option>
@@ -368,7 +356,19 @@ $propertyTypes = [
                         <?php endforeach; ?>
                     </select>
                 </div>
-                <div class="col-md-3 d-flex align-items-end">
+                <div class="col-md-2">
+                    <label class="form-label">نوع المصروف</label>
+                    <select class="form-select" name="expense_category">
+                        <option value="all">الكل</option>
+                        <?php foreach ($expenseCategories as $cat): ?>
+                        <option value="<?php echo $cat['idmasrofcod']; ?>"
+                                <?php echo $expenseCategory == $cat['idmasrofcod'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($cat['masrofkind']); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
                     <button type="submit" class="btn btn-primary w-100">
                         <i class="bi bi-search me-2"></i>عرض
                     </button>
@@ -380,23 +380,23 @@ $propertyTypes = [
     <!-- Summary Cards -->
     <div class="row g-3 mb-4">
         <div class="col-md-4">
+            <div class="summary-card" style="border-right: 4px solid #dc3545;">
+                <div class="text-muted mb-2">إجمالي المصروفات</div>
+                <div class="summary-value text-danger"><?php echo number_format($totals['total'], 2); ?> ر.س</div>
+            </div>
+        </div>
+        <div class="col-md-4">
             <div class="summary-card" style="border-right: 4px solid #28a745;">
-                <div class="text-muted mb-2">إجمالي الإيجارات</div>
-                <div class="summary-value text-success"><?php echo number_format($totals['amount'], 2); ?> ر.س</div>
+                <div class="text-muted mb-2">عدد العقارات</div>
+                <div class="summary-value text-success"><?php echo count($propertyData); ?></div>
             </div>
         </div>
         <div class="col-md-4">
             <div class="summary-card" style="border-right: 4px solid #ffc107;">
-                <div class="text-muted mb-2">إجمالي الخدمات والمرافق</div>
+                <div class="text-muted mb-2">عدد المصروفات</div>
                 <div class="summary-value text-warning">
-                    <?php echo number_format($totals['sa3ee'] + $totals['water'] + $totals['services'], 2); ?> ر.س
+                    <?php echo array_sum(array_column($propertyData, 'count')); ?>
                 </div>
-            </div>
-        </div>
-        <div class="col-md-4">
-            <div class="summary-card" style="border-right: 4px solid #667eea;">
-                <div class="text-muted mb-2">الإجمالي النهائي</div>
-                <div class="summary-value text-primary"><?php echo number_format($totals['total'], 2); ?> ر.س</div>
             </div>
         </div>
     </div>
@@ -405,17 +405,20 @@ $propertyTypes = [
     <div class="report-card">
         <div class="mb-3">
             <h5 style="color: #667eea;">
-                كشف إيرادات العقارات من <?php echo $dateFrom; ?> إلى <?php echo $dateTo; ?>
+                كشف مصروفات العقارات من <?php echo $dateFrom; ?> إلى <?php echo $dateTo; ?>
             </h5>
             <?php if ($propertyType != 'all'): ?>
-            <p class="text-muted">نوع العقار: <?php echo $propertyTypes[$propertyType] ?? $propertyType; ?></p>
+            <p class="text-muted mb-1">نوع العقار: <?php echo $propertyTypes[$propertyType] ?? $propertyType; ?></p>
+            <?php endif; ?>
+            <?php if ($expenseCategory != 'all' && !empty($expenseCategory)): ?>
+            <p class="text-muted mb-0">تصفية حسب التصنيف المحدد</p>
             <?php endif; ?>
         </div>
 
         <?php if (empty($propertyData)): ?>
         <div class="alert alert-info">
             <i class="bi bi-info-circle me-2"></i>
-            لا توجد إيرادات في الفترة المحددة
+            لا توجد مصروفات في الفترة المحددة
         </div>
         <?php else: ?>
 
@@ -424,12 +427,9 @@ $propertyTypes = [
                 <tr>
                     <th style="text-align: start;">العقار</th>
                     <th>التاريخ</th>
-                    <th>المستأجر</th>
+                    <th>نوع المصروف</th>
                     <th>البيان</th>
-                    <th>الإيجار</th>
-                    <th>كهرباء</th>
-                    <th>ماء</th>
-                    <th>خدمات</th>
+                    <th>المستفيد</th>
                     <th>المبلغ (ر.س)</th>
                 </tr>
             </thead>
@@ -437,7 +437,7 @@ $propertyTypes = [
                 <?php foreach ($propertyData as $prop): ?>
                 <!-- Property Header Row -->
                 <tr class="property-row">
-                    <td colspan="9">
+                    <td colspan="6">
                         <div class="d-flex justify-content-between align-items-center">
                             <div>
                                 <strong><?php echo htmlspecialchars($prop['property_name']); ?></strong>
@@ -446,57 +446,54 @@ $propertyTypes = [
                                 </span>
                             </div>
                             <div>
-                                <strong>عدد الإيرادات: <?php echo $prop['count']; ?></strong>
+                                <strong>عدد المصروفات: <?php echo $prop['count']; ?></strong>
                             </div>
                         </div>
                     </td>
                 </tr>
 
-                <!-- Revenue Rows -->
-                <?php foreach ($prop['revenues'] as $revenue): ?>
-                <tr class="revenue-row">
+                <!-- Expense Rows -->
+                <?php foreach ($prop['expenses'] as $expense): ?>
+                <tr class="expense-row">
                     <td></td>
-                    <td><?php echo $revenue['date']; ?></td>
-                    <td><?php echo htmlspecialchars($revenue['tenant']); ?></td>
-                    <td><?php echo htmlspecialchars($revenue['description']); ?></td>
-                    <td class="text-end"><?php echo $revenue['amount'] > 0 ? number_format($revenue['amount'], 2) : '-'; ?></td>
-                    <td class="text-end"><?php echo $revenue['sa3ee'] > 0 ? number_format($revenue['sa3ee'], 2) : '-'; ?></td>
-                    <td class="text-end"><?php echo $revenue['water'] > 0 ? number_format($revenue['water'], 2) : '-'; ?></td>
-                    <td class="text-end"><?php echo $revenue['services'] > 0 ? number_format($revenue['services'], 2) : '-'; ?></td>
-                    <td class="text-end"><?php echo number_format($revenue['total'], 2); ?></td>
+                    <td><?php echo $expense['date']; ?></td>
+                    <td>
+                        <span class="category-badge">
+                            <?php echo htmlspecialchars($expense['category']); ?>
+                        </span>
+                    </td>
+                    <td><?php echo htmlspecialchars($expense['description']); ?></td>
+                    <td><?php echo htmlspecialchars($expense['paid_by']); ?></td>
+                    <td class="text-end"><?php echo number_format($expense['amount'], 2); ?></td>
                 </tr>
                 <?php endforeach; ?>
 
                 <!-- Property Total Row -->
                 <tr class="property-total-row">
-                    <td colspan="4" class="text-end">
+                    <td colspan="5" class="text-end">
                         <strong>إجمالي <?php echo htmlspecialchars($prop['property_name']); ?>:</strong>
                     </td>
-                    <td class="text-end"><strong><?php echo number_format($prop['amount'], 2); ?></strong></td>
-                    <td class="text-end"><strong><?php echo number_format($prop['sa3ee'], 2); ?></strong></td>
-                    <td class="text-end"><strong><?php echo number_format($prop['water'], 2); ?></strong></td>
-                    <td class="text-end"><strong><?php echo number_format($prop['services'], 2); ?></strong></td>
-                    <td class="text-end"><strong><?php echo number_format($prop['total'], 2); ?></strong></td>
+                    <td class="text-end">
+                        <strong><?php echo number_format($prop['total'], 2); ?></strong>
+                    </td>
                 </tr>
 
                 <!-- Spacer Row -->
                 <tr>
-                    <td colspan="9" style="border: none; height: 0.5rem;"></td>
+                    <td colspan="6" style="border: none; height: 0.5rem;"></td>
                 </tr>
                 <?php endforeach; ?>
 
                 <!-- Grand Total -->
                 <tr class="grand-total-row">
-                    <td colspan="4" class="text-end">
+                    <td colspan="5" class="text-end">
                         <strong>
                             <i class="bi bi-calculator me-2"></i>الإجمالي الكلي:
                         </strong>
                     </td>
-                    <td class="text-end"><strong><?php echo number_format($totals['amount'], 2); ?></strong></td>
-                    <td class="text-end"><strong><?php echo number_format($totals['sa3ee'], 2); ?></strong></td>
-                    <td class="text-end"><strong><?php echo number_format($totals['water'], 2); ?></strong></td>
-                    <td class="text-end"><strong><?php echo number_format($totals['services'], 2); ?></strong></td>
-                    <td class="text-end"><strong><?php echo number_format($totals['total'], 2); ?></strong></td>
+                    <td class="text-end">
+                        <strong><?php echo number_format($totals['total'], 2); ?></strong>
+                    </td>
                 </tr>
             </tbody>
         </table>
@@ -504,7 +501,38 @@ $propertyTypes = [
         <!-- Summary Analysis -->
         <div class="mt-4 p-3" style="background: #f8f9fa; border-radius: 10px;">
             <h6 class="mb-3" style="color: #667eea;">
-                <i class="bi bi-pie-chart me-2"></i>تحليل الإيرادات حسب نوع العقار
+                <i class="bi bi-pie-chart me-2"></i>تحليل المصروفات حسب النوع
+            </h6>
+            <div class="row g-3">
+                <?php
+                foreach ($categoryTotals as $category => $amount):
+                    $percentage = ($totals['total'] > 0) ? ($amount / $totals['total']) * 100 : 0;
+                ?>
+                <div class="col-md-6">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span>
+                            <span class="category-badge">
+                                <?php echo htmlspecialchars($category); ?>
+                            </span>
+                        </span>
+                        <strong><?php echo number_format($amount, 2); ?> ر.س</strong>
+                    </div>
+                    <div class="progress" style="height: 25px;">
+                        <div class="progress-bar bg-danger" role="progressbar"
+                             style="width: <?php echo $percentage; ?>%"
+                             aria-valuenow="<?php echo $percentage; ?>" aria-valuemin="0" aria-valuemax="100">
+                            <?php echo number_format($percentage, 1); ?>%
+                        </div>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+
+        <!-- Property Type Breakdown -->
+        <div class="mt-3 p-3" style="background: #f8f9fa; border-radius: 10px;">
+            <h6 class="mb-3" style="color: #667eea;">
+                <i class="bi bi-building me-2"></i>توزيع المصروفات حسب نوع العقار
             </h6>
             <div class="row g-3">
                 <?php
@@ -533,7 +561,7 @@ $propertyTypes = [
                         <strong><?php echo number_format($amount, 2); ?> ر.س</strong>
                     </div>
                     <div class="progress" style="height: 25px;">
-                        <div class="progress-bar bg-success" role="progressbar"
+                        <div class="progress-bar bg-danger" role="progressbar"
                              style="width: <?php echo $percentage; ?>%"
                              aria-valuenow="<?php echo $percentage; ?>" aria-valuemin="0" aria-valuemax="100">
                             <?php echo number_format($percentage, 1); ?>%

@@ -1,0 +1,639 @@
+<?php
+/**
+ * Payments List
+ * سجل المدفوعات
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "سجل المدفوعات";
+$sc_id = "205";
+$use_accounting_theme = true;
+include_once "../../../../nocash.hnt";
+include_once "../../../../connectdb.hnt";
+include_once "../../includes/accounting_class.hnt";
+
+function getPaymentMethodLabel($method) {
+    switch ($method) {
+        case 'cash':
+            return 'نقداً';
+        case 'bank_transfer':
+            return 'تحويل بنكي';
+        case 'credit_card':
+            return 'بطاقة ائتمان';
+        case 'cheque':
+            return 'شيك';
+        default:
+            return 'غير محدد';
+    }
+}
+
+function getPaymentStatusLabel($status) {
+    switch ($status) {
+        case 'paid':
+            return 'مسدد';
+        case 'partial':
+            return 'جزئي';
+        case 'unpaid':
+            return 'غير مدفوع';
+        case 'overdue':
+            return 'متأخر';
+        default:
+            return 'غير محدد';
+    }
+}
+
+function getPaymentStatusClass($status) {
+    switch ($status) {
+        case 'paid':
+            return 'status-paid';
+        case 'partial':
+            return 'status-partial';
+        case 'overdue':
+            return 'status-overdue';
+        default:
+            return 'status-default';
+    }
+}
+
+function bindStatementParams($stmt, $types, $params) {
+    if ($stmt && $types !== '' && !empty($params)) {
+        $stmt->bind_param($types, ...$params);
+    }
+}
+
+$dateFrom = $_GET['date_from'] ?? date('Y-01-01');
+$dateTo = $_GET['date_to'] ?? date('Y-m-d');
+$customerId = isset($_GET['customer_id']) ? (int)$_GET['customer_id'] : 0;
+$paymentMethod = trim($_GET['payment_method'] ?? '');
+$search = trim($_GET['search'] ?? '');
+$exportType = trim($_GET['export'] ?? '');
+$isPrintMode = isset($_GET['print']) && $_GET['print'] === '1';
+$currentPage = max(1, (int)($_GET['page'] ?? 1));
+$pageSize = 25;
+
+$allowedPaymentMethods = ['cash', 'bank_transfer', 'credit_card', 'cheque'];
+if (!in_array($paymentMethod, $allowedPaymentMethods, true)) {
+    $paymentMethod = '';
+}
+if (!in_array($exportType, ['csv', 'xls'], true)) {
+    $exportType = '';
+}
+
+$customersQuery = "SELECT customer_id, customer_name, customer_code FROM acc_customers WHERE is_active = 1 ORDER BY customer_name ASC";
+$customersResult = $db->query($customersQuery);
+$customers = [];
+if ($customersResult) {
+    while ($row = $customersResult->fetch_assoc()) {
+        $customers[] = $row;
+    }
+}
+
+$paymentsQuery = "
+    SELECT
+        je.entry_id,
+        je.entry_number,
+        je.entry_date,
+        je.description,
+        je.status,
+        je.notes,
+        inv.invoice_id,
+        inv.invoice_number,
+        inv.customer_id,
+        inv.customer_name,
+        inv.payment_status,
+        SUM(ar_line.credit_amount) AS amount,
+        COALESCE(
+            NULLIF(TRIM(je.notes), ''),
+            CASE
+                WHEN MAX(debit_line.account_id) = 3 THEN 'bank_transfer'
+                WHEN MAX(debit_line.account_id) = 2 THEN 'cash'
+                ELSE ''
+            END
+        ) AS payment_method
+    FROM acc_journal_entries je
+    INNER JOIN acc_invoices inv
+        ON je.reference_type = 'invoice'
+        AND je.reference_id = inv.invoice_id
+    INNER JOIN acc_journal_entry_lines ar_line
+        ON je.entry_id = ar_line.entry_id
+        AND ar_line.account_id = 4
+        AND ar_line.credit_amount > 0
+    LEFT JOIN acc_journal_entry_lines debit_line
+        ON je.entry_id = debit_line.entry_id
+        AND debit_line.debit_amount > 0
+        AND debit_line.account_id <> 4
+    WHERE je.status = 'posted'
+        AND je.reference_type = 'invoice'
+        AND je.reference_id IS NOT NULL
+        AND je.entry_date BETWEEN ? AND ?
+";
+
+$types = 'ss';
+$params = [$dateFrom, $dateTo];
+
+if ($customerId > 0) {
+    $paymentsQuery .= " AND inv.customer_id = ?";
+    $types .= 'i';
+    $params[] = $customerId;
+}
+
+if ($search !== '') {
+    $paymentsQuery .= " AND (
+        je.entry_number LIKE ?
+        OR inv.invoice_number LIKE ?
+        OR inv.customer_name LIKE ?
+        OR je.description LIKE ?
+    )";
+    $types .= 'ssss';
+    $searchLike = '%' . $search . '%';
+    $params[] = $searchLike;
+    $params[] = $searchLike;
+    $params[] = $searchLike;
+    $params[] = $searchLike;
+}
+
+$paymentsQuery .= "
+    GROUP BY
+        je.entry_id,
+        je.entry_number,
+        je.entry_date,
+        je.description,
+        je.status,
+        je.notes,
+        inv.invoice_id,
+        inv.invoice_number,
+        inv.customer_id,
+        inv.customer_name,
+        inv.payment_status
+";
+
+$filteredPaymentsQuery = "SELECT payment_rows.* FROM (" . $paymentsQuery . ") payment_rows WHERE 1=1";
+$filteredTypes = $types;
+$filteredParams = $params;
+
+if ($paymentMethod !== '') {
+    $filteredPaymentsQuery .= " AND payment_rows.payment_method = ?";
+    $filteredTypes .= 's';
+    $filteredParams[] = $paymentMethod;
+}
+
+$countQuery = "SELECT COUNT(*) AS total_rows FROM (" . $filteredPaymentsQuery . ") payment_rows_count";
+$countStmt = $db->prepare($countQuery);
+$totalRows = 0;
+if ($countStmt) {
+    bindStatementParams($countStmt, $filteredTypes, $filteredParams);
+    $countStmt->execute();
+    $totalRows = (int)($countStmt->get_result()->fetch_assoc()['total_rows'] ?? 0);
+}
+
+$totalPages = max(1, (int)ceil($totalRows / $pageSize));
+if (!$isPrintMode && $exportType === '' && $currentPage > $totalPages) {
+    $currentPage = $totalPages;
+}
+
+$statsQuery = "
+    SELECT
+        COUNT(*) AS total_payments,
+        COALESCE(SUM(payment_rows.amount), 0) AS total_collected,
+        COUNT(DISTINCT payment_rows.customer_id) AS unique_customers,
+        COALESCE(SUM(CASE WHEN DATE_FORMAT(payment_rows.entry_date, '%Y-%m') = ? THEN 1 ELSE 0 END), 0) AS current_month_payments
+    FROM (" . $filteredPaymentsQuery . ") payment_rows
+";
+$statsStmt = $db->prepare($statsQuery);
+$statsTypes = 's' . $filteredTypes;
+$statsParams = array_merge([date('Y-m')], $filteredParams);
+$paymentsStats = [
+    'total_payments' => 0,
+    'total_collected' => 0,
+    'unique_customers' => 0,
+    'current_month_payments' => 0
+];
+if ($statsStmt) {
+    bindStatementParams($statsStmt, $statsTypes, $statsParams);
+    $statsStmt->execute();
+    $paymentsStats = array_merge($paymentsStats, $statsStmt->get_result()->fetch_assoc() ?: []);
+}
+
+$paymentsDataQuery = $filteredPaymentsQuery . " ORDER BY payment_rows.entry_date DESC, payment_rows.entry_id DESC";
+$paymentsDataTypes = $filteredTypes;
+$paymentsDataParams = $filteredParams;
+if (!$isPrintMode && $exportType === '') {
+    $paymentsDataQuery .= " LIMIT ? OFFSET ?";
+    $paymentsDataTypes .= 'ii';
+    $paymentsDataParams[] = $pageSize;
+    $paymentsDataParams[] = ($currentPage - 1) * $pageSize;
+}
+
+$stmt = $db->prepare($paymentsDataQuery);
+if ($stmt) {
+    bindStatementParams($stmt, $paymentsDataTypes, $paymentsDataParams);
+    $stmt->execute();
+    $paymentsResult = $stmt->get_result();
+} else {
+    $paymentsResult = false;
+}
+
+$payments = [];
+if ($paymentsResult) {
+    while ($row = $paymentsResult->fetch_assoc()) {
+        $payments[] = $row;
+    }
+}
+
+$baseFilterParams = [
+    'date_from' => $dateFrom,
+    'date_to' => $dateTo
+];
+if ($customerId > 0) {
+    $baseFilterParams['customer_id'] = $customerId;
+}
+if ($paymentMethod !== '') {
+    $baseFilterParams['payment_method'] = $paymentMethod;
+}
+if ($search !== '') {
+    $baseFilterParams['search'] = $search;
+}
+
+if ($exportType !== '') {
+    $filenameDate = date('Ymd_His');
+    if ($exportType === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="payments_' . $filenameDate . '.csv"');
+        $output = fopen('php://output', 'w');
+        fwrite($output, "\xEF\xBB\xBF");
+        fputcsv($output, ['التاريخ', 'رقم القيد', 'رقم الفاتورة', 'العميل', 'طريقة الدفع', 'البيان', 'المبلغ', 'الحالة']);
+        foreach ($payments as $payment) {
+            fputcsv($output, [
+                $payment['entry_date'],
+                $payment['entry_number'],
+                $payment['invoice_number'],
+                $payment['customer_name'],
+                getPaymentMethodLabel($payment['payment_method']),
+                $payment['description'],
+                number_format((float)$payment['amount'], 2, '.', ''),
+                getPaymentStatusLabel($payment['payment_status'])
+            ]);
+        }
+        fclose($output);
+        exit;
+    }
+
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="payments_' . $filenameDate . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body>';
+    echo '<table border="1">';
+    echo '<tr><th>التاريخ</th><th>رقم القيد</th><th>رقم الفاتورة</th><th>العميل</th><th>طريقة الدفع</th><th>البيان</th><th>المبلغ</th><th>الحالة</th></tr>';
+    foreach ($payments as $payment) {
+        echo '<tr>';
+        echo '<td>' . htmlspecialchars($payment['entry_date']) . '</td>';
+        echo '<td>' . htmlspecialchars($payment['entry_number']) . '</td>';
+        echo '<td>' . htmlspecialchars($payment['invoice_number']) . '</td>';
+        echo '<td>' . htmlspecialchars($payment['customer_name']) . '</td>';
+        echo '<td>' . htmlspecialchars(getPaymentMethodLabel($payment['payment_method'])) . '</td>';
+        echo '<td>' . htmlspecialchars($payment['description']) . '</td>';
+        echo '<td>' . number_format((float)$payment['amount'], 2) . '</td>';
+        echo '<td>' . htmlspecialchars(getPaymentStatusLabel($payment['payment_status'])) . '</td>';
+        echo '</tr>';
+    }
+    echo '</table></body></html>';
+    exit;
+}
+
+$totalPayments = (int)$paymentsStats['total_payments'];
+$totalCollected = (float)$paymentsStats['total_collected'];
+$uniqueCustomersCount = (int)$paymentsStats['unique_customers'];
+$currentMonthPayments = (int)$paymentsStats['current_month_payments'];
+
+include_once "../../../../header.hnt";
+?>
+
+<style>
+:root {
+    --primary-color: var(--accounting-primary-color, #4e627f);
+}
+
+body {
+    background: #f8f9fa;
+}
+
+.stats-card,
+.filter-card,
+.table-card {
+    background: white;
+    border-radius: 15px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.stats-card {
+    padding: 1.5rem;
+    text-align: center;
+    height: 100%;
+}
+
+.stats-value {
+    font-size: 2rem;
+    font-weight: bold;
+    color: var(--primary-color);
+}
+
+.filter-card {
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.table-card {
+    overflow: hidden;
+}
+
+.table td,
+.table th {
+    vertical-align: middle;
+}
+
+.header-btn {
+    border-radius: 10px;
+    padding: 0.75rem 1.5rem;
+    font-weight: 600;
+}
+
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 72px;
+    padding: 0.4rem 0.9rem;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+.status-paid {
+    background: rgba(25, 135, 84, 0.12);
+    color: #198754;
+}
+
+.status-partial {
+    background: rgba(255, 193, 7, 0.18);
+    color: #8a6d00;
+}
+
+.status-overdue {
+    background: rgba(220, 53, 69, 0.12);
+    color: #dc3545;
+}
+
+.status-default {
+    background: rgba(108, 117, 125, 0.12);
+    color: #6c757d;
+}
+
+.empty-state {
+    padding: 4rem 2rem;
+    text-align: center;
+}
+
+.empty-state i {
+    font-size: 4.5rem;
+    color: var(--primary-color);
+    opacity: 0.35;
+}
+
+.pagination .page-link {
+    color: var(--primary-color);
+}
+
+.pagination .page-item.active .page-link {
+    background: var(--primary-color);
+    border-color: var(--primary-color);
+}
+
+@media print {
+    .no-print {
+        display: none !important;
+    }
+
+    body {
+        background: white;
+    }
+
+    .page-header,
+    .stats-card,
+    .table-card {
+        box-shadow: none !important;
+        border: 1px solid #dee2e6;
+    }
+
+    .container-fluid {
+        padding: 0 !important;
+    }
+}
+</style>
+
+<div class="container-fluid p-4">
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-3">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-wallet2 me-2"></i>سجل المدفوعات
+                </h1>
+                <p class="mb-0 opacity-75">عرض جميع الدفعات المسجلة مع الفلاتر والتفاصيل</p>
+            </div>
+            <div class="d-flex gap-2 flex-wrap no-print">
+                <button class="btn btn-light btn-lg header-btn" onclick="window.location='../../index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-success btn-lg header-btn" onclick="window.location='index.hnt'">
+                    <i class="bi bi-plus-circle me-2"></i>تسجيل دفعة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value"><?php echo $totalPayments; ?></div>
+                <div class="text-muted">عدد الدفعات</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value text-success"><?php echo number_format($totalCollected, 2); ?></div>
+                <div class="text-muted">إجمالي المحصل (ر.س)</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value text-info"><?php echo $uniqueCustomersCount; ?></div>
+                <div class="text-muted">عملاء مختلفون</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value text-warning"><?php echo $currentMonthPayments; ?></div>
+                <div class="text-muted">مدفوعات هذا الشهر</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="filter-card no-print">
+        <form method="GET" class="row g-3 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label">من تاريخ</label>
+                <input type="date" class="form-control" name="date_from" value="<?php echo htmlspecialchars($dateFrom); ?>">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">إلى تاريخ</label>
+                <input type="date" class="form-control" name="date_to" value="<?php echo htmlspecialchars($dateTo); ?>">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">العميل</label>
+                <select class="form-select" name="customer_id">
+                    <option value="0">كل العملاء</option>
+                    <?php foreach ($customers as $customer): ?>
+                    <option value="<?php echo (int)$customer['customer_id']; ?>" <?php echo $customerId === (int)$customer['customer_id'] ? 'selected' : ''; ?>>
+                        <?php echo htmlspecialchars($customer['customer_name']); ?>
+                    </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">طريقة الدفع</label>
+                <select class="form-select" name="payment_method">
+                    <option value="">الكل</option>
+                    <option value="cash" <?php echo $paymentMethod === 'cash' ? 'selected' : ''; ?>>نقداً</option>
+                    <option value="bank_transfer" <?php echo $paymentMethod === 'bank_transfer' ? 'selected' : ''; ?>>تحويل بنكي</option>
+                    <option value="credit_card" <?php echo $paymentMethod === 'credit_card' ? 'selected' : ''; ?>>بطاقة ائتمان</option>
+                    <option value="cheque" <?php echo $paymentMethod === 'cheque' ? 'selected' : ''; ?>>شيك</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">البحث</label>
+                <input type="text" class="form-control" name="search" value="<?php echo htmlspecialchars($search); ?>" placeholder="رقم القيد / الفاتورة / العميل">
+            </div>
+            <div class="col-12 d-flex gap-2 flex-wrap">
+                <button type="submit" class="btn btn-primary">
+                    <i class="bi bi-search me-2"></i>تطبيق الفلاتر
+                </button>
+                <a href="list.hnt" class="btn btn-outline-secondary">
+                    <i class="bi bi-arrow-clockwise me-2"></i>إعادة ضبط
+                </a>
+                <a href="list.hnt?<?php echo htmlspecialchars(http_build_query(array_merge($baseFilterParams, ['export' => 'csv']))); ?>" class="btn btn-outline-success">
+                    <i class="bi bi-filetype-csv me-2"></i>تصدير CSV
+                </a>
+                <a href="list.hnt?<?php echo htmlspecialchars(http_build_query(array_merge($baseFilterParams, ['export' => 'xls']))); ?>" class="btn btn-outline-success">
+                    <i class="bi bi-file-earmark-excel me-2"></i>تصدير Excel
+                </a>
+                <a href="list.hnt?<?php echo htmlspecialchars(http_build_query(array_merge($baseFilterParams, ['print' => '1']))); ?>" class="btn btn-outline-dark" target="_blank">
+                    <i class="bi bi-printer me-2"></i>طباعة
+                </a>
+            </div>
+        </form>
+    </div>
+
+    <div class="table-card">
+        <?php if (empty($payments)): ?>
+        <div class="empty-state">
+            <div class="mb-4">
+                <i class="bi bi-wallet2"></i>
+            </div>
+            <h3 class="mb-3">لا توجد مدفوعات مطابقة</h3>
+            <p class="text-muted mb-0">جرّب تغيير الفلاتر أو قم بتسجيل دفعة جديدة لعرضها هنا.</p>
+        </div>
+        <?php else: ?>
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>التاريخ</th>
+                        <th>رقم القيد</th>
+                        <th>رقم الفاتورة</th>
+                        <th>العميل</th>
+                        <th>طريقة الدفع</th>
+                        <th>البيان</th>
+                        <th class="text-end">المبلغ</th>
+                        <th>الحالة</th>
+                        <?php if (!$isPrintMode): ?>
+                        <th>إجراءات</th>
+                        <?php endif; ?>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($payments as $payment): ?>
+                    <tr>
+                        <td><?php echo htmlspecialchars($payment['entry_date']); ?></td>
+                        <td><strong><?php echo htmlspecialchars($payment['entry_number']); ?></strong></td>
+                        <td><?php echo htmlspecialchars($payment['invoice_number']); ?></td>
+                        <td><?php echo htmlspecialchars($payment['customer_name']); ?></td>
+                        <td>
+                            <span class="badge text-bg-light">
+                                <?php echo htmlspecialchars(getPaymentMethodLabel($payment['payment_method'])); ?>
+                            </span>
+                        </td>
+                        <td><?php echo htmlspecialchars($payment['description']); ?></td>
+                        <td class="text-end fw-bold text-success"><?php echo number_format((float)$payment['amount'], 2); ?> ر.س</td>
+                        <td>
+                            <span class="status-badge <?php echo getPaymentStatusClass($payment['payment_status']); ?>">
+                                <?php echo htmlspecialchars(getPaymentStatusLabel($payment['payment_status'])); ?>
+                            </span>
+                        </td>
+                        <?php if (!$isPrintMode): ?>
+                        <td>
+                            <div class="d-flex gap-2">
+                                <a class="btn btn-sm btn-outline-primary" href="../invoices/view.hnt?id=<?php echo (int)$payment['invoice_id']; ?>" title="عرض الفاتورة">
+                                    <i class="bi bi-eye"></i>
+                                </a>
+                                <a class="btn btn-sm btn-outline-secondary" href="../reports/customer_statement.hnt?customer_id=<?php echo (int)$payment['customer_id']; ?>&date_from=<?php echo urlencode($dateFrom); ?>&date_to=<?php echo urlencode($dateTo); ?>" title="كشف حساب العميل">
+                                    <i class="bi bi-receipt"></i>
+                                </a>
+                            </div>
+                        </td>
+                        <?php endif; ?>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php endif; ?>
+    </div>
+
+    <?php if (!$isPrintMode && $exportType === '' && $totalPages > 1): ?>
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-3 mt-4 no-print">
+        <div class="text-muted">
+            عرض <?php echo number_format(($currentPage - 1) * $pageSize + 1); ?> - <?php echo number_format(min($currentPage * $pageSize, $totalRows)); ?>
+            من أصل <?php echo number_format($totalRows); ?> دفعة
+        </div>
+        <nav aria-label="Pagination">
+            <ul class="pagination mb-0">
+                <li class="page-item <?php echo $currentPage <= 1 ? 'disabled' : ''; ?>">
+                    <a class="page-link" href="list.hnt?<?php echo htmlspecialchars(http_build_query(array_merge($baseFilterParams, ['page' => max(1, $currentPage - 1)]))); ?>">السابق</a>
+                </li>
+                <?php
+                $startPage = max(1, $currentPage - 2);
+                $endPage = min($totalPages, $currentPage + 2);
+                for ($page = $startPage; $page <= $endPage; $page++):
+                ?>
+                <li class="page-item <?php echo $page === $currentPage ? 'active' : ''; ?>">
+                    <a class="page-link" href="list.hnt?<?php echo htmlspecialchars(http_build_query(array_merge($baseFilterParams, ['page' => $page]))); ?>"><?php echo $page; ?></a>
+                </li>
+                <?php endfor; ?>
+                <li class="page-item <?php echo $currentPage >= $totalPages ? 'disabled' : ''; ?>">
+                    <a class="page-link" href="list.hnt?<?php echo htmlspecialchars(http_build_query(array_merge($baseFilterParams, ['page' => min($totalPages, $currentPage + 1)]))); ?>">التالي</a>
+                </li>
+            </ul>
+        </nav>
+    </div>
+    <?php endif; ?>
+</div>
+
+<?php if ($isPrintMode): ?>
+<script>
+window.addEventListener('load', function() {
+    window.print();
+});
+</script>
+<?php endif; ?>
+
+<?php require("../../../../foter.hnt"); ?>

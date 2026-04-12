@@ -1,0 +1,603 @@
+<?php
+/**
+ * Property Profitability Report
+ * تقرير ربحية العقارات
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "تقرير ربحية العقارات";
+$sc_id = "214";
+$use_accounting_theme = true;
+include_once "../../../../nocash.hnt";
+include_once "../../../../connectdb.hnt";
+include_once "../../../../header.hnt";
+
+// Get parameters
+$dateFrom = $_GET['date_from'] ?? date('Y-01-01');
+$dateTo = $_GET['date_to'] ?? date('Y-m-d');
+$propertyType = $_GET['property_type'] ?? 'all';
+$sortBy = $_GET['sort_by'] ?? 'profit_desc'; // profit_desc, profit_asc, margin_desc, margin_asc
+
+// Convert dates to timestamps for comparison
+$timestampFrom = strtotime($dateFrom);
+$timestampTo = strtotime($dateTo . ' 23:59:59');
+
+// Get income data from eradat table
+$incomeQuery = "
+    SELECT
+        idaqar,
+        SUM(amount + mysa3ee + mywater + tamen + services) as total_income
+    FROM eradat
+    WHERE paymentdate >= ?
+    AND paymentdate <= ?
+    AND amount > 0
+    GROUP BY idaqar
+";
+
+$stmt = $db->prepare($incomeQuery);
+$stmt->bind_param('ii', $timestampFrom, $timestampTo);
+$stmt->execute();
+$incomeData = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+// Convert to associative array
+$incomeByProperty = [];
+foreach ($incomeData as $row) {
+    $incomeByProperty[$row['idaqar']] = floatval($row['total_income']);
+}
+
+// Get expenses data from masrofat table
+$expensesQuery = "
+    SELECT
+        idaqar,
+        SUM(amount) as total_expenses
+    FROM masrofat
+    WHERE payeddate >= ?
+    AND payeddate <= ?
+    AND amount > 0
+    GROUP BY idaqar
+";
+
+$stmt = $db->prepare($expensesQuery);
+$stmt->bind_param('ii', $timestampFrom, $timestampTo);
+$stmt->execute();
+$expensesData = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+// Convert to associative array
+$expensesByProperty = [];
+foreach ($expensesData as $row) {
+    $expensesByProperty[$row['idaqar']] = floatval($row['total_expenses']);
+}
+
+// Combine all property IDs
+$allPropertyIds = array_unique(array_merge(
+    array_keys($incomeByProperty),
+    array_keys($expensesByProperty)
+));
+
+// Build property profitability data
+$propertyData = [];
+$totals = [
+    'income' => 0,
+    'expenses' => 0,
+    'profit' => 0
+];
+
+foreach ($allPropertyIds as $idaqar) {
+    if ($idaqar == 0) continue; // Skip items without property
+
+    $income = $incomeByProperty[$idaqar] ?? 0;
+    $expenses = $expensesByProperty[$idaqar] ?? 0;
+    $profit = $income - $expenses;
+    $margin = $income > 0 ? ($profit / $income) * 100 : 0;
+
+    // Get property details
+    $propName = 'عقار #' . $idaqar;
+    $propType = 'other';
+
+    // Check emara (buildings) table
+    $stmt = $db->prepare("SELECT emararakam, emaratype FROM emara WHERE emaraid = ?");
+    $stmt->bind_param('i', $idaqar);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    if ($row = $result->fetch_assoc()) {
+        $propName = 'عمارة رقم ' . $row['emararakam'];
+        $propType = 'building';
+    } else {
+        // Check arady (lands) table
+        $stmt = $db->prepare("SELECT ardy_rakam FROM arady WHERE ardyid = ?");
+        $stmt->bind_param('i', $idaqar);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        if ($row = $result->fetch_assoc()) {
+            $propName = 'أرض رقم ' . $row['ardy_rakam'];
+            $propType = 'land';
+        } else {
+            // Check vila table
+            $stmt = $db->prepare("SELECT vilarakam FROM vila WHERE vilaid = ?");
+            $stmt->bind_param('i', $idaqar);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            if ($row = $result->fetch_assoc()) {
+                $propName = 'فيلا رقم ' . $row['vilarakam'];
+                $propType = 'villa';
+            }
+        }
+    }
+
+    $propertyData[$idaqar] = [
+        'property_id' => $idaqar,
+        'property_name' => $propName,
+        'property_type' => $propType,
+        'income' => $income,
+        'expenses' => $expenses,
+        'profit' => $profit,
+        'margin' => $margin
+    ];
+
+    $totals['income'] += $income;
+    $totals['expenses'] += $expenses;
+    $totals['profit'] += $profit;
+}
+
+// Filter by property type if specified
+if ($propertyType != 'all') {
+    $propertyData = array_filter($propertyData, function($prop) use ($propertyType) {
+        return $prop['property_type'] == $propertyType;
+    });
+
+    // Recalculate totals after filtering
+    $totals = [
+        'income' => 0,
+        'expenses' => 0,
+        'profit' => 0
+    ];
+    foreach ($propertyData as $prop) {
+        $totals['income'] += $prop['income'];
+        $totals['expenses'] += $prop['expenses'];
+        $totals['profit'] += $prop['profit'];
+    }
+}
+
+// Sort data
+switch ($sortBy) {
+    case 'profit_asc':
+        uasort($propertyData, function($a, $b) {
+            return $a['profit'] <=> $b['profit'];
+        });
+        break;
+    case 'margin_desc':
+        uasort($propertyData, function($a, $b) {
+            return $b['margin'] <=> $a['margin'];
+        });
+        break;
+    case 'margin_asc':
+        uasort($propertyData, function($a, $b) {
+            return $a['margin'] <=> $b['margin'];
+        });
+        break;
+    case 'profit_desc':
+    default:
+        uasort($propertyData, function($a, $b) {
+            return $b['profit'] <=> $a['profit'];
+        });
+        break;
+}
+
+// Calculate overall margin
+$overallMargin = $totals['income'] > 0 ? ($totals['profit'] / $totals['income']) * 100 : 0;
+
+// Count profitable vs unprofitable properties
+$profitableCount = count(array_filter($propertyData, function($p) { return $p['profit'] > 0; }));
+$unprofitableCount = count(array_filter($propertyData, function($p) { return $p['profit'] < 0; }));
+$breakEvenCount = count(array_filter($propertyData, function($p) { return $p['profit'] == 0; }));
+
+// Get property types for filter
+$propertyTypes = [
+    'land' => 'أراضي',
+    'building' => 'عمائر',
+    'villa' => 'فلل',
+    'other' => 'أخرى'
+];
+?>
+
+<style>
+:root {
+    --primary-color: var(--accounting-primary-color, #4e627f);
+}
+
+.report-card {
+    background: white;
+    border-radius: 15px;
+    padding: 2rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.summary-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+    text-align: center;
+}
+
+.summary-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+}
+
+.stats-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1rem;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+    text-align: center;
+}
+
+.profitability-table {
+    width: 100%;
+    margin-top: 1rem;
+}
+
+.profitability-table th {
+    padding: 1rem;
+    text-align: center;
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+.profitability-table td {
+    padding: 0.75rem;
+    border-bottom: 1px solid #e9ecef;
+    text-align: end;
+}
+
+.profitability-table td:first-child {
+    text-align: start;
+}
+
+.profitability-table tbody tr:hover {
+    background: #f8f9fa;
+}
+
+.profitability-table tfoot tr {
+    background: #e9ecef;
+    font-weight: bold;
+    font-size: 1.05rem;
+}
+
+.profitability-table tfoot td {
+    border-top: 2px solid var(--primary-color);
+    border-bottom: 2px solid var(--primary-color);
+}
+
+.property-type-badge {
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.type-land { background: #d4edda; color: #155724; }
+.type-building { background: #d1ecf1; color: #0c5460; }
+.type-villa { background: #fff3cd; color: #856404; }
+.type-other { background: #e2e3e5; color: #383d41; }
+
+.profit-positive { color: #28a745; font-weight: 600; }
+.profit-negative { color: #dc3545; font-weight: 600; }
+.profit-zero { color: #6c757d; font-weight: 600; }
+
+.margin-badge {
+    padding: 4px 10px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.margin-excellent { background: #d4edda; color: #155724; }
+.margin-good { background: #d1ecf1; color: #0c5460; }
+.margin-fair { background: #fff3cd; color: #856404; }
+.margin-poor { background: #f8d7da; color: #721c24; }
+
+@media print {
+    .no-print { display: none !important; }
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header no-print">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-graph-up-arrow me-2"></i>تقرير ربحية العقارات
+                </h1>
+                <p class="mb-0 opacity-75">Property Profitability Report</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.history.back()">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-light btn-lg ms-2" onclick="window.print()">
+                    <i class="bi bi-printer me-2"></i>طباعة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="card mb-4 no-print" style="border-radius: 15px;">
+        <div class="card-body">
+            <form method="GET" class="row g-3">
+                <div class="col-md-3">
+                    <label class="form-label">من تاريخ</label>
+                    <input type="date" class="form-control" name="date_from" value="<?php echo $dateFrom; ?>">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">إلى تاريخ</label>
+                    <input type="date" class="form-control" name="date_to" value="<?php echo $dateTo; ?>">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">نوع العقار</label>
+                    <select class="form-select" name="property_type">
+                        <option value="all" <?php echo $propertyType == 'all' ? 'selected' : ''; ?>>الكل</option>
+                        <?php foreach ($propertyTypes as $key => $label): ?>
+                        <option value="<?php echo $key; ?>" <?php echo $propertyType == $key ? 'selected' : ''; ?>>
+                            <?php echo $label; ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">الترتيب</label>
+                    <select class="form-select" name="sort_by">
+                        <option value="profit_desc" <?php echo $sortBy == 'profit_desc' ? 'selected' : ''; ?>>الأعلى ربحاً</option>
+                        <option value="profit_asc" <?php echo $sortBy == 'profit_asc' ? 'selected' : ''; ?>>الأقل ربحاً</option>
+                        <option value="margin_desc" <?php echo $sortBy == 'margin_desc' ? 'selected' : ''; ?>>الأعلى هامشاً</option>
+                        <option value="margin_asc" <?php echo $sortBy == 'margin_asc' ? 'selected' : ''; ?>>الأقل هامشاً</option>
+                    </select>
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary w-100">
+                        <i class="bi bi-search me-2"></i>عرض
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Summary Cards -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-3">
+            <div class="summary-card" style="border-right: 4px solid #28a745;">
+                <div class="text-muted mb-2">إجمالي الإيرادات</div>
+                <div class="summary-value text-success"><?php echo number_format($totals['income'], 2); ?> ر.س</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="summary-card" style="border-right: 4px solid #dc3545;">
+                <div class="text-muted mb-2">إجمالي المصروفات</div>
+                <div class="summary-value text-danger"><?php echo number_format($totals['expenses'], 2); ?> ر.س</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="summary-card" style="border-right: 4px solid <?php echo $totals['profit'] >= 0 ? '#667eea' : '#dc3545'; ?>;">
+                <div class="text-muted mb-2">صافي الربح</div>
+                <div class="summary-value" style="color: <?php echo $totals['profit'] >= 0 ? '#667eea' : '#dc3545'; ?>">
+                    <?php echo number_format($totals['profit'], 2); ?> ر.س
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="summary-card" style="border-right: 4px solid #ffc107;">
+                <div class="text-muted mb-2">هامش الربح</div>
+                <div class="summary-value text-warning"><?php echo number_format($overallMargin, 1); ?>%</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-4">
+            <div class="stats-card" style="border-right: 4px solid #28a745;">
+                <div class="text-muted small">عقارات رابحة</div>
+                <div class="h4 mb-0 text-success"><?php echo $profitableCount; ?></div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="stats-card" style="border-right: 4px solid #dc3545;">
+                <div class="text-muted small">عقارات خاسرة</div>
+                <div class="h4 mb-0 text-danger"><?php echo $unprofitableCount; ?></div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="stats-card" style="border-right: 4px solid #6c757d;">
+                <div class="text-muted small">عقارات متعادلة</div>
+                <div class="h4 mb-0 text-secondary"><?php echo $breakEvenCount; ?></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Report -->
+    <div class="report-card">
+        <div class="mb-3">
+            <h5 style="color: #667eea;">
+                كشف ربحية العقارات من <?php echo $dateFrom; ?> إلى <?php echo $dateTo; ?>
+            </h5>
+            <?php if ($propertyType != 'all'): ?>
+            <p class="text-muted mb-0">نوع العقار: <?php echo $propertyTypes[$propertyType] ?? $propertyType; ?></p>
+            <?php endif; ?>
+        </div>
+
+        <?php if (empty($propertyData)): ?>
+        <div class="alert alert-info">
+            <i class="bi bi-info-circle me-2"></i>
+            لا توجد بيانات في الفترة المحددة
+        </div>
+        <?php else: ?>
+
+        <table class="profitability-table">
+            <thead>
+                <tr>
+                    <th style="text-align: start;">العقار</th>
+                    <th>النوع</th>
+                    <th>الإيرادات</th>
+                    <th>المصروفات</th>
+                    <th>صافي الربح</th>
+                    <th>هامش الربح</th>
+                    <th>الحالة</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ($propertyData as $prop):
+                    $profitClass = $prop['profit'] > 0 ? 'profit-positive' :
+                                  ($prop['profit'] < 0 ? 'profit-negative' : 'profit-zero');
+
+                    $marginClass = $prop['margin'] >= 30 ? 'margin-excellent' :
+                                  ($prop['margin'] >= 15 ? 'margin-good' :
+                                  ($prop['margin'] >= 5 ? 'margin-fair' : 'margin-poor'));
+
+                    $statusText = $prop['profit'] > 0 ? 'رابح' :
+                                 ($prop['profit'] < 0 ? 'خاسر' : 'متعادل');
+                    $statusColor = $prop['profit'] > 0 ? 'success' :
+                                  ($prop['profit'] < 0 ? 'danger' : 'secondary');
+                ?>
+                <tr>
+                    <td>
+                        <strong><?php echo htmlspecialchars($prop['property_name']); ?></strong>
+                    </td>
+                    <td>
+                        <span class="property-type-badge type-<?php echo $prop['property_type']; ?>">
+                            <?php echo $propertyTypes[$prop['property_type']] ?? $prop['property_type']; ?>
+                        </span>
+                    </td>
+                    <td class="text-success"><?php echo number_format($prop['income'], 2); ?></td>
+                    <td class="text-danger"><?php echo number_format($prop['expenses'], 2); ?></td>
+                    <td class="<?php echo $profitClass; ?>">
+                        <?php echo number_format($prop['profit'], 2); ?>
+                    </td>
+                    <td>
+                        <span class="margin-badge <?php echo $marginClass; ?>">
+                            <?php echo number_format($prop['margin'], 1); ?>%
+                        </span>
+                    </td>
+                    <td>
+                        <span class="badge bg-<?php echo $statusColor; ?>">
+                            <?php echo $statusText; ?>
+                        </span>
+                    </td>
+                </tr>
+                <?php endforeach; ?>
+            </tbody>
+            <tfoot>
+                <tr>
+                    <td colspan="2">الإجمالي</td>
+                    <td class="text-success"><?php echo number_format($totals['income'], 2); ?></td>
+                    <td class="text-danger"><?php echo number_format($totals['expenses'], 2); ?></td>
+                    <td class="<?php echo $totals['profit'] >= 0 ? 'profit-positive' : 'profit-negative'; ?>">
+                        <?php echo number_format($totals['profit'], 2); ?>
+                    </td>
+                    <td>
+                        <strong><?php echo number_format($overallMargin, 1); ?>%</strong>
+                    </td>
+                    <td>-</td>
+                </tr>
+            </tfoot>
+        </table>
+
+        <!-- Analysis Section -->
+        <div class="mt-4 p-3" style="background: #f8f9fa; border-radius: 10px;">
+            <h6 class="mb-3" style="color: #667eea;">
+                <i class="bi bi-graph-up me-2"></i>تحليل الأداء
+            </h6>
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span>نسبة العقارات الرابحة:</span>
+                        <strong class="text-success">
+                            <?php echo count($propertyData) > 0 ? number_format(($profitableCount / count($propertyData)) * 100, 1) : 0; ?>%
+                        </strong>
+                    </div>
+                    <div class="progress" style="height: 20px;">
+                        <div class="progress-bar bg-success" role="progressbar"
+                             style="width: <?php echo count($propertyData) > 0 ? ($profitableCount / count($propertyData)) * 100 : 0; ?>%">
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span>نسبة العقارات الخاسرة:</span>
+                        <strong class="text-danger">
+                            <?php echo count($propertyData) > 0 ? number_format(($unprofitableCount / count($propertyData)) * 100, 1) : 0; ?>%
+                        </strong>
+                    </div>
+                    <div class="progress" style="height: 20px;">
+                        <div class="progress-bar bg-danger" role="progressbar"
+                             style="width: <?php echo count($propertyData) > 0 ? ($unprofitableCount / count($propertyData)) * 100 : 0; ?>%">
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="d-flex justify-content-between">
+                        <span>متوسط الربح لكل عقار:</span>
+                        <strong>
+                            <?php echo count($propertyData) > 0 ? number_format($totals['profit'] / count($propertyData), 2) : 0; ?> ر.س
+                        </strong>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="d-flex justify-content-between">
+                        <span>متوسط الإيرادات لكل عقار:</span>
+                        <strong class="text-success">
+                            <?php echo count($propertyData) > 0 ? number_format($totals['income'] / count($propertyData), 2) : 0; ?> ر.س
+                        </strong>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Top/Bottom Properties -->
+        <div class="row g-3 mt-3">
+            <div class="col-md-6">
+                <div class="p-3" style="background: #d4edda; border-radius: 10px;">
+                    <h6 class="mb-3" style="color: #155724;">
+                        <i class="bi bi-trophy me-2"></i>الأعلى ربحاً
+                    </h6>
+                    <?php
+                    $topProfitable = array_slice($propertyData, 0, 3);
+                    foreach ($topProfitable as $prop):
+                        if ($prop['profit'] <= 0) continue;
+                    ?>
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span><?php echo htmlspecialchars($prop['property_name']); ?></span>
+                        <strong class="text-success"><?php echo number_format($prop['profit'], 2); ?> ر.س</strong>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="p-3" style="background: #f8d7da; border-radius: 10px;">
+                    <h6 class="mb-3" style="color: #721c24;">
+                        <i class="bi bi-exclamation-triangle me-2"></i>الأكثر خسارة
+                    </h6>
+                    <?php
+                    $bottomProfitable = array_slice(array_reverse($propertyData), 0, 3);
+                    foreach ($bottomProfitable as $prop):
+                        if ($prop['profit'] >= 0) continue;
+                    ?>
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span><?php echo htmlspecialchars($prop['property_name']); ?></span>
+                        <strong class="text-danger"><?php echo number_format($prop['profit'], 2); ?> ر.س</strong>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+        </div>
+
+        <?php endif; ?>
+    </div>
+</div>
+
+<?php require("../../../../foter.hnt"); ?>

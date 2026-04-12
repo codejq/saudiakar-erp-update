@@ -98,6 +98,122 @@ class AccountingManager {
         
         return ['success' => false, 'error' => $error, 'message' => $errorMessage];
     }
+
+    /**
+     * Update account
+     * تحديث حساب
+     */
+    public function updateAccount($accountId, $data) {
+        $accountId = (int)$accountId;
+        if ($accountId <= 0) {
+            return ['success' => false, 'message' => 'رقم الحساب غير صالح'];
+        }
+
+        if (empty($data['account_type'])) {
+            return [
+                'success' => false,
+                'error' => 'Account type is required',
+                'message' => 'نوع الحساب مطلوب. يرجى اختيار نوع الحساب'
+            ];
+        }
+
+        $currentAccount = $this->getAccount($accountId);
+        if (!$currentAccount) {
+            return ['success' => false, 'message' => 'الحساب غير موجود'];
+        }
+
+        $parentAccountId = !empty($data['parent_account_id']) ? (int)$data['parent_account_id'] : null;
+        if ($parentAccountId === $accountId) {
+            return ['success' => false, 'message' => 'لا يمكن اختيار نفس الحساب كحساب رئيسي'];
+        }
+
+        $accountLevel = 1;
+        if ($parentAccountId) {
+            $parentStmt = $this->db->prepare("SELECT account_level, is_leaf FROM acc_chart_of_accounts WHERE account_id = ?");
+            $parentStmt->bind_param("i", $parentAccountId);
+            $parentStmt->execute();
+            $parent = $parentStmt->get_result()->fetch_assoc();
+
+            if (!$parent) {
+                return ['success' => false, 'message' => 'الحساب الرئيسي المحدد غير موجود'];
+            }
+
+            $accountLevel = (int)$parent['account_level'] + 1;
+
+            if ((int)$parent['is_leaf'] === 1) {
+                $updateParentStmt = $this->db->prepare("UPDATE acc_chart_of_accounts SET is_leaf = 0 WHERE account_id = ?");
+                $updateParentStmt->bind_param("i", $parentAccountId);
+                $updateParentStmt->execute();
+            }
+        }
+
+        $childCountStmt = $this->db->prepare("SELECT COUNT(*) AS child_count FROM acc_chart_of_accounts WHERE parent_account_id = ?");
+        $childCountStmt->bind_param("i", $accountId);
+        $childCountStmt->execute();
+        $childCount = (int)($childCountStmt->get_result()->fetch_assoc()['child_count'] ?? 0);
+        $isLeaf = $childCount > 0 ? 0 : (int)($data['is_leaf'] ?? 1);
+
+        $stmt = $this->db->prepare(" 
+            UPDATE acc_chart_of_accounts
+            SET account_code = ?,
+                account_name_ar = ?,
+                account_name_en = ?,
+                parent_account_id = ?,
+                account_type = ?,
+                account_category = ?,
+                account_level = ?,
+                is_leaf = ?,
+                opening_balance = ?,
+                vat_applicable = ?,
+                description = ?
+            WHERE account_id = ?
+        ");
+
+        $stmt->bind_param(
+            "sssissiidisi",
+            $data['account_code'],
+            $data['account_name_ar'],
+            $data['account_name_en'],
+            $parentAccountId,
+            $data['account_type'],
+            $data['account_category'],
+            $accountLevel,
+            $isLeaf,
+            $data['opening_balance'],
+            $data['vat_applicable'],
+            $data['description'],
+            $accountId
+        );
+
+        if ($stmt->execute()) {
+            $oldParentAccountId = !empty($currentAccount['parent_account_id']) ? (int)$currentAccount['parent_account_id'] : null;
+            if ($oldParentAccountId && $oldParentAccountId !== $parentAccountId) {
+                $oldParentCountStmt = $this->db->prepare("SELECT COUNT(*) AS child_count FROM acc_chart_of_accounts WHERE parent_account_id = ?");
+                $oldParentCountStmt->bind_param("i", $oldParentAccountId);
+                $oldParentCountStmt->execute();
+                $oldParentChildCount = (int)($oldParentCountStmt->get_result()->fetch_assoc()['child_count'] ?? 0);
+                $oldParentIsLeaf = $oldParentChildCount > 0 ? 0 : 1;
+
+                $oldParentUpdateStmt = $this->db->prepare("UPDATE acc_chart_of_accounts SET is_leaf = ? WHERE account_id = ?");
+                $oldParentUpdateStmt->bind_param("ii", $oldParentIsLeaf, $oldParentAccountId);
+                $oldParentUpdateStmt->execute();
+            }
+
+            $this->logAudit('update', 'account', $accountId, $currentAccount, $data);
+            return ['success' => true, 'account_id' => $accountId];
+        }
+
+        $error = $stmt->error;
+        $errorMessage = 'فشل في تحديث الحساب';
+
+        if (strpos($error, 'Duplicate entry') !== false && strpos($error, 'idx_code') !== false) {
+            preg_match("/Duplicate entry '([^']+)'/", $error, $matches);
+            $duplicateCode = $matches[1] ?? $data['account_code'];
+            $errorMessage = "رمز الحساب '{$duplicateCode}' موجود بالفعل. يرجى استخدام رمز مختلف";
+        }
+
+        return ['success' => false, 'error' => $error, 'message' => $errorMessage];
+    }
     
     /**
      * Get account by ID

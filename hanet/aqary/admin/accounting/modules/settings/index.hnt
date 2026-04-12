@@ -1,0 +1,323 @@
+<?php
+/**
+ * Accounting Settings
+ * إعدادات المحاسبة
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "إعدادات المحاسبة";
+$sc_id = "208";
+$use_accounting_theme = true;
+include_once "../../../../header.hnt";
+include_once "../../includes/accounting_class.hnt";
+
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+
+// Handle form submission
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['save_settings'])) {
+    $settings = [
+        'company_name_ar' => $_POST['company_name_ar'],
+        'company_name_en' => $_POST['company_name_en'],
+        'company_vat_number' => $_POST['company_vat_number'],
+        'company_cr_number' => $_POST['company_cr_number'],
+        'company_address' => $_POST['company_address'],
+        'company_phone' => $_POST['company_phone'],
+        'company_email' => $_POST['company_email'],
+        'default_vat_rate' => $_POST['default_vat_rate'],
+        'invoice_prefix' => $_POST['invoice_prefix'],
+        'journal_prefix' => $_POST['journal_prefix'],
+        'fiscal_year_start' => $_POST['fiscal_year_start'],
+        'zatca_enabled' => isset($_POST['zatca_enabled']) ? 1 : 0,
+        'zatca_environment' => $_POST['zatca_environment']
+    ];
+
+    foreach ($settings as $key => $value) {
+        $stmt = $db->prepare("
+            INSERT INTO acc_system_settings (setting_key, setting_value, formuid)
+            VALUES (?, ?, UUID())
+            ON DUPLICATE KEY UPDATE setting_value = ?
+        ");
+        $stmt->bind_param("sss", $key, $value, $value);
+        $stmt->execute();
+    }
+
+    $successMessage = "تم حفظ الإعدادات بنجاح";
+}
+
+// Get current settings
+$settings = [];
+$result = $db->query("SELECT setting_key, setting_value FROM acc_system_settings");
+if ($result) {
+    while ($row = $result->fetch_assoc()) {
+        $settings[$row['setting_key']] = $row['setting_value'];
+    }
+}
+
+// Default values
+$defaults = [
+    'company_name_ar' => 'شركة العقارات',
+    'company_name_en' => 'Real Estate Company',
+    'company_vat_number' => '',
+    'company_cr_number' => '',
+    'company_address' => '',
+    'company_phone' => '',
+    'company_email' => '',
+    'default_vat_rate' => '15',
+    'invoice_prefix' => 'INV',
+    'journal_prefix' => 'JE',
+    'fiscal_year_start' => '01-01',
+    'zatca_enabled' => '0',
+    'zatca_environment' => 'sandbox'
+];
+
+foreach ($defaults as $key => $value) {
+    if (!isset($settings[$key])) {
+        $settings[$key] = $value;
+    }
+}
+?>
+
+<style>
+:root {
+    --primary-color: #4e627f;
+}
+
+.settings-card {
+    background: white;
+    border-radius: 15px;
+    padding: 2rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.settings-section-title {
+    font-size: 1.25rem;
+    font-weight: 700;
+    margin-bottom: 1.5rem;
+    color: #2c3e50;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 2px solid #e9ecef;
+}
+
+.btn-save {
+    background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+    border: none;
+    color: white;
+    padding: 0.75rem 2rem;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+.btn-save:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(40, 167, 69, 0.4);
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-gear me-2"></i>إعدادات المحاسبة
+                </h1>
+                <p class="mb-0 opacity-75">Accounting Settings & Configuration</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <?php if (isset($successMessage)): ?>
+    <div class="alert alert-success alert-dismissible fade show" role="alert">
+        <i class="bi bi-check-circle me-2"></i><?php echo $successMessage; ?>
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+    <?php endif; ?>
+
+    <form method="POST">
+        <!-- Company Information -->
+        <div class="settings-card">
+            <h5 class="settings-section-title">
+                <i class="bi bi-building"></i>معلومات الشركة
+            </h5>
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <label class="form-label">اسم الشركة (عربي)</label>
+                    <input type="text" class="form-control" name="company_name_ar"
+                           value="<?php echo htmlspecialchars($settings['company_name_ar']); ?>">
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label">Company Name (English)</label>
+                    <input type="text" class="form-control" name="company_name_en"
+                           value="<?php echo htmlspecialchars($settings['company_name_en']); ?>">
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label">الرقم الضريبي (VAT Number)</label>
+                    <input type="text" class="form-control" name="company_vat_number"
+                           value="<?php echo htmlspecialchars($settings['company_vat_number']); ?>" maxlength="15">
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label">السجل التجاري (CR Number)</label>
+                    <input type="text" class="form-control" name="company_cr_number"
+                           value="<?php echo htmlspecialchars($settings['company_cr_number']); ?>">
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label">الهاتف</label>
+                    <input type="tel" class="form-control" name="company_phone"
+                           value="<?php echo htmlspecialchars($settings['company_phone']); ?>">
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label">البريد الإلكتروني</label>
+                    <input type="email" class="form-control" name="company_email"
+                           value="<?php echo htmlspecialchars($settings['company_email']); ?>">
+                </div>
+                <div class="col-md-12">
+                    <label class="form-label">العنوان</label>
+                    <textarea class="form-control" name="company_address" rows="2"><?php echo htmlspecialchars($settings['company_address']); ?></textarea>
+                </div>
+            </div>
+        </div>
+
+        <!-- Accounting Settings -->
+        <div class="settings-card">
+            <h5 class="settings-section-title">
+                <i class="bi bi-calculator"></i>الإعدادات المحاسبية
+            </h5>
+            <div class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label">نسبة الضريبة الافتراضية (%)</label>
+                    <input type="number" class="form-control" name="default_vat_rate"
+                           value="<?php echo htmlspecialchars($settings['default_vat_rate']); ?>"
+                           min="0" max="100" step="0.01">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">بادئة رقم الفاتورة</label>
+                    <input type="text" class="form-control" name="invoice_prefix"
+                           value="<?php echo htmlspecialchars($settings['invoice_prefix']); ?>">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">بادئة رقم القيد</label>
+                    <input type="text" class="form-control" name="journal_prefix"
+                           value="<?php echo htmlspecialchars($settings['journal_prefix']); ?>">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">بداية السنة المالية (MM-DD)</label>
+                    <input type="text" class="form-control" name="fiscal_year_start"
+                           value="<?php echo htmlspecialchars($settings['fiscal_year_start']); ?>"
+                           placeholder="01-01">
+                </div>
+            </div>
+        </div>
+
+        <!-- ZATCA Settings -->
+        <div class="settings-card">
+            <h5 class="settings-section-title">
+                <i class="bi bi-shield-check"></i>إعدادات ZATCA
+            </h5>
+            <div class="row g-3">
+                <div class="col-md-12">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" name="zatca_enabled"
+                               id="zatca_enabled" <?php echo $settings['zatca_enabled'] ? 'checked' : ''; ?>>
+                        <label class="form-check-label" for="zatca_enabled">
+                            تفعيل التكامل مع ZATCA
+                        </label>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label">البيئة (Environment)</label>
+                    <select class="form-select" name="zatca_environment">
+                        <option value="sandbox" <?php echo $settings['zatca_environment'] == 'sandbox' ? 'selected' : ''; ?>>
+                            Sandbox (تجريبي)
+                        </option>
+                        <option value="simulation" <?php echo $settings['zatca_environment'] == 'simulation' ? 'selected' : ''; ?>>
+                            simulation (محاكاة)
+                        </option>
+                        <option value="production" <?php echo $settings['zatca_environment'] == 'production' ? 'selected' : ''; ?>>
+                            Production (إنتاج)
+                        </option>
+                    </select>
+                </div>
+            </div>
+            <div class="alert alert-info mt-3">
+                <i class="bi bi-info-circle me-2"></i>
+                <strong>ملاحظة:</strong> التكامل مع ZATCA يتطلب شهادة رقمية وإعدادات إضافية. يرجى الرجوع إلى الدليل الفني.
+            </div>
+        </div>
+
+        <!-- Save Button -->
+        <div class="text-end">
+            <button type="submit" name="save_settings" class="btn btn-save btn-lg">
+                <i class="bi bi-check-circle me-2"></i>حفظ الإعدادات
+            </button>
+        </div>
+    </form>
+
+    <!-- System Information -->
+    <div class="settings-card mt-4">
+        <h5 class="settings-section-title">
+            <i class="bi bi-info-circle"></i>معلومات النظام
+        </h5>
+        <div class="row">
+            <div class="col-md-6">
+                <table class="table table-sm">
+                    <tr>
+                        <td><strong>إصدار النظام:</strong></td>
+                        <td>1.0.0</td>
+                    </tr>
+                    <tr>
+                        <td><strong>قاعدة البيانات:</strong></td>
+                        <td>MySQL <?php echo $db->server_info; ?></td>
+                    </tr>
+                    <tr>
+                        <td><strong>PHP Version:</strong></td>
+                        <td><?php echo phpversion(); ?></td>
+                    </tr>
+                </table>
+            </div>
+            <div class="col-md-6">
+                <table class="table table-sm">
+                    <tr>
+                        <td><strong>عدد الحسابات:</strong></td>
+                        <td>
+                            <?php
+                            $result = $db->query("SELECT COUNT(*) as count FROM acc_chart_of_accounts");
+                            echo $result ? $result->fetch_assoc()['count'] : 0;
+                            ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong>عدد القيود:</strong></td>
+                        <td>
+                            <?php
+                            $result = $db->query("SELECT COUNT(*) as count FROM acc_journal_entries");
+                            echo $result ? $result->fetch_assoc()['count'] : 0;
+                            ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong>عدد الفواتير:</strong></td>
+                        <td>
+                            <?php
+                            $result = $db->query("SELECT COUNT(*) as count FROM acc_invoices");
+                            echo $result ? $result->fetch_assoc()['count'] : 0;
+                            ?>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<?php require("../../../../foter.hnt"); ?>

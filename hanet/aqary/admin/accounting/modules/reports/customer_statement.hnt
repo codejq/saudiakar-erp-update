@@ -1,0 +1,342 @@
+<?php
+/**
+ * Customer Statement Report
+ * كشف حساب العميل
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "كشف حساب العميل";
+$sc_id = "210";
+$use_accounting_theme = true;
+include_once "../../../../nocash.hnt";
+include_once "../../../../connectdb.hnt";
+include_once "../../../../header.hnt";
+
+// Get all customers for the dropdown
+$customersQuery = "SELECT customer_id, customer_name, customer_code FROM acc_customers WHERE is_active = 1 ORDER BY customer_name";
+$customersResult = $db->query($customersQuery);
+$customers = $customersResult->fetch_all(MYSQLI_ASSOC);
+
+// Get parameters
+$customerId = $_GET['customer_id'] ?? '';
+$dateFrom = $_GET['date_from'] ?? date('Y-01-01');
+$dateTo = $_GET['date_to'] ?? date('Y-m-d');
+
+// Initialize variables
+$customerName = '';
+$invoices = [];
+$payments = [];
+$transactions = [];
+$totalInvoices = 0;
+$totalPayments = 0;
+$balance = 0;
+
+// Only process if customer is selected
+if (!empty($customerId)) {
+    // Get customer name
+    $customerQuery = "SELECT customer_name FROM acc_customers WHERE customer_id = ?";
+    $stmt = $db->prepare($customerQuery);
+    $stmt->bind_param('i', $customerId);
+    $stmt->execute();
+    $customerResult = $stmt->get_result()->fetch_assoc();
+    $customerName = $customerResult['customer_name'] ?? '';
+
+    if ($customerName) {
+        // Get invoices
+        $invoicesQuery = "
+            SELECT
+                invoice_id,
+                invoice_number,
+                invoice_date,
+                invoice_type,
+                subtotal,
+                vat_amount,
+                total_amount,
+                paid_amount,
+                payment_status
+            FROM acc_invoices
+            WHERE customer_id = ?
+            AND invoice_date BETWEEN ? AND ?
+            ORDER BY invoice_date, invoice_id
+        ";
+        $stmt = $db->prepare($invoicesQuery);
+        $stmt->bind_param('iss', $customerId, $dateFrom, $dateTo);
+        $stmt->execute();
+        $invoices = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+        // Get payments
+        $paymentsQuery = "
+            SELECT
+                je.entry_number,
+                je.entry_date,
+                je.description,
+                SUM(jel.credit_amount) as amount
+            FROM acc_journal_entries je
+            INNER JOIN acc_journal_entry_lines jel ON je.entry_id = jel.entry_id
+            INNER JOIN acc_invoices inv ON je.reference_type = 'invoice' AND je.reference_id = inv.invoice_id
+            WHERE je.reference_type = 'invoice'
+            AND je.reference_id IS NOT NULL
+            AND je.status = 'posted'
+            AND inv.customer_id = ?
+            AND jel.account_id = 4
+            AND jel.credit_amount > 0
+            AND je.entry_date BETWEEN ? AND ?
+            GROUP BY je.entry_id
+            ORDER BY je.entry_date
+        ";
+        $stmt = $db->prepare($paymentsQuery);
+        $stmt->bind_param('iss', $customerId, $dateFrom, $dateTo);
+        $stmt->execute();
+        $payments = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+        // Combine and sort transactions
+        $transactions = [];
+        foreach ($invoices as $inv) {
+            $transactions[] = [
+                'date' => $inv['invoice_date'],
+                'type' => 'invoice',
+                'reference' => $inv['invoice_number'],
+                'description' => 'فاتورة ' . $inv['invoice_type'],
+                'debit' => $inv['total_amount'],
+                'credit' => 0,
+                'balance' => 0
+            ];
+        }
+        foreach ($payments as $pay) {
+            $transactions[] = [
+                'date' => $pay['entry_date'],
+                'type' => 'payment',
+                'reference' => $pay['entry_number'],
+                'description' => $pay['description'],
+                'debit' => 0,
+                'credit' => $pay['amount'],
+                'balance' => 0
+            ];
+        }
+
+        // Sort by date
+        usort($transactions, function($a, $b) {
+            return strcmp($a['date'], $b['date']);
+        });
+
+        // Calculate running balance
+        $runningBalance = 0;
+        foreach ($transactions as &$trans) {
+            $runningBalance += $trans['debit'] - $trans['credit'];
+            $trans['balance'] = $runningBalance;
+        }
+        unset($trans);
+
+        // Calculate totals from displayed transactions
+        $totalInvoices = 0;
+        $totalPayments = 0;
+        foreach ($transactions as $trans) {
+            $totalInvoices += (float)$trans['debit'];
+            $totalPayments += (float)$trans['credit'];
+        }
+        $balance = $runningBalance;
+    }
+}
+?>
+
+
+<style>
+:root {
+    --primary-color: var(--accounting-primary-color, #4e627f);
+}
+
+.report-card {
+    background: white;
+    border-radius: 15px;
+    padding: 2rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.customer-header {
+    background: #f8f9fa;
+    padding: 1.5rem;
+    border-radius: 12px;
+    margin-bottom: 2rem;
+}
+
+.statement-table {
+    width: 100%;
+    margin-top: 1rem;
+}
+
+.statement-table th {
+    padding: 1rem;
+    text-align: center;
+    font-weight: 600;
+}
+
+.statement-table td {
+    padding: 0.75rem;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.statement-table tbody tr:hover {
+    background: #f8f9fa;
+}
+
+.summary-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+    text-align: center;
+}
+
+.summary-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+}
+
+.required::after {
+    content: " *";
+    color: #dc3545;
+}
+
+@media print {
+    .no-print { display: none !important; }
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header no-print">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-file-text me-2"></i>كشف حساب العميل
+                </h1>
+                <p class="mb-0 opacity-75">Customer Statement</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.history.back()">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-light btn-lg ms-2" onclick="window.print()">
+                    <i class="bi bi-printer me-2"></i>طباعة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="card mb-4 no-print" style="border-radius: 15px;">
+        <div class="card-body">
+            <form method="GET" class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label required">اختر العميل</label>
+                    <select class="form-select" name="customer_id" required>
+                        <option value="">-- اختر عميل --</option>
+                        <?php foreach ($customers as $customer): ?>
+                        <option value="<?php echo $customer['customer_id']; ?>"
+                                <?php echo ($customerId == $customer['customer_id']) ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($customer['customer_name']); ?>
+                            <?php if ($customer['customer_code']): ?>
+                                (<?php echo htmlspecialchars($customer['customer_code']); ?>)
+                            <?php endif; ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">من تاريخ</label>
+                    <input type="date" class="form-control" name="date_from" value="<?php echo $dateFrom; ?>">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">إلى تاريخ</label>
+                    <input type="date" class="form-control" name="date_to" value="<?php echo $dateTo; ?>">
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary w-100">
+                        <i class="bi bi-search me-2"></i>عرض
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <?php if (!empty($customerId) && !empty($customerName)): ?>
+    <!-- Summary Cards -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-4">
+            <div class="summary-card" style="border-right: 4px solid #dc3545;">
+                <div class="text-muted mb-2">إجمالي الفواتير</div>
+                <div class="summary-value text-danger"><?php echo number_format($totalInvoices, 2); ?> ر.س</div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="summary-card" style="border-right: 4px solid #28a745;">
+                <div class="text-muted mb-2">إجمالي المدفوعات</div>
+                <div class="summary-value text-success"><?php echo number_format($totalPayments, 2); ?> ر.س</div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="summary-card" style="border-right: 4px solid #667eea;">
+                <div class="text-muted mb-2">الرصيد المستحق</div>
+                <div class="summary-value text-primary"><?php echo number_format($balance, 2); ?> ر.س</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Report -->
+    <div class="report-card">
+        <div class="customer-header">
+            <h3 style="color: #667eea; margin-bottom: 10px;"><?php echo htmlspecialchars($customerName); ?></h3>
+            <p class="text-muted mb-0">كشف حساب من <?php echo $dateFrom; ?> إلى <?php echo $dateTo; ?></p>
+        </div>
+
+        <table class="statement-table">
+            <thead>
+                <tr>
+                    <th>التاريخ</th>
+                    <th>المرجع</th>
+                    <th>البيان</th>
+                    <th>مدين</th>
+                    <th>دائن</th>
+                    <th>الرصيد</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($transactions)): ?>
+                <tr>
+                    <td colspan="6" class="text-center text-muted">لا توجد حركات في هذه الفترة</td>
+                </tr>
+                <?php else: ?>
+                <?php foreach ($transactions as $trans): ?>
+                <tr>
+                    <td><?php echo $trans['date']; ?></td>
+                    <td><?php echo htmlspecialchars($trans['reference']); ?></td>
+                    <td><?php echo htmlspecialchars($trans['description']); ?></td>
+                    <td class="text-end"><?php echo $trans['debit'] > 0 ? number_format($trans['debit'], 2) : '-'; ?></td>
+                    <td class="text-end"><?php echo $trans['credit'] > 0 ? number_format($trans['credit'], 2) : '-'; ?></td>
+                    <td class="text-end fw-bold"><?php echo number_format($trans['balance'], 2); ?></td>
+                </tr>
+                <?php endforeach; ?>
+                <tr style="background: #e9ecef; font-weight: bold;">
+                    <td colspan="3">الإجمالي</td>
+                    <td class="text-end"><?php echo number_format($totalInvoices, 2); ?></td>
+                    <td class="text-end"><?php echo number_format($totalPayments, 2); ?></td>
+                    <td class="text-end"><?php echo number_format($balance, 2); ?></td>
+                </tr>
+                <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+    <?php else: ?>
+    <!-- No Customer Selected Message -->
+    <div class="report-card text-center py-5">
+        <i class="bi bi-person-badge" style="font-size: 4rem; color: #667eea; opacity: 0.3;"></i>
+        <h4 class="mt-3 text-muted">اختر عميل لعرض كشف الحساب</h4>
+        <p class="text-muted">الرجاء اختيار عميل من القائمة أعلاه وتحديد الفترة الزمنية</p>
+    </div>
+    <?php endif; ?>
+</div>
+
+<?php require("../../../../foter.hnt"); ?>

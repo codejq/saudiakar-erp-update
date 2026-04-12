@@ -9,6 +9,7 @@
 
 $sc_title = "المدفوعات";
 $sc_id = "205";
+$use_accounting_theme = true;
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
     include_once "../../../../reqloginajax.hnt";
@@ -85,11 +86,20 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
             if ($result['success']) {
                 // Update invoice payment status
                 $paidAmount = $invoice['paid_amount'] + $amount;
+                $remainingAmount = max(0, $invoice['total_amount'] - $paidAmount);
                 $paymentStatus = ($paidAmount >= $invoice['total_amount']) ? 'paid' : 'partial';
 
-                $updateQuery = "UPDATE acc_invoices SET paid_amount = ?, payment_status = ? WHERE invoice_id = ?";
+                if (!empty($result['entry_id'])) {
+                    $paymentEntryUpdate = $db->prepare("UPDATE acc_journal_entries SET notes = ? WHERE entry_id = ?");
+                    if ($paymentEntryUpdate) {
+                        $paymentEntryUpdate->bind_param('si', $paymentMethod, $result['entry_id']);
+                        $paymentEntryUpdate->execute();
+                    }
+                }
+
+                $updateQuery = "UPDATE acc_invoices SET paid_amount = ?, remaining_amount = ?, payment_status = ?, payment_method = ? WHERE invoice_id = ?";
                 $stmt = $db->prepare($updateQuery);
-                $stmt->bind_param('dsi', $paidAmount, $paymentStatus, $invoiceId);
+                $stmt->bind_param('ddssi', $paidAmount, $remainingAmount, $paymentStatus, $paymentMethod, $invoiceId);
                 $stmt->execute();
 
                 $response['success'] = true;
@@ -106,10 +116,52 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
 
 // Get recent payments (from journal entries)
 $paymentsQuery = "
-    SELECT je.*, inv.invoice_number, inv.customer_name, inv.total_amount
+    SELECT
+        je.entry_id,
+        je.entry_number,
+        je.entry_date,
+        je.description,
+        je.notes,
+        inv.invoice_id,
+        inv.invoice_number,
+        inv.customer_id,
+        inv.customer_name,
+        inv.payment_status,
+        SUM(ar_line.credit_amount) AS amount,
+        COALESCE(
+            NULLIF(TRIM(je.notes), ''),
+            CASE
+                WHEN MAX(debit_line.account_id) = 3 THEN 'bank_transfer'
+                WHEN MAX(debit_line.account_id) = 2 THEN 'cash'
+                ELSE ''
+            END
+        ) AS payment_method
     FROM acc_journal_entries je
-    LEFT JOIN acc_invoices inv ON je.reference_id = inv.invoice_id AND je.reference_type = 'invoice'
-    WHERE je.entry_type = 'payment'
+    INNER JOIN acc_invoices inv
+        ON je.reference_id = inv.invoice_id
+        AND je.reference_type = 'invoice'
+    INNER JOIN acc_journal_entry_lines ar_line
+        ON je.entry_id = ar_line.entry_id
+        AND ar_line.account_id = 4
+        AND ar_line.credit_amount > 0
+    LEFT JOIN acc_journal_entry_lines debit_line
+        ON je.entry_id = debit_line.entry_id
+        AND debit_line.debit_amount > 0
+        AND debit_line.account_id <> 4
+    WHERE je.status = 'posted'
+        AND je.reference_type = 'invoice'
+        AND je.reference_id IS NOT NULL
+    GROUP BY
+        je.entry_id,
+        je.entry_number,
+        je.entry_date,
+        je.description,
+        je.notes,
+        inv.invoice_id,
+        inv.invoice_number,
+        inv.customer_id,
+        inv.customer_name,
+        inv.payment_status
     ORDER BY je.entry_date DESC, je.entry_id DESC
     LIMIT 50
 ";
@@ -146,16 +198,7 @@ if ($preselectedInvoiceId > 0) {
 
 <style>
 :root {
-    --primary-color: #667eea;
-    --secondary-color: #764ba2;
-}
-
-.page-header {
-    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
-    color: white;
-    padding: 2rem;
-    border-radius: 15px;
-    margin-bottom: 2rem;
+    --primary-color: #4e627f;
 }
 
 .payment-card {
@@ -219,6 +262,9 @@ if ($preselectedInvoiceId > 0) {
                 <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
                     <i class="bi bi-arrow-right me-2"></i>العودة
                 </button>
+                <button class="btn btn-light btn-lg ms-2" onclick="window.location='list.hnt'">
+                    <i class="bi bi-wallet2 me-2"></i>سجل المدفوعات
+                </button>
                 <button class="btn btn-record-payment btn-lg ms-2" onclick="showQuickPaymentModal()">
                     <i class="bi bi-plus-circle me-2"></i>تسجيل دفعة
                 </button>
@@ -230,7 +276,7 @@ if ($preselectedInvoiceId > 0) {
     <div class="row g-3 mb-4">
         <?php
         $totalPayments = count($payments);
-        $totalPaid = array_sum(array_column($payments, 'total_debit'));
+        $totalPaid = array_sum(array_column($payments, 'amount'));
         $unpaidCount = count($unpaidInvoices);
         $unpaidAmount = array_sum(array_column($unpaidInvoices, 'total_amount')) - array_sum(array_column($unpaidInvoices, 'paid_amount'));
         ?>
@@ -315,7 +361,7 @@ if ($preselectedInvoiceId > 0) {
                     </div>
                     <div class="text-end">
                         <div class="h5 mb-0 text-success">
-                            <?php echo number_format($payment['total_debit'], 2); ?> ر.س
+                            <?php echo number_format($payment['amount'], 2); ?> ر.س
                         </div>
                         <small class="text-muted">
                             <i class="bi bi-calendar me-1"></i><?php echo $payment['entry_date']; ?>

@@ -1,0 +1,265 @@
+<?php
+/**
+ * Income Statement Report
+ * قائمة الدخل
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "قائمة الدخل";
+$sc_id = "206";
+$use_accounting_theme = true;
+include_once "../../../../nocash.hnt";
+include_once "../../../../connectdb.hnt";
+include_once "../../../../header.hnt";
+include_once "../../includes/accounting_class.hnt";
+
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+
+// Get date range
+$dateFrom = $_GET['date_from'] ?? date('Y-01-01');
+$dateTo = $_GET['date_to'] ?? date('Y-m-d');
+
+// Get revenue accounts
+$revenueQuery = "
+    SELECT
+        acc.account_id,
+        acc.account_code,
+        acc.account_name_ar,
+        COALESCE(SUM(jel.credit_amount - jel.debit_amount), 0) as amount
+    FROM acc_chart_of_accounts acc
+    LEFT JOIN acc_journal_entry_lines jel ON acc.account_id = jel.account_id
+    LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+        AND je.status = 'posted'
+        AND je.entry_date BETWEEN ? AND ?
+    WHERE acc.account_type = 'revenue' AND acc.is_active = 1
+    GROUP BY acc.account_id
+    HAVING amount != 0
+    ORDER BY acc.account_code
+";
+$stmt = $db->prepare($revenueQuery);
+$stmt->bind_param('ss', $dateFrom, $dateTo);
+$stmt->execute();
+$revenueAccounts = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+// Get expense accounts
+$expenseQuery = "
+    SELECT
+        acc.account_id,
+        acc.account_code,
+        acc.account_name_ar,
+        COALESCE(SUM(jel.debit_amount - jel.credit_amount), 0) as amount
+    FROM acc_chart_of_accounts acc
+    LEFT JOIN acc_journal_entry_lines jel ON acc.account_id = jel.account_id
+    LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+        AND je.status = 'posted'
+        AND je.entry_date BETWEEN ? AND ?
+    WHERE acc.account_type = 'expense' AND acc.is_active = 1
+    GROUP BY acc.account_id
+    HAVING amount != 0
+    ORDER BY acc.account_code
+";
+$stmt = $db->prepare($expenseQuery);
+$stmt->bind_param('ss', $dateFrom, $dateTo);
+$stmt->execute();
+$expenseAccounts = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+// Calculate totals
+$totalRevenue = array_sum(array_column($revenueAccounts, 'amount'));
+$totalExpenses = array_sum(array_column($expenseAccounts, 'amount'));
+$netIncome = $totalRevenue - $totalExpenses;
+?>
+
+
+<style>
+:root {
+    --primary-color: var(--accounting-primary-color, #4e627f);
+}
+
+.report-card {
+    background: white;
+    border-radius: 15px;
+    padding: 2rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.report-section {
+    margin-bottom: 2rem;
+}
+
+.section-header {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+    font-weight: 600;
+}
+
+.account-line {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.account-line:hover {
+    background: #f8f9fa;
+}
+
+.subtotal-line {
+    display: flex;
+    justify-content: space-between;
+    padding: 1rem;
+    background: #f8f9fa;
+    border-radius: 8px;
+    font-weight: 600;
+    margin-top: 1rem;
+}
+
+.net-income {
+    display: flex;
+    justify-content: space-between;
+    padding: 1.5rem;
+    background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+    color: white;
+    border-radius: 12px;
+    font-weight: 700;
+    font-size: 1.2rem;
+    margin-top: 2rem;
+}
+
+.net-loss {
+    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+}
+
+@media print {
+    .no-print {
+        display: none !important;
+    }
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header no-print">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-graph-up me-2"></i>قائمة الدخل
+                </h1>
+                <p class="mb-0 opacity-75">Income Statement</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة
+                </button>
+                <button class="btn btn-light btn-lg ms-2" onclick="window.print()">
+                    <i class="bi bi-printer me-2"></i>طباعة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="card mb-4 no-print" style="border-radius: 15px;">
+        <div class="card-body">
+            <form method="GET" class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label">من تاريخ</label>
+                    <input type="date" class="form-control" name="date_from" value="<?php echo $dateFrom; ?>">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">إلى تاريخ</label>
+                    <input type="date" class="form-control" name="date_to" value="<?php echo $dateTo; ?>">
+                </div>
+                <div class="col-md-4 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary w-100">
+                        <i class="bi bi-search me-2"></i>عرض
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Report -->
+    <div class="report-card">
+        <div class="text-center mb-4">
+            <h3>قائمة الدخل</h3>
+            <p class="text-muted">من <?php echo $dateFrom; ?> إلى <?php echo $dateTo; ?></p>
+        </div>
+
+        <!-- Revenue Section -->
+        <div class="report-section">
+            <div class="section-header">
+                <i class="bi bi-currency-dollar me-2"></i>الإيرادات
+            </div>
+            <?php if (empty($revenueAccounts)): ?>
+            <div class="text-center text-muted py-3">لا توجد إيرادات في هذه الفترة</div>
+            <?php else: ?>
+            <?php foreach ($revenueAccounts as $account): ?>
+            <div class="account-line">
+                <span><?php echo $account['account_code']; ?> - <?php echo $account['account_name_ar']; ?></span>
+                <span><?php echo number_format($account['amount'], 2); ?> ر.س</span>
+            </div>
+            <?php endforeach; ?>
+            <?php endif; ?>
+
+            <div class="subtotal-line">
+                <span>إجمالي الإيرادات</span>
+                <span><?php echo number_format($totalRevenue, 2); ?> ر.س</span>
+            </div>
+        </div>
+
+        <!-- Expenses Section -->
+        <div class="report-section">
+            <div class="section-header">
+                <i class="bi bi-cart-dash me-2"></i>المصروفات
+            </div>
+            <?php if (empty($expenseAccounts)): ?>
+            <div class="text-center text-muted py-3">لا توجد مصروفات في هذه الفترة</div>
+            <?php else: ?>
+            <?php foreach ($expenseAccounts as $account): ?>
+            <div class="account-line">
+                <span><?php echo $account['account_code']; ?> - <?php echo $account['account_name_ar']; ?></span>
+                <span><?php echo number_format($account['amount'], 2); ?> ر.س</span>
+            </div>
+            <?php endforeach; ?>
+            <?php endif; ?>
+
+            <div class="subtotal-line">
+                <span>إجمالي المصروفات</span>
+                <span><?php echo number_format($totalExpenses, 2); ?> ر.س</span>
+            </div>
+        </div>
+
+        <!-- Net Income -->
+        <div class="<?php echo $netIncome >= 0 ? 'net-income' : 'net-income net-loss'; ?>">
+            <span><?php echo $netIncome >= 0 ? 'صافي الربح' : 'صافي الخسارة'; ?></span>
+            <span><?php echo number_format(abs($netIncome), 2); ?> ر.س</span>
+        </div>
+
+        <!-- Summary -->
+        <div class="mt-4 p-3" style="background: #f8f9fa; border-radius: 8px;">
+            <div class="row text-center">
+                <div class="col-md-4">
+                    <div class="h5 mb-0 text-success"><?php echo number_format($totalRevenue, 2); ?></div>
+                    <small class="text-muted">إجمالي الإيرادات</small>
+                </div>
+                <div class="col-md-4">
+                    <div class="h5 mb-0 text-danger"><?php echo number_format($totalExpenses, 2); ?></div>
+                    <small class="text-muted">إجمالي المصروفات</small>
+                </div>
+                <div class="col-md-4">
+                    <div class="h5 mb-0 <?php echo $netIncome >= 0 ? 'text-primary' : 'text-warning'; ?>">
+                        <?php echo number_format(abs($netIncome), 2); ?>
+                    </div>
+                    <small class="text-muted"><?php echo $netIncome >= 0 ? 'صافي الربح' : 'صافي الخسارة'; ?></small>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<?php require("../../../../foter.hnt"); ?>
