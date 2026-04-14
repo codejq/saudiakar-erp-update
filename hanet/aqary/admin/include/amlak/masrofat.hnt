@@ -54,14 +54,21 @@ if (isset($_POST['idaqar']) && isset($_POST['amount']) && $_POST['idaqar'] && $_
     $payedby = isset($_POST['payedby']) ? mysql_real_escape_string($_POST['payedby'], $link) : '';
     $payeddue = isset($_POST['payeddue']) ? mysql_real_escape_string($_POST['payeddue'], $link) : '';
 
-    // Process date
-    $payeddate = isset($_POST['payeddate']) ? $_POST['payeddate'] : date('d/m/Y');
-    $payeddate_parts = explode("/", $payeddate);
-    if (count($payeddate_parts) == 3 && $payeddate_parts[2] < 1700) {
+    // Process date — handle both d/m/Y (Arabic slash) and Y-m-d (ISO from grid)
+    $payeddate = isset($_POST['payeddate']) ? trim($_POST['payeddate']) : date('d/m/Y');
+    if (strpos($payeddate, '-') !== false) {
+        // ISO format Y-m-d → split into [day, month, year]
+        $iso = explode('-', $payeddate);
+        $payeddate_parts = [(int)($iso[2] ?? 1), (int)($iso[1] ?? 1), (int)($iso[0] ?? date('Y'))];
+    } else {
+        $tmp = explode('/', $payeddate);
+        $payeddate_parts = [(int)($tmp[0] ?? 1), (int)($tmp[1] ?? 1), (int)($tmp[2] ?? date('Y'))];
+    }
+    if ($payeddate_parts[2] < 1700) {
         $dateo = $dcal->u2g($payeddate_parts[0], $payeddate_parts[1], $payeddate_parts[2]);
-        $payeddate_parts[0] = $dateo['day'];
-        $payeddate_parts[1] = $dateo['month'];
-        $payeddate_parts[2] = $dateo['year'];
+        $payeddate_parts[0] = (int)$dateo['day'];
+        $payeddate_parts[1] = (int)$dateo['month'];
+        $payeddate_parts[2] = (int)$dateo['year'];
     }
     $payeddate_unix = mktime(0, 0, 0, $payeddate_parts[1], $payeddate_parts[0], $payeddate_parts[2]);
 
@@ -422,9 +429,10 @@ $(document).ready(function() {
                     } else {
                         alert(response.message);
                     }
-                    // Clear form
+                    // Clear form and reset button
                     $('#payedby, #payeddue, #amount').val('');
                     $('#idmasrof').val('');
+                    $('#mafrofatsubmit').html('<i class="bi bi-check-circle me-2"></i>إدخال إلى المصروفات');
                     fillmasrofat();
                 } else {
                     if (typeof showBootstrapNotification === 'function') {
@@ -538,7 +546,8 @@ $(document).ready(function() {
             $('#payeddate').val(result[4]);
             // fund_source: result[5] is 'المالك' or 'المكتب'
             $('#fund_source').val(result[5] === 'المالك' ? '1' : '0');
-            $('#mafrofatsubmit').prop('disabled', false);
+            $('#mafrofatsubmit').prop('disabled', false)
+                .html('<i class="bi bi-floppy me-2"></i>حفظ المصروف');
         }
 
         $('html, body').animate({ scrollTop: $('#masrofatForm').offset().top - 20 }, 300);
