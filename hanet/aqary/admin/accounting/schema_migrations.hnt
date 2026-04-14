@@ -1,0 +1,191 @@
+<?php
+function runAccountingSchemaMigrations($db) {
+    $errors = [];
+
+    $invoiceColumnMigrations = [
+        'journal_id' => "ALTER TABLE acc_invoices ADD COLUMN journal_id INT NULL AFTER due_date",
+        'cost_center_id' => "ALTER TABLE acc_invoices ADD COLUMN cost_center_id INT NULL AFTER journal_id",
+        'tenant_id' => "ALTER TABLE acc_invoices ADD COLUMN tenant_id INT NULL AFTER cost_center_id",
+        'owner_id' => "ALTER TABLE acc_invoices ADD COLUMN owner_id INT NULL AFTER tenant_id",
+        'aqar_id' => "ALTER TABLE acc_invoices ADD COLUMN aqar_id INT NULL AFTER owner_id",
+        'subaqar_id' => "ALTER TABLE acc_invoices ADD COLUMN subaqar_id INT NULL AFTER aqar_id",
+        'egar_id' => "ALTER TABLE acc_invoices ADD COLUMN egar_id INT NULL AFTER subaqar_id",
+        'vat_rate' => "ALTER TABLE acc_invoices ADD COLUMN vat_rate DECIMAL(5,2) DEFAULT 15.00 AFTER subtotal",
+        'remaining_amount' => "ALTER TABLE acc_invoices ADD COLUMN remaining_amount DECIMAL(15,2) DEFAULT 0 AFTER paid_amount",
+        'payment_method' => "ALTER TABLE acc_invoices ADD COLUMN payment_method VARCHAR(50) NULL AFTER payment_status",
+        'status' => "ALTER TABLE acc_invoices ADD COLUMN status ENUM('draft','approved','posted','cancelled') DEFAULT 'draft' AFTER payment_status",
+        'updated_at' => "ALTER TABLE acc_invoices ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at"
+    ];
+
+    foreach ($invoiceColumnMigrations as $columnName => $alterSql) {
+        $columnCheck = $db->query("SHOW COLUMNS FROM acc_invoices LIKE '{$columnName}'");
+        if (!$columnCheck) {
+            $errors[] = 'فشل في فحص أعمدة جدول الفواتير: ' . $db->error;
+            continue;
+        }
+        if ($columnCheck->num_rows == 0 && !$db->query($alterSql)) {
+            $errors[] = 'فشل في تحديث بنية جدول الفواتير: ' . $db->error;
+        }
+    }
+
+    $journalTableCheck = $db->query("SHOW TABLES LIKE 'acc_journals'");
+    if (!$journalTableCheck) {
+        $errors[] = 'فشل في فحص جدول اليومية: ' . $db->error;
+    } elseif ($journalTableCheck->num_rows == 0) {
+        $createJournalTableSql = "CREATE TABLE acc_journals (
+            journal_id INT(11) NOT NULL AUTO_INCREMENT,
+            journal_code VARCHAR(50) NOT NULL,
+            journal_name_ar VARCHAR(255) NOT NULL,
+            journal_name_en VARCHAR(255) DEFAULT NULL,
+            journal_type VARCHAR(50) DEFAULT 'general',
+            is_active TINYINT(1) DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            formuid VARCHAR(500) NOT NULL,
+            PRIMARY KEY (journal_id),
+            UNIQUE KEY idx_journal_code (journal_code),
+            KEY idx_journal_active (is_active)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+        if (!$db->query($createJournalTableSql)) {
+            $errors[] = 'فشل في إنشاء جدول اليوميات: ' . $db->error;
+        }
+    }
+
+    $defaultJournals = [
+        [
+            'journal_code' => 'GEN',
+            'journal_name_ar' => 'دفتر اليومية العام',
+            'journal_name_en' => 'General Journal',
+            'journal_type' => 'general'
+        ],
+        [
+            'journal_code' => 'REC',
+            'journal_name_ar' => 'دفتر المقبوضات',
+            'journal_name_en' => 'Receipts Journal',
+            'journal_type' => 'receipt'
+        ],
+        [
+            'journal_code' => 'PAY',
+            'journal_name_ar' => 'دفتر المدفوعات',
+            'journal_name_en' => 'Payments Journal',
+            'journal_type' => 'payment'
+        ],
+        [
+            'journal_code' => 'SAL',
+            'journal_name_ar' => 'دفتر المبيعات',
+            'journal_name_en' => 'Sales Journal',
+            'journal_type' => 'sales'
+        ],
+        [
+            'journal_code' => 'ADJ',
+            'journal_name_ar' => 'دفتر التسويات',
+            'journal_name_en' => 'Adjustments Journal',
+            'journal_type' => 'adjustment'
+        ]
+    ];
+
+    foreach ($defaultJournals as $journal) {
+        $journalCheck = $db->query("SELECT journal_id FROM acc_journals WHERE journal_code = '" . $db->real_escape_string($journal['journal_code']) . "' LIMIT 1");
+        if (!$journalCheck) {
+            $errors[] = 'فشل في فحص اليوميات الافتراضية: ' . $db->error;
+            continue;
+        }
+        if ($journalCheck->num_rows == 0) {
+            $journalInsert = $db->prepare("INSERT INTO acc_journals (journal_code, journal_name_ar, journal_name_en, journal_type, is_active, formuid) VALUES (?, ?, ?, ?, 1, UUID())");
+            if (!$journalInsert) {
+                $errors[] = 'فشل في تجهيز إدراج دفتر يومية افتراضي: ' . $db->error;
+                continue;
+            }
+            $journalInsert->bind_param('ssss', $journal['journal_code'], $journal['journal_name_ar'], $journal['journal_name_en'], $journal['journal_type']);
+            if (!$journalInsert->execute()) {
+                $errors[] = 'فشل في إضافة دفتر يومية افتراضي: ' . $journalInsert->error;
+            }
+            $journalInsert->close();
+        }
+    }
+
+    $costCenterTableCheck = $db->query("SHOW TABLES LIKE 'acc_cost_centers'");
+    if (!$costCenterTableCheck) {
+        $errors[] = 'فشل في فحص جدول مراكز التكلفة: ' . $db->error;
+    } elseif ($costCenterTableCheck->num_rows == 0) {
+        $createCostCenterTableSql = "CREATE TABLE acc_cost_centers (
+            cost_center_id INT(11) NOT NULL AUTO_INCREMENT,
+            cost_center_code VARCHAR(50) NOT NULL,
+            cost_center_name_ar VARCHAR(255) NOT NULL,
+            cost_center_name_en VARCHAR(255) DEFAULT NULL,
+            parent_cost_center_id INT(11) DEFAULT NULL,
+            aqar_id INT(11) DEFAULT NULL,
+            subaqar_id INT(11) DEFAULT NULL,
+            is_active TINYINT(1) DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            formuid VARCHAR(500) NOT NULL,
+            PRIMARY KEY (cost_center_id),
+            UNIQUE KEY idx_cost_center_code (cost_center_code),
+            KEY idx_cost_center_parent (parent_cost_center_id),
+            KEY idx_cost_center_aqar (aqar_id),
+            KEY idx_cost_center_subaqar (subaqar_id),
+            KEY idx_cost_center_active (is_active)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+        if (!$db->query($createCostCenterTableSql)) {
+            $errors[] = 'فشل في إنشاء جدول مراكز التكلفة: ' . $db->error;
+        }
+    }
+
+    $journalEntryColumnMigrations = [
+        'journal_id' => "ALTER TABLE acc_journal_entries ADD COLUMN journal_id INT(11) NULL AFTER entry_type",
+        'tenant_id' => "ALTER TABLE acc_journal_entries ADD COLUMN tenant_id INT(11) NULL AFTER journal_id",
+        'owner_id' => "ALTER TABLE acc_journal_entries ADD COLUMN owner_id INT(11) NULL AFTER tenant_id",
+        'aqar_id' => "ALTER TABLE acc_journal_entries ADD COLUMN aqar_id INT(11) NULL AFTER owner_id",
+        'subaqar_id' => "ALTER TABLE acc_journal_entries ADD COLUMN subaqar_id INT(11) NULL AFTER aqar_id",
+        'egar_id' => "ALTER TABLE acc_journal_entries ADD COLUMN egar_id INT(11) NULL AFTER subaqar_id",
+        'sanad_id' => "ALTER TABLE acc_journal_entries ADD COLUMN sanad_id INT(11) NULL AFTER egar_id",
+        'masrofat_id' => "ALTER TABLE acc_journal_entries ADD COLUMN masrofat_id INT(11) NULL AFTER sanad_id",
+        'invoice_id' => "ALTER TABLE acc_journal_entries ADD COLUMN invoice_id INT(11) NULL AFTER masrofat_id"
+    ];
+
+    foreach ($journalEntryColumnMigrations as $columnName => $alterSql) {
+        $columnCheck = $db->query("SHOW COLUMNS FROM acc_journal_entries LIKE '{$columnName}'");
+        if (!$columnCheck) {
+            $errors[] = 'فشل في فحص أعمدة القيود اليومية: ' . $db->error;
+            continue;
+        }
+        if ($columnCheck->num_rows == 0 && !$db->query($alterSql)) {
+            $errors[] = 'فشل في تحديث جدول القيود اليومية: ' . $db->error;
+        }
+    }
+
+    $journalEntryIndexes = [
+        'idx_journal_entries_journal_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_journal_id (journal_id)",
+        'idx_journal_entries_tenant_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_tenant_id (tenant_id)",
+        'idx_journal_entries_owner_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_owner_id (owner_id)",
+        'idx_journal_entries_aqar_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_aqar_id (aqar_id)",
+        'idx_journal_entries_subaqar_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_subaqar_id (subaqar_id)",
+        'idx_journal_entries_egar_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_egar_id (egar_id)",
+        'idx_journal_entries_reference' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_reference (reference_type, reference_id)"
+    ];
+
+    foreach ($journalEntryIndexes as $indexName => $alterSql) {
+        $indexCheck = $db->query("SHOW INDEX FROM acc_journal_entries WHERE Key_name = '{$indexName}'");
+        if (!$indexCheck) {
+            $errors[] = 'فشل في فحص فهارس القيود اليومية: ' . $db->error;
+            continue;
+        }
+        if ($indexCheck->num_rows == 0 && !$db->query($alterSql)) {
+            $errors[] = 'فشل في إضافة فهرس إلى جدول القيود اليومية: ' . $db->error;
+        }
+    }
+
+    $lineCostCenterIndexCheck = $db->query("SHOW INDEX FROM acc_journal_entry_lines WHERE Key_name = 'idx_cost_center_id'");
+    if (!$lineCostCenterIndexCheck) {
+        $errors[] = 'فشل في فحص فهرس مراكز التكلفة في بنود القيود: ' . $db->error;
+    } elseif ($lineCostCenterIndexCheck->num_rows == 0 && !$db->query("ALTER TABLE acc_journal_entry_lines ADD INDEX idx_cost_center_id (cost_center_id)")) {
+        $errors[] = 'فشل في إضافة فهرس مراكز التكلفة في بنود القيود: ' . $db->error;
+    }
+
+    return [
+        'success' => count($errors) === 0,
+        'message' => count($errors) === 0 ? '' : implode("\n", $errors),
+        'errors' => $errors
+    ];
+}

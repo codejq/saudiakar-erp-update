@@ -8,10 +8,15 @@
  * @author Real Estate System
  */
 
+include_once dirname(__DIR__) . "/schema_migrations.hnt";
+
 class AccountingManager {
     private $db;
     private $userId;
     private $fiscalYear;
+    private $schemaMigrationErrors = [];
+    private $propertyMetadataCache = [];
+    private $tenantNameCache = [];
     
     public function __construct($db, $userId) {
         if (!$db) {
@@ -19,7 +24,15 @@ class AccountingManager {
         }
         $this->db = $db;
         $this->userId = $userId;
+        $migrationResult = runAccountingSchemaMigrations($this->db);
+        if (!$migrationResult['success']) {
+            $this->schemaMigrationErrors = $migrationResult['errors'] ?? [$migrationResult['message'] ?? 'Schema migration error'];
+        }
         $this->fiscalYear = $this->getCurrentFiscalYear();
+    }
+
+    public function getSchemaMigrationErrors() {
+        return $this->schemaMigrationErrors;
     }
     
     // ============================================
@@ -252,6 +265,12 @@ class AccountingManager {
             $params[] = $filters['is_leaf'];
             $types .= "i";
         }
+
+        if (isset($filters['account_category'])) {
+            $sql .= " AND account_category = ?";
+            $params[] = $filters['account_category'];
+            $types .= "s";
+        }
         
         $sql .= " ORDER BY account_code";
         
@@ -268,6 +287,27 @@ class AccountingManager {
         }
         
         return $accounts;
+    }
+
+    public function getActiveCustomers() {
+        $customers = [];
+        $result = $this->db->query("SELECT customer_id, customer_name, customer_code FROM acc_customers WHERE is_active = 1 ORDER BY customer_name ASC");
+        if ($result) {
+            while ($row = $result->fetch_assoc()) {
+                $customers[] = $row;
+            }
+        }
+
+        return $customers;
+    }
+
+    public function getCashBankAccounts() {
+        return $this->getAllAccounts([
+            'account_type' => 'asset',
+            'is_active' => 1,
+            'is_leaf' => 1,
+            'account_category' => 'cash'
+        ]);
     }
     
     /**
@@ -328,24 +368,62 @@ class AccountingManager {
         
         // Generate entry number
         $entryNumber = $this->generateEntryNumber();
+
+        $journalId = isset($data['journal_id']) && $data['journal_id'] !== '' ? (int)$data['journal_id'] : null;
+        if ($journalId) {
+            $journalCheck = $this->db->prepare("SELECT journal_id FROM acc_journals WHERE journal_id = ? AND is_active = 1 LIMIT 1");
+            if (!$journalCheck) {
+                return ['success' => false, 'error' => $this->db->error, 'message' => 'فشل في التحقق من دفتر اليومية'];
+            }
+            $journalCheck->bind_param("i", $journalId);
+            $journalCheck->execute();
+            $journalExists = $journalCheck->get_result()->fetch_assoc();
+            $journalCheck->close();
+            if (!$journalExists) {
+                return ['success' => false, 'error' => 'Invalid journal', 'message' => 'دفتر اليومية المحدد غير موجود أو غير نشط'];
+            }
+        }
+
+        $tenantId = isset($data['tenant_id']) && $data['tenant_id'] !== '' ? (int)$data['tenant_id'] : null;
+        $ownerId = isset($data['owner_id']) && $data['owner_id'] !== '' ? (int)$data['owner_id'] : null;
+        $aqarId = isset($data['aqar_id']) && $data['aqar_id'] !== '' ? (int)$data['aqar_id'] : null;
+        $subaqarId = isset($data['subaqar_id']) && $data['subaqar_id'] !== '' ? (int)$data['subaqar_id'] : null;
+        $egarId = isset($data['egar_id']) && $data['egar_id'] !== '' ? (int)$data['egar_id'] : null;
+        $sanadId = isset($data['sanad_id']) && $data['sanad_id'] !== '' ? (int)$data['sanad_id'] : null;
+        $masrofatId = isset($data['masrofat_id']) && $data['masrofat_id'] !== '' ? (int)$data['masrofat_id'] : null;
+        $invoiceId = isset($data['invoice_id']) && $data['invoice_id'] !== '' ? (int)$data['invoice_id'] : null;
         
         // Insert entry header
         $requestedStatus = $data['status'] ?? 'draft';
         $status = $requestedStatus == 'posted' ? 'draft' : $requestedStatus;
         $stmt = $this->db->prepare("
             INSERT INTO acc_journal_entries 
-            (entry_number, entry_date, entry_type, reference_type, reference_id,
-             description, total_debit, total_credit, fiscal_year, fiscal_period,
-             status, created_by, formuid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UUID())
+            (entry_number, entry_date, entry_type, journal_id, tenant_id, owner_id,
+             aqar_id, subaqar_id, egar_id, sanad_id, masrofat_id, invoice_id,
+             reference_type, reference_id, description, total_debit, total_credit,
+             fiscal_year, fiscal_period, status, created_by, formuid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UUID())
         ");
+
+        if (!$stmt) {
+            return ['success' => false, 'error' => $this->db->error, 'message' => 'فشل في تجهيز القيد المحاسبي'];
+        }
         
         $fiscalPeriod = (int)date('m', strtotime($data['entry_date']));
         
-        $stmt->bind_param("ssssissdiisi",
+        $stmt->bind_param("sssiiiiiiiiisisddiisi",
             $entryNumber,
             $data['entry_date'],
             $data['entry_type'],
+            $journalId,
+            $tenantId,
+            $ownerId,
+            $aqarId,
+            $subaqarId,
+            $egarId,
+            $sanadId,
+            $masrofatId,
+            $invoiceId,
             $data['reference_type'],
             $data['reference_id'],
             $data['description'],
@@ -371,8 +449,14 @@ class AccountingManager {
                  debit_amount, credit_amount, cost_center_id, formuid)
                 VALUES (?, ?, ?, ?, ?, ?, ?, UUID())
             ");
+
+            if (!$stmt) {
+                $this->db->query("DELETE FROM acc_journal_entries WHERE entry_id = $entryId");
+                return ['success' => false, 'error' => $this->db->error, 'message' => 'فشل في تجهيز بنود القيد'];
+            }
             
             $lineNumber = $index + 1;
+            $costCenterId = isset($line['cost_center_id']) && $line['cost_center_id'] !== '' ? (int)$line['cost_center_id'] : null;
             $stmt->bind_param("iiisddi",
                 $entryId,
                 $line['account_id'],
@@ -380,7 +464,7 @@ class AccountingManager {
                 $line['description'],
                 $line['debit_amount'],
                 $line['credit_amount'],
-                $line['cost_center_id']
+                $costCenterId
             );
             
             if (!$stmt->execute()) {
@@ -482,6 +566,689 @@ class AccountingManager {
         
         return sprintf("%s-%s-%05d", $prefix, $year, $nextNum);
     }
+
+    public function getActiveJournals() {
+        $journals = [];
+        $result = $this->db->query("SELECT journal_id, journal_code, journal_name_ar, journal_name_en, journal_type FROM acc_journals WHERE is_active = 1 ORDER BY journal_code ASC");
+        if ($result) {
+            while ($row = $result->fetch_assoc()) {
+                $journals[] = $row;
+            }
+        }
+
+        return $journals;
+    }
+
+    public function getDefaultJournalIdByCode($journalCode) {
+        $stmt = $this->db->prepare("SELECT journal_id FROM acc_journals WHERE journal_code = ? AND is_active = 1 LIMIT 1");
+        if (!$stmt) {
+            return null;
+        }
+
+        $stmt->bind_param("s", $journalCode);
+        $stmt->execute();
+        $result = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $result['journal_id'] ?? null;
+    }
+
+    public function getActiveCostCenters() {
+        $costCenters = [];
+        $result = $this->db->query("SELECT cost_center_id, cost_center_code, cost_center_name_ar, cost_center_name_en, aqar_id, subaqar_id FROM acc_cost_centers WHERE is_active = 1 ORDER BY cost_center_code ASC");
+        if ($result) {
+            while ($row = $result->fetch_assoc()) {
+                $costCenters[] = $row;
+            }
+        }
+
+        return $costCenters;
+    }
+
+    public function getCostCenterByAqarId($aqarId) {
+        $aqarId = (int)$aqarId;
+        if ($aqarId <= 0) {
+            return null;
+        }
+
+        $stmt = $this->db->prepare("SELECT * FROM acc_cost_centers WHERE aqar_id = ? ORDER BY cost_center_id ASC LIMIT 1");
+        if (!$stmt) {
+            return null;
+        }
+
+        $stmt->bind_param("i", $aqarId);
+        $stmt->execute();
+        $result = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $result ?: null;
+    }
+
+    public function ensurePropertyCostCenter($aqarId, $propertyName, $subaqarId = null) {
+        $aqarId = (int)$aqarId;
+        $subaqarId = !empty($subaqarId) ? (int)$subaqarId : null;
+        if ($aqarId <= 0) {
+            return ['success' => false, 'message' => 'رقم العقار غير صالح'];
+        }
+
+        $existing = $this->getCostCenterByAqarId($aqarId);
+        if ($existing) {
+            return ['success' => true, 'cost_center' => $existing, 'created' => false];
+        }
+
+        $costCenterCode = 'AQR-' . str_pad((string)$aqarId, 5, '0', STR_PAD_LEFT);
+        $costCenterName = trim((string)$propertyName) !== '' ? trim((string)$propertyName) : ('عقار رقم ' . $aqarId);
+
+        $stmt = $this->db->prepare("INSERT INTO acc_cost_centers (cost_center_code, cost_center_name_ar, cost_center_name_en, parent_cost_center_id, aqar_id, subaqar_id, is_active, formuid) VALUES (?, ?, ?, NULL, ?, ?, 1, UUID())");
+        if (!$stmt) {
+            return ['success' => false, 'message' => 'فشل في تجهيز مركز التكلفة: ' . $this->db->error];
+        }
+
+        $costCenterNameEn = $costCenterName;
+        $stmt->bind_param("sssii", $costCenterCode, $costCenterName, $costCenterNameEn, $aqarId, $subaqarId);
+
+        if (!$stmt->execute()) {
+            $error = $stmt->error;
+            $stmt->close();
+
+            if (strpos($error, 'Duplicate entry') !== false) {
+                $existing = $this->getCostCenterByAqarId($aqarId);
+                if ($existing) {
+                    return ['success' => true, 'cost_center' => $existing, 'created' => false];
+                }
+            }
+
+            return ['success' => false, 'message' => 'فشل في إنشاء مركز التكلفة: ' . $error];
+        }
+
+        $costCenterId = $stmt->insert_id;
+        $stmt->close();
+
+        return [
+            'success' => true,
+            'created' => true,
+            'cost_center' => [
+                'cost_center_id' => $costCenterId,
+                'cost_center_code' => $costCenterCode,
+                'cost_center_name_ar' => $costCenterName,
+                'cost_center_name_en' => $costCenterNameEn,
+                'aqar_id' => $aqarId,
+                'subaqar_id' => $subaqarId
+            ]
+        ];
+    }
+
+    public function getJournals($activeOnly = false) {
+        $journals = [];
+        $sql = "SELECT * FROM acc_journals";
+        if ($activeOnly) {
+            $sql .= " WHERE is_active = 1";
+        }
+        $sql .= " ORDER BY journal_code ASC, journal_id ASC";
+
+        $result = $this->db->query($sql);
+        if ($result) {
+            while ($row = $result->fetch_assoc()) {
+                $journals[] = $row;
+            }
+        }
+
+        return $journals;
+    }
+
+    public function getJournal($journalId) {
+        $journalId = (int)$journalId;
+        if ($journalId <= 0) {
+            return null;
+        }
+
+        $stmt = $this->db->prepare("SELECT * FROM acc_journals WHERE journal_id = ? LIMIT 1");
+        if (!$stmt) {
+            return null;
+        }
+
+        $stmt->bind_param("i", $journalId);
+        $stmt->execute();
+        $result = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $result ?: null;
+    }
+
+    public function saveJournal($data, $journalId = null) {
+        $journalCode = trim((string)($data['journal_code'] ?? ''));
+        $journalNameAr = trim((string)($data['journal_name_ar'] ?? ''));
+        $journalNameEn = trim((string)($data['journal_name_en'] ?? ''));
+        $journalType = trim((string)($data['journal_type'] ?? 'general'));
+        $isActive = isset($data['is_active']) ? (int)$data['is_active'] : 1;
+
+        if ($journalCode === '') {
+            return ['success' => false, 'message' => 'رمز دفتر اليومية مطلوب'];
+        }
+
+        if ($journalNameAr === '') {
+            return ['success' => false, 'message' => 'اسم دفتر اليومية بالعربية مطلوب'];
+        }
+
+        if ($journalId) {
+            $stmt = $this->db->prepare("UPDATE acc_journals SET journal_code = ?, journal_name_ar = ?, journal_name_en = ?, journal_type = ?, is_active = ? WHERE journal_id = ?");
+            if (!$stmt) {
+                return ['success' => false, 'message' => 'فشل في تجهيز تحديث دفتر اليومية: ' . $this->db->error];
+            }
+            $journalId = (int)$journalId;
+            $stmt->bind_param("ssssii", $journalCode, $journalNameAr, $journalNameEn, $journalType, $isActive, $journalId);
+        } else {
+            $stmt = $this->db->prepare("INSERT INTO acc_journals (journal_code, journal_name_ar, journal_name_en, journal_type, is_active, formuid) VALUES (?, ?, ?, ?, ?, UUID())");
+            if (!$stmt) {
+                return ['success' => false, 'message' => 'فشل في تجهيز إضافة دفتر اليومية: ' . $this->db->error];
+            }
+            $stmt->bind_param("ssssi", $journalCode, $journalNameAr, $journalNameEn, $journalType, $isActive);
+        }
+
+        if (!$stmt->execute()) {
+            $error = $stmt->error;
+            $stmt->close();
+            if (strpos($error, 'Duplicate entry') !== false) {
+                return ['success' => false, 'message' => 'رمز دفتر اليومية مستخدم بالفعل'];
+            }
+            return ['success' => false, 'message' => 'فشل في حفظ دفتر اليومية: ' . $error];
+        }
+
+        $savedId = $journalId ?: $stmt->insert_id;
+        $stmt->close();
+
+        return ['success' => true, 'journal_id' => $savedId];
+    }
+
+    public function toggleJournalStatus($journalId) {
+        $journal = $this->getJournal($journalId);
+        if (!$journal) {
+            return ['success' => false, 'message' => 'دفتر اليومية غير موجود'];
+        }
+
+        $newStatus = $journal['is_active'] ? 0 : 1;
+        $stmt = $this->db->prepare("UPDATE acc_journals SET is_active = ? WHERE journal_id = ?");
+        if (!$stmt) {
+            return ['success' => false, 'message' => 'فشل في تجهيز تحديث حالة دفتر اليومية: ' . $this->db->error];
+        }
+
+        $journalId = (int)$journalId;
+        $stmt->bind_param("ii", $newStatus, $journalId);
+        if (!$stmt->execute()) {
+            $error = $stmt->error;
+            $stmt->close();
+            return ['success' => false, 'message' => 'فشل في تحديث حالة دفتر اليومية: ' . $error];
+        }
+        $stmt->close();
+
+        return ['success' => true, 'is_active' => $newStatus];
+    }
+
+    public function getCostCenters($activeOnly = false) {
+        $costCenters = [];
+        $sql = "SELECT * FROM acc_cost_centers";
+        if ($activeOnly) {
+            $sql .= " WHERE is_active = 1";
+        }
+        $sql .= " ORDER BY cost_center_code ASC, cost_center_id ASC";
+
+        $result = $this->db->query($sql);
+        if ($result) {
+            while ($row = $result->fetch_assoc()) {
+                $costCenters[] = $row;
+            }
+        }
+
+        return $costCenters;
+    }
+
+    public function getCostCenter($costCenterId) {
+        $costCenterId = (int)$costCenterId;
+        if ($costCenterId <= 0) {
+            return null;
+        }
+
+        $stmt = $this->db->prepare("SELECT * FROM acc_cost_centers WHERE cost_center_id = ? LIMIT 1");
+        if (!$stmt) {
+            return null;
+        }
+
+        $stmt->bind_param("i", $costCenterId);
+        $stmt->execute();
+        $result = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $result ?: null;
+    }
+
+    public function saveCostCenter($data, $costCenterId = null) {
+        $costCenterCode = trim((string)($data['cost_center_code'] ?? ''));
+        $costCenterNameAr = trim((string)($data['cost_center_name_ar'] ?? ''));
+        $costCenterNameEn = trim((string)($data['cost_center_name_en'] ?? ''));
+        $parentCostCenterId = !empty($data['parent_cost_center_id']) ? (int)$data['parent_cost_center_id'] : null;
+        $aqarId = !empty($data['aqar_id']) ? (int)$data['aqar_id'] : null;
+        $subaqarId = !empty($data['subaqar_id']) ? (int)$data['subaqar_id'] : null;
+        $isActive = isset($data['is_active']) ? (int)$data['is_active'] : 1;
+
+        if ($costCenterCode === '') {
+            return ['success' => false, 'message' => 'رمز مركز التكلفة مطلوب'];
+        }
+
+        if ($costCenterNameAr === '') {
+            return ['success' => false, 'message' => 'اسم مركز التكلفة بالعربية مطلوب'];
+        }
+
+        if ($costCenterId) {
+            $stmt = $this->db->prepare("UPDATE acc_cost_centers SET cost_center_code = ?, cost_center_name_ar = ?, cost_center_name_en = ?, parent_cost_center_id = ?, aqar_id = ?, subaqar_id = ?, is_active = ? WHERE cost_center_id = ?");
+            if (!$stmt) {
+                return ['success' => false, 'message' => 'فشل في تجهيز تحديث مركز التكلفة: ' . $this->db->error];
+            }
+            $costCenterId = (int)$costCenterId;
+            $stmt->bind_param("sssiiiii", $costCenterCode, $costCenterNameAr, $costCenterNameEn, $parentCostCenterId, $aqarId, $subaqarId, $isActive, $costCenterId);
+        } else {
+            $stmt = $this->db->prepare("INSERT INTO acc_cost_centers (cost_center_code, cost_center_name_ar, cost_center_name_en, parent_cost_center_id, aqar_id, subaqar_id, is_active, formuid) VALUES (?, ?, ?, ?, ?, ?, ?, UUID())");
+            if (!$stmt) {
+                return ['success' => false, 'message' => 'فشل في تجهيز إضافة مركز التكلفة: ' . $this->db->error];
+            }
+            $stmt->bind_param("sssiiii", $costCenterCode, $costCenterNameAr, $costCenterNameEn, $parentCostCenterId, $aqarId, $subaqarId, $isActive);
+        }
+
+        if (!$stmt->execute()) {
+            $error = $stmt->error;
+            $stmt->close();
+            if (strpos($error, 'Duplicate entry') !== false) {
+                return ['success' => false, 'message' => 'رمز مركز التكلفة مستخدم بالفعل'];
+            }
+            return ['success' => false, 'message' => 'فشل في حفظ مركز التكلفة: ' . $error];
+        }
+
+        $savedId = $costCenterId ?: $stmt->insert_id;
+        $stmt->close();
+
+        return ['success' => true, 'cost_center_id' => $savedId];
+    }
+
+    public function toggleCostCenterStatus($costCenterId) {
+        $costCenter = $this->getCostCenter($costCenterId);
+        if (!$costCenter) {
+            return ['success' => false, 'message' => 'مركز التكلفة غير موجود'];
+        }
+
+        $newStatus = $costCenter['is_active'] ? 0 : 1;
+        $stmt = $this->db->prepare("UPDATE acc_cost_centers SET is_active = ? WHERE cost_center_id = ?");
+        if (!$stmt) {
+            return ['success' => false, 'message' => 'فشل في تجهيز تحديث حالة مركز التكلفة: ' . $this->db->error];
+        }
+
+        $costCenterId = (int)$costCenterId;
+        $stmt->bind_param("ii", $newStatus, $costCenterId);
+        if (!$stmt->execute()) {
+            $error = $stmt->error;
+            $stmt->close();
+            return ['success' => false, 'message' => 'فشل في تحديث حالة مركز التكلفة: ' . $error];
+        }
+        $stmt->close();
+
+        return ['success' => true, 'is_active' => $newStatus];
+    }
+
+    private function getTenantDisplayName($tenantId) {
+        $tenantId = (int)$tenantId;
+        if ($tenantId <= 0) {
+            return '';
+        }
+
+        if (isset($this->tenantNameCache[$tenantId])) {
+            return $this->tenantNameCache[$tenantId];
+        }
+
+        $tenantName = '';
+        $stmt = $this->db->prepare("SELECT mostagername FROM mostagereen WHERE mostagerid = ? LIMIT 1");
+        if ($stmt) {
+            $stmt->bind_param("i", $tenantId);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $tenantName = $row['mostagername'] ?? '';
+            $stmt->close();
+        }
+
+        $this->tenantNameCache[$tenantId] = $tenantName;
+        return $tenantName;
+    }
+
+    public function getPropertyMetadata($aqarId) {
+        $aqarId = (int)$aqarId;
+        if ($aqarId <= 0) {
+            return [
+                'property_id' => 0,
+                'property_name' => 'غير محدد',
+                'property_type' => 'other'
+            ];
+        }
+
+        if (isset($this->propertyMetadataCache[$aqarId])) {
+            return $this->propertyMetadataCache[$aqarId];
+        }
+
+        $propertyName = 'عقار #' . $aqarId;
+        $propertyType = 'other';
+
+        $amlakStmt = $this->db->prepare("SELECT aqarname FROM amlak WHERE idaqar = ? LIMIT 1");
+        if ($amlakStmt) {
+            $amlakStmt->bind_param("i", $aqarId);
+            $amlakStmt->execute();
+            $amlakRow = $amlakStmt->get_result()->fetch_assoc();
+            if (!empty($amlakRow['aqarname'])) {
+                $propertyName = $amlakRow['aqarname'];
+            }
+            $amlakStmt->close();
+        }
+
+        $stmt = $this->db->prepare("SELECT emararakam FROM emara WHERE emaraid = ? LIMIT 1");
+        if ($stmt) {
+            $stmt->bind_param("i", $aqarId);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            if ($row) {
+                $propertyType = 'building';
+                if ($propertyName === 'عقار #' . $aqarId) {
+                    $propertyName = 'عمارة رقم ' . $row['emararakam'];
+                }
+            }
+            $stmt->close();
+        }
+
+        if ($propertyType === 'other') {
+            $stmt = $this->db->prepare("SELECT ardy_rakam FROM arady WHERE ardyid = ? LIMIT 1");
+            if ($stmt) {
+                $stmt->bind_param("i", $aqarId);
+                $stmt->execute();
+                $row = $stmt->get_result()->fetch_assoc();
+                if ($row) {
+                    $propertyType = 'land';
+                    if ($propertyName === 'عقار #' . $aqarId) {
+                        $propertyName = 'أرض رقم ' . $row['ardy_rakam'];
+                    }
+                }
+                $stmt->close();
+            }
+        }
+
+        if ($propertyType === 'other') {
+            $stmt = $this->db->prepare("SELECT vilarakam FROM vila WHERE vilaid = ? LIMIT 1");
+            if ($stmt) {
+                $stmt->bind_param("i", $aqarId);
+                $stmt->execute();
+                $row = $stmt->get_result()->fetch_assoc();
+                if ($row) {
+                    $propertyType = 'villa';
+                    if ($propertyName === 'عقار #' . $aqarId) {
+                        $propertyName = 'فيلا رقم ' . $row['vilarakam'];
+                    }
+                }
+                $stmt->close();
+            }
+        }
+
+        $metadata = [
+            'property_id' => $aqarId,
+            'property_name' => $propertyName,
+            'property_type' => $propertyType
+        ];
+
+        $this->propertyMetadataCache[$aqarId] = $metadata;
+        return $metadata;
+    }
+
+    private function getPropertyLedgerLines($dateFrom, $dateTo, $accountType, $costCenterId = null, $accountId = null) {
+        $sql = "SELECT
+                    je.entry_id,
+                    je.entry_date,
+                    je.description AS entry_description,
+                    je.tenant_id,
+                    je.owner_id,
+                    je.aqar_id,
+                    je.subaqar_id,
+                    je.journal_id,
+                    jel.line_number,
+                    jel.description AS line_description,
+                    jel.debit_amount,
+                    jel.credit_amount,
+                    jel.cost_center_id,
+                    acc.account_id,
+                    acc.account_code,
+                    acc.account_name_ar,
+                    COALESCE(je.aqar_id, cc.aqar_id) AS property_id,
+                    COALESCE(jel.cost_center_id, cc.cost_center_id) AS resolved_cost_center_id,
+                    cc.cost_center_code,
+                    cc.cost_center_name_ar,
+                    j.journal_code,
+                    j.journal_name_ar
+                FROM acc_journal_entry_lines jel
+                INNER JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+                INNER JOIN acc_chart_of_accounts acc ON jel.account_id = acc.account_id
+                LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
+                LEFT JOIN acc_journals j ON je.journal_id = j.journal_id
+                WHERE je.status = 'posted'
+                  AND je.entry_date BETWEEN ? AND ?
+                  AND acc.account_type = ?
+                  AND COALESCE(je.aqar_id, cc.aqar_id) IS NOT NULL
+                  AND COALESCE(je.aqar_id, cc.aqar_id) > 0";
+
+        $types = 'sss';
+        $params = [$dateFrom, $dateTo, $accountType];
+
+        if (!empty($costCenterId)) {
+            $sql .= " AND jel.cost_center_id = ?";
+            $types .= 'i';
+            $params[] = (int)$costCenterId;
+        }
+
+        if (!empty($accountId)) {
+            $sql .= " AND acc.account_id = ?";
+            $types .= 'i';
+            $params[] = (int)$accountId;
+        }
+
+        $sql .= " ORDER BY COALESCE(je.aqar_id, cc.aqar_id), je.entry_date, je.entry_id, jel.line_number";
+
+        $stmt = $this->db->prepare($sql);
+        if (!$stmt) {
+            return [];
+        }
+
+        $stmt->bind_param($types, ...$params);
+        $stmt->execute();
+        $result = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $stmt->close();
+
+        return $result;
+    }
+
+    public function getPropertyRevenueReportData($dateFrom, $dateTo, $costCenterId = null) {
+        $lines = $this->getPropertyLedgerLines($dateFrom, $dateTo, 'revenue', $costCenterId);
+        $propertyData = [];
+        $totals = [
+            'rental' => 0,
+            'service' => 0,
+            'other' => 0,
+            'total' => 0
+        ];
+
+        foreach ($lines as $line) {
+            $amount = (float)$line['credit_amount'] - (float)$line['debit_amount'];
+            if ($amount <= 0) {
+                continue;
+            }
+
+            $propertyId = (int)$line['property_id'];
+            $metadata = $this->getPropertyMetadata($propertyId);
+
+            if (!isset($propertyData[$propertyId])) {
+                $propertyData[$propertyId] = [
+                    'property_id' => $propertyId,
+                    'property_name' => $metadata['property_name'],
+                    'property_type' => $metadata['property_type'],
+                    'revenues' => [],
+                    'rental' => 0,
+                    'service' => 0,
+                    'other' => 0,
+                    'total' => 0,
+                    'count' => 0
+                ];
+            }
+
+            $bucket = 'other';
+            $accountCode = (string)($line['account_code'] ?? '');
+            $accountName = (string)($line['account_name_ar'] ?? '');
+            $descriptionText = (string)($line['line_description'] ?: $line['entry_description']);
+            $normalizedText = mb_strtolower($accountName . ' ' . $descriptionText);
+
+            if (strpos($accountCode, '4') === 0 || mb_strpos($normalizedText, 'ايجار') !== false || mb_strpos($normalizedText, 'إيجار') !== false) {
+                $bucket = 'rental';
+            } elseif (mb_strpos($normalizedText, 'خدم') !== false || mb_strpos($normalizedText, 'ماء') !== false || mb_strpos($normalizedText, 'كهرب') !== false || mb_strpos($normalizedText, 'service') !== false) {
+                $bucket = 'service';
+            }
+
+            $tenantName = $this->getTenantDisplayName($line['tenant_id'] ?? 0);
+            $row = [
+                'date' => $line['entry_date'],
+                'tenant' => $tenantName,
+                'description' => $descriptionText,
+                'journal' => trim((string)(($line['journal_code'] ?? '') . ' - ' . ($line['journal_name_ar'] ?? '')), ' -'),
+                'account_name' => $accountName,
+                'cost_center' => trim((string)(($line['cost_center_code'] ?? '') . ' - ' . ($line['cost_center_name_ar'] ?? '')), ' -'),
+                'bucket' => $bucket,
+                'amount' => $amount
+            ];
+
+            $propertyData[$propertyId]['revenues'][] = $row;
+            $propertyData[$propertyId][$bucket] += $amount;
+            $propertyData[$propertyId]['total'] += $amount;
+            $propertyData[$propertyId]['count']++;
+
+            $totals[$bucket] += $amount;
+            $totals['total'] += $amount;
+        }
+
+        uasort($propertyData, function ($a, $b) {
+            return $b['total'] <=> $a['total'];
+        });
+
+        return [
+            'property_data' => $propertyData,
+            'totals' => $totals
+        ];
+    }
+
+    public function getPropertyExpenseReportData($dateFrom, $dateTo, $costCenterId = null, $expenseAccountId = null) {
+        $lines = $this->getPropertyLedgerLines($dateFrom, $dateTo, 'expense', $costCenterId, $expenseAccountId);
+        $propertyData = [];
+        $totals = ['total' => 0];
+        $categoryTotals = [];
+
+        foreach ($lines as $line) {
+            $amount = (float)$line['debit_amount'] - (float)$line['credit_amount'];
+            if ($amount <= 0) {
+                continue;
+            }
+
+            $propertyId = (int)$line['property_id'];
+            $metadata = $this->getPropertyMetadata($propertyId);
+            $category = (string)($line['account_name_ar'] ?: 'غير محدد');
+
+            if (!isset($propertyData[$propertyId])) {
+                $propertyData[$propertyId] = [
+                    'property_id' => $propertyId,
+                    'property_name' => $metadata['property_name'],
+                    'property_type' => $metadata['property_type'],
+                    'expenses' => [],
+                    'total' => 0,
+                    'count' => 0,
+                    'categories' => []
+                ];
+            }
+
+            $propertyData[$propertyId]['expenses'][] = [
+                'date' => $line['entry_date'],
+                'category' => $category,
+                'description' => (string)($line['line_description'] ?: $line['entry_description']),
+                'paid_by' => trim((string)(($line['journal_code'] ?? '') . ' - ' . ($line['journal_name_ar'] ?? '')), ' -'),
+                'cost_center' => trim((string)(($line['cost_center_code'] ?? '') . ' - ' . ($line['cost_center_name_ar'] ?? '')), ' -'),
+                'amount' => $amount
+            ];
+
+            $propertyData[$propertyId]['total'] += $amount;
+            $propertyData[$propertyId]['count']++;
+
+            if (!isset($propertyData[$propertyId]['categories'][$category])) {
+                $propertyData[$propertyId]['categories'][$category] = 0;
+            }
+            $propertyData[$propertyId]['categories'][$category] += $amount;
+
+            if (!isset($categoryTotals[$category])) {
+                $categoryTotals[$category] = 0;
+            }
+            $categoryTotals[$category] += $amount;
+
+            $totals['total'] += $amount;
+        }
+
+        uasort($propertyData, function ($a, $b) {
+            return $b['total'] <=> $a['total'];
+        });
+        arsort($categoryTotals);
+
+        return [
+            'property_data' => $propertyData,
+            'totals' => $totals,
+            'category_totals' => $categoryTotals
+        ];
+    }
+
+    public function getPropertyProfitabilityReportData($dateFrom, $dateTo, $costCenterId = null) {
+        $incomeReport = $this->getPropertyRevenueReportData($dateFrom, $dateTo, $costCenterId);
+        $expenseReport = $this->getPropertyExpenseReportData($dateFrom, $dateTo, $costCenterId);
+
+        $incomeByProperty = $incomeReport['property_data'];
+        $expenseByProperty = $expenseReport['property_data'];
+        $propertyIds = array_unique(array_merge(array_keys($incomeByProperty), array_keys($expenseByProperty)));
+
+        $propertyData = [];
+        $totals = [
+            'income' => 0,
+            'expenses' => 0,
+            'profit' => 0
+        ];
+
+        foreach ($propertyIds as $propertyId) {
+            $metadata = $this->getPropertyMetadata((int)$propertyId);
+            $income = (float)($incomeByProperty[$propertyId]['total'] ?? 0);
+            $expenses = (float)($expenseByProperty[$propertyId]['total'] ?? 0);
+            $profit = $income - $expenses;
+            $margin = $income > 0 ? ($profit / $income) * 100 : 0;
+
+            $propertyData[$propertyId] = [
+                'property_id' => (int)$propertyId,
+                'property_name' => $metadata['property_name'],
+                'property_type' => $metadata['property_type'],
+                'income' => $income,
+                'expenses' => $expenses,
+                'profit' => $profit,
+                'margin' => $margin
+            ];
+
+            $totals['income'] += $income;
+            $totals['expenses'] += $expenses;
+            $totals['profit'] += $profit;
+        }
+
+        return [
+            'property_data' => $propertyData,
+            'totals' => $totals,
+            'overall_margin' => $totals['income'] > 0 ? ($totals['profit'] / $totals['income']) * 100 : 0
+        ];
+    }
     
     // ============================================
     // Invoice Methods
@@ -492,6 +1259,31 @@ class AccountingManager {
      * Create invoice
      * إنشاء فاتورة
      */
+    public function ensureInvoiceDimensionColumnsExist() {
+        $dimensionColumns = [
+            'journal_id' => "ALTER TABLE acc_invoices ADD COLUMN journal_id INT NULL AFTER due_date",
+            'cost_center_id' => "ALTER TABLE acc_invoices ADD COLUMN cost_center_id INT NULL AFTER journal_id",
+            'tenant_id' => "ALTER TABLE acc_invoices ADD COLUMN tenant_id INT NULL AFTER cost_center_id",
+            'owner_id' => "ALTER TABLE acc_invoices ADD COLUMN owner_id INT NULL AFTER tenant_id",
+            'aqar_id' => "ALTER TABLE acc_invoices ADD COLUMN aqar_id INT NULL AFTER owner_id",
+            'subaqar_id' => "ALTER TABLE acc_invoices ADD COLUMN subaqar_id INT NULL AFTER aqar_id",
+            'egar_id' => "ALTER TABLE acc_invoices ADD COLUMN egar_id INT NULL AFTER subaqar_id"
+        ];
+
+        foreach ($dimensionColumns as $columnName => $alterSql) {
+            $columnCheck = $this->db->query("SHOW COLUMNS FROM acc_invoices LIKE '{$columnName}'");
+            if (!$columnCheck) {
+                return false;
+            }
+
+            if ($columnCheck->num_rows == 0 && !$this->db->query($alterSql)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     public function createInvoice($data, $items) {
         // Calculate totals
         $subtotal = 0;
@@ -552,17 +1344,22 @@ class AccountingManager {
             }
         }
 
+        if (!$this->ensureInvoiceDimensionColumnsExist()) {
+            return ['success' => false, 'error' => 'Failed to add invoice dimension columns: ' . $this->db->error];
+        }
+
         $this->db->begin_transaction();
 
         // Insert invoice
-        $stmt = $this->db->prepare("
+        $stmt = $this->db->prepare(" 
             INSERT INTO acc_invoices
             (invoice_number, invoice_type, invoice_date, due_date,
+             journal_id, cost_center_id, tenant_id, owner_id, aqar_id, subaqar_id, egar_id,
              customer_type, customer_id, customer_name, customer_vat_number, customer_address,
              subtotal, vat_amount, total_amount, paid_amount,
              payment_status, payment_method, notes, seller_source, seller_supplier_id,
              seller_name, seller_vat_number, seller_address, created_by, formuid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'unpaid', ?, ?, ?, ?, ?, ?, ?, ?, UUID())
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'unpaid', ?, ?, ?, ?, ?, ?, ?, ?, UUID())
         ");
 
         if (!$stmt) {
@@ -582,11 +1379,26 @@ class AccountingManager {
         $sellerVatNumber = $data['seller_vat_number'] ?? '';
         $sellerAddress = $data['seller_address'] ?? '';
 
-        $stmt->bind_param("sssssisssdddsssisssi",
+        $journalId = isset($data['journal_id']) && $data['journal_id'] !== '' ? (int)$data['journal_id'] : null;
+        $costCenterId = isset($data['cost_center_id']) && $data['cost_center_id'] !== '' ? (int)$data['cost_center_id'] : null;
+        $tenantId = isset($data['tenant_id']) && $data['tenant_id'] !== '' ? (int)$data['tenant_id'] : null;
+        $ownerId = isset($data['owner_id']) && $data['owner_id'] !== '' ? (int)$data['owner_id'] : null;
+        $aqarId = isset($data['aqar_id']) && $data['aqar_id'] !== '' ? (int)$data['aqar_id'] : null;
+        $subaqarId = isset($data['subaqar_id']) && $data['subaqar_id'] !== '' ? (int)$data['subaqar_id'] : null;
+        $egarId = isset($data['egar_id']) && $data['egar_id'] !== '' ? (int)$data['egar_id'] : null;
+
+        $stmt->bind_param("ssssiiiiiiisisssdddsssisssi",
             $invoiceNumber,
             $data['invoice_type'],
             $data['invoice_date'],
             $data['due_date'],
+            $journalId,
+            $costCenterId,
+            $tenantId,
+            $ownerId,
+            $aqarId,
+            $subaqarId,
+            $egarId,
             $customerType,
             $customerId,
             $data['customer_name'],
@@ -666,9 +1478,18 @@ class AccountingManager {
             }
         }
 
+        $defaultCostCenterId = !empty($data['cost_center_id']) ? (int)$data['cost_center_id'] : null;
+
         $entryData = [
             'entry_date' => $data['invoice_date'],
             'entry_type' => 'auto',
+            'journal_id' => $data['journal_id'] ?? null,
+            'tenant_id' => $data['tenant_id'] ?? null,
+            'owner_id' => $data['owner_id'] ?? null,
+            'aqar_id' => $data['aqar_id'] ?? null,
+            'subaqar_id' => $data['subaqar_id'] ?? null,
+            'egar_id' => $data['egar_id'] ?? null,
+            'invoice_id' => $invoiceId,
             'reference_type' => 'invoice',
             'reference_id' => $invoiceId,
             'description' => "إثبات فاتورة {$invoiceNumber} - {$data['customer_name']}",
@@ -681,14 +1502,14 @@ class AccountingManager {
                 'description' => "المدين - فاتورة {$invoiceNumber}",
                 'debit_amount' => $totalAmount,
                 'credit_amount' => 0,
-                'cost_center_id' => null
+                'cost_center_id' => $defaultCostCenterId
             ],
             [
                 'account_id' => $revenueAccountId,
                 'description' => "الإيراد - فاتورة {$invoiceNumber}",
                 'debit_amount' => 0,
                 'credit_amount' => $subtotal,
-                'cost_center_id' => null
+                'cost_center_id' => $defaultCostCenterId
             ]
         ];
 
@@ -698,7 +1519,7 @@ class AccountingManager {
                 'description' => "ضريبة القيمة المضافة - فاتورة {$invoiceNumber}",
                 'debit_amount' => 0,
                 'credit_amount' => $vatAmount,
-                'cost_center_id' => null
+                'cost_center_id' => $defaultCostCenterId
             ];
         }
 
@@ -738,6 +1559,921 @@ class AccountingManager {
         
         return sprintf("%s-%s-%05d", $prefix, $year, $nextNum);
     }
+
+    public function getReportDimensionOptions() {
+        $properties = [];
+        $tenants = [];
+        $owners = [];
+        $contracts = [];
+
+        $propertiesResult = $this->db->query("SELECT idaqar AS property_id, aqarname AS property_name FROM amlak WHERE aqarname != '' ORDER BY aqarname ASC");
+        if ($propertiesResult) {
+            while ($row = $propertiesResult->fetch_assoc()) {
+                $properties[] = $row;
+            }
+        }
+
+        $tenantsResult = $this->db->query("SELECT mostagerid AS tenant_id, mostagername AS tenant_name FROM mostagereen WHERE mostagername != '' ORDER BY mostagername ASC");
+        if ($tenantsResult) {
+            while ($row = $tenantsResult->fetch_assoc()) {
+                $tenants[] = $row;
+            }
+        }
+
+        $ownersResult = $this->db->query("SELECT malekid AS owner_id, malekbayan1 AS owner_name FROM malek WHERE malekbayan1 != '' ORDER BY malekbayan1 ASC");
+        if ($ownersResult) {
+            while ($row = $ownersResult->fetch_assoc()) {
+                $owners[] = $row;
+            }
+        }
+
+        $contractsResult = $this->db->query("SELECT rakam3akdid AS egar_id, rakam3akd AS contract_number FROM egar ORDER BY rakam3akdid DESC");
+        if ($contractsResult) {
+            while ($row = $contractsResult->fetch_assoc()) {
+                $contracts[] = $row;
+            }
+        }
+
+        return [
+            'journals' => $this->getActiveJournals(),
+            'cost_centers' => $this->getActiveCostCenters(),
+            'properties' => $properties,
+            'tenants' => $tenants,
+            'owners' => $owners,
+            'contracts' => $contracts,
+            'customers' => $this->getActiveCustomers(),
+            'cash_bank_accounts' => $this->getCashBankAccounts()
+        ];
+    }
+
+    private function buildDimensionFilterClause($filters, $entryAlias = 'je', $lineAlias = 'jel', $costCenterAlias = 'cc') {
+        $conditions = [];
+        $params = [];
+        $types = '';
+
+        if (!empty($filters['journal_id'])) {
+            $conditions[] = "$entryAlias.journal_id = ?";
+            $params[] = (int)$filters['journal_id'];
+            $types .= 'i';
+        }
+
+        if (!empty($filters['cost_center_id'])) {
+            $conditions[] = "$lineAlias.cost_center_id = ?";
+            $params[] = (int)$filters['cost_center_id'];
+            $types .= 'i';
+        }
+
+        if (!empty($filters['aqar_id'])) {
+            $conditions[] = "COALESCE($entryAlias.aqar_id, $costCenterAlias.aqar_id) = ?";
+            $params[] = (int)$filters['aqar_id'];
+            $types .= 'i';
+        }
+
+        if (!empty($filters['tenant_id'])) {
+            $conditions[] = "$entryAlias.tenant_id = ?";
+            $params[] = (int)$filters['tenant_id'];
+            $types .= 'i';
+        }
+
+        if (!empty($filters['owner_id'])) {
+            $conditions[] = "$entryAlias.owner_id = ?";
+            $params[] = (int)$filters['owner_id'];
+            $types .= 'i';
+        }
+
+        if (!empty($filters['egar_id'])) {
+            $conditions[] = "$entryAlias.egar_id = ?";
+            $params[] = (int)$filters['egar_id'];
+            $types .= 'i';
+        }
+
+        return [
+            'sql' => !empty($conditions) ? (' AND ' . implode(' AND ', $conditions)) : '',
+            'params' => $params,
+            'types' => $types
+        ];
+    }
+
+    private function buildInvoiceDimensionFilterClause($filters, $invoiceAlias = 'inv', $invoiceCostCenterAlias = 'inv_cc', $entryAlias = 'je', $lineAlias = 'jel', $entryCostCenterAlias = 'cc') {
+        $conditions = [];
+        $params = [];
+        $types = '';
+
+        if (!empty($filters['journal_id'])) {
+            $conditions[] = "COALESCE($invoiceAlias.journal_id, $entryAlias.journal_id) = ?";
+            $params[] = (int)$filters['journal_id'];
+            $types .= 'i';
+        }
+
+        if (!empty($filters['cost_center_id'])) {
+            $conditions[] = "COALESCE($invoiceAlias.cost_center_id, $lineAlias.cost_center_id) = ?";
+            $params[] = (int)$filters['cost_center_id'];
+            $types .= 'i';
+        }
+
+        if (!empty($filters['aqar_id'])) {
+            $conditions[] = "COALESCE($invoiceAlias.aqar_id, $invoiceCostCenterAlias.aqar_id, $entryAlias.aqar_id, $entryCostCenterAlias.aqar_id) = ?";
+            $params[] = (int)$filters['aqar_id'];
+            $types .= 'i';
+        }
+
+        if (!empty($filters['tenant_id'])) {
+            $conditions[] = "COALESCE($invoiceAlias.tenant_id, $entryAlias.tenant_id) = ?";
+            $params[] = (int)$filters['tenant_id'];
+            $types .= 'i';
+        }
+
+        if (!empty($filters['owner_id'])) {
+            $conditions[] = "COALESCE($invoiceAlias.owner_id, $entryAlias.owner_id) = ?";
+            $params[] = (int)$filters['owner_id'];
+            $types .= 'i';
+        }
+
+        if (!empty($filters['egar_id'])) {
+            $conditions[] = "COALESCE($invoiceAlias.egar_id, $entryAlias.egar_id) = ?";
+            $params[] = (int)$filters['egar_id'];
+            $types .= 'i';
+        }
+
+        return [
+            'sql' => !empty($conditions) ? (' AND ' . implode(' AND ', $conditions)) : '',
+            'params' => $params,
+            'types' => $types
+        ];
+    }
+
+    public function getInvoiceDimensionContext($invoiceId) {
+        if (!$this->ensureInvoiceDimensionColumnsExist()) {
+            return [
+                'journal_id' => null,
+                'cost_center_id' => null,
+                'tenant_id' => null,
+                'owner_id' => null,
+                'aqar_id' => null,
+                'subaqar_id' => null,
+                'egar_id' => null
+            ];
+        }
+
+        $invoiceId = (int)$invoiceId;
+        if ($invoiceId <= 0) {
+            return [
+                'journal_id' => null,
+                'cost_center_id' => null,
+                'tenant_id' => null,
+                'owner_id' => null,
+                'aqar_id' => null,
+                'subaqar_id' => null,
+                'egar_id' => null
+            ];
+        }
+
+        $stmt = $this->db->prepare("SELECT
+                inv.journal_id,
+                inv.cost_center_id,
+                inv.tenant_id,
+                inv.owner_id,
+                inv.aqar_id,
+                inv.subaqar_id,
+                inv.egar_id,
+                (
+                    SELECT je.journal_id
+                    FROM acc_journal_entries je
+                    WHERE je.reference_type = 'invoice'
+                      AND je.reference_id = inv.invoice_id
+                      AND je.status = 'posted'
+                      AND je.entry_type = 'auto'
+                    ORDER BY je.entry_id DESC
+                    LIMIT 1
+                ) AS fallback_journal_id,
+                (
+                    SELECT MAX(jel.cost_center_id)
+                    FROM acc_journal_entries je
+                    LEFT JOIN acc_journal_entry_lines jel ON je.entry_id = jel.entry_id
+                    WHERE je.reference_type = 'invoice'
+                      AND je.reference_id = inv.invoice_id
+                      AND je.status = 'posted'
+                      AND je.entry_type = 'auto'
+                ) AS fallback_cost_center_id,
+                (
+                    SELECT je.tenant_id
+                    FROM acc_journal_entries je
+                    WHERE je.reference_type = 'invoice'
+                      AND je.reference_id = inv.invoice_id
+                      AND je.status = 'posted'
+                      AND je.entry_type = 'auto'
+                    ORDER BY je.entry_id DESC
+                    LIMIT 1
+                ) AS fallback_tenant_id,
+                (
+                    SELECT je.owner_id
+                    FROM acc_journal_entries je
+                    WHERE je.reference_type = 'invoice'
+                      AND je.reference_id = inv.invoice_id
+                      AND je.status = 'posted'
+                      AND je.entry_type = 'auto'
+                    ORDER BY je.entry_id DESC
+                    LIMIT 1
+                ) AS fallback_owner_id,
+                (
+                    SELECT je.aqar_id
+                    FROM acc_journal_entries je
+                    WHERE je.reference_type = 'invoice'
+                      AND je.reference_id = inv.invoice_id
+                      AND je.status = 'posted'
+                      AND je.entry_type = 'auto'
+                    ORDER BY je.entry_id DESC
+                    LIMIT 1
+                ) AS fallback_aqar_id,
+                (
+                    SELECT je.subaqar_id
+                    FROM acc_journal_entries je
+                    WHERE je.reference_type = 'invoice'
+                      AND je.reference_id = inv.invoice_id
+                      AND je.status = 'posted'
+                      AND je.entry_type = 'auto'
+                    ORDER BY je.entry_id DESC
+                    LIMIT 1
+                ) AS fallback_subaqar_id,
+                (
+                    SELECT je.egar_id
+                    FROM acc_journal_entries je
+                    WHERE je.reference_type = 'invoice'
+                      AND je.reference_id = inv.invoice_id
+                      AND je.status = 'posted'
+                      AND je.entry_type = 'auto'
+                    ORDER BY je.entry_id DESC
+                    LIMIT 1
+                ) AS fallback_egar_id
+            FROM acc_invoices inv
+            WHERE inv.invoice_id = ?
+            LIMIT 1");
+        if (!$stmt) {
+            return [
+                'journal_id' => null,
+                'cost_center_id' => null,
+                'tenant_id' => null,
+                'owner_id' => null,
+                'aqar_id' => null,
+                'subaqar_id' => null,
+                'egar_id' => null
+            ];
+        }
+
+        $stmt->bind_param('i', $invoiceId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$row) {
+            return [
+                'journal_id' => null,
+                'cost_center_id' => null,
+                'tenant_id' => null,
+                'owner_id' => null,
+                'aqar_id' => null,
+                'subaqar_id' => null,
+                'egar_id' => null
+            ];
+        }
+
+        return [
+            'journal_id' => $row['journal_id'] ?? $row['fallback_journal_id'] ?? null,
+            'cost_center_id' => $row['cost_center_id'] ?? $row['fallback_cost_center_id'] ?? null,
+            'tenant_id' => $row['tenant_id'] ?? $row['fallback_tenant_id'] ?? null,
+            'owner_id' => $row['owner_id'] ?? $row['fallback_owner_id'] ?? null,
+            'aqar_id' => $row['aqar_id'] ?? $row['fallback_aqar_id'] ?? null,
+            'subaqar_id' => $row['subaqar_id'] ?? $row['fallback_subaqar_id'] ?? null,
+            'egar_id' => $row['egar_id'] ?? $row['fallback_egar_id'] ?? null
+        ];
+    }
+
+    public function getIncomeStatementData($dateFrom, $dateTo, $filters = []) {
+        $dimensionClause = $this->buildDimensionFilterClause($filters);
+
+        $buildQuery = function ($accountType) use ($dateFrom, $dateTo, $dimensionClause) {
+            $amountExpression = $accountType === 'revenue'
+                ? 'jel.credit_amount - jel.debit_amount'
+                : 'jel.debit_amount - jel.credit_amount';
+
+            $sql = "SELECT
+                        acc.account_id,
+                        acc.account_code,
+                        acc.account_name_ar,
+                        COALESCE(SUM(CASE
+                            WHEN je.status = 'posted'
+                             AND je.entry_date BETWEEN ? AND ?" . $dimensionClause['sql'] . "
+                            THEN $amountExpression
+                            ELSE 0
+                        END), 0) AS amount
+                    FROM acc_chart_of_accounts acc
+                    LEFT JOIN acc_journal_entry_lines jel ON acc.account_id = jel.account_id
+                    LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+                    LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
+                    WHERE acc.account_type = ? AND acc.is_active = 1
+                    GROUP BY acc.account_id
+                    HAVING amount != 0
+                    ORDER BY acc.account_code";
+
+            $params = array_merge([$dateFrom, $dateTo], $dimensionClause['params'], [$accountType]);
+            $types = 'ss' . $dimensionClause['types'] . 's';
+
+            $stmt = $this->db->prepare($sql);
+            if (!$stmt) {
+                return [];
+            }
+
+            $stmt->bind_param($types, ...$params);
+            $stmt->execute();
+            $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+            $stmt->close();
+
+            return $rows;
+        };
+
+        $revenueAccounts = $buildQuery('revenue');
+        $expenseAccounts = $buildQuery('expense');
+
+        return [
+            'revenue_accounts' => $revenueAccounts,
+            'expense_accounts' => $expenseAccounts,
+            'total_revenue' => array_sum(array_column($revenueAccounts, 'amount')),
+            'total_expenses' => array_sum(array_column($expenseAccounts, 'amount'))
+        ];
+    }
+
+    public function getBalanceSheetData($asOfDate, $filters = []) {
+        $dimensionClause = $this->buildDimensionFilterClause($filters);
+
+        $fetchByType = function ($accountType) use ($asOfDate, $dimensionClause) {
+            $movementExpression = in_array($accountType, ['asset', 'expense'], true)
+                ? 'jel.debit_amount - jel.credit_amount'
+                : 'jel.credit_amount - jel.debit_amount';
+
+            $sql = "SELECT
+                        acc.account_id,
+                        acc.account_code,
+                        acc.account_name_ar,
+                        acc.account_category,
+                        acc.opening_balance + COALESCE(SUM(CASE
+                            WHEN je.status = 'posted'
+                             AND je.entry_date <= ?" . $dimensionClause['sql'] . "
+                            THEN $movementExpression
+                            ELSE 0
+                        END), 0) AS balance
+                    FROM acc_chart_of_accounts acc
+                    LEFT JOIN acc_journal_entry_lines jel ON acc.account_id = jel.account_id
+                    LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+                    LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
+                    WHERE acc.account_type = ? AND acc.is_active = 1
+                    GROUP BY acc.account_id
+                    HAVING balance != 0
+                    ORDER BY acc.account_code";
+
+            $params = array_merge([$asOfDate], $dimensionClause['params'], [$accountType]);
+            $types = 's' . $dimensionClause['types'] . 's';
+
+            $stmt = $this->db->prepare($sql);
+            if (!$stmt) {
+                return [];
+            }
+
+            $stmt->bind_param($types, ...$params);
+            $stmt->execute();
+            $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+            $stmt->close();
+
+            return $rows;
+        };
+
+        $assets = $fetchByType('asset');
+        $liabilities = $fetchByType('liability');
+        $equity = $fetchByType('equity');
+
+        return [
+            'assets' => $assets,
+            'liabilities' => $liabilities,
+            'equity' => $equity,
+            'total_assets' => array_sum(array_column($assets, 'balance')),
+            'total_liabilities' => array_sum(array_column($liabilities, 'balance')),
+            'total_equity' => array_sum(array_column($equity, 'balance'))
+        ];
+    }
+
+    public function getCustomerStatementData($customerId, $dateFrom, $dateTo, $filters = []) {
+        $customerId = (int)$customerId;
+        $result = [
+            'customer_name' => '',
+            'transactions' => [],
+            'total_invoices' => 0,
+            'total_payments' => 0,
+            'balance' => 0,
+            'opening_balance' => 0
+        ];
+
+        if ($customerId <= 0) {
+            return $result;
+        }
+
+        $customerStmt = $this->db->prepare("SELECT customer_name FROM acc_customers WHERE customer_id = ? LIMIT 1");
+        if ($customerStmt) {
+            $customerStmt->bind_param('i', $customerId);
+            $customerStmt->execute();
+            $row = $customerStmt->get_result()->fetch_assoc();
+            $result['customer_name'] = $row['customer_name'] ?? '';
+            $customerStmt->close();
+        }
+
+        if ($result['customer_name'] === '') {
+            return $result;
+        }
+
+        $dimensionClause = $this->buildDimensionFilterClause($filters);
+        $this->ensureInvoiceDimensionColumnsExist();
+        $invoiceDimensionClause = $this->buildInvoiceDimensionFilterClause($filters);
+
+        $invoiceSql = "SELECT
+                inv.invoice_id,
+                inv.invoice_number,
+                inv.invoice_date,
+                inv.invoice_type,
+                inv.total_amount,
+                COALESCE(MAX(inv_j.journal_code), MAX(j.journal_code)) AS journal_code,
+                COALESCE(MAX(inv_j.journal_name_ar), MAX(j.journal_name_ar)) AS journal_name_ar,
+                COALESCE(MAX(inv_cc.cost_center_code), MAX(cc.cost_center_code)) AS cost_center_code,
+                COALESCE(MAX(inv_cc.cost_center_name_ar), MAX(cc.cost_center_name_ar)) AS cost_center_name_ar
+            FROM acc_invoices inv
+            LEFT JOIN acc_journal_entries je ON je.reference_type = 'invoice' AND je.reference_id = inv.invoice_id AND je.status = 'posted' AND je.entry_type = 'auto'
+            LEFT JOIN acc_journal_entry_lines jel ON je.entry_id = jel.entry_id
+            LEFT JOIN acc_cost_centers inv_cc ON inv.cost_center_id = inv_cc.cost_center_id
+            LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
+            LEFT JOIN acc_journals inv_j ON inv.journal_id = inv_j.journal_id
+            LEFT JOIN acc_journals j ON je.journal_id = j.journal_id
+            WHERE inv.customer_id = ?
+              AND inv.invoice_date BETWEEN ? AND ?" . $invoiceDimensionClause['sql'] . "
+            GROUP BY inv.invoice_id
+            ORDER BY inv.invoice_date, inv.invoice_id";
+
+        $invoiceStmt = $this->db->prepare($invoiceSql);
+        $invoiceParams = array_merge([$customerId, $dateFrom, $dateTo], $invoiceDimensionClause['params']);
+        $invoiceTypes = 'iss' . $invoiceDimensionClause['types'];
+        $invoiceStmt->bind_param($invoiceTypes, ...$invoiceParams);
+        $invoiceStmt->execute();
+        $invoices = $invoiceStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $invoiceStmt->close();
+
+        $openingInvoiceSql = "SELECT COALESCE(SUM(inv.total_amount), 0) AS total_amount
+            FROM (
+                SELECT inv.invoice_id, inv.total_amount
+                FROM acc_invoices inv
+                LEFT JOIN acc_journal_entries je ON je.reference_type = 'invoice' AND je.reference_id = inv.invoice_id AND je.status = 'posted' AND je.entry_type = 'auto'
+                LEFT JOIN acc_journal_entry_lines jel ON je.entry_id = jel.entry_id
+                LEFT JOIN acc_cost_centers inv_cc ON inv.cost_center_id = inv_cc.cost_center_id
+                LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
+                WHERE inv.customer_id = ?
+                  AND inv.invoice_date < ?" . $invoiceDimensionClause['sql'] . "
+                GROUP BY inv.invoice_id
+            ) inv";
+        $openingInvoiceStmt = $this->db->prepare($openingInvoiceSql);
+        $openingInvoiceParams = array_merge([$customerId, $dateFrom], $invoiceDimensionClause['params']);
+        $openingInvoiceTypes = 'is' . $invoiceDimensionClause['types'];
+        $openingInvoiceStmt->bind_param($openingInvoiceTypes, ...$openingInvoiceParams);
+        $openingInvoiceStmt->execute();
+        $openingInvoiceTotal = (float)($openingInvoiceStmt->get_result()->fetch_assoc()['total_amount'] ?? 0);
+        $openingInvoiceStmt->close();
+
+        $receivableCode = '1121';
+        $paymentSql = "SELECT
+                je.entry_id,
+                je.entry_number,
+                je.entry_date,
+                je.description,
+                SUM(jel.credit_amount - jel.debit_amount) AS amount,
+                MAX(j.journal_code) AS journal_code,
+                MAX(j.journal_name_ar) AS journal_name_ar,
+                MAX(cc.cost_center_code) AS cost_center_code,
+                MAX(cc.cost_center_name_ar) AS cost_center_name_ar
+            FROM acc_journal_entries je
+            INNER JOIN acc_invoices inv ON je.invoice_id = inv.invoice_id
+            INNER JOIN acc_journal_entry_lines jel ON je.entry_id = jel.entry_id
+            INNER JOIN acc_chart_of_accounts acc ON jel.account_id = acc.account_id
+            LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
+            LEFT JOIN acc_journals j ON je.journal_id = j.journal_id
+            WHERE je.status = 'posted'
+              AND inv.customer_id = ?
+              AND acc.account_code = ?
+              AND (jel.credit_amount - jel.debit_amount) > 0
+              AND je.entry_date BETWEEN ? AND ?" . $dimensionClause['sql'] . "
+            GROUP BY je.entry_id
+            ORDER BY je.entry_date, je.entry_id";
+        $paymentStmt = $this->db->prepare($paymentSql);
+        $paymentParams = array_merge([$customerId, $receivableCode, $dateFrom, $dateTo], $dimensionClause['params']);
+        $paymentTypes = 'isss' . $dimensionClause['types'];
+        $paymentStmt->bind_param($paymentTypes, ...$paymentParams);
+        $paymentStmt->execute();
+        $payments = $paymentStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $paymentStmt->close();
+
+        $openingPaymentSql = "SELECT COALESCE(SUM(payment_rows.amount), 0) AS total_amount
+            FROM (
+                SELECT je.entry_id, SUM(jel.credit_amount - jel.debit_amount) AS amount
+                FROM acc_journal_entries je
+                INNER JOIN acc_invoices inv ON je.invoice_id = inv.invoice_id
+                INNER JOIN acc_journal_entry_lines jel ON je.entry_id = jel.entry_id
+                INNER JOIN acc_chart_of_accounts acc ON jel.account_id = acc.account_id
+                LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
+                WHERE je.status = 'posted'
+                  AND inv.customer_id = ?
+                  AND acc.account_code = ?
+                  AND (jel.credit_amount - jel.debit_amount) > 0
+                  AND je.entry_date < ?" . $dimensionClause['sql'] . "
+                GROUP BY je.entry_id
+            ) payment_rows";
+        $openingPaymentStmt = $this->db->prepare($openingPaymentSql);
+        $openingPaymentParams = array_merge([$customerId, $receivableCode, $dateFrom], $dimensionClause['params']);
+        $openingPaymentTypes = 'iss' . $dimensionClause['types'];
+        $openingPaymentStmt->bind_param($openingPaymentTypes, ...$openingPaymentParams);
+        $openingPaymentStmt->execute();
+        $openingPaymentTotal = (float)($openingPaymentStmt->get_result()->fetch_assoc()['total_amount'] ?? 0);
+        $openingPaymentStmt->close();
+
+        $transactions = [];
+        foreach ($invoices as $invoice) {
+            $transactions[] = [
+                'date' => $invoice['invoice_date'],
+                'type' => 'invoice',
+                'reference' => $invoice['invoice_number'],
+                'description' => 'فاتورة ' . ($invoice['invoice_type'] ?: 'مبيعات'),
+                'journal' => trim((string)(($invoice['journal_code'] ?? '') . ' - ' . ($invoice['journal_name_ar'] ?? '')), ' -'),
+                'cost_center' => trim((string)(($invoice['cost_center_code'] ?? '') . ' - ' . ($invoice['cost_center_name_ar'] ?? '')), ' -'),
+                'debit' => (float)$invoice['total_amount'],
+                'credit' => 0,
+                'balance' => 0
+            ];
+        }
+
+        foreach ($payments as $payment) {
+            $transactions[] = [
+                'date' => $payment['entry_date'],
+                'type' => 'payment',
+                'reference' => $payment['entry_number'],
+                'description' => $payment['description'],
+                'journal' => trim((string)(($payment['journal_code'] ?? '') . ' - ' . ($payment['journal_name_ar'] ?? '')), ' -'),
+                'cost_center' => trim((string)(($payment['cost_center_code'] ?? '') . ' - ' . ($payment['cost_center_name_ar'] ?? '')), ' -'),
+                'debit' => 0,
+                'credit' => (float)$payment['amount'],
+                'balance' => 0
+            ];
+        }
+
+        usort($transactions, function ($a, $b) {
+            $comparison = strcmp($a['date'], $b['date']);
+            if ($comparison !== 0) {
+                return $comparison;
+            }
+            return strcmp($a['reference'], $b['reference']);
+        });
+
+        $openingBalance = $openingInvoiceTotal - $openingPaymentTotal;
+        $runningBalance = $openingBalance;
+        if (abs($openingBalance) > 0.0001) {
+            $result['transactions'][] = [
+                'date' => $dateFrom,
+                'type' => 'opening',
+                'reference' => '-',
+                'description' => 'رصيد أول المدة',
+                'journal' => '-',
+                'cost_center' => '-',
+                'debit' => $openingBalance > 0 ? $openingBalance : 0,
+                'credit' => $openingBalance < 0 ? abs($openingBalance) : 0,
+                'balance' => $openingBalance
+            ];
+        }
+
+        foreach ($transactions as $transaction) {
+            $runningBalance += $transaction['debit'] - $transaction['credit'];
+            $transaction['balance'] = $runningBalance;
+            $result['transactions'][] = $transaction;
+            $result['total_invoices'] += (float)$transaction['debit'];
+            $result['total_payments'] += (float)$transaction['credit'];
+        }
+
+        $result['opening_balance'] = $openingBalance;
+        $result['balance'] = $runningBalance;
+
+        return $result;
+    }
+
+    public function getAgedReceivablesData($asOfDate, $showZeroBalance = false, $filters = []) {
+        $this->ensureInvoiceDimensionColumnsExist();
+        $dimensionClause = $this->buildInvoiceDimensionFilterClause($filters);
+        $sql = "SELECT
+                inv.invoice_id,
+                inv.customer_id,
+                inv.customer_name,
+                COALESCE(inv.remaining_amount, inv.total_amount - inv.paid_amount) AS outstanding,
+                DATEDIFF(?, inv.invoice_date) AS days_old
+            FROM acc_invoices inv
+            LEFT JOIN acc_journal_entries je ON je.reference_type = 'invoice' AND je.reference_id = inv.invoice_id AND je.status = 'posted' AND je.entry_type = 'auto'
+            LEFT JOIN acc_journal_entry_lines jel ON je.entry_id = jel.entry_id
+            LEFT JOIN acc_cost_centers inv_cc ON inv.cost_center_id = inv_cc.cost_center_id
+            LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
+            WHERE inv.invoice_date <= ?
+              AND COALESCE(inv.remaining_amount, inv.total_amount - inv.paid_amount) >= 0" . $dimensionClause['sql'] . "
+            GROUP BY inv.invoice_id
+            ORDER BY inv.customer_name, inv.invoice_date";
+        $stmt = $this->db->prepare($sql);
+        $params = array_merge([$asOfDate, $asOfDate], $dimensionClause['params']);
+        $types = 'ss' . $dimensionClause['types'];
+        $stmt->bind_param($types, ...$params);
+        $stmt->execute();
+        $invoices = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $stmt->close();
+
+        $customerData = [];
+        if ($showZeroBalance) {
+            foreach ($this->getActiveCustomers() as $customer) {
+                $customerData[(int)$customer['customer_id']] = [
+                    'customer_id' => (int)$customer['customer_id'],
+                    'customer_name' => $customer['customer_name'],
+                    'current' => 0,
+                    '30' => 0,
+                    '60' => 0,
+                    '90_plus' => 0,
+                    'total' => 0
+                ];
+            }
+        }
+
+        $totals = [
+            'current' => 0,
+            '30' => 0,
+            '60' => 0,
+            '90_plus' => 0,
+            'total' => 0
+        ];
+
+        foreach ($invoices as $invoice) {
+            $customerId = (int)$invoice['customer_id'];
+            if (!isset($customerData[$customerId])) {
+                $customerData[$customerId] = [
+                    'customer_id' => $customerId,
+                    'customer_name' => $invoice['customer_name'],
+                    'current' => 0,
+                    '30' => 0,
+                    '60' => 0,
+                    '90_plus' => 0,
+                    'total' => 0
+                ];
+            }
+
+            $outstanding = (float)$invoice['outstanding'];
+            $daysOld = (int)$invoice['days_old'];
+
+            if ($daysOld <= 30) {
+                $bucket = 'current';
+            } elseif ($daysOld <= 60) {
+                $bucket = '30';
+            } elseif ($daysOld <= 90) {
+                $bucket = '60';
+            } else {
+                $bucket = '90_plus';
+            }
+
+            $customerData[$customerId][$bucket] += $outstanding;
+            $customerData[$customerId]['total'] += $outstanding;
+            $totals[$bucket] += $outstanding;
+            $totals['total'] += $outstanding;
+        }
+
+        if (!$showZeroBalance) {
+            $customerData = array_filter($customerData, function ($row) {
+                return $row['total'] > 0;
+            });
+        }
+
+        uasort($customerData, function ($a, $b) {
+            return $b['total'] <=> $a['total'];
+        });
+
+        return [
+            'customer_data' => $customerData,
+            'totals' => $totals,
+            'total_customers' => count($customerData),
+            'total_outstanding' => $totals['total']
+        ];
+    }
+
+    public function getGeneralLedgerDetailData($accountId, $dateFrom, $dateTo, $filters = []) {
+        $accountId = (int)$accountId;
+        $account = $this->getAccount($accountId);
+        if (!$account) {
+            return [
+                'account' => null,
+                'rows' => [],
+                'opening_balance' => 0,
+                'total_debit' => 0,
+                'total_credit' => 0,
+                'ending_balance' => 0
+            ];
+        }
+
+        $dimensionClause = $this->buildDimensionFilterClause($filters);
+        $openingSql = "SELECT COALESCE(SUM(jel.debit_amount), 0) AS total_debit, COALESCE(SUM(jel.credit_amount), 0) AS total_credit
+            FROM acc_journal_entry_lines jel
+            INNER JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+            LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
+            WHERE jel.account_id = ?
+              AND je.status = 'posted'
+              AND je.entry_date < ?" . $dimensionClause['sql'];
+        $openingStmt = $this->db->prepare($openingSql);
+        $openingParams = array_merge([$accountId, $dateFrom], $dimensionClause['params']);
+        $openingTypes = 'is' . $dimensionClause['types'];
+        $openingStmt->bind_param($openingTypes, ...$openingParams);
+        $openingStmt->execute();
+        $openingRow = $openingStmt->get_result()->fetch_assoc();
+        $openingStmt->close();
+
+        $openingMovement = in_array($account['account_type'], ['asset', 'expense'], true)
+            ? ((float)$openingRow['total_debit'] - (float)$openingRow['total_credit'])
+            : ((float)$openingRow['total_credit'] - (float)$openingRow['total_debit']);
+        $openingBalance = (float)$account['opening_balance'] + $openingMovement;
+
+        $detailSql = "SELECT
+                je.entry_id,
+                je.entry_number,
+                je.entry_date,
+                je.description AS entry_description,
+                je.tenant_id,
+                je.owner_id,
+                je.aqar_id,
+                je.egar_id,
+                jel.description AS line_description,
+                jel.debit_amount,
+                jel.credit_amount,
+                cc.cost_center_code,
+                cc.cost_center_name_ar,
+                j.journal_code,
+                j.journal_name_ar
+            FROM acc_journal_entry_lines jel
+            INNER JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+            LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
+            LEFT JOIN acc_journals j ON je.journal_id = j.journal_id
+            WHERE jel.account_id = ?
+              AND je.status = 'posted'
+              AND je.entry_date BETWEEN ? AND ?" . $dimensionClause['sql'] . "
+            ORDER BY je.entry_date, je.entry_id, jel.line_number";
+        $detailStmt = $this->db->prepare($detailSql);
+        $detailParams = array_merge([$accountId, $dateFrom, $dateTo], $dimensionClause['params']);
+        $detailTypes = 'iss' . $dimensionClause['types'];
+        $detailStmt->bind_param($detailTypes, ...$detailParams);
+        $detailStmt->execute();
+        $rows = $detailStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $detailStmt->close();
+
+        $runningBalance = $openingBalance;
+        $totalDebit = 0;
+        $totalCredit = 0;
+        foreach ($rows as &$row) {
+            $debit = (float)$row['debit_amount'];
+            $credit = (float)$row['credit_amount'];
+            $totalDebit += $debit;
+            $totalCredit += $credit;
+            if (in_array($account['account_type'], ['asset', 'expense'], true)) {
+                $runningBalance += $debit - $credit;
+            } else {
+                $runningBalance += $credit - $debit;
+            }
+            $row['description'] = (string)($row['line_description'] ?: $row['entry_description']);
+            $row['journal'] = trim((string)(($row['journal_code'] ?? '') . ' - ' . ($row['journal_name_ar'] ?? '')), ' -');
+            $row['cost_center'] = trim((string)(($row['cost_center_code'] ?? '') . ' - ' . ($row['cost_center_name_ar'] ?? '')), ' -');
+            $row['running_balance'] = $runningBalance;
+        }
+        unset($row);
+
+        return [
+            'account' => $account,
+            'rows' => $rows,
+            'opening_balance' => $openingBalance,
+            'total_debit' => $totalDebit,
+            'total_credit' => $totalCredit,
+            'ending_balance' => $runningBalance
+        ];
+    }
+
+    public function getCashBankMovementData($dateFrom, $dateTo, $accountId = null, $filters = []) {
+        $cashBankAccounts = $this->getCashBankAccounts();
+        $selectedAccountId = !empty($accountId) ? (int)$accountId : null;
+        $eligibleAccountIds = [];
+        foreach ($cashBankAccounts as $account) {
+            $eligibleAccountIds[] = (int)$account['account_id'];
+        }
+
+        if ($selectedAccountId && !in_array($selectedAccountId, $eligibleAccountIds, true)) {
+            return [
+                'accounts' => $cashBankAccounts,
+                'rows' => [],
+                'opening_balance' => 0,
+                'total_receipts' => 0,
+                'total_payments' => 0,
+                'ending_balance' => 0
+            ];
+        }
+
+        if (empty($eligibleAccountIds)) {
+            return [
+                'accounts' => [],
+                'rows' => [],
+                'opening_balance' => 0,
+                'total_receipts' => 0,
+                'total_payments' => 0,
+                'ending_balance' => 0
+            ];
+        }
+
+        $dimensionClause = $this->buildDimensionFilterClause($filters);
+        $accountPlaceholders = implode(',', array_fill(0, count($selectedAccountId ? [$selectedAccountId] : $eligibleAccountIds), '?'));
+        $accountIds = $selectedAccountId ? [$selectedAccountId] : $eligibleAccountIds;
+        $accountTypes = str_repeat('i', count($accountIds));
+
+        $openingSql = "SELECT acc.account_id, acc.opening_balance,
+                COALESCE(SUM(jel.debit_amount), 0) AS total_debit,
+                COALESCE(SUM(jel.credit_amount), 0) AS total_credit
+            FROM acc_chart_of_accounts acc
+            LEFT JOIN acc_journal_entry_lines jel ON acc.account_id = jel.account_id
+            LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+            LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
+            WHERE acc.account_id IN ($accountPlaceholders)
+              AND (je.entry_id IS NULL OR (je.status = 'posted' AND je.entry_date < ?" . $dimensionClause['sql'] . "))
+            GROUP BY acc.account_id, acc.opening_balance";
+        $openingStmt = $this->db->prepare($openingSql);
+        $openingParams = array_merge($accountIds, [$dateFrom], $dimensionClause['params']);
+        $openingTypes = $accountTypes . 's' . $dimensionClause['types'];
+        $openingStmt->bind_param($openingTypes, ...$openingParams);
+        $openingStmt->execute();
+        $openingRows = $openingStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $openingStmt->close();
+
+        $openingBalance = 0;
+        foreach ($openingRows as $openingRow) {
+            $openingBalance += (float)$openingRow['opening_balance'] + ((float)$openingRow['total_debit'] - (float)$openingRow['total_credit']);
+        }
+
+        $movementSql = "SELECT
+                acc.account_code,
+                acc.account_name_ar,
+                je.entry_number,
+                je.entry_date,
+                je.description AS entry_description,
+                jel.description AS line_description,
+                jel.debit_amount,
+                jel.credit_amount,
+                cc.cost_center_code,
+                cc.cost_center_name_ar,
+                j.journal_code,
+                j.journal_name_ar
+            FROM acc_journal_entry_lines jel
+            INNER JOIN acc_chart_of_accounts acc ON jel.account_id = acc.account_id
+            INNER JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+            LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
+            LEFT JOIN acc_journals j ON je.journal_id = j.journal_id
+            WHERE jel.account_id IN ($accountPlaceholders)
+              AND je.status = 'posted'
+              AND je.entry_date BETWEEN ? AND ?" . $dimensionClause['sql'] . "
+            ORDER BY je.entry_date, je.entry_id, jel.line_number";
+        $movementStmt = $this->db->prepare($movementSql);
+        $movementParams = array_merge($accountIds, [$dateFrom, $dateTo], $dimensionClause['params']);
+        $movementTypes = $accountTypes . 'ss' . $dimensionClause['types'];
+        $movementStmt->bind_param($movementTypes, ...$movementParams);
+        $movementStmt->execute();
+        $rows = $movementStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $movementStmt->close();
+
+        $totalReceipts = 0;
+        $totalPayments = 0;
+        $runningBalance = $openingBalance;
+        foreach ($rows as &$row) {
+            $debit = (float)$row['debit_amount'];
+            $credit = (float)$row['credit_amount'];
+            $totalReceipts += $debit;
+            $totalPayments += $credit;
+            $runningBalance += $debit - $credit;
+            $row['description'] = (string)($row['line_description'] ?: $row['entry_description']);
+            $row['journal'] = trim((string)(($row['journal_code'] ?? '') . ' - ' . ($row['journal_name_ar'] ?? '')), ' -');
+            $row['cost_center'] = trim((string)(($row['cost_center_code'] ?? '') . ' - ' . ($row['cost_center_name_ar'] ?? '')), ' -');
+            $row['running_balance'] = $runningBalance;
+        }
+        unset($row);
+
+        return [
+            'accounts' => $cashBankAccounts,
+            'rows' => $rows,
+            'opening_balance' => $openingBalance,
+            'total_receipts' => $totalReceipts,
+            'total_payments' => $totalPayments,
+            'ending_balance' => $runningBalance
+        ];
+    }
     
     // ============================================
     // Reports
@@ -748,31 +2484,53 @@ class AccountingManager {
      * Get trial balance
      * ميزان المراجعة
      */
-    public function getTrialBalance($date = null) {
+    public function getTrialBalance($date = null, $filters = [], $dateFrom = null) {
         if (!$date) {
             $date = date('Y-m-d');
         }
-        
-        $sql = "SELECT 
+        if (!$dateFrom) {
+            $dateFrom = date('Y-01-01', strtotime($date));
+        }
+
+        $dimensionClause = $this->buildDimensionFilterClause($filters);
+        $sql = "SELECT
                     acc.account_id,
                     acc.account_code,
                     acc.account_name_ar,
                     acc.account_type,
                     acc.opening_balance,
-                    COALESCE(SUM(jel.debit_amount), 0) as total_debit,
-                    COALESCE(SUM(jel.credit_amount), 0) as total_credit
+                    COALESCE(SUM(CASE
+                        WHEN je.status = 'posted'
+                         AND je.entry_date BETWEEN ? AND ?" . $dimensionClause['sql'] . "
+                        THEN jel.debit_amount
+                        ELSE 0
+                    END), 0) AS total_debit,
+                    COALESCE(SUM(CASE
+                        WHEN je.status = 'posted'
+                         AND je.entry_date BETWEEN ? AND ?" . $dimensionClause['sql'] . "
+                        THEN jel.credit_amount
+                        ELSE 0
+                    END), 0) AS total_credit
                 FROM acc_chart_of_accounts acc
                 LEFT JOIN acc_journal_entry_lines jel ON acc.account_id = jel.account_id
-                LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id 
-                    AND je.status = 'posted' AND je.entry_date <= ?
+                LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
+                LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
                 WHERE acc.is_leaf = 1 AND acc.is_active = 1
                 GROUP BY acc.account_id
                 ORDER BY acc.account_code";
-        
+
+        $params = array_merge(
+            [$dateFrom, $date],
+            $dimensionClause['params'],
+            [$dateFrom, $date],
+            $dimensionClause['params']
+        );
+        $types = 'ss' . $dimensionClause['types'] . 'ss' . $dimensionClause['types'];
+
         $stmt = $this->db->prepare($sql);
-        $stmt->bind_param("s", $date);
+        $stmt->bind_param($types, ...$params);
         $stmt->execute();
-        
+
         return $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     }
     

@@ -1,14 +1,14 @@
 <?php
 /**
- * Income Statement Report
- * قائمة الدخل
+ * General Ledger Detail Report
+ * تفاصيل الأستاذ العام
  *
  * @charset UTF-8
  * @version 1.0
  */
 
-$sc_title = "قائمة الدخل";
-$sc_id = "206";
+$sc_title = "تفاصيل الأستاذ العام";
+$sc_id = "212";
 $use_accounting_theme = true;
 include_once "../../../../nocash.hnt";
 include_once "../../../../connectdb.hnt";
@@ -16,8 +16,10 @@ include_once "../../../../header.hnt";
 include_once "../../includes/accounting_class.hnt";
 
 $accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+$accounts = $accountingManager->getAllAccounts(['is_active' => 1, 'is_leaf' => 1]);
+$dimensionOptions = $accountingManager->getReportDimensionOptions();
 
-// Get date range
+$accountId = !empty($_GET['account_id']) ? (int)$_GET['account_id'] : 0;
 $dateFrom = $_GET['date_from'] ?? date('Y-01-01');
 $dateTo = $_GET['date_to'] ?? date('Y-m-d');
 $filters = [
@@ -28,16 +30,27 @@ $filters = [
     'owner_id' => !empty($_GET['owner_id']) ? (int)$_GET['owner_id'] : null,
     'egar_id' => !empty($_GET['egar_id']) ? (int)$_GET['egar_id'] : null
 ];
-$dimensionOptions = $accountingManager->getReportDimensionOptions();
 
-$statementData = $accountingManager->getIncomeStatementData($dateFrom, $dateTo, $filters);
-$revenueAccounts = $statementData['revenue_accounts'];
-$expenseAccounts = $statementData['expense_accounts'];
-$totalRevenue = $statementData['total_revenue'];
-$totalExpenses = $statementData['total_expenses'];
-$netIncome = $totalRevenue - $totalExpenses;
+$ledgerData = [
+    'account' => null,
+    'rows' => [],
+    'opening_balance' => 0,
+    'total_debit' => 0,
+    'total_credit' => 0,
+    'ending_balance' => 0
+];
+
+if ($accountId > 0) {
+    $ledgerData = $accountingManager->getGeneralLedgerDetailData($accountId, $dateFrom, $dateTo, $filters);
+}
+
+$selectedAccount = $ledgerData['account'];
+$rows = $ledgerData['rows'];
+$openingBalance = $ledgerData['opening_balance'];
+$totalDebit = $ledgerData['total_debit'];
+$totalCredit = $ledgerData['total_credit'];
+$endingBalance = $ledgerData['ending_balance'];
 ?>
-
 
 <style>
 :root {
@@ -51,72 +64,59 @@ $netIncome = $totalRevenue - $totalExpenses;
     box-shadow: 0 4px 15px rgba(0,0,0,0.08);
 }
 
-.report-section {
-    margin-bottom: 2rem;
-}
-
-.section-header {
-    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
-    color: white;
-    padding: 1rem;
-    border-radius: 8px;
+.summary-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
     margin-bottom: 1rem;
-    font-weight: 600;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+    text-align: center;
 }
 
-.account-line {
-    display: flex;
-    justify-content: space-between;
-    padding: 0.75rem 1rem;
-    border-bottom: 1px solid #e9ecef;
+.summary-value {
+    font-size: 1.5rem;
+    font-weight: 700;
 }
 
-.account-line:hover {
-    background: #f8f9fa;
-}
-
-.subtotal-line {
-    display: flex;
-    justify-content: space-between;
-    padding: 1rem;
-    background: #f8f9fa;
-    border-radius: 8px;
-    font-weight: 600;
+.report-table {
+    width: 100%;
+    border-collapse: collapse;
     margin-top: 1rem;
 }
 
-.net-income {
-    display: flex;
-    justify-content: space-between;
-    padding: 1.5rem;
-    background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
-    color: white;
-    border-radius: 12px;
-    font-weight: 700;
-    font-size: 1.2rem;
-    margin-top: 2rem;
+.report-table th {
+    padding: 1rem;
+    text-align: center;
+    font-weight: 600;
 }
 
-.net-loss {
-    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+.report-table td {
+    padding: 0.75rem;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.report-table tbody tr:hover {
+    background: #f8f9fa;
+}
+
+.report-table tfoot tr {
+    background: #e9ecef;
+    font-weight: bold;
 }
 
 @media print {
-    .no-print {
-        display: none !important;
-    }
+    .no-print { display: none !important; }
 }
 </style>
 
 <div class="container-fluid p-4">
-    <!-- Header -->
     <div class="page-header no-print">
         <div class="d-flex justify-content-between align-items-center">
             <div>
                 <h1 class="mb-2">
-                    <i class="bi bi-graph-up me-2"></i>قائمة الدخل
+                    <i class="bi bi-journal-text me-2"></i>تفاصيل الأستاذ العام
                 </h1>
-                <p class="mb-0 opacity-75">Income Statement</p>
+                <p class="mb-0 opacity-75">General Ledger Detail</p>
             </div>
             <div>
                 <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
@@ -129,10 +129,20 @@ $netIncome = $totalRevenue - $totalExpenses;
         </div>
     </div>
 
-    <!-- Filters -->
     <div class="card mb-4 no-print" style="border-radius: 15px;">
         <div class="card-body">
             <form method="GET" class="row g-3">
+                <div class="col-md-3">
+                    <label class="form-label">الحساب</label>
+                    <select class="form-select" name="account_id">
+                        <option value="">-- اختر الحساب --</option>
+                        <?php foreach ($accounts as $account): ?>
+                        <option value="<?php echo (int)$account['account_id']; ?>" <?php echo $accountId === (int)$account['account_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($account['account_code'] . ' - ' . $account['account_name_ar'], ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
                 <div class="col-md-3">
                     <label class="form-label">من تاريخ</label>
                     <input type="date" class="form-control" name="date_from" value="<?php echo $dateFrom; ?>">
@@ -216,86 +226,93 @@ $netIncome = $totalRevenue - $totalExpenses;
         </div>
     </div>
 
-    <!-- Report -->
+    <?php if ($selectedAccount): ?>
+    <div class="row g-3 mb-4">
+        <div class="col-md-3">
+            <div class="summary-card" style="border-right: 4px solid #6c757d;">
+                <div class="text-muted mb-2">رصيد أول المدة</div>
+                <div class="summary-value text-secondary"><?php echo number_format($openingBalance, 2); ?> ر.س</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="summary-card" style="border-right: 4px solid #28a745;">
+                <div class="text-muted mb-2">إجمالي المدين</div>
+                <div class="summary-value text-success"><?php echo number_format($totalDebit, 2); ?> ر.س</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="summary-card" style="border-right: 4px solid #dc3545;">
+                <div class="text-muted mb-2">إجمالي الدائن</div>
+                <div class="summary-value text-danger"><?php echo number_format($totalCredit, 2); ?> ر.س</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="summary-card" style="border-right: 4px solid #667eea;">
+                <div class="text-muted mb-2">الرصيد الختامي</div>
+                <div class="summary-value text-primary"><?php echo number_format($endingBalance, 2); ?> ر.س</div>
+            </div>
+        </div>
+    </div>
+
     <div class="report-card">
-        <div class="text-center mb-4">
-            <h3>قائمة الدخل</h3>
-            <p class="text-muted">من <?php echo $dateFrom; ?> إلى <?php echo $dateTo; ?></p>
+        <div class="mb-3">
+            <h4 style="color: #667eea;"><?php echo htmlspecialchars($selectedAccount['account_code'] . ' - ' . $selectedAccount['account_name_ar'], ENT_QUOTES, 'UTF-8'); ?></h4>
+            <p class="text-muted mb-0">من <?php echo $dateFrom; ?> إلى <?php echo $dateTo; ?></p>
             <?php if (array_filter($filters)): ?>
             <p class="text-muted mb-0">تم تطبيق تصفية حسب الأبعاد المحاسبية المحددة</p>
             <?php endif; ?>
         </div>
 
-        <!-- Revenue Section -->
-        <div class="report-section">
-            <div class="section-header">
-                <i class="bi bi-currency-dollar me-2"></i>الإيرادات
-            </div>
-            <?php if (empty($revenueAccounts)): ?>
-            <div class="text-center text-muted py-3">لا توجد إيرادات في هذه الفترة</div>
-            <?php else: ?>
-            <?php foreach ($revenueAccounts as $account): ?>
-            <div class="account-line">
-                <span><?php echo $account['account_code']; ?> - <?php echo $account['account_name_ar']; ?></span>
-                <span><?php echo number_format($account['amount'], 2); ?> ر.س</span>
-            </div>
-            <?php endforeach; ?>
-            <?php endif; ?>
-
-            <div class="subtotal-line">
-                <span>إجمالي الإيرادات</span>
-                <span><?php echo number_format($totalRevenue, 2); ?> ر.س</span>
-            </div>
-        </div>
-
-        <!-- Expenses Section -->
-        <div class="report-section">
-            <div class="section-header">
-                <i class="bi bi-cart-dash me-2"></i>المصروفات
-            </div>
-            <?php if (empty($expenseAccounts)): ?>
-            <div class="text-center text-muted py-3">لا توجد مصروفات في هذه الفترة</div>
-            <?php else: ?>
-            <?php foreach ($expenseAccounts as $account): ?>
-            <div class="account-line">
-                <span><?php echo $account['account_code']; ?> - <?php echo $account['account_name_ar']; ?></span>
-                <span><?php echo number_format($account['amount'], 2); ?> ر.س</span>
-            </div>
-            <?php endforeach; ?>
-            <?php endif; ?>
-
-            <div class="subtotal-line">
-                <span>إجمالي المصروفات</span>
-                <span><?php echo number_format($totalExpenses, 2); ?> ر.س</span>
-            </div>
-        </div>
-
-        <!-- Net Income -->
-        <div class="<?php echo $netIncome >= 0 ? 'net-income' : 'net-income net-loss'; ?>">
-            <span><?php echo $netIncome >= 0 ? 'صافي الربح' : 'صافي الخسارة'; ?></span>
-            <span><?php echo number_format(abs($netIncome), 2); ?> ر.س</span>
-        </div>
-
-        <!-- Summary -->
-        <div class="mt-4 p-3" style="background: #f8f9fa; border-radius: 8px;">
-            <div class="row text-center">
-                <div class="col-md-4">
-                    <div class="h5 mb-0 text-success"><?php echo number_format($totalRevenue, 2); ?></div>
-                    <small class="text-muted">إجمالي الإيرادات</small>
-                </div>
-                <div class="col-md-4">
-                    <div class="h5 mb-0 text-danger"><?php echo number_format($totalExpenses, 2); ?></div>
-                    <small class="text-muted">إجمالي المصروفات</small>
-                </div>
-                <div class="col-md-4">
-                    <div class="h5 mb-0 <?php echo $netIncome >= 0 ? 'text-primary' : 'text-warning'; ?>">
-                        <?php echo number_format(abs($netIncome), 2); ?>
-                    </div>
-                    <small class="text-muted"><?php echo $netIncome >= 0 ? 'صافي الربح' : 'صافي الخسارة'; ?></small>
-                </div>
-            </div>
-        </div>
+        <table class="report-table">
+            <thead>
+                <tr>
+                    <th>التاريخ</th>
+                    <th>رقم القيد</th>
+                    <th>دفتر اليومية</th>
+                    <th>مركز التكلفة</th>
+                    <th>البيان</th>
+                    <th>مدين</th>
+                    <th>دائن</th>
+                    <th>الرصيد الجاري</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($rows)): ?>
+                <tr>
+                    <td colspan="8" class="text-center text-muted">لا توجد حركات في هذه الفترة</td>
+                </tr>
+                <?php else: ?>
+                <?php foreach ($rows as $row): ?>
+                <tr>
+                    <td><?php echo htmlspecialchars($row['entry_date'], ENT_QUOTES, 'UTF-8'); ?></td>
+                    <td><?php echo htmlspecialchars($row['entry_number'], ENT_QUOTES, 'UTF-8'); ?></td>
+                    <td><?php echo htmlspecialchars($row['journal'] ?: '-', ENT_QUOTES, 'UTF-8'); ?></td>
+                    <td><?php echo htmlspecialchars($row['cost_center'] ?: '-', ENT_QUOTES, 'UTF-8'); ?></td>
+                    <td><?php echo htmlspecialchars($row['description'], ENT_QUOTES, 'UTF-8'); ?></td>
+                    <td class="text-end"><?php echo (float)$row['debit_amount'] > 0 ? number_format((float)$row['debit_amount'], 2) : '-'; ?></td>
+                    <td class="text-end"><?php echo (float)$row['credit_amount'] > 0 ? number_format((float)$row['credit_amount'], 2) : '-'; ?></td>
+                    <td class="text-end fw-bold"><?php echo number_format((float)$row['running_balance'], 2); ?></td>
+                </tr>
+                <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+            <tfoot>
+                <tr>
+                    <td colspan="5">الإجمالي</td>
+                    <td class="text-end"><?php echo number_format($totalDebit, 2); ?></td>
+                    <td class="text-end"><?php echo number_format($totalCredit, 2); ?></td>
+                    <td class="text-end"><?php echo number_format($endingBalance, 2); ?></td>
+                </tr>
+            </tfoot>
+        </table>
     </div>
+    <?php else: ?>
+    <div class="report-card text-center py-5">
+        <i class="bi bi-journal-bookmark" style="font-size: 4rem; color: #667eea; opacity: 0.3;"></i>
+        <h4 class="mt-3 text-muted">اختر حسابًا لعرض تفاصيل الأستاذ</h4>
+        <p class="text-muted">حدد الحساب والفترة والأبعاد المطلوبة لعرض حركة الأستاذ بالتفصيل</p>
+    </div>
+    <?php endif; ?>
 </div>
 
 <?php require("../../../../foter.hnt"); ?>

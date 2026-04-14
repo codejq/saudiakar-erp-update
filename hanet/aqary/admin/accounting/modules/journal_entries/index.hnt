@@ -21,6 +21,13 @@ else {
     include_once "../../includes/accounting_class.hnt";
 
 $accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+$journals = $accountingManager->getActiveJournals();
+$costCenters = $accountingManager->getActiveCostCenters();
+$dimensionOptions = $accountingManager->getReportDimensionOptions();
+$dimTenants    = array_map(fn($t) => ['id' => (int)$t['tenant_id'],    'label' => $t['tenant_name']],   $dimensionOptions['tenants']);
+$dimOwners     = array_map(fn($o) => ['id' => (int)$o['owner_id'],     'label' => $o['owner_name']],    $dimensionOptions['owners']);
+$dimProperties = array_map(fn($p) => ['id' => (int)$p['property_id'], 'label' => $p['property_name']], $dimensionOptions['properties']);
+$dimContracts  = array_map(fn($c) => ['id' => (int)$c['egar_id'],      'label' => ($c['contract_number'] ?: 'عقد #' . $c['egar_id'])], $dimensionOptions['contracts']);
 
 // Handle AJAX actions
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
@@ -35,27 +42,33 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                 $response = ['success' => false, 'error' => 'Entry date is required', 'message' => 'تاريخ القيد مطلوب'];
                 break;
             }
-            
+
             if (empty($_POST['description'])) {
                 $response = ['success' => false, 'error' => 'Description is required', 'message' => 'وصف القيد مطلوب'];
                 break;
             }
-            
+
             $lines = json_decode($_POST['lines'], true);
-            
+
             if (empty($lines) || !is_array($lines)) {
                 $response = ['success' => false, 'error' => 'No entry lines provided', 'message' => 'يجب إضافة بنود للقيد'];
                 break;
             }
-            
+
             if (count($lines) < 2) {
                 $response = ['success' => false, 'error' => 'Minimum 2 lines required', 'message' => 'يجب إضافة بندين على الأقل للقيد'];
                 break;
             }
-            
+
             $data = [
                 'entry_date' => $_POST['entry_date'],
                 'entry_type' => $_POST['entry_type'] ?? 'manual',
+                'journal_id' => $_POST['journal_id'] ?? null,
+                'tenant_id' => $_POST['tenant_id'] ?? null,
+                'owner_id' => $_POST['owner_id'] ?? null,
+                'aqar_id' => $_POST['aqar_id'] ?? null,
+                'subaqar_id' => $_POST['subaqar_id'] ?? null,
+                'egar_id' => $_POST['egar_id'] ?? null,
                 'reference_type' => $_POST['reference_type'] ?? null,
                 'reference_id' => $_POST['reference_id'] ?? null,
                 'description' => $_POST['description'],
@@ -71,43 +84,49 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
 
         case 'update_entry':
             $entryId = intval($_POST['entry_id'] ?? 0);
-            
+
             if (empty($entryId)) {
                 $response = ['success' => false, 'error' => 'Entry ID is required', 'message' => 'معرف القيد مطلوب'];
                 break;
             }
-            
+
             $checkEntry = $db->query("SELECT entry_id, status FROM acc_journal_entries WHERE entry_id = $entryId");
             if (!$checkEntry || $checkEntry->num_rows == 0) {
                 $response = ['success' => false, 'error' => 'Entry not found', 'message' => 'القيد غير موجود'];
                 break;
             }
-            
+
             if (empty($_POST['entry_date'])) {
                 $response = ['success' => false, 'error' => 'Entry date is required', 'message' => 'تاريخ القيد مطلوب'];
                 break;
             }
-            
+
             if (empty($_POST['description'])) {
                 $response = ['success' => false, 'error' => 'Description is required', 'message' => 'وصف القيد مطلوب'];
                 break;
             }
-            
+
             $lines = json_decode($_POST['lines'], true);
-            
+
             if (empty($lines) || !is_array($lines)) {
                 $response = ['success' => false, 'error' => 'No entry lines provided', 'message' => 'يجب إضافة بنود للقيد'];
                 break;
             }
-            
+
             if (count($lines) < 2) {
                 $response = ['success' => false, 'error' => 'Minimum 2 lines required', 'message' => 'يجب إضافة بندين على الأقل للقيد'];
                 break;
             }
-            
+
             $data = [
                 'entry_date' => $_POST['entry_date'],
                 'entry_type' => $_POST['entry_type'] ?? 'manual',
+                'journal_id' => $_POST['journal_id'] ?? null,
+                'tenant_id' => $_POST['tenant_id'] ?? null,
+                'owner_id' => $_POST['owner_id'] ?? null,
+                'aqar_id' => $_POST['aqar_id'] ?? null,
+                'subaqar_id' => $_POST['subaqar_id'] ?? null,
+                'egar_id' => $_POST['egar_id'] ?? null,
                 'description' => $_POST['description']
             ];
 
@@ -121,6 +140,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
             $updateSql = "UPDATE acc_journal_entries SET
                          entry_date = '{$data['entry_date']}',
                          entry_type = '{$data['entry_type']}',
+                         journal_id = " . (!empty($data['journal_id']) ? (int)$data['journal_id'] : 'NULL') . ",
+                         tenant_id = " . (!empty($data['tenant_id']) ? (int)$data['tenant_id'] : 'NULL') . ",
+                         owner_id = " . (!empty($data['owner_id']) ? (int)$data['owner_id'] : 'NULL') . ",
+                         aqar_id = " . (!empty($data['aqar_id']) ? (int)$data['aqar_id'] : 'NULL') . ",
+                         subaqar_id = " . (!empty($data['subaqar_id']) ? (int)$data['subaqar_id'] : 'NULL') . ",
+                         egar_id = " . (!empty($data['egar_id']) ? (int)$data['egar_id'] : 'NULL') . ",
                          description = '{$db->real_escape_string($data['description'])}'
                          WHERE entry_id = $entryId";
 
@@ -136,13 +161,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                     $desc = $db->real_escape_string($line['description']);
                     $debit = floatval($line['debit_amount']);
                     $credit = floatval($line['credit_amount']);
+                    $costCenterId = isset($line['cost_center_id']) && $line['cost_center_id'] !== '' ? (int)$line['cost_center_id'] : 'NULL';
 
                     $totalDebit += $debit;
                     $totalCredit += $credit;
 
                     $lineSql = "INSERT INTO acc_journal_entry_lines
-                               (entry_id, line_number, account_id, description, debit_amount, credit_amount)
-                               VALUES ($entryId, $lineNumber, $accountId, '$desc', $debit, $credit)";
+                               (entry_id, line_number, account_id, description, debit_amount, credit_amount, cost_center_id, formuid)
+                               VALUES ($entryId, $lineNumber, $accountId, '$desc', $debit, $credit, $costCenterId, UUID())";
                     if (!$db->query($lineSql)) {
                         $insertSuccess = false;
                         $response = ['success' => false, 'error' => $db->error, 'message' => 'فشل في إضافة البند رقم ' . $lineNumber . ': ' . $db->error];
@@ -168,29 +194,29 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
 
         case 'post_entry':
             $entryId = intval($_POST['entry_id'] ?? 0);
-            
+
             if (empty($entryId)) {
                 $response = ['success' => false, 'error' => 'Entry ID is required', 'message' => 'معرف القيد مطلوب'];
                 break;
             }
-            
+
             $checkEntry = $db->query("SELECT status FROM acc_journal_entries WHERE entry_id = $entryId");
             if (!$checkEntry || $checkEntry->num_rows == 0) {
                 $response = ['success' => false, 'error' => 'Entry not found', 'message' => 'القيد غير موجود'];
                 break;
             }
-            
+
             $entryData = $checkEntry->fetch_assoc();
             if ($entryData['status'] == 'posted') {
                 $response = ['success' => false, 'error' => 'Entry already posted', 'message' => 'القيد مرحّل بالفعل'];
                 break;
             }
-            
+
             if ($entryData['status'] == 'cancelled') {
                 $response = ['success' => false, 'error' => 'Cannot post cancelled entry', 'message' => 'لا يمكن ترحيل قيد ملغي'];
                 break;
             }
-            
+
             $result = $accountingManager->postJournalEntry($entryId);
             $response = $result;
             if (!isset($response['message'])) {
@@ -200,7 +226,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
 
         case 'delete_entry':
             $entryId = intval($_POST['entry_id'] ?? 0);
-            
+
             if (empty($entryId)) {
                 $response = ['success' => false, 'error' => 'Entry ID is required', 'message' => 'معرف القيد مطلوب'];
                 break;
@@ -624,6 +650,50 @@ if (!empty($entries)) {
                                 <option value="adjustment">تسوية</option>
                             </select>
                         </div>
+                        <div class="col-md-6">
+                            <label class="form-label">دفتر اليومية</label>
+                            <select class="form-select" name="journal_id">
+                                <option value="">-- اختر دفتر اليومية --</option>
+                                <?php foreach ($journals as $journal): ?>
+                                <option value="<?php echo (int)$journal['journal_id']; ?>"><?php echo htmlspecialchars($journal['journal_code'] . ' - ' . $journal['journal_name_ar'], ENT_QUOTES, 'UTF-8'); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">المستأجر</label>
+                            <div class="dim-ac-wrapper">
+                                <input type="text" class="form-control" id="add_tenant_text" placeholder="ابحث عن مستأجر..." autocomplete="off">
+                                <input type="hidden" name="tenant_id" id="add_tenant_id">
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">المالك</label>
+                            <div class="dim-ac-wrapper">
+                                <input type="text" class="form-control" id="add_owner_text" placeholder="ابحث عن مالك..." autocomplete="off">
+                                <input type="hidden" name="owner_id" id="add_owner_id">
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">العقار</label>
+                            <div class="dim-ac-wrapper">
+                                <input type="text" class="form-control" id="add_property_text" placeholder="ابحث عن عقار..." autocomplete="off">
+                                <input type="hidden" name="aqar_id" id="add_property_id">
+                            </div>
+                        </div>
+                        <div class="col-md-3 ms-auto">
+                            <label class="form-label">الوحدة</label>
+                            <div class="dim-ac-wrapper">
+                                <input type="text" class="form-control" id="add_unit_text" placeholder="اختر عقاراً أولاً" autocomplete="off">
+                                <input type="hidden" name="subaqar_id" id="add_unit_id">
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">العقد</label>
+                            <div class="dim-ac-wrapper">
+                                <input type="text" class="form-control" id="add_contract_text" placeholder="ابحث عن عقد..." autocomplete="off">
+                                <input type="hidden" name="egar_id" id="add_contract_id">
+                            </div>
+                        </div>
                         <div class="col-12">
                             <label class="form-label">الوصف *</label>
                             <textarea class="form-control" name="description" rows="2" required></textarea>
@@ -640,9 +710,12 @@ if (!empty($entries)) {
                             <label class="form-label">البيان</label>
                         </div>
                         <div class="col-md-2">
-                            <label class="form-label">مدين</label>
+                            <label class="form-label">مركز التكلفة</label>
                         </div>
                         <div class="col-md-2">
+                            <label class="form-label">مدين</label>
+                        </div>
+                        <div class="col-md-1">
                             <label class="form-label">دائن</label>
                         </div>
                         <div class="col-md-1">
@@ -713,6 +786,50 @@ if (!empty($entries)) {
                                 <option value="adjustment">تسوية</option>
                             </select>
                         </div>
+                        <div class="col-md-6">
+                            <label class="form-label">دفتر اليومية</label>
+                            <select class="form-select" id="edit_journal_id" name="journal_id">
+                                <option value="">-- اختر دفتر اليومية --</option>
+                                <?php foreach ($journals as $journal): ?>
+                                <option value="<?php echo (int)$journal['journal_id']; ?>"><?php echo htmlspecialchars($journal['journal_code'] . ' - ' . $journal['journal_name_ar'], ENT_QUOTES, 'UTF-8'); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">المستأجر</label>
+                            <div class="dim-ac-wrapper">
+                                <input type="text" class="form-control" id="edit_tenant_text" placeholder="ابحث عن مستأجر..." autocomplete="off">
+                                <input type="hidden" id="edit_tenant_id" name="tenant_id">
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">المالك</label>
+                            <div class="dim-ac-wrapper">
+                                <input type="text" class="form-control" id="edit_owner_text" placeholder="ابحث عن مالك..." autocomplete="off">
+                                <input type="hidden" id="edit_owner_id" name="owner_id">
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">العقار</label>
+                            <div class="dim-ac-wrapper">
+                                <input type="text" class="form-control" id="edit_property_text" placeholder="ابحث عن عقار..." autocomplete="off">
+                                <input type="hidden" id="edit_aqar_id" name="aqar_id">
+                            </div>
+                        </div>
+                        <div class="col-md-3 ms-auto">
+                            <label class="form-label">الوحدة</label>
+                            <div class="dim-ac-wrapper">
+                                <input type="text" class="form-control" id="edit_unit_text" placeholder="اختر عقاراً أولاً" autocomplete="off">
+                                <input type="hidden" id="edit_subaqar_id" name="subaqar_id">
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">العقد</label>
+                            <div class="dim-ac-wrapper">
+                                <input type="text" class="form-control" id="edit_contract_text" placeholder="ابحث عن عقد..." autocomplete="off">
+                                <input type="hidden" id="edit_egar_id" name="egar_id">
+                            </div>
+                        </div>
                         <div class="col-12">
                             <label class="form-label">الوصف *</label>
                             <textarea class="form-control" id="edit_description" name="description" rows="2" required></textarea>
@@ -775,10 +892,18 @@ if (!empty($entries)) {
 
 
 
+<script src="../../includes/dimension_autocomplete.js"></script>
 <script>
 const accounts = <?php echo json_encode($accounts); ?>;
+const journals = <?php echo json_encode($journals); ?>;
+const costCenters = <?php echo json_encode($costCenters); ?>;
 const entriesData = <?php echo json_encode($entries); ?>;
 const entryLinesData = <?php echo json_encode($entryLines); ?>;
+const dimTenants    = <?php echo json_encode($dimTenants); ?>;
+const dimOwners     = <?php echo json_encode($dimOwners); ?>;
+const dimProperties = <?php echo json_encode($dimProperties); ?>;
+const dimContracts  = <?php echo json_encode($dimContracts); ?>;
+const dimAjaxUrl    = '../../ajax/get_dimensions.hnt';
 let lineCounter = 0;
 
 function addLine() {
@@ -796,9 +921,15 @@ function addLine() {
                     <input type="text" class="form-control" name="description_${lineCounter}" placeholder="البيان" required>
                 </div>
                 <div class="col-md-2">
-                    <input type="number" step="0.01" class="form-control debit-input" name="debit_${lineCounter}" placeholder="مدين" value="0" onchange="calculateTotals()">
+                    <select class="form-control" name="cost_center_${lineCounter}">
+                        <option value="">بدون مركز تكلفة</option>
+                        ${costCenters.map(cc => `<option value="${cc.cost_center_id}">${cc.cost_center_code} - ${cc.cost_center_name_ar}</option>`).join('')}
+                    </select>
                 </div>
                 <div class="col-md-2">
+                    <input type="number" step="0.01" class="form-control debit-input" name="debit_${lineCounter}" placeholder="مدين" value="0" onchange="calculateTotals()">
+                </div>
+                <div class="col-md-1">
                     <input type="number" step="0.01" class="form-control credit-input" name="credit_${lineCounter}" placeholder="دائن" value="0" onchange="calculateTotals()">
                 </div>
                 <div class="col-md-1">
@@ -844,18 +975,19 @@ function calculateTotals() {
 function submitEntry(status) {
     const form = document.getElementById('addEntryForm');
     const formData = new FormData(form);
+    const linesContainer = document.getElementById('entryLines');
 
     // Collect lines
     const lines = [];
     for (let i = 1; i <= lineCounter; i++) {
-        const accountSelect = document.querySelector(`[name="account_id_${i}"]`);
+        const accountSelect = linesContainer.querySelector(`[name="account_id_${i}"]`);
         if (accountSelect && accountSelect.value) {
             lines.push({
                 account_id: accountSelect.value,
-                description: document.querySelector(`[name="description_${i}"]`).value,
-                debit_amount: parseFloat(document.querySelector(`[name="debit_${i}"]`).value) || 0,
-                credit_amount: parseFloat(document.querySelector(`[name="credit_${i}"]`).value) || 0,
-                cost_center_id: null
+                description: linesContainer.querySelector(`[name="description_${i}"]`).value,
+                debit_amount: parseFloat(linesContainer.querySelector(`[name="debit_${i}"]`).value) || 0,
+                credit_amount: parseFloat(linesContainer.querySelector(`[name="credit_${i}"]`).value) || 0,
+                cost_center_id: linesContainer.querySelector(`[name="cost_center_${i}"]`)?.value || null
             });
         }
     }
@@ -952,6 +1084,102 @@ function showResultModal(success, message) {
 addLine();
 addLine();
 
+// ── Dimension Autocomplete ────────────────────────────────────────────────────
+
+/**
+ * Initialize autocomplete fields for the given modal prefix ('add' or 'edit').
+ * Called once on DOMContentLoaded so the elements are ready.
+ */
+function initDimAC(prefix) {
+    var isEdit = (prefix === 'edit');
+
+    AccountingDimAC.init(
+        document.getElementById(prefix + '_tenant_text'),
+        document.getElementById(isEdit ? 'edit_tenant_id' : 'add_tenant_id'),
+        dimTenants, {}
+    );
+    AccountingDimAC.init(
+        document.getElementById(prefix + '_owner_text'),
+        document.getElementById(isEdit ? 'edit_owner_id' : 'add_owner_id'),
+        dimOwners, {}
+    );
+    AccountingDimAC.init(
+        document.getElementById(prefix + '_property_text'),
+        document.getElementById(isEdit ? 'edit_aqar_id' : 'add_property_id'),
+        dimProperties, {
+            onSelect: function(item) { loadUnitsForPrefix(prefix, item.id); },
+            onClear:  function()     { clearUnitForPrefix(prefix); }
+        }
+    );
+    AccountingDimAC.init(
+        document.getElementById(prefix + '_unit_text'),
+        document.getElementById(isEdit ? 'edit_subaqar_id' : 'add_unit_id'),
+        [], {}
+    );
+    AccountingDimAC.init(
+        document.getElementById(prefix + '_contract_text'),
+        document.getElementById(isEdit ? 'edit_egar_id' : 'add_contract_id'),
+        dimContracts, {}
+    );
+}
+
+/** Load unit list for the chosen property, then optionally select a unit by ID. */
+function loadUnitsForPrefix(prefix, aqarId, cb) {
+    var isEdit   = (prefix === 'edit');
+    var unitText = document.getElementById(prefix + '_unit_text');
+    var unitHid  = document.getElementById(isEdit ? 'edit_subaqar_id' : 'add_unit_id');
+    if (!unitText) return;
+    unitText.value = '';
+    if (unitHid) unitHid.value = '';
+    unitText.placeholder = 'جاري التحميل...';
+    AccountingDimAC.fetchItems(dimAjaxUrl, 'unit', aqarId, function(items) {
+        if (unitText._dimAc) unitText._dimAc.setItems(items);
+        unitText.placeholder = items.length ? 'ابحث عن وحدة...' : 'لا توجد وحدات';
+        if (cb) cb();
+    });
+}
+
+/** Clear the unit autocomplete for the given prefix. */
+function clearUnitForPrefix(prefix) {
+    var isEdit   = (prefix === 'edit');
+    var unitText = document.getElementById(prefix + '_unit_text');
+    var unitHid  = document.getElementById(isEdit ? 'edit_subaqar_id' : 'add_unit_id');
+    if (unitText) {
+        unitText.value = '';
+        unitText.placeholder = 'اختر عقاراً أولاً';
+        if (unitText._dimAc) unitText._dimAc.setItems([]);
+    }
+    if (unitHid) unitHid.value = '';
+}
+
+/** Set autocomplete text label from a pre-loaded items array by ID. */
+function setDimACById(textId, id, items) {
+    if (!id) return;
+    var el = document.getElementById(textId);
+    if (!el) return;
+    if (el._dimAc) {
+        el._dimAc.selectById(id);
+    }
+}
+
+// Init autocomplete for both modals once elements are in DOM
+initDimAC('add');
+initDimAC('edit');
+
+// Reset add modal fields when it opens
+document.getElementById('addEntryModal').addEventListener('show.bs.modal', function() {
+    ['add_tenant_text','add_owner_text','add_property_text','add_unit_text','add_contract_text'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el && el._dimAc) el._dimAc.clear();
+        else if (el) el.value = '';
+    });
+    ['add_tenant_id','add_owner_id','add_property_id','add_unit_id','add_contract_id'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.value = '';
+    });
+    clearUnitForPrefix('add');
+});
+
 // Edit functionality
 let editLineCounter = 0;
 let currentEditEntry = null;
@@ -981,7 +1209,27 @@ function fetchEntryData(entryId) {
     document.getElementById('edit_entry_id').value = entry.entry_id;
     document.getElementById('edit_entry_date').value = entry.entry_date;
     document.getElementById('edit_entry_type').value = entry.entry_type;
+    document.getElementById('edit_journal_id').value = entry.journal_id || '';
+    document.getElementById('edit_tenant_id').value = entry.tenant_id || '';
+    document.getElementById('edit_owner_id').value = entry.owner_id || '';
+    document.getElementById('edit_aqar_id').value = entry.aqar_id || '';
+    document.getElementById('edit_subaqar_id').value = entry.subaqar_id || '';
+    document.getElementById('edit_egar_id').value = entry.egar_id || '';
     document.getElementById('edit_description').value = entry.description;
+
+    // Populate autocomplete text labels
+    setDimACById('edit_tenant_text',   entry.tenant_id,  dimTenants);
+    setDimACById('edit_owner_text',    entry.owner_id,   dimOwners);
+    setDimACById('edit_property_text', entry.aqar_id,    dimProperties);
+    setDimACById('edit_contract_text', entry.egar_id,    dimContracts);
+    // Units depend on property — load via AJAX then select
+    if (entry.aqar_id) {
+        loadUnitsForPrefix('edit', entry.aqar_id, function() {
+            setDimACById('edit_unit_text', entry.subaqar_id, null);
+        });
+    } else {
+        clearUnitForPrefix('edit');
+    }
 
     // Fetch and populate lines
     fetchEntryLines(entryId);
@@ -1026,9 +1274,15 @@ function addEditLine(lineData = null) {
                     <input type="text" class="form-control" name="description_${editLineCounter}" placeholder="البيان" value="${lineData ? lineData.description : ''}" required>
                 </div>
                 <div class="col-md-2">
-                    <input type="number" step="0.01" class="form-control edit-debit-input" name="debit_${editLineCounter}" placeholder="مدين" value="${lineData ? lineData.debit_amount : '0'}" onchange="calculateEditTotals()">
+                    <select class="form-control" name="cost_center_${editLineCounter}">
+                        <option value="">بدون مركز تكلفة</option>
+                        ${costCenters.map(cc => `<option value="${cc.cost_center_id}" ${lineData && lineData.cost_center_id == cc.cost_center_id ? 'selected' : ''}>${cc.cost_center_code} - ${cc.cost_center_name_ar}</option>`).join('')}
+                    </select>
                 </div>
                 <div class="col-md-2">
+                    <input type="number" step="0.01" class="form-control edit-debit-input" name="debit_${editLineCounter}" placeholder="مدين" value="${lineData ? lineData.debit_amount : '0'}" onchange="calculateEditTotals()">
+                </div>
+                <div class="col-md-1">
                     <input type="number" step="0.01" class="form-control edit-credit-input" name="credit_${editLineCounter}" placeholder="دائن" value="${lineData ? lineData.credit_amount : '0'}" onchange="calculateEditTotals()">
                 </div>
                 <div class="col-md-1">
@@ -1074,17 +1328,19 @@ function calculateEditTotals() {
 function submitEditEntry() {
     const form = document.getElementById('editEntryForm');
     const formData = new FormData(form);
+    const linesContainer = document.getElementById('editEntryLines');
 
     // Collect lines
     const lines = [];
     for (let i = 1; i <= editLineCounter; i++) {
-        const accountSelect = document.querySelector(`[name="account_id_${i}"]`);
+        const accountSelect = linesContainer.querySelector(`[name="account_id_${i}"]`);
         if (accountSelect && accountSelect.value) {
             lines.push({
                 account_id: accountSelect.value,
-                description: document.querySelector(`[name="description_${i}"]`).value,
-                debit_amount: parseFloat(document.querySelector(`[name="debit_${i}"]`).value) || 0,
-                credit_amount: parseFloat(document.querySelector(`[name="credit_${i}"]`).value) || 0
+                description: linesContainer.querySelector(`[name="description_${i}"]`).value,
+                debit_amount: parseFloat(linesContainer.querySelector(`[name="debit_${i}"]`).value) || 0,
+                credit_amount: parseFloat(linesContainer.querySelector(`[name="credit_${i}"]`).value) || 0,
+                cost_center_id: linesContainer.querySelector(`[name="cost_center_${i}"]`)?.value || null
             });
         }
     }

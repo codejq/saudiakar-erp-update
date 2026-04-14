@@ -16,6 +16,118 @@ class AmlakAccountingIntegration {
         $this->accountingManager = $accountingManager;
     }
 
+    private function buildPropertyContext($aqarId, $subaqarId = null) {
+        $aqarId = (int)$aqarId;
+        $subaqarId = !empty($subaqarId) ? (int)$subaqarId : null;
+
+        if ($aqarId <= 0) {
+            return [
+                'aqar_id' => null,
+                'subaqar_id' => $subaqarId,
+                'property_name' => null,
+                'sub_property_name' => null,
+                'cost_center_id' => null,
+                'cost_center_message' => null
+            ];
+        }
+
+        $propertyStmt = $this->db->prepare("SELECT aqarname FROM amlak WHERE idaqar = ? LIMIT 1");
+        $propertyName = null;
+        if ($propertyStmt) {
+            $propertyStmt->bind_param('i', $aqarId);
+            $propertyStmt->execute();
+            $propertyRow = $propertyStmt->get_result()->fetch_assoc();
+            $propertyName = $propertyRow['aqarname'] ?? null;
+            $propertyStmt->close();
+        }
+
+        $subPropertyName = null;
+        if ($subaqarId) {
+            $subStmt = $this->db->prepare("SELECT aqarname FROM amlakdetails WHERE idsubaqar = ? LIMIT 1");
+            if ($subStmt) {
+                $subStmt->bind_param('i', $subaqarId);
+                $subStmt->execute();
+                $subRow = $subStmt->get_result()->fetch_assoc();
+                $subPropertyName = $subRow['aqarname'] ?? null;
+                $subStmt->close();
+            }
+        }
+
+        $costCenterResult = $this->accountingManager->ensurePropertyCostCenter($aqarId, $propertyName ?: ('عقار رقم ' . $aqarId), $subaqarId);
+
+        return [
+            'aqar_id' => $aqarId,
+            'subaqar_id' => $subaqarId,
+            'property_name' => $propertyName,
+            'sub_property_name' => $subPropertyName,
+            'cost_center_id' => $costCenterResult['success'] ? ($costCenterResult['cost_center']['cost_center_id'] ?? null) : null,
+            'cost_center_message' => $costCenterResult['success'] ? null : ($costCenterResult['message'] ?? null)
+        ];
+    }
+
+    private function resolveSanadContext($sanad) {
+        $context = [
+            'tenant_id' => !empty($sanad['mostagerid']) ? (int)$sanad['mostagerid'] : null,
+            'owner_id' => !empty($sanad['malekid']) ? (int)$sanad['malekid'] : null,
+            'aqar_id' => !empty($sanad['idaqar']) ? (int)$sanad['idaqar'] : null,
+            'subaqar_id' => !empty($sanad['idsubaqar']) ? (int)$sanad['idsubaqar'] : null,
+            'egar_id' => null,
+            'invoice_id' => null,
+            'property_name' => null,
+            'cost_center_id' => null
+        ];
+
+        if (!empty($sanad['egarid'])) {
+            $context['egar_id'] = (int)$sanad['egarid'];
+        }
+
+        if (empty($context['egar_id']) && !empty($sanad['invoice_id'])) {
+            $context['invoice_id'] = (int)$sanad['invoice_id'];
+        }
+
+        if ($context['egar_id']) {
+            $stmt = $this->db->prepare("SELECT rakam3akdid, mostagerid, idaqar, idsubaqar FROM egar WHERE rakam3akdid = ? LIMIT 1");
+            if ($stmt) {
+                $stmt->bind_param('i', $context['egar_id']);
+                $stmt->execute();
+                $egar = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+
+                if ($egar) {
+                    $context['tenant_id'] = $context['tenant_id'] ?: (!empty($egar['mostagerid']) ? (int)$egar['mostagerid'] : null);
+                    $context['aqar_id'] = $context['aqar_id'] ?: (!empty($egar['idaqar']) ? (int)$egar['idaqar'] : null);
+                    $context['subaqar_id'] = $context['subaqar_id'] ?: (!empty($egar['idsubaqar']) ? (int)$egar['idsubaqar'] : null);
+                }
+            }
+        }
+
+        if (!$context['egar_id'] && !$context['aqar_id'] && !$context['tenant_id']) {
+            $referenceText = trim((string)($sanad['mybyan'] ?? ''));
+            if ($referenceText !== '') {
+                $stmt = $this->db->prepare("SELECT rakam3akdid, mostagerid, idaqar, idsubaqar FROM egar WHERE rakam3akd = ? OR rakam3akdid = ? LIMIT 1");
+                if ($stmt) {
+                    $numericReference = (int)$referenceText;
+                    $stmt->bind_param('si', $referenceText, $numericReference);
+                    $stmt->execute();
+                    $egar = $stmt->get_result()->fetch_assoc();
+                    $stmt->close();
+                    if ($egar) {
+                        $context['egar_id'] = (int)$egar['rakam3akdid'];
+                        $context['tenant_id'] = !empty($egar['mostagerid']) ? (int)$egar['mostagerid'] : null;
+                        $context['aqar_id'] = !empty($egar['idaqar']) ? (int)$egar['idaqar'] : null;
+                        $context['subaqar_id'] = !empty($egar['idsubaqar']) ? (int)$egar['idsubaqar'] : null;
+                    }
+                }
+            }
+        }
+
+        $propertyContext = $this->buildPropertyContext($context['aqar_id'], $context['subaqar_id']);
+        $context['property_name'] = $propertyContext['property_name'];
+        $context['cost_center_id'] = $propertyContext['cost_center_id'];
+
+        return $context;
+    }
+
     /**
      * Create invoice from rental contract (egar)
      * إنشاء فاتورة من عقد الإيجار
@@ -38,6 +150,9 @@ class AmlakAccountingIntegration {
             return ['success' => false, 'message' => 'Contract not found'];
         }
 
+        $propertyContext = $this->buildPropertyContext($egar['idaqar'] ?? 0, $egar['idsubaqar'] ?? null);
+        $salesJournalId = $this->accountingManager->getDefaultJournalIdByCode('SAL');
+
         // Calculate amounts
         $annualPrice = $egar['annualprice'] ?? 0;
         $subtotal = $annualPrice / 1.15; // Remove VAT
@@ -46,13 +161,21 @@ class AmlakAccountingIntegration {
         // Prepare invoice data
         $invoiceData = [
             'invoice_type' => 'standard',
+            'customer_type' => 'tenant',
+            'customer_id' => $egar['mostagerid'] ?? 0,
             'customer_name' => $egar['mostagername'] ?? 'مستأجر',
             'customer_vat_number' => $egar['mostagervatnumber'] ?? null,
             'customer_address' => null,
             'invoice_date' => date('Y-m-d'),
             'due_date' => $egar['egarenddate'] ?? null,
             'payment_method' => 'bank_transfer',
-            'notes' => "إيجار {$egar['aqarname']} - عقد رقم {$egar['rakam3akdid']}"
+            'notes' => "إيجار {$egar['aqarname']} - عقد رقم {$egar['rakam3akdid']}",
+            'journal_id' => $salesJournalId,
+            'tenant_id' => $egar['mostagerid'] ?? null,
+            'aqar_id' => $propertyContext['aqar_id'],
+            'subaqar_id' => $propertyContext['subaqar_id'],
+            'egar_id' => $egarId,
+            'cost_center_id' => $propertyContext['cost_center_id']
         ];
 
         // Prepare items
@@ -97,6 +220,9 @@ class AmlakAccountingIntegration {
             return ['success' => false, 'message' => 'Voucher not found'];
         }
 
+        $sanadContext = $this->resolveSanadContext($sanad);
+        $receiptJournalId = $this->accountingManager->getDefaultJournalIdByCode('REC');
+
         // Get the correct amount - try multiple fields
         $amount = 0;
         if (!empty($sanad['depositeamount'])) {
@@ -122,6 +248,14 @@ class AmlakAccountingIntegration {
         $entryData = [
             'entry_date' => $sanadDate,
             'entry_type' => 'payment',
+            'journal_id' => $receiptJournalId,
+            'tenant_id' => $sanadContext['tenant_id'],
+            'owner_id' => $sanadContext['owner_id'],
+            'aqar_id' => $sanadContext['aqar_id'],
+            'subaqar_id' => $sanadContext['subaqar_id'],
+            'egar_id' => $sanadContext['egar_id'],
+            'sanad_id' => $sanadId,
+            'invoice_id' => $sanadContext['invoice_id'],
             'reference_type' => 'sanad',
             'reference_id' => $sanadId,
             'description' => $sanad['mybyan'] ?? "سند قبض رقم " . ($sanad['sanadrakam'] ?? $sanadId),
@@ -159,13 +293,15 @@ class AmlakAccountingIntegration {
                 'account_id' => $paymentAccountId,
                 'description' => "استلام دفعة - {$description}",
                 'debit_amount' => $amount,
-                'credit_amount' => 0
+                'credit_amount' => 0,
+                'cost_center_id' => $sanadContext['cost_center_id']
             ],
             [
                 'account_id' => $receivableAccountId,
                 'description' => "تسديد - {$description}",
                 'debit_amount' => 0,
-                'credit_amount' => $amount
+                'credit_amount' => $amount,
+                'cost_center_id' => $sanadContext['cost_center_id']
             ]
         ];
 
@@ -188,12 +324,20 @@ class AmlakAccountingIntegration {
             return ['success' => false, 'error' => 'Expense not found'];
         }
 
+        $propertyContext = $this->buildPropertyContext($masrofat['idaqar'] ?? 0, $masrofat['idsubaqar'] ?? null);
+        $paymentJournalId = $this->accountingManager->getDefaultJournalIdByCode('PAY');
+
         $amount = $masrofat['masrofatamount'] ?? 0;
 
         // Prepare journal entry
         $entryData = [
             'entry_date' => $masrofat['masrofatdate'] ?? date('Y-m-d'),
             'entry_type' => 'expense',
+            'journal_id' => $paymentJournalId,
+            'owner_id' => !empty($masrofat['malekid']) ? (int)$masrofat['malekid'] : null,
+            'aqar_id' => $propertyContext['aqar_id'],
+            'subaqar_id' => $propertyContext['subaqar_id'],
+            'masrofat_id' => $masrofatId,
             'reference_type' => 'masrofat',
             'reference_id' => $masrofatId,
             'description' => $masrofat['masrofatdescription'] ?? "مصروف رقم {$masrofatId}",
@@ -209,13 +353,15 @@ class AmlakAccountingIntegration {
                 'account_id' => $expenseAccountId,
                 'description' => $masrofat['masrofatdescription'],
                 'debit_amount' => $amount,
-                'credit_amount' => 0
+                'credit_amount' => 0,
+                'cost_center_id' => $propertyContext['cost_center_id']
             ],
             [
                 'account_id' => $cashAccountId,
                 'description' => "صرف - {$masrofat['masrofatdescription']}",
                 'debit_amount' => 0,
-                'credit_amount' => $amount
+                'credit_amount' => $amount,
+                'cost_center_id' => $propertyContext['cost_center_id']
             ]
         ];
 

@@ -13,161 +13,24 @@ $use_accounting_theme = true;
 include_once "../../../../nocash.hnt";
 include_once "../../../../connectdb.hnt";
 include_once "../../../../header.hnt";
+include_once "../../includes/accounting_class.hnt";
+
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
 
 // Get parameters
 $dateFrom = $_GET['date_from'] ?? date('Y-01-01');
 $dateTo = $_GET['date_to'] ?? date('Y-m-d');
 $propertyType = $_GET['property_type'] ?? 'all';
 $expenseCategory = $_GET['expense_category'] ?? 'all';
+$costCenterId = !empty($_GET['cost_center_id']) ? (int)$_GET['cost_center_id'] : null;
+$expenseAccountId = ($expenseCategory !== 'all' && $expenseCategory !== '') ? (int)$expenseCategory : null;
+$costCenters = $accountingManager->getActiveCostCenters();
+$expenseAccounts = $accountingManager->getAllAccounts(['account_type' => 'expense', 'is_active' => 1, 'is_leaf' => 1]);
 
-// Convert dates to timestamps for comparison
-$timestampFrom = strtotime($dateFrom);
-$timestampTo = strtotime($dateTo . ' 23:59:59');
-
-// Get expense categories for filter
-$categoriesQuery = "SELECT idmasrofcod, masrofkind FROM masrofattakweed ORDER BY masrofkind";
-$categoriesResult = $db->query($categoriesQuery);
-$expenseCategories = $categoriesResult ? $categoriesResult->fetch_all(MYSQLI_ASSOC) : [];
-
-// Build query
-$query = "
-    SELECT
-        m.idmasrof,
-        m.idaqar,
-        m.idsubaqar,
-        m.idmasrofcod,
-        m.amount,
-        m.payedby,
-        m.payeddue,
-        m.payeddate,
-        mt.masrofkind
-    FROM masrofat m
-    LEFT JOIN masrofattakweed mt ON m.idmasrofcod = mt.idmasrofcod
-    WHERE m.payeddate >= ?
-    AND m.payeddate <= ?
-    AND m.amount > 0
-";
-
-$params = [$timestampFrom, $timestampTo];
-$types = 'ii';
-
-if ($expenseCategory != 'all' && !empty($expenseCategory)) {
-    $query .= " AND m.idmasrofcod = ?";
-    $params[] = intval($expenseCategory);
-    $types .= 'i';
-}
-
-$query .= " ORDER BY m.idaqar, m.payeddate";
-
-$stmt = $db->prepare($query);
-$stmt->bind_param($types, ...$params);
-$stmt->execute();
-$items = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-
-// Group data by property
-$propertyData = [];
-$totals = [
-    'total' => 0
-];
-
-// Category totals
-$categoryTotals = [];
-
-// Get property details for each unique idaqar
-$propertyInfo = [];
-foreach ($items as $item) {
-    $idaqar = $item['idaqar'];
-
-    if (!isset($propertyInfo[$idaqar]) && $idaqar > 0) {
-        // Try to find property in different tables
-        $propName = 'عقار #' . $idaqar;
-        $propType = 'other';
-
-        // Check emara (buildings) table
-        $stmt = $db->prepare("SELECT emararakam, emaratype FROM emara WHERE emaraid = ?");
-        $stmt->bind_param('i', $idaqar);
-        $stmt->execute();
-        $result = $stmt->get_result();
-        if ($row = $result->fetch_assoc()) {
-            $propName = 'عمارة رقم ' . $row['emararakam'];
-            $propType = 'building';
-        } else {
-            // Check arady (lands) table
-            $stmt = $db->prepare("SELECT ardy_rakam FROM arady WHERE ardyid = ?");
-            $stmt->bind_param('i', $idaqar);
-            $stmt->execute();
-            $result = $stmt->get_result();
-            if ($row = $result->fetch_assoc()) {
-                $propName = 'أرض رقم ' . $row['ardy_rakam'];
-                $propType = 'land';
-            } else {
-                // Check vila table
-                $stmt = $db->prepare("SELECT vilarakam FROM vila WHERE vilaid = ?");
-                $stmt->bind_param('i', $idaqar);
-                $stmt->execute();
-                $result = $stmt->get_result();
-                if ($row = $result->fetch_assoc()) {
-                    $propName = 'فيلا رقم ' . $row['vilarakam'];
-                    $propType = 'villa';
-                }
-            }
-        }
-
-        $propertyInfo[$idaqar] = [
-            'name' => $propName,
-            'type' => $propType
-        ];
-    }
-}
-
-// Group expenses by property
-foreach ($items as $item) {
-    $idaqar = $item['idaqar'];
-
-    if ($idaqar == 0) continue; // Skip items without property
-
-    if (!isset($propertyData[$idaqar])) {
-        $propertyData[$idaqar] = [
-            'property_id' => $idaqar,
-            'property_name' => $propertyInfo[$idaqar]['name'] ?? 'عقار #' . $idaqar,
-            'property_type' => $propertyInfo[$idaqar]['type'] ?? 'other',
-            'expenses' => [],
-            'total' => 0,
-            'count' => 0,
-            'categories' => []
-        ];
-    }
-
-    $amount = floatval($item['amount']);
-    $category = $item['masrofkind'] ?? 'غير محدد';
-
-    // Add expense entry
-    $propertyData[$idaqar]['expenses'][] = [
-        'date' => date('Y-m-d', $item['payeddate']),
-        'category' => $category,
-        'description' => $item['payeddue'],
-        'paid_by' => $item['payedby'],
-        'amount' => $amount
-    ];
-
-    // Accumulate totals
-    $propertyData[$idaqar]['total'] += $amount;
-    $propertyData[$idaqar]['count']++;
-
-    // Track by category
-    if (!isset($propertyData[$idaqar]['categories'][$category])) {
-        $propertyData[$idaqar]['categories'][$category] = 0;
-    }
-    $propertyData[$idaqar]['categories'][$category] += $amount;
-
-    // Overall category totals
-    if (!isset($categoryTotals[$category])) {
-        $categoryTotals[$category] = 0;
-    }
-    $categoryTotals[$category] += $amount;
-
-    $totals['total'] += $amount;
-}
+$reportData = $accountingManager->getPropertyExpenseReportData($dateFrom, $dateTo, $costCenterId, $expenseAccountId);
+$propertyData = $reportData['property_data'];
+$totals = $reportData['totals'];
+$categoryTotals = $reportData['category_totals'];
 
 // Filter by property type if specified
 if ($propertyType != 'all') {
@@ -360,13 +223,26 @@ $propertyTypes = [
                     <label class="form-label">نوع المصروف</label>
                     <select class="form-select" name="expense_category">
                         <option value="all">الكل</option>
-                        <?php foreach ($expenseCategories as $cat): ?>
-                        <option value="<?php echo $cat['idmasrofcod']; ?>"
-                                <?php echo $expenseCategory == $cat['idmasrofcod'] ? 'selected' : ''; ?>>
-                            <?php echo htmlspecialchars($cat['masrofkind']); ?>
+                        <?php foreach ($expenseAccounts as $account): ?>
+                        <option value="<?php echo (int)$account['account_id']; ?>"
+                                <?php echo $expenseCategory == $account['account_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($account['account_code'] . ' - ' . $account['account_name_ar'], ENT_QUOTES, 'UTF-8'); ?>
                         </option>
                         <?php endforeach; ?>
                     </select>
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <div class="w-100">
+                        <label class="form-label">مركز التكلفة</label>
+                        <select class="form-select" name="cost_center_id">
+                            <option value="">الكل</option>
+                            <?php foreach ($costCenters as $costCenter): ?>
+                            <option value="<?php echo (int)$costCenter['cost_center_id']; ?>" <?php echo $costCenterId === (int)$costCenter['cost_center_id'] ? 'selected' : ''; ?>>
+                                <?php echo htmlspecialchars($costCenter['cost_center_code'] . ' - ' . $costCenter['cost_center_name_ar'], ENT_QUOTES, 'UTF-8'); ?>
+                            </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
                 </div>
                 <div class="col-md-2 d-flex align-items-end">
                     <button type="submit" class="btn btn-primary w-100">
@@ -413,6 +289,9 @@ $propertyTypes = [
             <?php if ($expenseCategory != 'all' && !empty($expenseCategory)): ?>
             <p class="text-muted mb-0">تصفية حسب التصنيف المحدد</p>
             <?php endif; ?>
+            <?php if ($costCenterId): ?>
+            <p class="text-muted mb-0">تصفية حسب مركز تكلفة محدد</p>
+            <?php endif; ?>
         </div>
 
         <?php if (empty($propertyData)): ?>
@@ -429,7 +308,8 @@ $propertyTypes = [
                     <th>التاريخ</th>
                     <th>نوع المصروف</th>
                     <th>البيان</th>
-                    <th>المستفيد</th>
+                    <th>دفتر اليومية</th>
+                    <th>مركز التكلفة</th>
                     <th>المبلغ (ر.س)</th>
                 </tr>
             </thead>
@@ -437,7 +317,7 @@ $propertyTypes = [
                 <?php foreach ($propertyData as $prop): ?>
                 <!-- Property Header Row -->
                 <tr class="property-row">
-                    <td colspan="6">
+                    <td colspan="7">
                         <div class="d-flex justify-content-between align-items-center">
                             <div>
                                 <strong><?php echo htmlspecialchars($prop['property_name']); ?></strong>
@@ -463,14 +343,15 @@ $propertyTypes = [
                         </span>
                     </td>
                     <td><?php echo htmlspecialchars($expense['description']); ?></td>
-                    <td><?php echo htmlspecialchars($expense['paid_by']); ?></td>
+                    <td><?php echo htmlspecialchars($expense['paid_by'] ?: '-'); ?></td>
+                    <td><?php echo htmlspecialchars($expense['cost_center'] ?: '-'); ?></td>
                     <td class="text-end"><?php echo number_format($expense['amount'], 2); ?></td>
                 </tr>
                 <?php endforeach; ?>
 
                 <!-- Property Total Row -->
                 <tr class="property-total-row">
-                    <td colspan="5" class="text-end">
+                    <td colspan="6" class="text-end">
                         <strong>إجمالي <?php echo htmlspecialchars($prop['property_name']); ?>:</strong>
                     </td>
                     <td class="text-end">
@@ -480,13 +361,13 @@ $propertyTypes = [
 
                 <!-- Spacer Row -->
                 <tr>
-                    <td colspan="6" style="border: none; height: 0.5rem;"></td>
+                    <td colspan="7" style="border: none; height: 0.5rem;"></td>
                 </tr>
                 <?php endforeach; ?>
 
                 <!-- Grand Total -->
                 <tr class="grand-total-row">
-                    <td colspan="5" class="text-end">
+                    <td colspan="6" class="text-end">
                         <strong>
                             <i class="bi bi-calculator me-2"></i>الإجمالي الكلي:
                         </strong>

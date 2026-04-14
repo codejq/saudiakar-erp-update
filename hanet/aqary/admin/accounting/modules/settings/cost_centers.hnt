@@ -1,0 +1,318 @@
+<?php
+$sc_title = "إدارة مراكز التكلفة";
+$sc_id = "2082";
+$use_accounting_theme = true;
+
+if (isset($_POST['ajax_action'])) {
+    include_once "../../../../reqloginajax.hnt";
+} else {
+    include_once "../../../../header.hnt";
+}
+include_once "../../includes/accounting_class.hnt";
+
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $action = $_POST['ajax_action'];
+    $response = ['success' => false, 'message' => ''];
+
+    switch ($action) {
+        case 'save_cost_center':
+            $costCenterId = !empty($_POST['cost_center_id']) ? (int)$_POST['cost_center_id'] : null;
+            $result = $accountingManager->saveCostCenter([
+                'cost_center_code' => $_POST['cost_center_code'] ?? '',
+                'cost_center_name_ar' => $_POST['cost_center_name_ar'] ?? '',
+                'cost_center_name_en' => $_POST['cost_center_name_en'] ?? '',
+                'parent_cost_center_id' => $_POST['parent_cost_center_id'] ?? null,
+                'aqar_id' => $_POST['aqar_id'] ?? null,
+                'subaqar_id' => $_POST['subaqar_id'] ?? null,
+                'is_active' => isset($_POST['is_active']) ? 1 : 0
+            ], $costCenterId);
+            $response = $result;
+            if (!isset($response['message'])) {
+                $response['message'] = !empty($result['success']) ? 'تم حفظ مركز التكلفة بنجاح' : 'فشل في حفظ مركز التكلفة';
+            }
+            break;
+
+        case 'toggle_cost_center_status':
+            $costCenterId = !empty($_POST['cost_center_id']) ? (int)$_POST['cost_center_id'] : 0;
+            $result = $accountingManager->toggleCostCenterStatus($costCenterId);
+            $response = $result;
+            if (!isset($response['message'])) {
+                $response['message'] = !empty($result['success']) ? 'تم تحديث حالة مركز التكلفة' : 'فشل في تحديث حالة مركز التكلفة';
+            }
+            break;
+    }
+
+    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+$search = trim($_GET['search'] ?? '');
+$statusFilter = $_GET['status'] ?? '';
+$costCenters = $accountingManager->getCostCenters();
+$parentOptions = $accountingManager->getCostCenters(true);
+
+if ($search !== '') {
+    $costCenters = array_values(array_filter($costCenters, function ($costCenter) use ($search) {
+        $needle = mb_strtolower($search);
+        return mb_stripos(mb_strtolower((string)$costCenter['cost_center_code']), $needle) !== false
+            || mb_stripos(mb_strtolower((string)$costCenter['cost_center_name_ar']), $needle) !== false
+            || mb_stripos(mb_strtolower((string)$costCenter['cost_center_name_en']), $needle) !== false
+            || mb_stripos((string)($costCenter['aqar_id'] ?? ''), $search) !== false;
+    }));
+}
+
+if ($statusFilter !== '') {
+    $isActive = $statusFilter === 'active' ? 1 : 0;
+    $costCenters = array_values(array_filter($costCenters, function ($costCenter) use ($isActive) {
+        return (int)$costCenter['is_active'] === $isActive;
+    }));
+}
+?>
+
+<style>
+:root {
+    --primary-color: #4e627f;
+}
+
+.cost-center-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.cost-center-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    color: #6c757d;
+    font-size: 0.95rem;
+}
+
+.btn-add-cost-center {
+    background: linear-gradient(135deg, var(--primary-color) 0%, #20c997 100%);
+    border: none;
+    color: white;
+    padding: 0.75rem 1.5rem;
+    border-radius: 10px;
+    font-weight: 600;
+}
+</style>
+
+<div class="container-fluid p-4">
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div>
+                <h1 class="mb-2"><i class="bi bi-diagram-3 me-2"></i>مراكز التكلفة</h1>
+                <p class="mb-0 opacity-75">إدارة مراكز التكلفة وربطها بالعقارات والوحدات</p>
+            </div>
+            <div>
+                <button class="btn btn-light btn-lg" onclick="window.location='index.hnt'">
+                    <i class="bi bi-arrow-right me-2"></i>العودة للإعدادات
+                </button>
+                <button class="btn btn-add-cost-center btn-lg ms-2" onclick="openCostCenterModal()">
+                    <i class="bi bi-plus-circle me-2"></i>مركز تكلفة جديد
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <form method="GET" class="row g-3">
+                <div class="col-md-8">
+                    <input type="text" class="form-control" name="search" placeholder="بحث بالرمز أو الاسم أو رقم العقار" value="<?php echo htmlspecialchars($search, ENT_QUOTES, 'UTF-8'); ?>">
+                </div>
+                <div class="col-md-2">
+                    <select class="form-select" name="status">
+                        <option value="">كل الحالات</option>
+                        <option value="active" <?php echo $statusFilter === 'active' ? 'selected' : ''; ?>>نشط</option>
+                        <option value="inactive" <?php echo $statusFilter === 'inactive' ? 'selected' : ''; ?>>غير نشط</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <button type="submit" class="btn btn-primary w-100"><i class="bi bi-search me-2"></i>بحث</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="alert alert-info">
+        <i class="bi bi-info-circle me-2"></i>
+        عرض <?php echo count($costCenters); ?> مركز تكلفة
+    </div>
+
+    <?php if (empty($costCenters)): ?>
+    <div class="alert alert-warning text-center">لا توجد مراكز تكلفة مطابقة للفلاتر الحالية.</div>
+    <?php else: ?>
+        <?php foreach ($costCenters as $costCenter): ?>
+        <div class="cost-center-card">
+            <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
+                <div>
+                    <h5 class="mb-1"><?php echo htmlspecialchars($costCenter['cost_center_code'] . ' - ' . $costCenter['cost_center_name_ar'], ENT_QUOTES, 'UTF-8'); ?></h5>
+                    <div class="cost-center-meta">
+                        <span><i class="bi bi-translate me-1"></i><?php echo htmlspecialchars($costCenter['cost_center_name_en'] ?: '-', ENT_QUOTES, 'UTF-8'); ?></span>
+                        <span><i class="bi bi-building me-1"></i>العقار: <?php echo htmlspecialchars((string)($costCenter['aqar_id'] ?? '-'), ENT_QUOTES, 'UTF-8'); ?></span>
+                        <span><i class="bi bi-houses me-1"></i>الوحدة: <?php echo htmlspecialchars((string)($costCenter['subaqar_id'] ?? '-'), ENT_QUOTES, 'UTF-8'); ?></span>
+                        <span><i class="bi bi-diagram-2 me-1"></i>الأب: <?php echo htmlspecialchars((string)($costCenter['parent_cost_center_id'] ?? '-'), ENT_QUOTES, 'UTF-8'); ?></span>
+                    </div>
+                </div>
+                <div class="text-end">
+                    <span class="badge <?php echo (int)$costCenter['is_active'] === 1 ? 'bg-success' : 'bg-secondary'; ?> mb-2">
+                        <?php echo (int)$costCenter['is_active'] === 1 ? 'نشط' : 'غير نشط'; ?>
+                    </span>
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-sm btn-outline-primary" onclick='openCostCenterModal(<?php echo json_encode($costCenter, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)'>
+                            <i class="bi bi-pencil me-1"></i>تعديل
+                        </button>
+                        <button class="btn btn-sm btn-outline-<?php echo (int)$costCenter['is_active'] === 1 ? 'warning' : 'success'; ?>" onclick="toggleCostCenterStatus(<?php echo (int)$costCenter['cost_center_id']; ?>)">
+                            <i class="bi bi-power me-1"></i><?php echo (int)$costCenter['is_active'] === 1 ? 'تعطيل' : 'تفعيل'; ?>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <?php endforeach; ?>
+    <?php endif; ?>
+</div>
+
+<div class="modal fade" id="costCenterModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header" style="background: linear-gradient(135deg, #4e627f 0%, #20c997 100%); color: white;">
+                <h5 class="modal-title" id="costCenterModalTitle">مركز تكلفة جديد</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="costCenterForm">
+                    <input type="hidden" name="cost_center_id" id="cost_center_id">
+                    <div class="mb-3">
+                        <label class="form-label">الرمز *</label>
+                        <input type="text" class="form-control" name="cost_center_code" id="cost_center_code" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">الاسم بالعربية *</label>
+                        <input type="text" class="form-control" name="cost_center_name_ar" id="cost_center_name_ar" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">الاسم بالإنجليزية</label>
+                        <input type="text" class="form-control" name="cost_center_name_en" id="cost_center_name_en">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">المركز الأب</label>
+                        <select class="form-select" name="parent_cost_center_id" id="parent_cost_center_id">
+                            <option value="">-- بدون مركز أب --</option>
+                            <?php foreach ($parentOptions as $parentOption): ?>
+                            <option value="<?php echo (int)$parentOption['cost_center_id']; ?>"><?php echo htmlspecialchars($parentOption['cost_center_code'] . ' - ' . $parentOption['cost_center_name_ar'], ENT_QUOTES, 'UTF-8'); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">رقم العقار</label>
+                            <input type="number" class="form-control" name="aqar_id" id="aqar_id" min="1">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">رقم الوحدة</label>
+                            <input type="number" class="form-control" name="subaqar_id" id="subaqar_id" min="1">
+                        </div>
+                    </div>
+                    <div class="form-check form-switch mt-3">
+                        <input class="form-check-input" type="checkbox" name="is_active" id="cost_center_is_active" checked>
+                        <label class="form-check-label" for="cost_center_is_active">نشط</label>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-primary" onclick="saveCostCenter()">حفظ</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="resultModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header" id="resultModalHeader">
+                <h5 class="modal-title text-white" id="resultModalTitle"></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p id="resultModalMessage"></p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function openCostCenterModal(costCenter = null) {
+    document.getElementById('costCenterForm').reset();
+    document.getElementById('cost_center_id').value = costCenter ? costCenter.cost_center_id : '';
+    document.getElementById('cost_center_code').value = costCenter ? costCenter.cost_center_code : '';
+    document.getElementById('cost_center_name_ar').value = costCenter ? costCenter.cost_center_name_ar : '';
+    document.getElementById('cost_center_name_en').value = costCenter ? (costCenter.cost_center_name_en || '') : '';
+    document.getElementById('parent_cost_center_id').value = costCenter && costCenter.parent_cost_center_id ? costCenter.parent_cost_center_id : '';
+    document.getElementById('aqar_id').value = costCenter && costCenter.aqar_id ? costCenter.aqar_id : '';
+    document.getElementById('subaqar_id').value = costCenter && costCenter.subaqar_id ? costCenter.subaqar_id : '';
+    document.getElementById('cost_center_is_active').checked = costCenter ? Number(costCenter.is_active) === 1 : true;
+    document.getElementById('costCenterModalTitle').textContent = costCenter ? 'تعديل مركز التكلفة' : 'مركز تكلفة جديد';
+    new bootstrap.Modal(document.getElementById('costCenterModal')).show();
+}
+
+function saveCostCenter() {
+    const formData = new FormData(document.getElementById('costCenterForm'));
+    formData.append('ajax_action', 'save_cost_center');
+
+    fetch('cost_centers.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        const modal = bootstrap.Modal.getInstance(document.getElementById('costCenterModal'));
+        if (modal) modal.hide();
+        showResultModal(data.success, data.message || 'تمت العملية');
+        if (data.success) {
+            setTimeout(() => window.location.reload(), 1200);
+        }
+    })
+    .catch(() => showResultModal(false, 'حدث خطأ أثناء حفظ مركز التكلفة'));
+}
+
+function toggleCostCenterStatus(costCenterId) {
+    const formData = new FormData();
+    formData.append('ajax_action', 'toggle_cost_center_status');
+    formData.append('cost_center_id', costCenterId);
+
+    fetch('cost_centers.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        showResultModal(data.success, data.message || 'تمت العملية');
+        if (data.success) {
+            setTimeout(() => window.location.reload(), 1200);
+        }
+    })
+    .catch(() => showResultModal(false, 'حدث خطأ أثناء تحديث الحالة'));
+}
+
+function showResultModal(success, message) {
+    const header = document.getElementById('resultModalHeader');
+    const title = document.getElementById('resultModalTitle');
+    const body = document.getElementById('resultModalMessage');
+    header.style.background = success ? 'linear-gradient(135deg, #28a745, #20c997)' : 'linear-gradient(135deg, #dc3545, #c82333)';
+    title.innerHTML = success ? '<i class="bi bi-check-circle me-2"></i>نجحت العملية' : '<i class="bi bi-x-circle me-2"></i>فشلت العملية';
+    body.textContent = message;
+    new bootstrap.Modal(document.getElementById('resultModal')).show();
+}
+</script>
+
+<?php require("../../../../foter.hnt"); ?>

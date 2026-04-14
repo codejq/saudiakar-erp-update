@@ -1,0 +1,95 @@
+<?php
+/**
+ * Shared AJAX endpoint — Accounting Dimension Options
+ * Returns tenant / owner / property / unit / contract lists as JSON.
+ *
+ * POST params:
+ *   type    (required) tenant | owner | property | unit | contract
+ *   aqar_id (optional) filter units by property ID
+ *   q       (optional) search string (server-side filter)
+ *
+ * Response: { success: true, items: [{id, label}, ...] }
+ *
+ * Reusable from: journal_entries, payments, reports, and any other
+ * accounting form that needs dimension autocomplete.
+ */
+
+include_once "../../../reqloginajax.hnt";
+include_once "../includes/accounting_class.hnt";
+
+header('Content-Type: application/json; charset=utf-8');
+
+$type   = isset($_POST['type'])    ? trim($_POST['type'])              : '';
+$q      = isset($_POST['q'])       ? $db->real_escape_string(trim($_POST['q'])) : '';
+$aqarId = isset($_POST['aqar_id']) ? (int)$_POST['aqar_id']           : 0;
+
+$items = [];
+
+switch ($type) {
+
+    case 'tenant':
+        $like = $q ? "AND mostagername LIKE '%$q%'" : '';
+        $r = $db->query(
+            "SELECT mostagerid AS id, mostagername AS label
+             FROM mostagereen
+             WHERE mostagername != '' $like
+             ORDER BY mostagername ASC LIMIT 200"
+        );
+        break;
+
+    case 'owner':
+        $like = $q ? "AND malekbayan1 LIKE '%$q%'" : '';
+        $r = $db->query(
+            "SELECT malekid AS id, malekbayan1 AS label
+             FROM malek
+             WHERE malekbayan1 != '' $like
+             ORDER BY malekbayan1 ASC LIMIT 200"
+        );
+        break;
+
+    case 'property':
+        $like = $q ? "AND aqarname LIKE '%$q%'" : '';
+        $r = $db->query(
+            "SELECT idaqar AS id, aqarname AS label
+             FROM amlak
+             WHERE aqarname != '' $like
+             ORDER BY aqarname ASC LIMIT 200"
+        );
+        break;
+
+    case 'unit':
+        $aqarFilter = $aqarId ? "AND d.idaqar = $aqarId" : '';
+        $like       = $q      ? "AND d.rakam LIKE '%$q%'" : '';
+        $r = $db->query(
+            "SELECT d.idsubaqar AS id,
+                    IF(d.rakam != '', d.rakam, CONCAT('#', d.idsubaqar)) AS label
+             FROM amlakdetails d
+             WHERE 1=1 $aqarFilter $like
+             ORDER BY d.rakam ASC, d.idsubaqar ASC LIMIT 200"
+        );
+        break;
+
+    case 'contract':
+        $like = $q ? "AND (rakam3akd LIKE '%$q%' OR CAST(rakam3akdid AS CHAR) LIKE '%$q%')" : '';
+        $r = $db->query(
+            "SELECT rakam3akdid AS id,
+                    IF(rakam3akd != '', rakam3akd, CONCAT('عقد #', rakam3akdid)) AS label
+             FROM egar
+             WHERE 1=1 $like
+             ORDER BY rakam3akdid DESC LIMIT 200"
+        );
+        break;
+
+    default:
+        echo json_encode(['success' => false, 'message' => 'Invalid type'], JSON_UNESCAPED_UNICODE);
+        exit;
+}
+
+if ($r) {
+    while ($row = $r->fetch_assoc()) {
+        $items[] = $row;
+    }
+}
+
+echo json_encode(['success' => true, 'items' => $items], JSON_UNESCAPED_UNICODE);
+exit;

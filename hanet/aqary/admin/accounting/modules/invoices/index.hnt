@@ -46,6 +46,8 @@ include_once "../../includes/accounting_class.hnt";
 // Include data.hnt to get $zatca_environment global variable
 include_once __DIR__ . '/../../../../data.hnt';
 $accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+$accountingManager->ensureInvoiceDimensionColumnsExist();
+$dimensionOptions = $accountingManager->getReportDimensionOptions();
 
 // Handle ZATCA submission
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['action'] == 'submit_to_zatca') {
@@ -584,7 +586,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                 'seller_supplier_id' => !empty($_POST['seller_supplier_id']) ? intval($_POST['seller_supplier_id']) : null,
                 'seller_name' => $_POST['seller_name'] ?? null,
                 'seller_vat_number' => $_POST['seller_vat_number'] ?? null,
-                'seller_address' => $_POST['seller_address'] ?? null
+                'seller_address' => $_POST['seller_address'] ?? null,
+                'journal_id' => isset($_POST['journal_id']) && $_POST['journal_id'] !== '' ? intval($_POST['journal_id']) : null,
+                'cost_center_id' => isset($_POST['cost_center_id']) && $_POST['cost_center_id'] !== '' ? intval($_POST['cost_center_id']) : null,
+                'tenant_id' => isset($_POST['tenant_id']) && $_POST['tenant_id'] !== '' ? intval($_POST['tenant_id']) : null,
+                'owner_id' => isset($_POST['owner_id']) && $_POST['owner_id'] !== '' ? intval($_POST['owner_id']) : null,
+                'aqar_id' => isset($_POST['aqar_id']) && $_POST['aqar_id'] !== '' ? intval($_POST['aqar_id']) : null,
+                'subaqar_id' => isset($_POST['subaqar_id']) && $_POST['subaqar_id'] !== '' ? intval($_POST['subaqar_id']) : null,
+                'egar_id' => isset($_POST['egar_id']) && $_POST['egar_id'] !== '' ? intval($_POST['egar_id']) : null
             ];
 
             $items = json_decode($_POST['items'], true);
@@ -733,10 +742,17 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
             $updSellerName = $_POST['seller_name'] ?? null;
             $updSellerVatN = $_POST['seller_vat_number'] ?? null;
             $updSellerAddr = $_POST['seller_address'] ?? null;
+            $updJournalId = isset($_POST['journal_id']) && $_POST['journal_id'] !== '' ? intval($_POST['journal_id']) : null;
+            $updCostCenterId = isset($_POST['cost_center_id']) && $_POST['cost_center_id'] !== '' ? intval($_POST['cost_center_id']) : null;
+            $updTenantId = isset($_POST['tenant_id']) && $_POST['tenant_id'] !== '' ? intval($_POST['tenant_id']) : null;
+            $updOwnerId = isset($_POST['owner_id']) && $_POST['owner_id'] !== '' ? intval($_POST['owner_id']) : null;
+            $updAqarId = isset($_POST['aqar_id']) && $_POST['aqar_id'] !== '' ? intval($_POST['aqar_id']) : null;
+            $updSubaqarId = isset($_POST['subaqar_id']) && $_POST['subaqar_id'] !== '' ? intval($_POST['subaqar_id']) : null;
+            $updEgarId = isset($_POST['egar_id']) && $_POST['egar_id'] !== '' ? intval($_POST['egar_id']) : null;
             $db->begin_transaction();
             try {
-                $updStmt = $db->prepare("UPDATE acc_invoices SET invoice_type=?, invoice_date=?, due_date=?, customer_id=?, customer_type=?, customer_name=?, customer_vat_number=?, customer_address=?, subtotal=?, vat_amount=?, total_amount=?, payment_method=?, notes=?, seller_source=?, seller_supplier_id=?, seller_name=?, seller_vat_number=?, seller_address=? WHERE invoice_id=?");
-                $updStmt->bind_param('sssissssdddsssisssi', $updInvoiceType, $updInvoiceDate, $updDueDate, $updCustomerId, $updCustomerType, $updCustomerName, $updCustomerVat, $updCustomerAddr, $updSubtotal, $updVatTotal, $updTotal, $updPayMethod, $updNotes, $updSellerSrc, $updSellerSid, $updSellerName, $updSellerVatN, $updSellerAddr, $invoiceId);
+                $updStmt = $db->prepare("UPDATE acc_invoices SET invoice_type=?, invoice_date=?, due_date=?, journal_id=?, cost_center_id=?, tenant_id=?, owner_id=?, aqar_id=?, subaqar_id=?, egar_id=?, customer_id=?, customer_type=?, customer_name=?, customer_vat_number=?, customer_address=?, subtotal=?, vat_amount=?, total_amount=?, payment_method=?, notes=?, seller_source=?, seller_supplier_id=?, seller_name=?, seller_vat_number=?, seller_address=? WHERE invoice_id=?");
+                $updStmt->bind_param('sssiiiiiiiissssdddsssisssi', $updInvoiceType, $updInvoiceDate, $updDueDate, $updJournalId, $updCostCenterId, $updTenantId, $updOwnerId, $updAqarId, $updSubaqarId, $updEgarId, $updCustomerId, $updCustomerType, $updCustomerName, $updCustomerVat, $updCustomerAddr, $updSubtotal, $updVatTotal, $updTotal, $updPayMethod, $updNotes, $updSellerSrc, $updSellerSid, $updSellerName, $updSellerVatN, $updSellerAddr, $invoiceId);
                 $updStmt->execute();
                 $delStmt = $db->prepare("DELETE FROM acc_invoice_items WHERE invoice_id = ?");
                 $delStmt->bind_param('i', $invoiceId);
@@ -1221,6 +1237,7 @@ if ($suppliersResult) {
                                         </div>
                                         <div id="customerDropdown" class="list-group position-absolute" style="z-index: 1000; max-height: 300px; overflow-y: auto; display: none; width: calc(100% - 28px);"></div>
                                         <input type="hidden" id="selectedCustomerId" name="customer_id">
+                                        <input type="hidden" id="invoice_subaqar_id" name="subaqar_id">
                                     </div>
 
                                     <div id="customerDetails" class="row g-3 mt-1" style="display: none;">
@@ -1314,6 +1331,60 @@ if ($suppliersResult) {
                                 <input type="text" class="form-control datepicker-input" name="due_date" value="<?php echo date('d/m/Y'); ?>" placeholder="dd/mm/yyyy" inputmode="numeric" dir="ltr" autocomplete="off">
                                 <span class="input-group-text invoice-date-picker-trigger"><i class="bi bi-calendar3"></i></span>
                             </div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">دفتر اليومية</label>
+                            <select class="form-select" id="invoice_journal_id" name="journal_id">
+                                <option value="">الافتراضي</option>
+                                <?php foreach ($dimensionOptions['journals'] as $journal): ?>
+                                <option value="<?php echo (int)$journal['journal_id']; ?>"><?php echo htmlspecialchars($journal['journal_code'] . ' - ' . $journal['journal_name_ar'], ENT_QUOTES, 'UTF-8'); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">مركز التكلفة</label>
+                            <select class="form-select" id="invoice_cost_center_id" name="cost_center_id">
+                                <option value="">بدون</option>
+                                <?php foreach ($dimensionOptions['cost_centers'] as $costCenter): ?>
+                                <option value="<?php echo (int)$costCenter['cost_center_id']; ?>"><?php echo htmlspecialchars($costCenter['cost_center_code'] . ' - ' . $costCenter['cost_center_name_ar'], ENT_QUOTES, 'UTF-8'); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">العقار</label>
+                            <select class="form-select" id="invoice_aqar_id" name="aqar_id">
+                                <option value="">بدون</option>
+                                <?php foreach ($dimensionOptions['properties'] as $property): ?>
+                                <option value="<?php echo (int)$property['property_id']; ?>"><?php echo htmlspecialchars($property['property_name'], ENT_QUOTES, 'UTF-8'); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">المستأجر</label>
+                            <select class="form-select" id="invoice_tenant_id" name="tenant_id">
+                                <option value="">بدون</option>
+                                <?php foreach ($dimensionOptions['tenants'] as $tenant): ?>
+                                <option value="<?php echo (int)$tenant['tenant_id']; ?>"><?php echo htmlspecialchars($tenant['tenant_name'], ENT_QUOTES, 'UTF-8'); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">المالك</label>
+                            <select class="form-select" id="invoice_owner_id" name="owner_id">
+                                <option value="">بدون</option>
+                                <?php foreach ($dimensionOptions['owners'] as $owner): ?>
+                                <option value="<?php echo (int)$owner['owner_id']; ?>"><?php echo htmlspecialchars($owner['owner_name'], ENT_QUOTES, 'UTF-8'); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">العقد</label>
+                            <select class="form-select" id="invoice_egar_id" name="egar_id">
+                                <option value="">بدون</option>
+                                <?php foreach ($dimensionOptions['contracts'] as $contract): ?>
+                                <option value="<?php echo (int)$contract['egar_id']; ?>"><?php echo htmlspecialchars((trim((string)$contract['contract_number']) !== '' ? $contract['contract_number'] : ('عقد #' . $contract['egar_id'])), ENT_QUOTES, 'UTF-8'); ?></option>
+                                <?php endforeach; ?>
+                            </select>
                         </div>
                         <div class="col-12">
                             <label class="form-label">ملاحظات</label>
@@ -2009,6 +2080,13 @@ function editInvoice(invoiceId) {
         document.querySelector('[name="notes"]').value = inv.notes || '';
 
         document.getElementById('selectedCustomerId').value = inv.customer_id || '';
+        document.getElementById('invoice_journal_id').value = inv.journal_id || '';
+        document.getElementById('invoice_cost_center_id').value = inv.cost_center_id || '';
+        document.getElementById('invoice_tenant_id').value = inv.tenant_id || '';
+        document.getElementById('invoice_owner_id').value = inv.owner_id || '';
+        document.getElementById('invoice_aqar_id').value = inv.aqar_id || '';
+        document.getElementById('invoice_subaqar_id').value = inv.subaqar_id || '';
+        document.getElementById('invoice_egar_id').value = inv.egar_id || '';
         document.getElementById('customerSearch').value = inv.customer_name || '';
         document.getElementById('customer_name').value = inv.customer_name || '';
         document.getElementById('customer_vat_number').value = inv.customer_vat_number || '';
@@ -2066,6 +2144,13 @@ function resetInvoiceForm() {
     document.querySelector('[name="invoice_date"]').value = today;
     document.querySelector('[name="due_date"]').value = today;
     document.getElementById('selectedCustomerId').value = '';
+    document.getElementById('invoice_journal_id').value = '';
+    document.getElementById('invoice_cost_center_id').value = '';
+    document.getElementById('invoice_tenant_id').value = '';
+    document.getElementById('invoice_owner_id').value = '';
+    document.getElementById('invoice_aqar_id').value = '';
+    document.getElementById('invoice_subaqar_id').value = '';
+    document.getElementById('invoice_egar_id').value = '';
     document.getElementById('customerSearch').value = '';
     document.getElementById('customerDetails').style.display = 'none';
     document.getElementById('invoiceItems').innerHTML = '';

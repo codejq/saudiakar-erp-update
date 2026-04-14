@@ -13,133 +13,21 @@ $use_accounting_theme = true;
 include_once "../../../../nocash.hnt";
 include_once "../../../../connectdb.hnt";
 include_once "../../../../header.hnt";
+include_once "../../includes/accounting_class.hnt";
+
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
 
 // Get parameters
 $dateFrom = $_GET['date_from'] ?? date('Y-01-01');
 $dateTo = $_GET['date_to'] ?? date('Y-m-d');
 $propertyType = $_GET['property_type'] ?? 'all';
 $sortBy = $_GET['sort_by'] ?? 'profit_desc'; // profit_desc, profit_asc, margin_desc, margin_asc
+$costCenterId = !empty($_GET['cost_center_id']) ? (int)$_GET['cost_center_id'] : null;
+$costCenters = $accountingManager->getActiveCostCenters();
 
-// Convert dates to timestamps for comparison
-$timestampFrom = strtotime($dateFrom);
-$timestampTo = strtotime($dateTo . ' 23:59:59');
-
-// Get income data from eradat table
-$incomeQuery = "
-    SELECT
-        idaqar,
-        SUM(amount + mysa3ee + mywater + tamen + services) as total_income
-    FROM eradat
-    WHERE paymentdate >= ?
-    AND paymentdate <= ?
-    AND amount > 0
-    GROUP BY idaqar
-";
-
-$stmt = $db->prepare($incomeQuery);
-$stmt->bind_param('ii', $timestampFrom, $timestampTo);
-$stmt->execute();
-$incomeData = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-
-// Convert to associative array
-$incomeByProperty = [];
-foreach ($incomeData as $row) {
-    $incomeByProperty[$row['idaqar']] = floatval($row['total_income']);
-}
-
-// Get expenses data from masrofat table
-$expensesQuery = "
-    SELECT
-        idaqar,
-        SUM(amount) as total_expenses
-    FROM masrofat
-    WHERE payeddate >= ?
-    AND payeddate <= ?
-    AND amount > 0
-    GROUP BY idaqar
-";
-
-$stmt = $db->prepare($expensesQuery);
-$stmt->bind_param('ii', $timestampFrom, $timestampTo);
-$stmt->execute();
-$expensesData = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-
-// Convert to associative array
-$expensesByProperty = [];
-foreach ($expensesData as $row) {
-    $expensesByProperty[$row['idaqar']] = floatval($row['total_expenses']);
-}
-
-// Combine all property IDs
-$allPropertyIds = array_unique(array_merge(
-    array_keys($incomeByProperty),
-    array_keys($expensesByProperty)
-));
-
-// Build property profitability data
-$propertyData = [];
-$totals = [
-    'income' => 0,
-    'expenses' => 0,
-    'profit' => 0
-];
-
-foreach ($allPropertyIds as $idaqar) {
-    if ($idaqar == 0) continue; // Skip items without property
-
-    $income = $incomeByProperty[$idaqar] ?? 0;
-    $expenses = $expensesByProperty[$idaqar] ?? 0;
-    $profit = $income - $expenses;
-    $margin = $income > 0 ? ($profit / $income) * 100 : 0;
-
-    // Get property details
-    $propName = 'عقار #' . $idaqar;
-    $propType = 'other';
-
-    // Check emara (buildings) table
-    $stmt = $db->prepare("SELECT emararakam, emaratype FROM emara WHERE emaraid = ?");
-    $stmt->bind_param('i', $idaqar);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    if ($row = $result->fetch_assoc()) {
-        $propName = 'عمارة رقم ' . $row['emararakam'];
-        $propType = 'building';
-    } else {
-        // Check arady (lands) table
-        $stmt = $db->prepare("SELECT ardy_rakam FROM arady WHERE ardyid = ?");
-        $stmt->bind_param('i', $idaqar);
-        $stmt->execute();
-        $result = $stmt->get_result();
-        if ($row = $result->fetch_assoc()) {
-            $propName = 'أرض رقم ' . $row['ardy_rakam'];
-            $propType = 'land';
-        } else {
-            // Check vila table
-            $stmt = $db->prepare("SELECT vilarakam FROM vila WHERE vilaid = ?");
-            $stmt->bind_param('i', $idaqar);
-            $stmt->execute();
-            $result = $stmt->get_result();
-            if ($row = $result->fetch_assoc()) {
-                $propName = 'فيلا رقم ' . $row['vilarakam'];
-                $propType = 'villa';
-            }
-        }
-    }
-
-    $propertyData[$idaqar] = [
-        'property_id' => $idaqar,
-        'property_name' => $propName,
-        'property_type' => $propType,
-        'income' => $income,
-        'expenses' => $expenses,
-        'profit' => $profit,
-        'margin' => $margin
-    ];
-
-    $totals['income'] += $income;
-    $totals['expenses'] += $expenses;
-    $totals['profit'] += $profit;
-}
+$reportData = $accountingManager->getPropertyProfitabilityReportData($dateFrom, $dateTo, $costCenterId);
+$propertyData = $reportData['property_data'];
+$totals = $reportData['totals'];
 
 // Filter by property type if specified
 if ($propertyType != 'all') {
@@ -359,6 +247,17 @@ $propertyTypes = [
                         <option value="margin_asc" <?php echo $sortBy == 'margin_asc' ? 'selected' : ''; ?>>الأقل هامشاً</option>
                     </select>
                 </div>
+                <div class="col-md-2">
+                    <label class="form-label">مركز التكلفة</label>
+                    <select class="form-select" name="cost_center_id">
+                        <option value="">الكل</option>
+                        <?php foreach ($costCenters as $costCenter): ?>
+                        <option value="<?php echo (int)$costCenter['cost_center_id']; ?>" <?php echo $costCenterId === (int)$costCenter['cost_center_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($costCenter['cost_center_code'] . ' - ' . $costCenter['cost_center_name_ar'], ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
                 <div class="col-md-2 d-flex align-items-end">
                     <button type="submit" class="btn btn-primary w-100">
                         <i class="bi bi-search me-2"></i>عرض
@@ -428,6 +327,9 @@ $propertyTypes = [
             </h5>
             <?php if ($propertyType != 'all'): ?>
             <p class="text-muted mb-0">نوع العقار: <?php echo $propertyTypes[$propertyType] ?? $propertyType; ?></p>
+            <?php endif; ?>
+            <?php if ($costCenterId): ?>
+            <p class="text-muted mb-0">تصفية حسب مركز تكلفة محدد</p>
             <?php endif; ?>
         </div>
 

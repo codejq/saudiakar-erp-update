@@ -13,93 +13,28 @@ $use_accounting_theme = true;
 include_once "../../../../nocash.hnt";
 include_once "../../../../connectdb.hnt";
 include_once "../../../../header.hnt";
+include_once "../../includes/accounting_class.hnt";
+
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
 
 // Get parameters
 $asOfDate = $_GET['as_of_date'] ?? date('Y-m-d');
 $showZeroBalance = isset($_GET['show_zero']) ? 1 : 0;
-
-// Get all invoices with outstanding amounts
-$invoicesQuery = "
-    SELECT
-        i.invoice_id,
-        i.invoice_number,
-        i.invoice_date,
-        i.customer_name,
-        i.total_amount,
-        i.paid_amount,
-        (i.total_amount - i.paid_amount) as outstanding,
-        DATEDIFF(?, i.invoice_date) as days_old
-    FROM acc_invoices i
-    WHERE i.total_amount > i.paid_amount
-    AND i.invoice_date <= ?
-    ORDER BY i.customer_name, i.invoice_date
-";
-$stmt = $db->prepare($invoicesQuery);
-$stmt->bind_param('ss', $asOfDate, $asOfDate);
-$stmt->execute();
-$invoices = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-
-// Group by customer and calculate aging
-$customerData = [];
-$totals = [
-    'current' => 0,
-    '30' => 0,
-    '60' => 0,
-    '90_plus' => 0,
-    'total' => 0
+$filters = [
+    'journal_id' => !empty($_GET['journal_id']) ? (int)$_GET['journal_id'] : null,
+    'cost_center_id' => !empty($_GET['cost_center_id']) ? (int)$_GET['cost_center_id'] : null,
+    'aqar_id' => !empty($_GET['aqar_id']) ? (int)$_GET['aqar_id'] : null,
+    'tenant_id' => !empty($_GET['tenant_id']) ? (int)$_GET['tenant_id'] : null,
+    'owner_id' => !empty($_GET['owner_id']) ? (int)$_GET['owner_id'] : null,
+    'egar_id' => !empty($_GET['egar_id']) ? (int)$_GET['egar_id'] : null
 ];
+$dimensionOptions = $accountingManager->getReportDimensionOptions();
 
-foreach ($invoices as $inv) {
-    $customer = $inv['customer_name'];
-
-    if (!isset($customerData[$customer])) {
-        $customerData[$customer] = [
-            'customer_name' => $customer,
-            'current' => 0,
-            '30' => 0,
-            '60' => 0,
-            '90_plus' => 0,
-            'total' => 0
-        ];
-    }
-
-    $outstanding = $inv['outstanding'];
-    $daysOld = $inv['days_old'];
-
-    // Categorize by age
-    if ($daysOld <= 30) {
-        $customerData[$customer]['current'] += $outstanding;
-        $totals['current'] += $outstanding;
-    } elseif ($daysOld <= 60) {
-        $customerData[$customer]['30'] += $outstanding;
-        $totals['30'] += $outstanding;
-    } elseif ($daysOld <= 90) {
-        $customerData[$customer]['60'] += $outstanding;
-        $totals['60'] += $outstanding;
-    } else {
-        $customerData[$customer]['90_plus'] += $outstanding;
-        $totals['90_plus'] += $outstanding;
-    }
-
-    $customerData[$customer]['total'] += $outstanding;
-    $totals['total'] += $outstanding;
-}
-
-// Filter out zero balances if requested
-if (!$showZeroBalance) {
-    $customerData = array_filter($customerData, function($data) {
-        return $data['total'] > 0;
-    });
-}
-
-// Sort by total outstanding (highest first)
-uasort($customerData, function($a, $b) {
-    return $b['total'] <=> $a['total'];
-});
-
-// Calculate counts
-$totalCustomers = count($customerData);
-$totalOutstanding = $totals['total'];
+$agedData = $accountingManager->getAgedReceivablesData($asOfDate, (bool)$showZeroBalance, $filters);
+$customerData = $agedData['customer_data'];
+$totals = $agedData['totals'];
+$totalCustomers = $agedData['total_customers'];
+$totalOutstanding = $agedData['total_outstanding'];
 ?>
 
 <style>
@@ -223,11 +158,33 @@ $totalOutstanding = $totals['total'];
     <div class="card mb-4 no-print" style="border-radius: 15px;">
         <div class="card-body">
             <form method="GET" class="row g-3">
-                <div class="col-md-4">
+                <div class="col-md-3">
                     <label class="form-label">تاريخ التقرير (حتى)</label>
                     <input type="date" class="form-control" name="as_of_date" value="<?php echo $asOfDate; ?>">
                 </div>
-                <div class="col-md-4">
+                <div class="col-md-3">
+                    <label class="form-label">دفتر اليومية</label>
+                    <select class="form-select" name="journal_id">
+                        <option value="">الكل</option>
+                        <?php foreach ($dimensionOptions['journals'] as $journal): ?>
+                        <option value="<?php echo (int)$journal['journal_id']; ?>" <?php echo $filters['journal_id'] === (int)$journal['journal_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($journal['journal_code'] . ' - ' . $journal['journal_name_ar'], ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">مركز التكلفة</label>
+                    <select class="form-select" name="cost_center_id">
+                        <option value="">الكل</option>
+                        <?php foreach ($dimensionOptions['cost_centers'] as $costCenter): ?>
+                        <option value="<?php echo (int)$costCenter['cost_center_id']; ?>" <?php echo $filters['cost_center_id'] === (int)$costCenter['cost_center_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($costCenter['cost_center_code'] . ' - ' . $costCenter['cost_center_name_ar'], ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-3">
                     <div class="form-check mt-4">
                         <input class="form-check-input" type="checkbox" name="show_zero" id="show_zero"
                                <?php echo $showZeroBalance ? 'checked' : ''; ?>>
@@ -236,7 +193,51 @@ $totalOutstanding = $totals['total'];
                         </label>
                     </div>
                 </div>
-                <div class="col-md-4 d-flex align-items-end">
+                <div class="col-md-3">
+                    <label class="form-label">العقار</label>
+                    <select class="form-select" name="aqar_id">
+                        <option value="">الكل</option>
+                        <?php foreach ($dimensionOptions['properties'] as $property): ?>
+                        <option value="<?php echo (int)$property['property_id']; ?>" <?php echo $filters['aqar_id'] === (int)$property['property_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($property['property_name'], ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">المستأجر</label>
+                    <select class="form-select" name="tenant_id">
+                        <option value="">الكل</option>
+                        <?php foreach ($dimensionOptions['tenants'] as $tenant): ?>
+                        <option value="<?php echo (int)$tenant['tenant_id']; ?>" <?php echo $filters['tenant_id'] === (int)$tenant['tenant_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($tenant['tenant_name'], ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">المالك</label>
+                    <select class="form-select" name="owner_id">
+                        <option value="">الكل</option>
+                        <?php foreach ($dimensionOptions['owners'] as $owner): ?>
+                        <option value="<?php echo (int)$owner['owner_id']; ?>" <?php echo $filters['owner_id'] === (int)$owner['owner_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($owner['owner_name'], ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">العقد</label>
+                    <select class="form-select" name="egar_id">
+                        <option value="">الكل</option>
+                        <?php foreach ($dimensionOptions['contracts'] as $contract): ?>
+                        <option value="<?php echo (int)$contract['egar_id']; ?>" <?php echo $filters['egar_id'] === (int)$contract['egar_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars((trim((string)$contract['contract_number']) !== '' ? $contract['contract_number'] : ('عقد #' . $contract['egar_id'])), ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-3 d-flex align-items-end">
                     <button type="submit" class="btn btn-primary w-100">
                         <i class="bi bi-search me-2"></i>عرض
                     </button>
@@ -285,6 +286,9 @@ $totalOutstanding = $totals['total'];
     <div class="report-card">
         <div class="mb-3">
             <h5 style="color: #667eea;">كشف أعمار الذمم حتى <?php echo $asOfDate; ?></h5>
+            <?php if (array_filter($filters)): ?>
+            <p class="text-muted mb-0">تم تطبيق تصفية حسب الأبعاد المحاسبية المحددة</p>
+            <?php endif; ?>
         </div>
 
         <table class="aging-table">

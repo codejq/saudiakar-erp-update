@@ -21,6 +21,7 @@ $amlakIntegration = new AmlakAccountingIntegration($db, $accountingManager);
 
 $syncLog = [];
 $syncStats = [
+    'cost_centers_created' => 0,
     'tenants_synced' => 0,
     'owners_synced' => 0,
     'invoices_created' => 0,
@@ -34,6 +35,37 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['sync_action'])) {
     $action = $_POST['sync_action'];
 
     switch ($action) {
+        case 'sync_cost_centers':
+            $propertiesQuery = "SELECT idaqar, aqarname FROM amlak WHERE aqarname != '' ORDER BY idaqar";
+            $propertiesResult = $db->query($propertiesQuery);
+
+            if (!$propertiesResult) {
+                $syncLog[] = "✗ خطأ في استعلام العقارات: " . $db->error;
+                $syncStats['errors']++;
+                break;
+            }
+
+            if ($propertiesResult->num_rows == 0) {
+                $toastMessage = "لا توجد عقارات لإنشاء مراكز تكلفة";
+                break;
+            }
+
+            while ($property = $propertiesResult->fetch_assoc()) {
+                $result = $accountingManager->ensurePropertyCostCenter($property['idaqar'], $property['aqarname']);
+                if (!empty($result['success'])) {
+                    if (!empty($result['created'])) {
+                        $syncStats['cost_centers_created']++;
+                        $syncLog[] = "✓ تم إنشاء مركز تكلفة للعقار: {$property['aqarname']}";
+                    } else {
+                        $syncLog[] = "✓ مركز التكلفة موجود مسبقاً للعقار: {$property['aqarname']}";
+                    }
+                } else {
+                    $syncStats['errors']++;
+                    $syncLog[] = "✗ فشل إنشاء مركز تكلفة للعقار: {$property['aqarname']} - " . ($result['message'] ?? 'خطأ غير معروف');
+                }
+            }
+            break;
+
         case 'sync_tenants':
             // Sync all tenants as customers
             $tenantsQuery = "SELECT mostagerid, mostagername FROM mostagereen WHERE mostagername != '' ORDER BY mostagerid";
@@ -392,6 +424,21 @@ if ($result) $invoicesCount = $result->fetch_assoc()['count'];
         <div class="col-md-6">
             <div class="sync-card">
                 <h5 class="mb-3">
+                    <i class="bi bi-diagram-3 me-2"></i>مزامنة مراكز التكلفة
+                </h5>
+                <p class="text-muted">إنشاء مراكز تكلفة للعقارات تلقائياً عند عدم وجودها</p>
+                <form method="POST">
+                    <input type="hidden" name="sync_action" value="sync_cost_centers">
+                    <button type="submit" class="sync-button">
+                        <i class="bi bi-building-add me-2"></i>إنشاء مراكز التكلفة
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="sync-card">
+                <h5 class="mb-3">
                     <i class="bi bi-people me-2"></i>مزامنة المستأجرين
                 </h5>
                 <p class="text-muted">نقل جميع المستأجرين إلى قائمة العملاء في نظام المحاسبة</p>
@@ -458,6 +505,11 @@ if ($result) $invoicesCount = $result->fetch_assoc()['count'];
             </h5>
 
             <div class="row g-3 mb-3">
+                <div class="col-md-3">
+                    <div class="alert alert-secondary mb-0">
+                        <strong><?php echo $syncStats['cost_centers_created']; ?></strong> مركز تكلفة
+                    </div>
+                </div>
                 <div class="col-md-3">
                     <div class="alert alert-success mb-0">
                         <strong><?php echo $syncStats['tenants_synced']; ?></strong> مستأجر

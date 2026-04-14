@@ -19,80 +19,23 @@ $accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
 
 // Get date
 $asOfDate = $_GET['as_of_date'] ?? date('Y-m-d');
+$filters = [
+    'journal_id' => !empty($_GET['journal_id']) ? (int)$_GET['journal_id'] : null,
+    'cost_center_id' => !empty($_GET['cost_center_id']) ? (int)$_GET['cost_center_id'] : null,
+    'aqar_id' => !empty($_GET['aqar_id']) ? (int)$_GET['aqar_id'] : null,
+    'tenant_id' => !empty($_GET['tenant_id']) ? (int)$_GET['tenant_id'] : null,
+    'owner_id' => !empty($_GET['owner_id']) ? (int)$_GET['owner_id'] : null,
+    'egar_id' => !empty($_GET['egar_id']) ? (int)$_GET['egar_id'] : null
+];
+$dimensionOptions = $accountingManager->getReportDimensionOptions();
 
-// Get Assets
-$assetsQuery = "
-    SELECT
-        acc.account_id,
-        acc.account_code,
-        acc.account_name_ar,
-        acc.account_category,
-        acc.opening_balance + COALESCE(SUM(jel.debit_amount - jel.credit_amount), 0) as balance
-    FROM acc_chart_of_accounts acc
-    LEFT JOIN acc_journal_entry_lines jel ON acc.account_id = jel.account_id
-    LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
-        AND je.status = 'posted'
-        AND je.entry_date <= ?
-    WHERE acc.account_type = 'asset' AND acc.is_active = 1
-    GROUP BY acc.account_id
-    HAVING balance != 0
-    ORDER BY acc.account_code
-";
-$stmt = $db->prepare($assetsQuery);
-$stmt->bind_param('s', $asOfDate);
-$stmt->execute();
-$assets = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-
-// Get Liabilities
-$liabilitiesQuery = "
-    SELECT
-        acc.account_id,
-        acc.account_code,
-        acc.account_name_ar,
-        acc.account_category,
-        acc.opening_balance + COALESCE(SUM(jel.credit_amount - jel.debit_amount), 0) as balance
-    FROM acc_chart_of_accounts acc
-    LEFT JOIN acc_journal_entry_lines jel ON acc.account_id = jel.account_id
-    LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
-        AND je.status = 'posted'
-        AND je.entry_date <= ?
-    WHERE acc.account_type = 'liability' AND acc.is_active = 1
-    GROUP BY acc.account_id
-    HAVING balance != 0
-    ORDER BY acc.account_code
-";
-$stmt = $db->prepare($liabilitiesQuery);
-$stmt->bind_param('s', $asOfDate);
-$stmt->execute();
-$liabilities = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-
-// Get Equity
-$equityQuery = "
-    SELECT
-        acc.account_id,
-        acc.account_code,
-        acc.account_name_ar,
-        acc.account_category,
-        acc.opening_balance + COALESCE(SUM(jel.credit_amount - jel.debit_amount), 0) as balance
-    FROM acc_chart_of_accounts acc
-    LEFT JOIN acc_journal_entry_lines jel ON acc.account_id = jel.account_id
-    LEFT JOIN acc_journal_entries je ON jel.entry_id = je.entry_id
-        AND je.status = 'posted'
-        AND je.entry_date <= ?
-    WHERE acc.account_type = 'equity' AND acc.is_active = 1
-    GROUP BY acc.account_id
-    HAVING balance != 0
-    ORDER BY acc.account_code
-";
-$stmt = $db->prepare($equityQuery);
-$stmt->bind_param('s', $asOfDate);
-$stmt->execute();
-$equity = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-
-// Calculate totals
-$totalAssets = array_sum(array_column($assets, 'balance'));
-$totalLiabilities = array_sum(array_column($liabilities, 'balance'));
-$totalEquity = array_sum(array_column($equity, 'balance'));
+$balanceSheetData = $accountingManager->getBalanceSheetData($asOfDate, $filters);
+$assets = $balanceSheetData['assets'];
+$liabilities = $balanceSheetData['liabilities'];
+$equity = $balanceSheetData['equity'];
+$totalAssets = $balanceSheetData['total_assets'];
+$totalLiabilities = $balanceSheetData['total_liabilities'];
+$totalEquity = $balanceSheetData['total_equity'];
 
 // Group assets by category
 $assetsByCategory = [];
@@ -236,11 +179,77 @@ foreach ($liabilities as $liability) {
     <div class="card mb-4 no-print" style="border-radius: 15px;">
         <div class="card-body">
             <form method="GET" class="row g-3">
-                <div class="col-md-8">
+                <div class="col-md-3">
                     <label class="form-label">كما في تاريخ</label>
                     <input type="date" class="form-control" name="as_of_date" value="<?php echo $asOfDate; ?>">
                 </div>
-                <div class="col-md-4 d-flex align-items-end">
+                <div class="col-md-3">
+                    <label class="form-label">دفتر اليومية</label>
+                    <select class="form-select" name="journal_id">
+                        <option value="">الكل</option>
+                        <?php foreach ($dimensionOptions['journals'] as $journal): ?>
+                        <option value="<?php echo (int)$journal['journal_id']; ?>" <?php echo $filters['journal_id'] === (int)$journal['journal_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($journal['journal_code'] . ' - ' . $journal['journal_name_ar'], ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">مركز التكلفة</label>
+                    <select class="form-select" name="cost_center_id">
+                        <option value="">الكل</option>
+                        <?php foreach ($dimensionOptions['cost_centers'] as $costCenter): ?>
+                        <option value="<?php echo (int)$costCenter['cost_center_id']; ?>" <?php echo $filters['cost_center_id'] === (int)$costCenter['cost_center_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($costCenter['cost_center_code'] . ' - ' . $costCenter['cost_center_name_ar'], ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">العقار</label>
+                    <select class="form-select" name="aqar_id">
+                        <option value="">الكل</option>
+                        <?php foreach ($dimensionOptions['properties'] as $property): ?>
+                        <option value="<?php echo (int)$property['property_id']; ?>" <?php echo $filters['aqar_id'] === (int)$property['property_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($property['property_name'], ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">المستأجر</label>
+                    <select class="form-select" name="tenant_id">
+                        <option value="">الكل</option>
+                        <?php foreach ($dimensionOptions['tenants'] as $tenant): ?>
+                        <option value="<?php echo (int)$tenant['tenant_id']; ?>" <?php echo $filters['tenant_id'] === (int)$tenant['tenant_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($tenant['tenant_name'], ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">المالك</label>
+                    <select class="form-select" name="owner_id">
+                        <option value="">الكل</option>
+                        <?php foreach ($dimensionOptions['owners'] as $owner): ?>
+                        <option value="<?php echo (int)$owner['owner_id']; ?>" <?php echo $filters['owner_id'] === (int)$owner['owner_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($owner['owner_name'], ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">العقد</label>
+                    <select class="form-select" name="egar_id">
+                        <option value="">الكل</option>
+                        <?php foreach ($dimensionOptions['contracts'] as $contract): ?>
+                        <option value="<?php echo (int)$contract['egar_id']; ?>" <?php echo $filters['egar_id'] === (int)$contract['egar_id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars((trim((string)$contract['contract_number']) !== '' ? $contract['contract_number'] : ('عقد #' . $contract['egar_id'])), ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-3 d-flex align-items-end">
                     <button type="submit" class="btn btn-primary w-100">
                         <i class="bi bi-search me-2"></i>عرض
                     </button>
@@ -254,6 +263,9 @@ foreach ($liabilities as $liability) {
         <div class="text-center mb-4">
             <h3>الميزانية العمومية</h3>
             <p class="text-muted">كما في <?php echo $asOfDate; ?></p>
+            <?php if (array_filter($filters)): ?>
+            <p class="text-muted mb-0">تم تطبيق تصفية حسب الأبعاد المحاسبية المحددة على الحركات حتى هذا التاريخ</p>
+            <?php endif; ?>
         </div>
 
         <div class="balance-sheet-container">
