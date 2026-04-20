@@ -51,13 +51,19 @@ if not exist ".git" (
 
 :: Fetch and reset
 echo Updating files...
-copy .\frp\frpc.toml  .\frp\frpc.toml.backup  /y
+
+copy "C:\saudiakar-erp\aso\frp\frpc.toml" "C:\saudiakar-erp\aso\frp\frpc.toml.backup" /y
+
+timeout 3
+
 "%GIT_PATH%" fetch origin
 "%GIT_PATH%" reset --hard origin/%BRANCH%
 
-copy  .\frp\frpc.toml.backup .\frp\frpc.toml /y
 
-del .\frp\frpc.toml.backup 
+copy "C:\saudiakar-erp\aso\frp\frpc.toml.backup" "C:\saudiakar-erp\aso\frp\frpc.toml" /y
+ 
+
+del "C:\saudiakar-erp\aso\frp\frpc.toml.backup"
 
 echo Update complete!
 
