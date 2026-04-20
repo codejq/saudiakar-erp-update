@@ -51,10 +51,13 @@ if not exist ".git" (
 
 :: Fetch and reset
 echo Updating files...
-:: "%GIT_PATH%" fetch origin
-:: "%GIT_PATH%" reset --hard origin/%BRANCH%
+copy .\frp\frpc.toml  .\frp\frpc.toml.backup  /y
+"%GIT_PATH%" fetch origin
+"%GIT_PATH%" reset --hard origin/%BRANCH%
 
-"%GIT_PATH%" pull origin %BRANCH% -X theirs
+copy  .\frp\frpc.toml.backup .\frp\frpc.toml /y
+
+del .\frp\frpc.toml.backup 
 
 echo Update complete!
 
