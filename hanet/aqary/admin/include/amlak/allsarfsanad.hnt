@@ -19,9 +19,36 @@ $startfrom        = isset($startfrom)  ? trim($startfrom)  : '';
 $enddate          = isset($enddate)    ? trim($enddate)    : '';
 $payment_type_f   = isset($payment_type_f)   ? intval($payment_type_f)   : 0;
 $money_source_filter = isset($money_source_filter) && $money_source_filter !== '' ? intval($money_source_filter) : -1;
+$bankid           = isset($bankid)          ? intval($bankid)           : 0;
 
 $sc_title = "جميع سندات الصرف";
 $sc_id = "63";
+
+// AJAX handler to fetch bank accounts for selected property
+if (isset($_POST['ajax_action']) && $_POST['ajax_action'] == 'get_property_bank_accounts') {
+    include_once "../../../reqloginajax.hnt";
+    header('Content-Type: application/json; charset=utf-8');
+    $property_id = isset($_POST['idaqar']) ? intval($_POST['idaqar']) : 0;
+
+    include_once "../../../connectdb.hnt";
+    if ($property_id > 0) {
+        $sql = "SELECT id, bankname, acountholder, acountnumber
+                FROM bankacounts
+                WHERE ownerid2 = 0 OR ownerid2 = '$property_id'
+                ORDER BY ownerid2 DESC, id DESC";
+    } else {
+        $sql = "SELECT id, bankname, acountholder, acountnumber
+                FROM bankacounts
+                ORDER BY id DESC";
+    }
+    $result = mysql_query($sql, $link);
+    $accounts = [];
+    while ($row = mysql_fetch_assoc($result)) {
+        $accounts[] = $row;
+    }
+    echo json_encode(['success' => true, 'accounts' => $accounts], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
 
 include_once "../../../nocash.hnt";
 require '../arabicTools.class.hnt';
@@ -38,6 +65,7 @@ if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], tr
     $_ed        = isset($_GET['enddate'])   ? trim($_GET['enddate'])   : '';
     $_pt        = isset($_GET['payment_type_f'])    ? intval($_GET['payment_type_f'])    : 0;
     $_ms        = isset($_GET['money_source_filter']) && $_GET['money_source_filter'] !== '' ? intval($_GET['money_source_filter']) : -1;
+    $_bankid    = isset($_GET['bankid'])             ? intval($_GET['bankid'])             : 0;
 
     $_sf_ts = 0; $_ed_ts = 0;
     if ($_sf) {
@@ -60,8 +88,9 @@ if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], tr
     if ($_idaqar > 0) $_conds[] = "sd.aqarid='" . $_idaqar . "'";
     if ($_sf_ts > 0)  $_conds[] = "sd.sanadate >= '" . $_sf_ts . "'";
     if ($_ed_ts > 0)  $_conds[] = "sd.sanadate <= '" . $_ed_ts . "'";
-    if ($_pt > 0)     $_conds[] = "sd.payment_type='" . $_pt . "'";
-    if ($_ms >= 0)    $_conds[] = "sd.money_source='" . $_ms . "'";
+    if ($_pt > 0)      $_conds[] = "sd.payment_type='" . $_pt . "'";
+    if ($_ms >= 0)     $_conds[] = "sd.money_source='" . $_ms . "'";
+    if ($_bankid > 0)  $_conds[] = "sd.bankid='" . $_bankid . "'";
     $_where = count($_conds) ? 'WHERE ' . implode(' AND ', $_conds) : '';
 
     $_ptLabels = [1 => 'نقداً', 2 => 'شيك', 3 => 'طريقة أخرى', 4 => 'تحويل بنكي', 5 => 'شبكة'];
@@ -133,6 +162,7 @@ $filter_params .= $startfrom ? '&startfrom='     . urlencode($startfrom) : '';
 $filter_params .= $enddate   ? '&enddate='        . urlencode($enddate)   : '';
 $filter_params .= $payment_type_f   > 0  ? '&payment_type_f='   . $payment_type_f   : '';
 $filter_params .= $money_source_filter >= 0 ? '&money_source_filter=' . $money_source_filter : '';
+$filter_params .= $bankid > 0 ? '&bankid=' . $bankid : '';
 
 // Ensure table structure is up to date
 mysql_query("ALTER TABLE sanadsarf ADD attachedimages varchar(500) NOT NULL", $link);
@@ -178,7 +208,7 @@ if ($deltesanadid && $ajax_request == 1) {
                                value="<?= str_replace('.', '', microtime(true) . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
 
                         <div class="row g-3 mb-3">
-                            <div class="col-md-4">
+                            <div class="col-md-3">
                                 <label class="form-label fw-bold">
                                     <i class="bi bi-building me-1"></i>اختر العقار
                                 </label>
@@ -194,14 +224,24 @@ if ($deltesanadid && $ajax_request == 1) {
                                     </button>
                                     <?php if ($idaqar): ?>
                                     <button type="button" class="btn btn-outline-secondary btn-sm"
-                                            onclick="$('#idaqar').val(0); $('#aqarname').val('');">
+                                            onclick="$('#idaqar').val(0); $('#aqarname').val(''); loadBankAccounts();">
                                         <i class="bi bi-x"></i>
                                     </button>
                                     <?php endif; ?>
                                 </div>
                             </div>
 
-                            <div class="col-md-4">
+                            <div class="col-md-3">
+                                <label for="bank_account_filter" class="form-label fw-bold">
+                                    <i class="bi bi-bank me-1"></i>الحساب البنكي
+                                </label>
+                                <input type="hidden" name="bankid" id="bankid" value="<?= $bankid ?>">
+                                <select class="form-select form-select-sm" id="bank_account_filter">
+                                    <option value="0">الكل</option>
+                                </select>
+                            </div>
+
+                            <div class="col-md-3">
                                 <label class="form-label fw-bold">
                                     <i class="bi bi-credit-card me-1"></i>طريقة الصرف
                                 </label>
@@ -215,7 +255,7 @@ if ($deltesanadid && $ajax_request == 1) {
                                 </select>
                             </div>
 
-                            <div class="col-md-4">
+                            <div class="col-md-3">
                                 <label class="form-label fw-bold">
                                     <i class="bi bi-wallet2 me-1"></i>مصدر المبلغ
                                 </label>
@@ -311,6 +351,9 @@ if ($sanadid) {
     }
     if ($money_source_filter >= 0) {
         $conditions[] = "money_source='" . intval($money_source_filter) . "'";
+    }
+    if ($bankid > 0) {
+        $conditions[] = "bankid='" . intval($bankid) . "'";
     }
 }
 
@@ -524,12 +567,35 @@ const deleteVoucher = async (sanadid) => {
     }
 };
 
+function loadBankAccounts() {
+    const idaqar = $('#idaqar').val();
+    $.ajax({
+        url: 'allsarfsanad.hnt',
+        type: 'POST',
+        data: { ajax_action: 'get_property_bank_accounts', idaqar: idaqar || 0 },
+        dataType: 'json',
+        success: function(response) {
+            if (response.success && response.accounts) {
+                const select = $('#bank_account_filter');
+                const currentBankId = parseInt($('#bankid').val()) || 0;
+                select.html('<option value="0">الكل</option>');
+                response.accounts.forEach(function(acc) {
+                    const label = acc.bankname + ' - ' + acc.acountholder + ' (' + acc.acountnumber + ')';
+                    const selected = (acc.id == currentBankId) ? ' selected' : '';
+                    select.append('<option value="' + acc.id + '"' + selected + '>' + label + '</option>');
+                });
+            }
+        }
+    });
+}
+
 function buildFilterUrl() {
     const search    = encodeURIComponent($('#search').val() || '');
     const idaqar    = $('#idaqar').val() || 0;
     const aqarname  = encodeURIComponent($('#aqarname').val() || '');
     const dd = $('#dd').val(), mm = $('#mm').val(), yy = $('#yy').val();
     const dd2 = $('#dd2').val(), mm2 = $('#mm2').val(), yy2 = $('#yy2').val();
+    const bankid              = $('#bankid').val() || 0;
     const payment_type_f      = $('#payment_type_f_select').val() || 0;
     const money_source_filter = $('#money_source_filter').val();
 
@@ -538,6 +604,7 @@ function buildFilterUrl() {
     if (idaqar > 0) url += '&idaqar=' + idaqar + '&aqarname=' + aqarname;
     if (dd && mm && yy)   url += '&startfrom=' + dd + '-' + mm + '-' + yy;
     if (dd2 && mm2 && yy2) url += '&enddate='  + dd2 + '-' + mm2 + '-' + yy2;
+    if (bankid > 0) url += '&bankid=' + bankid;
     if (payment_type_f > 0) url += '&payment_type_f=' + payment_type_f;
     if (money_source_filter !== '' && money_source_filter !== '-1') url += '&money_source_filter=' + money_source_filter;
     return url;
@@ -556,6 +623,23 @@ $(document).ready(function() {
     $('#payment_type_f_select, #money_source_filter').on('change', function() {
         recalculate();
     });
+
+    // Bank account filter: update hidden field and recalculate on change
+    $('#bank_account_filter').on('change', function() {
+        $('#bankid').val($(this).val());
+        recalculate();
+    });
+
+    // Reload bank list when property changes (ajaxfilldiv polling)
+    loadBankAccounts();
+    let lastIdaqar = $('#idaqar').val();
+    setInterval(function() {
+        const cur = $('#idaqar').val();
+        if (cur !== lastIdaqar) {
+            lastIdaqar = cur;
+            loadBankAccounts();
+        }
+    }, 500);
 
     const searchInput = document.getElementById('search');
     if (searchInput && !searchInput.value) {
