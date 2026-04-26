@@ -1,0 +1,567 @@
+<?php
+/**
+ * All Payment Vouchers - Payment Vouchers List
+ * Modern refactored version with Bootstrap 5
+ */
+
+// Extract POST variables
+extract($_REQUEST);
+
+// Initialize variables
+$search           = isset($search)     ? trim($search)     : '';
+$page             = isset($page)       ? intval($page)     : 1;
+$deltesanadid     = isset($deltesanadid) ? intval($deltesanadid) : 0;
+$sanadid          = isset($sanadid)    ? intval($sanadid)  : 0;
+$ajax_request     = isset($ajax)       ? intval($ajax)     : 0;
+$idaqar           = isset($idaqar)     ? intval($idaqar)   : 0;
+$aqarname         = isset($aqarname)   ? trim($aqarname)   : '';
+$startfrom        = isset($startfrom)  ? trim($startfrom)  : '';
+$enddate          = isset($enddate)    ? trim($enddate)    : '';
+$payment_type_f   = isset($payment_type_f)   ? intval($payment_type_f)   : 0;
+$money_source_filter = isset($money_source_filter) && $money_source_filter !== '' ? intval($money_source_filter) : -1;
+
+$sc_title = "جميع سندات الصرف";
+$sc_id = "63";
+
+include_once "../../../nocash.hnt";
+require '../arabicTools.class.hnt';
+require '../uCal.class.hnt';
+$dcal = new uCal;
+include_once "amlakfunctions.hnt";
+
+// Export handler — runs before any HTML output
+if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], true)) {
+    include_once "../../../connectdb.hnt";
+    $_search    = isset($_GET['search'])    ? trim($_GET['search'])    : '';
+    $_idaqar    = isset($_GET['idaqar'])    ? intval($_GET['idaqar'])  : 0;
+    $_sf        = isset($_GET['startfrom']) ? trim($_GET['startfrom']) : '';
+    $_ed        = isset($_GET['enddate'])   ? trim($_GET['enddate'])   : '';
+    $_pt        = isset($_GET['payment_type_f'])    ? intval($_GET['payment_type_f'])    : 0;
+    $_ms        = isset($_GET['money_source_filter']) && $_GET['money_source_filter'] !== '' ? intval($_GET['money_source_filter']) : -1;
+
+    $_sf_ts = 0; $_ed_ts = 0;
+    if ($_sf) {
+        $_d = explode("-", "0-0-0-" . $_sf);
+        if (isset($_d[5]) && $_d[5] < 1900 && $_d[5] > 1400) {
+            $_dateo = $dcal->u2g($_d[3], $_d[4], $_d[5]); $_d[3] = $_dateo['day']; $_d[4] = $_dateo['month']; $_d[5] = $_dateo['year'];
+        }
+        if (isset($_d[5])) $_sf_ts = mktime(0, 0, 0, $_d[4], $_d[3], $_d[5]);
+    }
+    if ($_ed) {
+        $_d2 = explode("-", "0-0-0-" . $_ed);
+        if (isset($_d2[5]) && $_d2[5] < 1900 && $_d2[5] > 1400) {
+            $_dateo = $dcal->u2g($_d2[3], $_d2[4], $_d2[5]); $_d2[3] = $_dateo['day']; $_d2[4] = $_dateo['month']; $_d2[5] = $_dateo['year'];
+        }
+        if (isset($_d2[5])) $_ed_ts = mktime(0, 0, 0, $_d2[4], $_d2[3], $_d2[5]) + 86399;
+    }
+
+    $_conds = [];
+    if ($_search) $_conds[] = "(sanadid='" . addslashes($_search) . "' OR amount='" . addslashes($_search) . "' OR bayan LIKE '%" . addslashes($_search) . "%' OR mostafeed LIKE '%" . addslashes($_search) . "%')";
+    if ($_idaqar > 0) $_conds[] = "sd.aqarid='" . $_idaqar . "'";
+    if ($_sf_ts > 0)  $_conds[] = "sd.sanadate >= '" . $_sf_ts . "'";
+    if ($_ed_ts > 0)  $_conds[] = "sd.sanadate <= '" . $_ed_ts . "'";
+    if ($_pt > 0)     $_conds[] = "sd.payment_type='" . $_pt . "'";
+    if ($_ms >= 0)    $_conds[] = "sd.money_source='" . $_ms . "'";
+    $_where = count($_conds) ? 'WHERE ' . implode(' AND ', $_conds) : '';
+
+    $_ptLabels = [1 => 'نقداً', 2 => 'شيك', 3 => 'طريقة أخرى', 4 => 'تحويل بنكي', 5 => 'شبكة'];
+    $exp_sql = "SELECT sd.sanadid, sd.mostafeed, sd.amount, sd.bayan, sd.sanadate, sd.payment_type, sd.money_source, a.aqarname
+                FROM sanadsarf sd LEFT JOIN amlak a ON sd.aqarid = a.idaqar
+                $_where ORDER BY sd.sanadate DESC";
+    $exp_res = mysql_query($exp_sql, $link);
+    $exp_headers = ['رقم السند', 'المستفيد', 'المبلغ', 'البيان', 'العقار', 'التاريخ', 'طريقة الصرف', 'مصدر المبلغ'];
+    $exp_rows = [];
+    while ($r = mysql_fetch_array($exp_res)) {
+        $_pt2 = intval($r['payment_type']); if ($_pt2 < 1) $_pt2 = 1;
+        $exp_rows[] = [
+            intval($r['sanadid']), $r['mostafeed'], number_format($r['amount'], 2, '.', ''), $r['bayan'],
+            $r['aqarname'] ?: '', date('d/m/Y', $r['sanadate']),
+            isset($_ptLabels[$_pt2]) ? $_ptLabels[$_pt2] : 'نقداً',
+            intval($r['money_source']) == 1 ? 'حساب المالك' : 'المكتب',
+        ];
+    }
+
+    $_exp_type = trim($_GET['export']); $_fn = date('Ymd_His');
+    if ($_exp_type === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="allsarfsanad_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w'); fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out); exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="allsarfsanad_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>'; exit;
+}
+
+include_once "../../../header.hnt";
+
+// Process date filters → unix timestamps (support Hijri and Gregorian)
+$startfrom_ts = 0;
+$enddate_ts   = 0;
+$dd = $mm = $yy = $dd2 = $mm2 = $yy2 = '';
+
+if ($startfrom) {
+    $daxx = explode("-", "0-0-0-" . $startfrom);
+    if (isset($daxx[5]) && ($daxx[5] < 1900) && ($daxx[5] > 1400)) {
+        $dateo = $dcal->u2g($daxx[3], $daxx[4], $daxx[5]);
+        $daxx[3] = $dateo['day']; $daxx[4] = $dateo['month']; $daxx[5] = $dateo['year'];
+    }
+    $startfrom_ts = mktime(0, 0, 0, $daxx[4], $daxx[3], $daxx[5]);
+    $dd = $daxx[3]; $mm = $daxx[4]; $yy = $daxx[5];
+}
+
+if ($enddate) {
+    $dax2 = explode("-", "0-0-0-" . $enddate);
+    if (isset($dax2[5]) && ($dax2[5] < 1900) && ($dax2[5] > 1400)) {
+        $dateo = $dcal->u2g($dax2[3], $dax2[4], $dax2[5]);
+        $dax2[3] = $dateo['day']; $dax2[4] = $dateo['month']; $dax2[5] = $dateo['year'];
+    }
+    $enddate_ts = mktime(0, 0, 0, $dax2[4], $dax2[3], $dax2[5]) + 86399;
+    $dd2 = $dax2[3]; $mm2 = $dax2[4]; $yy2 = $dax2[5];
+}
+
+// Build shared filter params string for pagination links
+$filter_params  = $search   ? '&search='        . urlencode($search)   : '';
+$filter_params .= $idaqar   ? '&idaqar='         . $idaqar . '&aqarname=' . urlencode($aqarname) : '';
+$filter_params .= $startfrom ? '&startfrom='     . urlencode($startfrom) : '';
+$filter_params .= $enddate   ? '&enddate='        . urlencode($enddate)   : '';
+$filter_params .= $payment_type_f   > 0  ? '&payment_type_f='   . $payment_type_f   : '';
+$filter_params .= $money_source_filter >= 0 ? '&money_source_filter=' . $money_source_filter : '';
+
+// Ensure table structure is up to date
+mysql_query("ALTER TABLE sanadsarf ADD attachedimages varchar(500) NOT NULL", $link);
+
+// Handle AJAX delete request
+if ($deltesanadid && $ajax_request == 1) {
+    $rid = mysql_fetch_array(mysql_query("SELECT sanadid FROM sanadsarf WHERE sanadid='" . intval($deltesanadid) . "' LIMIT 1", $link));
+
+    if ($rid['sanadid']) {
+        loginfo("critical", "delete", "تم حذف سند الصرف رقم {$deltesanadid}", "", "sanadsarf", $deltesanadid, $link);
+        mysql_query("DELETE FROM sanadsarf WHERE sanadid='" . intval($deltesanadid) . "' LIMIT 1", $link);
+
+        $response = array(
+            'success' => true,
+            'message' => 'تم حذف السند بنجاح'
+        );
+    } else {
+        $response = array(
+            'success' => false,
+            'message' => 'السند غير موجود'
+        );
+    }
+
+    echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit();
+}
+?>
+
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <!-- Page Header -->
+            <div class="card mb-4 shadow-sm border-0">
+                <div class="card-header text-white" style="background: linear-gradient(135deg, #0a7047 0%, #0d9488 100%);">
+                    <h4 class="mb-0">
+                        <i class="bi bi-receipt-cutoff me-2"></i>
+                        <?= $sc_title ?>
+                    </h4>
+                </div>
+                <div class="card-body p-4">
+                    <form name="form" id="filter_form" method="get" action="?">
+                        <input type="hidden" name="formuid" id="formuid"
+                               value="<?= str_replace('.', '', microtime(true) . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+
+                        <div class="row g-3 mb-3">
+                            <div class="col-md-4">
+                                <label class="form-label fw-bold">
+                                    <i class="bi bi-building me-1"></i>اختر العقار
+                                </label>
+                                <div class="input-group">
+                                    <input type="hidden" name="idaqar" id="idaqar" value="<?= $idaqar ?>">
+                                    <input type="text" class="form-control" name="aqarname" id="aqarname"
+                                           value="<?= htmlspecialchars($aqarname) ?>"
+                                           placeholder="اسم العقار..."
+                                           onclick="event.preventDefault(); event.stopPropagation(); ajaxfilldiv('select idaqar,aqarname from amlak','idaqar','aqarname'); return false;">
+                                    <button type="button" class="btn btn-primary btn-sm"
+                                            onclick="event.preventDefault(); event.stopPropagation(); ajaxfilldiv('select idaqar,aqarname from amlak','idaqar','aqarname'); return false;">
+                                        <i class="bi bi-search"></i>
+                                    </button>
+                                    <?php if ($idaqar): ?>
+                                    <button type="button" class="btn btn-outline-secondary btn-sm"
+                                            onclick="$('#idaqar').val(0); $('#aqarname').val('');">
+                                        <i class="bi bi-x"></i>
+                                    </button>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+
+                            <div class="col-md-4">
+                                <label class="form-label fw-bold">
+                                    <i class="bi bi-credit-card me-1"></i>طريقة الصرف
+                                </label>
+                                <select class="form-select form-select-sm" id="payment_type_f_select" name="payment_type_f">
+                                    <option value="0"  <?= $payment_type_f == 0 ? 'selected' : '' ?>>الكل</option>
+                                    <option value="1"  <?= $payment_type_f == 1 ? 'selected' : '' ?>>نقداً</option>
+                                    <option value="2"  <?= $payment_type_f == 2 ? 'selected' : '' ?>>شيك</option>
+                                    <option value="3"  <?= $payment_type_f == 3 ? 'selected' : '' ?>>طريقة أخرى</option>
+                                    <option value="4"  <?= $payment_type_f == 4 ? 'selected' : '' ?>>تحويل بنكي</option>
+                                    <option value="5"  <?= $payment_type_f == 5 ? 'selected' : '' ?>>شبكة</option>
+                                </select>
+                            </div>
+
+                            <div class="col-md-4">
+                                <label class="form-label fw-bold">
+                                    <i class="bi bi-wallet2 me-1"></i>مصدر المبلغ
+                                </label>
+                                <select class="form-select form-select-sm" id="money_source_filter" name="money_source_filter">
+                                    <option value="-1" <?= $money_source_filter == -1 ? 'selected' : '' ?>>الكل</option>
+                                    <option value="0"  <?= $money_source_filter === 0  ? 'selected' : '' ?>>من حساب المكتب</option>
+                                    <option value="1"  <?= $money_source_filter === 1  ? 'selected' : '' ?>>من حساب المالك (تحويل داخلي)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-md-3">
+                                <label class="form-label fw-bold">
+                                    <i class="bi bi-calendar-event me-1"></i>من تاريخ
+                                </label>
+                                <div class="row g-1">
+                                    <div class="col-4"><input type="text" class="form-control form-control-sm" id="dd"  value="<?= $dd  ?>" placeholder="يوم"></div>
+                                    <div class="col-4"><input type="text" class="form-control form-control-sm" id="mm"  value="<?= $mm  ?>" placeholder="شهر"></div>
+                                    <div class="col-4"><input type="text" class="form-control form-control-sm" id="yy"  value="<?= $yy  ?>" placeholder="سنة"></div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label fw-bold">
+                                    <i class="bi bi-calendar-check me-1"></i>إلى تاريخ
+                                </label>
+                                <div class="row g-1">
+                                    <div class="col-4"><input type="text" class="form-control form-control-sm" id="dd2" value="<?= $dd2 ?>" placeholder="يوم"></div>
+                                    <div class="col-4"><input type="text" class="form-control form-control-sm" id="mm2" value="<?= $mm2 ?>" placeholder="شهر"></div>
+                                    <div class="col-4"><input type="text" class="form-control form-control-sm" id="yy2" value="<?= $yy2 ?>" placeholder="سنة"></div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="search" class="form-label fw-bold">
+                                    <i class="bi bi-search me-1"></i>بحث نصي
+                                </label>
+                                <input type="text" class="form-control form-control-sm" name="search" id="search"
+                                       value="<?= htmlspecialchars($search) ?>"
+                                       placeholder="رقم السند، المستفيد، المبلغ، البيان...">
+                            </div>
+                        </div>
+
+                        <div class="d-flex gap-2 flex-wrap">
+                            <button type="button" class="btn btn-primary" onclick="recalculate();">
+                                <i class="bi bi-search me-1"></i>بحث
+                            </button>
+                            <button type="button" class="btn btn-secondary" onclick="window.location.href='allsarfsanad.hnt';">
+                                <i class="bi bi-x-circle me-1"></i>إلغاء الفلاتر
+                            </button>
+                            <button type="button" class="btn btn-success" onclick="window.location.href='reports.hnt';">
+                                <i class="bi bi-arrow-left me-1"></i>عودة
+                            </button>
+                            <?php
+                            $_ep = $_GET; unset($_ep['export']);
+                            $_eq = http_build_query($_ep);
+                            $_eu = 'allsarfsanad.hnt?' . $_eq . ($_eq ? '&' : '');
+                            ?>
+                            <a href="<?= htmlspecialchars($_eu . 'export=csv') ?>" class="btn btn-outline-success">
+                                <i class="bi bi-filetype-csv me-1"></i>تصدير CSV
+                            </a>
+                            <a href="<?= htmlspecialchars($_eu . 'export=xls') ?>" class="btn btn-outline-success">
+                                <i class="bi bi-file-earmark-excel me-1"></i>تصدير Excel
+                            </a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Vouchers Table -->
+            <div class="card shadow-sm">
+                <div class="card-body">
+<?php
+// Build WHERE clause
+$conditions = [];
+
+if ($sanadid) {
+    $conditions[] = "sanadid='" . intval($sanadid) . "'";
+} else {
+    if ($search) {
+        $conditions[] = "(sanadid='" . addslashes($search) . "' OR amount='" . addslashes($search) . "' OR bayan LIKE '%" . addslashes($search) . "%' OR note LIKE '%" . addslashes($search) . "%' OR mostafeed LIKE '%" . addslashes($search) . "%')";
+    }
+    if ($idaqar > 0) {
+        $conditions[] = "aqarid='" . intval($idaqar) . "'";
+    }
+    if ($startfrom_ts > 0) {
+        $conditions[] = "sanadate >= '" . $startfrom_ts . "'";
+    }
+    if ($enddate_ts > 0) {
+        $conditions[] = "sanadate <= '" . $enddate_ts . "'";
+    }
+    if ($payment_type_f > 0) {
+        $conditions[] = "payment_type='" . intval($payment_type_f) . "'";
+    }
+    if ($money_source_filter >= 0) {
+        $conditions[] = "money_source='" . intval($money_source_filter) . "'";
+    }
+}
+
+$where = count($conditions) ? ' WHERE ' . implode(' AND ', $conditions) : '';
+
+// Pagination
+$sql = "SELECT COUNT(sanadid) as dd FROM sanadsarf $where";
+$rownum = mysql_fetch_array(mysql_query($sql, $link));
+$rownum = $rownum['dd'];
+$rowperpage = isset($rowperpage) ? intval($rowperpage) : 40;
+$pagenum = ceil($rownum / $rowperpage);
+
+// Display count
+echo '<div class="alert alert-info mb-3">';
+echo '<i class="bi bi-info-circle me-2"></i>';
+echo 'عدد السندات: <strong class="text-danger">' . $rownum . '</strong> سند';
+echo '</div>';
+
+// Pagination
+if ($pagenum > 1) {
+    echo '<nav aria-label="Page navigation"><ul class="pagination justify-content-center">';
+    for ($xi = 1; $xi <= $pagenum; $xi++) {
+        $active = ($page == $xi) ? 'active' : '';
+        if (($xi > ($page - 4) && $xi < ($page + 4)) || $xi == 1 || $xi == $pagenum || $xi < 4 || $xi > ($pagenum - 4)) {
+            echo '<li class="page-item ' . $active . '"><a class="page-link" href="allsarfsanad.hnt?page=' . $xi . $filter_params . '">' . $xi . '</a></li>';
+        } elseif ($xi == ($page - 4) || $xi == ($page + 4)) {
+            echo '<li class="page-item disabled"><span class="page-link">...</span></li>';
+        }
+    }
+    echo '</ul></nav>';
+}
+
+// Calculate limit
+$limit = ($page - 1) * $rowperpage;
+$limit = $limit . "," . $rowperpage;
+if ($page == 1 || $page == '') {
+    $limit = $rowperpage;
+}
+
+// Get vouchers
+$sql = "SELECT * FROM sanadsarf $where ORDER BY sanadate DESC LIMIT $limit";
+$result = mysql_query($sql, $link);
+$total_amount = 0;
+?>
+
+                    <div class="table-responsive">
+                        <table class="table table-hover table-striped align-middle">
+                            <thead class="table-light">
+                                <tr class="text-center">
+                                    <th><i class="bi bi-hash me-1"></i>رقم السند</th>
+                                    <th><i class="bi bi-person me-1"></i>المستفيد</th>
+                                    <th><i class="bi bi-currency-exchange me-1"></i>المبلغ</th>
+                                    <th>المستلم</th>
+                                    <th><i class="bi bi-file-text me-1"></i>البيان</th>
+                                    <th><i class="bi bi-building me-1"></i>العقار</th>
+                                    <th><i class="bi bi-calendar me-1"></i>التاريخ</th>
+                                    <th><i class="bi bi-credit-card me-1"></i>طريقة الصرف</th>
+                                    <th><i class="bi bi-wallet2 me-1"></i>مصدر المبلغ</th>
+                                    <th class="text-center">الإجراءات</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php
+                                while ($row = mysql_fetch_array($result)) {
+                                    // Prepare attachments link
+                                    if ($row['attachedimages']) {
+                                        $attachedimagelink = "<a href='/aqary/admin/include/uploadcenter.hnt?ids=" . $row['attachedimages'] . "&table=sanadsarf&tableid=sanadid&tableidvalue=" . $row['sanadid'] . "' class='btn btn-sm btn-outline-primary' target='_blank' title='عرض المرفقات'><i class='bi bi-paperclip'></i></a>";
+                                    } else {
+                                        $attachedimagelink = "<a href='/aqary/admin/include/uploadcenter.hnt?ids=0,0&table=sanadsarf&tableid=sanadid&tableidvalue=" . $row['sanadid'] . "' class='btn btn-sm btn-outline-secondary' target='_blank' title='إضافة مرفقات'><i class='bi bi-link-45deg'></i></a>";
+                                    }
+
+                                    // Get property name
+                                    $sql2 = "SELECT aqarname FROM amlak WHERE idaqar='" . intval($row['aqarid']) . "'";
+                                    $rowaq = mysql_fetch_array(mysql_query($sql2, $link));
+
+                                    // Format date
+                                    if (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) {
+                                        $dhd = date("d/m/Y", $row['sanadate']);
+                                    } else {
+                                        $dhd = ArabicTools::arabicDate('hj:d/m/Y', $row['sanadate']);
+                                    }
+
+                                    // Payment type badge
+                                    $payTypeLabels = [1=>'نقداً',2=>'شيك',3=>'طريقة أخرى',4=>'تحويل بنكي',5=>'شبكة'];
+                                    $payTypeIcons  = [1=>'bi-cash',2=>'bi-file-earmark-check',3=>'bi-three-dots',4=>'bi-arrow-left-right',5=>'bi-credit-card-2-front'];
+                                    $payTypeColors = [1=>'success',2=>'primary',3=>'secondary',4=>'info',5=>'warning'];
+                                    $ptype = max(1, intval($row['payment_type']));
+                                    $payLabel = isset($payTypeLabels[$ptype]) ? $payTypeLabels[$ptype] : 'نقداً';
+                                    $payIcon  = isset($payTypeIcons[$ptype])  ? $payTypeIcons[$ptype]  : 'bi-cash';
+                                    $payColor = isset($payTypeColors[$ptype]) ? $payTypeColors[$ptype] : 'success';
+
+                                    // Money source badge
+                                    $msource = intval($row['money_source']);
+                                ?>
+                                <tr class="text-center">
+                                    <td><strong><?= htmlspecialchars($row['sanadid']) ?></strong></td>
+                                    <td><?= htmlspecialchars($row['mostafeed']) ?></td>
+                                    <td><?= htmlspecialchars($row['amount']) ?></td>
+                                    <td><?= htmlspecialchars($row['mowazaf']) ?></td>
+                                    <td><?= htmlspecialchars($row['bayan']) ?></td>
+                                    <td><?= isset($rowaq['aqarname']) ? htmlspecialchars($rowaq['aqarname']) : '-' ?></td>
+                                    <td><?= $dhd ?></td>
+                                    <td><span class="badge bg-<?= $payColor ?>"><i class="bi <?= $payIcon ?> me-1"></i><?= $payLabel ?></span></td>
+                                    <td>
+                                        <?php if ($msource == 1): ?>
+                                        <span class="badge bg-warning text-dark"><i class="bi bi-person-fill me-1"></i>من حساب المالك</span>
+                                        <?php else: ?>
+                                        <span class="badge bg-secondary"><i class="bi bi-building me-1"></i>من حساب المكتب</span>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td>
+                                        <div class="btn-group btn-group-sm" role="group">
+                                            <?= $attachedimagelink ?>
+                                            <button type="button" class="btn btn-sm btn-outline-info"
+                                                    onclick="openvbs('<?= isset($server) ? $server : '' ?>/aqary/admin/include/amlak/read_word_voucher.hnt?sanadid=<?= $row['sanadid'] ?>');"
+                                                    title="فتح بالوورد">
+                                                <i class="bi bi-file-word"></i>
+                                            </button>
+                                            <a href="selectprintform.hnt?formtype=paymentvaoucher&id=<?= $row['sanadid'] ?>"
+                                               class="btn btn-sm btn-primary" target="_blank" title="عرض">
+                                                <i class="bi bi-eye"></i>
+                                            </a>
+                                            <?php if ($row['iderad']) { ?>
+                                            <a href="sendmony-sanad.hnt?iderad=<?= $row['iderad'] ?>"
+                                               class="btn btn-sm btn-success" title="تفاصيل التسليم">
+                                                <i class="bi bi-info-circle"></i>
+                                            </a>
+                                            <?php } ?>
+                                            <button type="button" class="btn btn-sm btn-outline-danger"
+                                                    onclick="deleteVoucher(<?= $row['sanadid'] ?>)"
+                                                    title="حذف">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <?php
+                                    $total_amount += floatval($row['amount']);
+                                }
+                                ?>
+                            </tbody>
+                            <tfoot>
+                                <tr class="table-dark text-center fw-bold">
+                                    <td colspan="2"><i class="bi bi-calculator me-1"></i>الإجمالي</td>
+                                    <td><?= number_format($total_amount, 2) ?></td>
+                                    <td colspan="7"></td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<iframe style="display:none" name="wordd" id="wordd"></iframe>
+
+<script>
+    // Modern ES6+ JavaScript
+
+// Open Word voucher
+const openWordVoucher = (sanadid) => {
+    const server = '<?= $server ?>';
+    const url = `${server}/aqary/admin/include/amlak/read_word_voucher.hnt?sanadid=${sanadid}`;
+    const iframe = document.getElementById('wordd');
+    iframe.src = url;
+};
+
+// Delete voucher with confirmation
+const deleteVoucher = async (sanadid) => {
+    if (!confirm('هل أنت متأكد من حذف هذا السند؟\n\nهذا الإجراء لا يمكن التراجع عنه.')) {
+        return;
+    }
+
+    try {
+        const formData = new FormData();
+        formData.append('deltesanadid', sanadid);
+        formData.append('ajax', '1');
+
+        const response = await fetch(window.location.href, {
+            method: 'POST',
+            body: formData
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            // Show success message
+            const alertDiv = document.createElement('div');
+            alertDiv.className = 'alert alert-success alert-dismissible fade show position-fixed top-0 start-50 translate-middle-x mt-3';
+            alertDiv.style.zIndex = '9999';
+            alertDiv.innerHTML = `
+                <i class="bi bi-check-circle-fill me-2"></i>
+                <strong>${result.message}</strong>
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            `;
+
+            document.body.appendChild(alertDiv);
+
+            // Reload page after 1 second
+            setTimeout(() => {
+                window.location.reload();
+            }, 1000);
+        } else {
+            alert(result.message || 'حدث خطأ أثناء حذف السند');
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('حدث خطأ أثناء حذف السند');
+    }
+};
+
+function buildFilterUrl() {
+    const search    = encodeURIComponent($('#search').val() || '');
+    const idaqar    = $('#idaqar').val() || 0;
+    const aqarname  = encodeURIComponent($('#aqarname').val() || '');
+    const dd = $('#dd').val(), mm = $('#mm').val(), yy = $('#yy').val();
+    const dd2 = $('#dd2').val(), mm2 = $('#mm2').val(), yy2 = $('#yy2').val();
+    const payment_type_f      = $('#payment_type_f_select').val() || 0;
+    const money_source_filter = $('#money_source_filter').val();
+
+    let url = 'allsarfsanad.hnt?';
+    if (search)    url += '&search='   + search;
+    if (idaqar > 0) url += '&idaqar=' + idaqar + '&aqarname=' + aqarname;
+    if (dd && mm && yy)   url += '&startfrom=' + dd + '-' + mm + '-' + yy;
+    if (dd2 && mm2 && yy2) url += '&enddate='  + dd2 + '-' + mm2 + '-' + yy2;
+    if (payment_type_f > 0) url += '&payment_type_f=' + payment_type_f;
+    if (money_source_filter !== '' && money_source_filter !== '-1') url += '&money_source_filter=' + money_source_filter;
+    return url;
+}
+
+function recalculate() {
+    window.location.href = buildFilterUrl();
+}
+
+// Initialize on page load
+$(document).ready(function() {
+    // Sync Select2 display with PHP-rendered selected value
+    $('#money_source_filter').val('<?= $money_source_filter ?>').trigger('change.select2');
+
+    // Auto-recalculate on dropdown changes
+    $('#payment_type_f_select, #money_source_filter').on('change', function() {
+        recalculate();
+    });
+
+    const searchInput = document.getElementById('search');
+    if (searchInput && !searchInput.value) {
+        searchInput.focus();
+    }
+});
+</script>
+
+<?php require('../../../foter.hnt'); ?>

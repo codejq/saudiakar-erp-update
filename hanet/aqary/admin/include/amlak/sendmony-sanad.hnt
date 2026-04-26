@@ -61,6 +61,33 @@ if (isset($_REQUEST['formuid']) && !empty($_REQUEST['formuid'])) {
     }
 }
 
+// Schema updates for payment method and money source tracking
+if (!$is_ajax_request) {
+    @mysql_query("ALTER TABLE sanadsarf ADD bankid int(11) NOT NULL DEFAULT 0", $link);
+    @mysql_query("ALTER TABLE sanadsarf ADD money_source int(11) NOT NULL DEFAULT 0", $link);
+}
+
+// AJAX: fetch bank accounts for disbursement payment
+if ($is_ajax_request && isset($_POST['action']) && $_POST['action'] == 'get_bank_accounts_sarf') {
+    header('Content-Type: application/json; charset=utf-8');
+    $sarf_idaqar = isset($_POST['idaqar']) ? intval($_POST['idaqar']) : 0;
+    if ($sarf_idaqar > 0) {
+        $sql = "SELECT id, bankname, acountholder, acountnumber, iban
+                FROM bankacounts
+                WHERE ownerid2 = 0 OR ownerid2 = '$sarf_idaqar'
+                ORDER BY ownerid2 DESC, id DESC";
+        $result_ba = mysql_query($sql, $link);
+        $accounts = [];
+        while ($row_ba = mysql_fetch_assoc($result_ba)) {
+            $accounts[] = $row_ba;
+        }
+        echo json_encode(['success' => true, 'accounts' => $accounts], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    } else {
+        echo json_encode(['success' => false, 'message' => 'معرف العقار غير صحيح'], JSON_UNESCAPED_UNICODE);
+    }
+    exit;
+}
+
 // Process payment voucher creation
 if (isset($_POST['makepayemtsanad']) && $_POST['makepayemtsanad'] == '1') {
     $tasfia = time();
@@ -83,6 +110,9 @@ if (isset($_POST['makepayemtsanad']) && $_POST['makepayemtsanad'] == '1') {
         idsubaqar = '" . intval($_POST['idsubaqar']) . "',
         iderad = '" . intval($_POST['iderad']) . "',
         masrofatarray = '" . addslashes($_POST['idmasrofarray']) . "',
+        payment_type = '" . (isset($_POST['payment_type']) ? intval($_POST['payment_type']) : 1) . "',
+        bankid = '" . (isset($_POST['bankid']) ? intval($_POST['bankid']) : 0) . "',
+        money_source = '" . (isset($_POST['money_source']) ? intval($_POST['money_source']) : 0) . "',
         formuid = '" . addslashes($_POST['formuid']) . "'";
 
     mysql_query($sql, $link);
@@ -130,7 +160,8 @@ if (isset($_POST['makepayemtsanad']) && $_POST['makepayemtsanad'] == '1') {
 
 // Check if payment already settled (by this erad)
 if ($iderad) {
-    $sql = "SELECT sanadate, sanadid, extradata, mostafeed, bayan, note, notes
+    $sql = "SELECT sanadate, sanadid, extradata, mostafeed, bayan, note, notes,
+                   payment_type, checkrakam, checkdate, checkbank, money_source
             FROM sanadsarf WHERE iderad = '" . intval($iderad) . "'";
     $row_paid = mysql_fetch_array(mysql_query($sql, $link));
 
@@ -211,6 +242,50 @@ if ($iderad) {
             <td class="py-3 px-4 text-muted"><?= htmlspecialchars($row_paid['notes']) ?></td>
           </tr>
           <?php endif; ?>
+          <?php
+          $payTypeLabels = [1=>'نقداً', 2=>'شيك', 3=>'طريقة أخرى', 4=>'تحويل بنكي', 5=>'شبكة'];
+          $payTypeIcons  = [1=>'bi-cash', 2=>'bi-file-earmark-check', 3=>'bi-three-dots', 4=>'bi-arrow-left-right', 5=>'bi-credit-card-2-front'];
+          $ptype = isset($row_paid['payment_type']) ? intval($row_paid['payment_type']) : 1;
+          if ($ptype < 1) $ptype = 1;
+          $pLabel = isset($payTypeLabels[$ptype]) ? $payTypeLabels[$ptype] : 'نقداً';
+          $pIcon  = isset($payTypeIcons[$ptype])  ? $payTypeIcons[$ptype]  : 'bi-cash';
+          ?>
+          <tr>
+            <th class="bg-light text-muted fw-semibold py-3 px-4">
+              <i class="bi bi-credit-card me-1"></i>طريقة الصرف
+            </th>
+            <td class="py-3 px-4">
+              <span class="badge bg-primary fs-6 px-3 py-2">
+                <i class="bi <?= $pIcon ?> me-1"></i><?= $pLabel ?>
+              </span>
+              <?php if ($ptype != 1 && !empty($row_paid['checkrakam'])): ?>
+                <span class="ms-3 text-muted"><small>رقم: <?= htmlspecialchars($row_paid['checkrakam']) ?></small></span>
+              <?php endif; ?>
+              <?php if (!empty($row_paid['checkbank'])): ?>
+                <span class="ms-2 text-muted"><small>البنك: <?= htmlspecialchars($row_paid['checkbank']) ?></small></span>
+              <?php endif; ?>
+              <?php if ($ptype == 2 && !empty($row_paid['checkdate'])): ?>
+                <span class="ms-2 text-muted"><small>التاريخ: <?= htmlspecialchars($row_paid['checkdate']) ?></small></span>
+              <?php endif; ?>
+            </td>
+          </tr>
+          <?php $msource = isset($row_paid['money_source']) ? intval($row_paid['money_source']) : 0; ?>
+          <tr>
+            <th class="bg-light text-muted fw-semibold py-3 px-4">
+              <i class="bi bi-wallet2 me-1"></i>مصدر المبلغ
+            </th>
+            <td class="py-3 px-4">
+              <?php if ($msource == 1): ?>
+                <span class="badge bg-warning text-dark fs-6 px-3 py-2">
+                  <i class="bi bi-person-fill me-1"></i>من حساب المالك (تحويل داخلي)
+                </span>
+              <?php else: ?>
+                <span class="badge bg-success fs-6 px-3 py-2">
+                  <i class="bi bi-building me-1"></i>من حساب المكتب
+                </span>
+              <?php endif; ?>
+            </td>
+          </tr>
         </tbody>
       </table>
     </div>
@@ -267,7 +342,8 @@ $sql = "SELECT eradat.*,
                amlakdetails.hnt_dll_type,
                aqarsubtype.aqarsubtypename,
                mostagereen.mostagername,
-               sanad.period
+               sanad.period,
+               sanad.bankid AS sanad_bankid
         FROM eradat
         LEFT JOIN sanad ON eradat.sanadrakam = sanad.idsanad
         LEFT JOIN amlakdetails ON amlakdetails.idsubaqar = sanad.idsubaqar
@@ -333,6 +409,24 @@ if ($row2['addwaterto'] == "malek") {
     $addwaterto = "إضافة المياه للمكتب حسب الإعدادات";
     $mywater = -$row['mywater'];
     $mywater_netincome = 0;
+}
+
+// Determine money source from the bank account that received the original payment
+// If sanad.bankid refers to an owner account (ownerid2 > 0), money is already in owner's account
+$auto_money_source = 0;
+$source_bank = [];
+$sanad_bankid = intval($row['sanad_bankid']);
+if ($sanad_bankid > 0) {
+    $bank_row = mysql_fetch_array(mysql_query(
+        "SELECT ownerid2, bankname, bankbranch, acountholder, acountnumber, iban
+         FROM bankacounts WHERE id = '$sanad_bankid'", $link
+    ));
+    if ($bank_row) {
+        $source_bank = $bank_row;
+        if (intval($bank_row['ownerid2']) > 0) {
+            $auto_money_source = 1;
+        }
+    }
 }
 
 // Calculate net income before expenses
@@ -738,6 +832,43 @@ if (!$is_ajax_request) {
     cursor: pointer;
 }
 
+.payment-method-card-sarf {
+    border: 2px solid #dee2e6;
+    border-radius: 8px;
+    padding: 0.65rem 0.75rem;
+    cursor: pointer;
+    transition: all 0.3s;
+    text-align: center;
+    height: 100%;
+}
+.payment-method-card-sarf:hover {
+    border-color: #0891b2;
+    background: #f0f9ff;
+}
+.payment-method-card-sarf.active {
+    border-color: #0891b2;
+    background: #e0f2fe;
+}
+.money-source-card {
+    border: 2px solid #dee2e6;
+    border-radius: 8px;
+    padding: 0.875rem 1rem;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+.money-source-card:hover {
+    border-color: #189c2a;
+    background: #f0fdf4;
+}
+.money-source-card.active {
+    border-color: #189c2a;
+    background: #dcfce7;
+}
+.money-source-card.owner-active {
+    border-color: #f59e0b;
+    background: #fef3c7;
+}
+
 @media (max-width: 768px) {
     .action-buttons {
         flex-direction: column;
@@ -960,6 +1091,7 @@ if (!$is_ajax_request) {
                         <input type="hidden" name="idsubaqar" value="<?= $idsubaqar ?>">
                         <input type="hidden" name="idmasrofarray" value="<?= implode(',', array_map('intval', $idmasrofcheck)) ?>">
                         <input type="hidden" name="cashtext" id="cashtext" value="">
+                        <input type="hidden" name="bankid" id="sarf_bankid" value="0">
 
                         <div id="userdata" class="mb-3">
                             <div class="info-badge-custom">
@@ -1005,34 +1137,132 @@ if (!$is_ajax_request) {
                                 <input type="text" name="sanadrealdate" value="<?= $current_date ?>" readonly>
                             </div>
 
-                            <div class="row">
-                                <div class="col-md-4">
-                                    <div class="form-group-custom">
-                                        <label>
-                                            <i class="bi bi-credit-card text-primary me-1"></i>
-                                            رقم الشيك
-                                        </label>
-                                        <input type="text" name="checkrakam" value="">
+                            <!-- Payment Method -->
+                            <div class="form-group-custom">
+                                <label>
+                                    <i class="bi bi-credit-card text-primary me-1"></i>
+                                    طريقة الصرف
+                                </label>
+                                <div class="row g-2">
+                                    <div class="col">
+                                        <div class="payment-method-card-sarf active" data-method="1">
+                                            <input type="radio" name="payment_type" value="1" checked class="form-check-input me-1">
+                                            <label class="form-check-label"><i class="bi bi-cash me-1"></i>نقداً</label>
+                                        </div>
+                                    </div>
+                                    <div class="col">
+                                        <div class="payment-method-card-sarf" data-method="2">
+                                            <input type="radio" name="payment_type" value="2" class="form-check-input me-1">
+                                            <label class="form-check-label"><i class="bi bi-file-earmark-check me-1"></i>شيك</label>
+                                        </div>
+                                    </div>
+                                    <div class="col">
+                                        <div class="payment-method-card-sarf" data-method="4">
+                                            <input type="radio" name="payment_type" value="4" class="form-check-input me-1">
+                                            <label class="form-check-label"><i class="bi bi-arrow-left-right me-1"></i>تحويل</label>
+                                        </div>
+                                    </div>
+                                    <div class="col">
+                                        <div class="payment-method-card-sarf" data-method="5">
+                                            <input type="radio" name="payment_type" value="5" class="form-check-input me-1">
+                                            <label class="form-check-label"><i class="bi bi-credit-card-2-front me-1"></i>شبكة</label>
+                                        </div>
+                                    </div>
+                                    <div class="col">
+                                        <div class="payment-method-card-sarf" data-method="3">
+                                            <input type="radio" name="payment_type" value="3" class="form-check-input me-1">
+                                            <label class="form-check-label"><i class="bi bi-three-dots me-1"></i>أخرى</label>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="col-md-4">
-                                    <div class="form-group-custom">
-                                        <label>
-                                            <i class="bi bi-calendar-check text-primary me-1"></i>
-                                            تاريخ الشيك
-                                        </label>
-                                        <input type="text" name="checkdate" value="">
-                                    </div>
+                            </div>
+
+                            <!-- Payment Details (shown for non-cash) -->
+                            <div id="sarfPaymentDetails" class="row g-2 mb-3" style="display: none;">
+                                <div class="col-md-3" id="sarfBankAccountSelector" style="display: none;">
+                                    <label class="form-label">
+                                        <i class="bi bi-bank me-1"></i>الحساب البنكي
+                                    </label>
+                                    <select class="form-control" id="sarf_bank_account_select">
+                                        <option value="">-- اختر حساب --</option>
+                                    </select>
                                 </div>
-                                <div class="col-md-4">
-                                    <div class="form-group-custom">
-                                        <label>
-                                            <i class="bi bi-bank text-primary me-1"></i>
-                                            البنك المسحوب عليه
-                                        </label>
-                                        <input type="text" name="checkbank" value="">
-                                    </div>
+                                <div class="col-md-3">
+                                    <label class="form-label">
+                                        <i class="bi bi-hash me-1"></i>رقم الشيك / الحوالة
+                                    </label>
+                                    <input type="text" class="form-control" name="checkrakam" id="sarf_checkrakam" value="">
                                 </div>
+                                <div class="col-md-3">
+                                    <label class="form-label">
+                                        <i class="bi bi-calendar-check me-1"></i>تاريخ الشيك
+                                    </label>
+                                    <input type="text" class="form-control" name="checkdate" id="sarf_checkdate" value="">
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label">
+                                        <i class="bi bi-bank me-1"></i>البنك المسحوب عليه
+                                    </label>
+                                    <input type="text" class="form-control" name="checkbank" id="sarf_checkbank" value="">
+                                </div>
+                            </div>
+
+                            <!-- Money Source (auto-detected from incoming payment bank account) -->
+                            <input type="hidden" name="money_source" value="<?= $auto_money_source ?>">
+                            <div class="form-group-custom">
+                                <label>
+                                    <i class="bi bi-wallet2 text-primary me-1"></i>
+                                    مصدر المبلغ
+                                </label>
+                                <?php if ($auto_money_source == 1): ?>
+                                    <div class="alert alert-warning mb-0 d-flex align-items-start gap-3">
+                                        <i class="bi bi-person-fill fs-4 text-warning mt-1 flex-shrink-0"></i>
+                                        <div class="w-100">
+                                            <strong>من حساب المالك</strong>
+                                            <small class="d-block mt-1 text-muted">
+                                                الدفعة المستلمة دُفعت في حساب المالك — هذا تحويل داخلي ولا يُحتسب إيراداً جديداً في التقارير
+                                            </small>
+                                            <?php if ($source_bank): ?>
+                                            <table class="table table-sm table-bordered mt-2 mb-0 bg-white" style="font-size:0.88rem;">
+                                                <?php if (!empty($source_bank['bankname'])): ?>
+                                                <tr><th class="bg-light w-25">البنك</th><td><?= htmlspecialchars($source_bank['bankname']) ?><?= !empty($source_bank['bankbranch']) ? ' — ' . htmlspecialchars($source_bank['bankbranch']) : '' ?></td></tr>
+                                                <?php endif; ?>
+                                                <?php if (!empty($source_bank['acountholder'])): ?>
+                                                <tr><th class="bg-light">صاحب الحساب</th><td><?= htmlspecialchars($source_bank['acountholder']) ?></td></tr>
+                                                <?php endif; ?>
+                                                <?php if (!empty($source_bank['acountnumber'])): ?>
+                                                <tr><th class="bg-light">رقم الحساب</th><td dir="ltr" class="text-end"><?= htmlspecialchars($source_bank['acountnumber']) ?></td></tr>
+                                                <?php endif; ?>
+                                                <?php if (!empty($source_bank['iban'])): ?>
+                                                <tr><th class="bg-light">آيبان</th><td dir="ltr" class="text-end"><?= htmlspecialchars($source_bank['iban']) ?></td></tr>
+                                                <?php endif; ?>
+                                            </table>
+                                            <?php endif; ?>
+                                        </div>
+                                    </div>
+                                <?php else: ?>
+                                    <div class="alert alert-info mb-0 d-flex align-items-start gap-3">
+                                        <i class="bi bi-building fs-4 text-primary mt-1 flex-shrink-0"></i>
+                                        <div class="w-100">
+                                            <strong>من حساب المكتب</strong>
+                                            <small class="d-block mt-1 text-muted">الدفعة المستلمة كانت في حساب المكتب — صرف عادي للمالك</small>
+                                            <?php if ($source_bank && !empty($source_bank['bankname'])): ?>
+                                            <table class="table table-sm table-bordered mt-2 mb-0 bg-white" style="font-size:0.88rem;">
+                                                <tr><th class="bg-light w-25">البنك</th><td><?= htmlspecialchars($source_bank['bankname']) ?><?= !empty($source_bank['bankbranch']) ? ' — ' . htmlspecialchars($source_bank['bankbranch']) : '' ?></td></tr>
+                                                <?php if (!empty($source_bank['acountholder'])): ?>
+                                                <tr><th class="bg-light">صاحب الحساب</th><td><?= htmlspecialchars($source_bank['acountholder']) ?></td></tr>
+                                                <?php endif; ?>
+                                                <?php if (!empty($source_bank['acountnumber'])): ?>
+                                                <tr><th class="bg-light">رقم الحساب</th><td dir="ltr" class="text-end"><?= htmlspecialchars($source_bank['acountnumber']) ?></td></tr>
+                                                <?php endif; ?>
+                                                <?php if (!empty($source_bank['iban'])): ?>
+                                                <tr><th class="bg-light">آيبان</th><td dir="ltr" class="text-end"><?= htmlspecialchars($source_bank['iban']) ?></td></tr>
+                                                <?php endif; ?>
+                                            </table>
+                                            <?php endif; ?>
+                                        </div>
+                                    </div>
+                                <?php endif; ?>
                             </div>
                         </div>
 
@@ -1155,6 +1385,14 @@ $(document).ready(function() {
             }
         }
 
+        // Payment method and money source
+        var payLabels = {1:'نقداً', 2:'شيك', 3:'طريقة أخرى', 4:'تحويل بنكي', 5:'شبكة'};
+        var selPayMethod = parseInt($('input[name="payment_type"]:checked').val() || '1');
+        html += '<tr><td>طريقة الصرف:</td><td>' + (payLabels[selPayMethod] || 'نقداً') + '</td></tr>';
+
+        var selMoneySource = $('input[name="money_source"]').val() || '0';
+        html += '<tr><td>مصدر المبلغ:</td><td>' + (selMoneySource == '1' ? 'من حساب المالك (تحويل داخلي)' : 'من حساب المكتب') + '</td></tr>';
+
         // محرر و مبلغ مستحق from #userdata text
         var userText = $('#userdata').text().replace(/\s+/g, ' ').trim();
         html += '</table>' + userText;
@@ -1163,6 +1401,73 @@ $(document).ready(function() {
     }
 
     updateCashText();
+
+    // Load bank accounts for transfer payment
+    function loadSarfBankAccounts() {
+        var idaqar = <?= intval($idaqar) ?>;
+        if (!idaqar) return;
+        $.ajax({
+            url: 'sendmony-sanad.hnt',
+            type: 'POST',
+            data: { ajax_submit: '1', action: 'get_bank_accounts_sarf', idaqar: idaqar },
+            dataType: 'json',
+            success: function(response) {
+                if (response.success && response.accounts) {
+                    var select = $('#sarf_bank_account_select');
+                    select.empty().append('<option value="">-- اختر حساب --</option>');
+                    $.each(response.accounts, function(i, acc) {
+                        var label = acc.bankname + ' - ' + acc.acountholder + ' (' + acc.acountnumber + ')';
+                        select.append($('<option></option>').val(acc.id)
+                            .data('bankname', acc.bankname).data('holder', acc.acountholder)
+                            .data('number', acc.acountnumber).data('iban', acc.iban || '')
+                            .text(label));
+                    });
+                }
+            }
+        });
+    }
+    loadSarfBankAccounts();
+
+    // Bank account auto-fill on transfer selection
+    $('#sarf_bank_account_select').on('change', function() {
+        var opt = $(this).find('option:selected');
+        if (opt.val()) {
+            $('#sarf_bankid').val(opt.val());
+            $('#sarf_checkbank').val(opt.data('bankname') + ' - ' + opt.data('holder'));
+            var note = 'تحويل الى حساب ' + opt.data('holder') + ' - بنك ' + opt.data('bankname') + ' - حساب ' + opt.data('number');
+            if (opt.data('iban')) note += ' - آيبان ' + opt.data('iban');
+            $('input[name="sanadnote"]').val(note);
+        } else {
+            $('#sarf_bankid').val('0');
+        }
+        updateCashText();
+    });
+
+    // Payment method card click
+    $('.payment-method-card-sarf').on('click', function() {
+        $('.payment-method-card-sarf').removeClass('active');
+        $(this).addClass('active');
+        $(this).find('input[type="radio"]').prop('checked', true);
+        var method = parseInt($(this).data('method'));
+        $('#sarf_checkrakam, #sarf_checkdate, #sarf_checkbank').val('');
+        $('#sarf_bankid').val('0');
+        $('#sarf_bank_account_select').val('');
+        if (method === 1) {
+            $('#sarfPaymentDetails').hide();
+            $('#sarfBankAccountSelector').hide();
+        } else {
+            $('#sarfPaymentDetails').show();
+            if (method === 4) {
+                $('#sarfBankAccountSelector').show();
+                $('#sarf_checkrakam').attr('placeholder', 'رقم الحوالة');
+            } else {
+                $('#sarfBankAccountSelector').hide();
+                $('#sarf_checkrakam').attr('placeholder', method === 2 ? 'رقم الشيك' : method === 5 ? 'رقم العملية' : '');
+            }
+        }
+        updateCashText();
+    });
+
 
     // AJAX form submission for payment
     $('#paymentForm').on('submit', function(e) {

@@ -1,0 +1,448 @@
+<?php
+/**
+ * All Vouchers - Property Vouchers List
+ * Modern refactored version with Bootstrap 5
+ */
+
+// Extract POST variables
+extract($_REQUEST);
+
+// Initialize variables
+$search = isset($search) ? trim($search) : '';
+$page = isset($page) ? intval($page) : 1;
+$idaqar = isset($idaqar) ? intval($idaqar) : 0;
+$idsanad = isset($idsanad) ? intval($idsanad) : 0;
+$dd = isset($dd) ? intval($dd) : 0;
+$mm = isset($mm) ? intval($mm) : 0;
+$yy = isset($yy) ? intval($yy) : 0;
+$dd2 = isset($dd2) ? intval($dd2) : 0;
+$mm2 = isset($mm2) ? intval($mm2) : 0;
+$yy2 = isset($yy2) ? intval($yy2) : 0;
+
+$sc_title = "عرض جميع سندات القبض";
+$sc_id = "56";
+
+include_once "../../../nocash.hnt";
+require '../arabicTools.class.hnt';
+require '../uCal.class.hnt';
+$dcal = new uCal;
+
+// Export handler — runs before any HTML output
+if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], true)) {
+    include_once "../../../connectdb.hnt";
+    $_search  = isset($_GET['search'])  ? trim($_GET['search'])  : '';
+    $_idsanad = isset($_GET['idsanad']) ? intval($_GET['idsanad']) : 0;
+    $_idaqar  = isset($_GET['idaqar'])  ? intval($_GET['idaqar']) : 0;
+    $_dd  = isset($_GET['dd'])  ? intval($_GET['dd'])  : 0;
+    $_mm  = isset($_GET['mm'])  ? intval($_GET['mm'])  : 0;
+    $_yy  = isset($_GET['yy'])  ? intval($_GET['yy'])  : 0;
+    $_dd2 = isset($_GET['dd2']) ? intval($_GET['dd2']) : 0;
+    $_mm2 = isset($_GET['mm2']) ? intval($_GET['mm2']) : 0;
+    $_yy2 = isset($_GET['yy2']) ? intval($_GET['yy2']) : 0;
+
+    $_sfx = 0; $_edx = 0;
+    if ($_dd) {
+        if ($_yy < 1900 && $_yy > 1400) {
+            $_dateo = $dcal->u2g($_dd, $_mm, $_yy);  $_dd = $_dateo['day'];  $_mm = $_dateo['month'];  $_yy = $_dateo['year'];
+            $_dateo = $dcal->u2g($_dd2, $_mm2, $_yy2); $_dd2 = $_dateo['day']; $_mm2 = $_dateo['month']; $_yy2 = $_dateo['year'];
+        }
+        $_sfx = mktime(0, 0, 0, $_mm, $_dd, $_yy);
+        $_edx = mktime(0, 0, 0, $_mm2, $_dd2, $_yy2);
+    }
+
+    $_where = '';
+    if ($_search) {
+        $_where = " WHERE idsanad='" . addslashes($_search) . "' OR mostagername LIKE '%" . addslashes($_search) . "%' OR depositeamount LIKE '%" . addslashes($_search) . "%' OR mybyan LIKE '%" . addslashes($_search) . "%'";
+    } elseif ($_idsanad) {
+        $_where = " WHERE idsanad='" . intval($_idsanad) . "'";
+    } elseif ($_idaqar && $_sfx && $_edx) {
+        $_where = " WHERE idaqar='" . intval($_idaqar) . "' AND sanaddate > $_sfx AND sanaddate < $_edx";
+    } elseif ($_dd && $_sfx && $_edx) {
+        $_where = " WHERE sanaddate > $_sfx AND sanaddate < $_edx";
+    }
+
+    $exp_sql = "SELECT s.idsanad, s.mostagername, s.depositeamount, s.mybyan, s.sanaddate, a.aqarname
+                FROM sanad s LEFT JOIN amlak a ON s.idaqar = a.idaqar
+                $_where ORDER BY s.idsanad DESC";
+    $exp_res = mysql_query($exp_sql, $link);
+    $exp_headers = ['رقم السند', 'اسم المستأجر', 'المبلغ', 'البيان', 'العقار', 'التاريخ'];
+    $exp_rows = [];
+    while ($r = mysql_fetch_array($exp_res)) {
+        $exp_rows[] = [intval($r['idsanad']), $r['mostagername'], number_format($r['depositeamount'], 2, '.', ''), $r['mybyan'], $r['aqarname'] ?: '', date('d/m/Y', $r['sanaddate'])];
+    }
+
+    $_exp_type = trim($_GET['export']); $_fn = date('Ymd_His');
+    if ($_exp_type === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="allsanad_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w'); fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out); exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="allsanad_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>'; exit;
+}
+
+include_once "../../../header.hnt";
+?>
+
+<!-- Main Content -->
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <!-- Page Header -->
+            <div class="card mb-4 shadow-sm border-0">
+                <div class="card-header text-white" style="background: linear-gradient(135deg, #0a7047 0%, #0d9488 100%);">
+                    <h4 class="mb-0">
+                        <i class="bi bi-receipt me-2"></i>
+                        <?= $sc_title ?>
+                    </h4>
+                </div>
+                <div class="card-body p-4">
+                    <div class="row g-3">
+                        <!-- General Search -->
+                        <div class="col-md-6">
+                            <div class="card h-100">
+                                <div class="card-header bg-light">
+                                    <h6 class="mb-0">
+                                        <i class="bi bi-search me-2"></i>
+                                        البحث العام في السندات
+                                    </h6>
+                                </div>
+                                <div class="card-body">
+                                    <form method="get" action="?">
+                                        <input type="hidden" name="formuid" id="formuid"
+                                               value="<?= str_replace('.', '', microtime(true) . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+
+                                        <div class="mb-3">
+                                            <label for="search" class="form-label">أكتب أي بيان من بيانات السند</label>
+                                            <input type="text" class="form-control" name="search" id="search"
+                                                   value="<?= htmlspecialchars($search) ?>"
+                                                   placeholder="رقم السند، اسم المستأجر، المبلغ...">
+                                        </div>
+
+                                        <div class="d-flex gap-2">
+                                            <button type="submit" class="btn btn-primary">
+                                                <i class="bi bi-search me-1"></i>
+                                                بحث
+                                            </button>
+                                            <button type="button" class="btn btn-secondary" onclick="window.location.href='?';">
+                                                <i class="bi bi-x-circle me-1"></i>
+                                                إلغاء
+                                            </button>
+                                            <button type="button" class="btn btn-success" onclick="window.location.href='reports.hnt';">
+                                                <i class="bi bi-arrow-left me-1"></i>
+                                                عودة
+                                            </button>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+
+
+                        <!-- Date Range & Property Search -->
+                        <div class="col-md-6">
+                            <div class="card h-100">
+                                <div class="card-header bg-light">
+                                    <h6 class="mb-0">
+                                        <i class="bi bi-calendar-range me-2"></i>
+                                        البحث بالعقار والتاريخ
+                                    </h6>
+                                </div>
+                                <div class="card-body">
+                                    <form name="form" method="get" action="?">
+                                        <input type="hidden" name="formuid" id="formuid2"
+                                               value="<?= str_replace('.', '', microtime(true) . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+
+                                        <div class="mb-3">
+                                            <label for="idaqar" class="form-label">اختر العقار</label>
+                                            <select name="idaqar" id="idaqar" class="form-select">
+                                                <option value="">جميع العقارات</option>
+                                                <?php
+                                                $sql = "SELECT idaqar, aqarname FROM amlak";
+                                                $result = mysql_query($sql, $link);
+                                                while ($row = mysql_fetch_array($result)) {
+                                                    $selected = ($idaqar == $row['idaqar']) ? 'selected' : '';
+                                                    echo "<option value='" . $row['idaqar'] . "' $selected>" . htmlspecialchars($row['aqarname']) . "</option>";
+                                                }
+                                                ?>
+                                            </select>
+                                        </div>
+
+<?php
+// Calculate default dates
+$startfrom = time();
+$enddate = time() + (30 * 86400);
+
+if (!isset($hnt_dll) || (!$hnt_dll && (!isset($hnt_supper_dll) || $hnt_supper_dll != 5))) {
+    $dateo = $dcal->g2u(date("d", $startfrom), date("m", $startfrom), date("Y", $startfrom));
+    $daxx[3] = $dateo['day'];
+    $daxx[4] = $dateo['month'];
+    $daxx[5] = $dateo['year'];
+    $dateo = $dcal->g2u(date("d", $enddate), date("m", $enddate), date("Y", $enddate));
+    $dax2[3] = $daxx[3];
+    $dax2[4] = $dateo['month'];
+    $dax2[5] = $dateo['year'];
+} else {
+    $daxx[3] = date("d", $startfrom);
+    $daxx[4] = date("m", $startfrom);
+    $daxx[5] = date("Y", $startfrom);
+    $dax2[3] = $daxx[3];
+    $dax2[4] = date("m", $enddate);
+    $dax2[5] = date("Y", $enddate);
+}
+
+// Override with request values if provided
+if ($dd) {
+    $daxx[3] = $dd;
+    $daxx[4] = $mm;
+    $daxx[5] = $yy;
+    $dax2[3] = $dd2;
+    $dax2[4] = $mm2;
+    $dax2[5] = $yy2;
+
+    if (($yy < 1900) && ($yy > 1400)) {
+        $dateo = $dcal->u2g($dd, $mm, $yy);
+        $dd = $dateo['day'];
+        $mm = $dateo['month'];
+        $yy = $dateo['year'];
+        $dateo = $dcal->u2g($dd2, $mm2, $yy2);
+        $dd2 = $dateo['day'];
+        $mm2 = $dateo['month'];
+        $yy2 = $dateo['year'];
+    }
+
+    $startfromx = mktime(0, 0, 0, $mm, $dd, $yy);
+    $enddatex = mktime(0, 0, 0, $mm2, $dd2, $yy2);
+}
+?>
+
+                                        <div class="row g-2 mb-3">
+                                            <div class="col-12">
+                                                <label class="form-label">من تاريخ</label>
+                                            </div>
+                                            <div class="col-4">
+                                                <input type="text" class="form-control" name="dd" id="dd"
+                                                       value="<?= $daxx[3] ?>" placeholder="يوم">
+                                            </div>
+                                            <div class="col-4">
+                                                <input type="text" class="form-control" name="mm" id="mm"
+                                                       value="<?= $daxx[4] ?>" placeholder="شهر">
+                                            </div>
+                                            <div class="col-4">
+                                                <input type="text" class="form-control" name="yy" id="yy"
+                                                       value="<?= $daxx[5] ?>" placeholder="سنة">
+                                            </div>
+                                        </div>
+
+                                        <div class="row g-2 mb-3">
+                                            <div class="col-12">
+                                                <label class="form-label">إلى تاريخ</label>
+                                            </div>
+                                            <div class="col-4">
+                                                <input type="text" class="form-control" name="dd2" id="dd2"
+                                                       value="<?= $dax2[3] ?>" placeholder="يوم">
+                                            </div>
+                                            <div class="col-4">
+                                                <input type="text" class="form-control" name="mm2" id="mm2"
+                                                       value="<?= $dax2[4] ?>" placeholder="شهر">
+                                            </div>
+                                            <div class="col-4">
+                                                <input type="text" class="form-control" name="yy2" id="yy2"
+                                                       value="<?= $dax2[5] ?>" placeholder="سنة">
+                                            </div>
+                                        </div>
+
+                                        <div class="d-flex gap-2 flex-wrap">
+                                            <button type="submit" class="btn btn-primary">
+                                                <i class="bi bi-search me-1"></i>
+                                                بحث
+                                            </button>
+                                            <button type="button" class="btn btn-secondary" onclick="window.location.href='?';">
+                                                <i class="bi bi-x-circle me-1"></i>
+                                                إلغاء
+                                            </button>
+                                            <button type="button" class="btn btn-success" onclick="window.location.href='reports.hnt';">
+                                                <i class="bi bi-arrow-left me-1"></i>
+                                                عودة
+                                            </button>
+                                            <?php
+                                            $_ep = $_GET; unset($_ep['export']);
+                                            $_eq = http_build_query($_ep);
+                                            $_eu = 'allsanad.hnt?' . $_eq . ($_eq ? '&' : '');
+                                            ?>
+                                            <a href="<?= htmlspecialchars($_eu . 'export=csv') ?>" class="btn btn-outline-success">
+                                                <i class="bi bi-filetype-csv me-1"></i>تصدير CSV
+                                            </a>
+                                            <a href="<?= htmlspecialchars($_eu . 'export=xls') ?>" class="btn btn-outline-success">
+                                                <i class="bi bi-file-earmark-excel me-1"></i>تصدير Excel
+                                            </a>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+
+            <!-- Vouchers Table -->
+            <div class="card shadow-sm">
+                <div class="card-body">
+<?php
+// Build WHERE clause
+$where = "";
+if ($search) {
+    $where = " WHERE
+        idsanad='" . addslashes($search) . "' OR
+        mostagername LIKE '%" . addslashes($search) . "%' OR
+        depositeamount LIKE '%" . addslashes($search) . "%' OR
+        recivername LIKE '%" . addslashes($search) . "%' OR
+        mybyan LIKE '%" . addslashes($search) . "%' OR
+        cheqnumber LIKE '%" . addslashes($search) . "%' OR
+        cheqon LIKE '%" . addslashes($search) . "%'";
+}
+
+if ($idsanad) {
+    $where = " WHERE idsanad='" . intval($idsanad) . "'";
+}
+
+if ($idaqar && isset($startfromx) && isset($enddatex)) {
+    $where = " WHERE idaqar='" . intval($idaqar) . "' AND sanaddate > $startfromx AND sanaddate < $enddatex";
+}
+
+if ($dd && !$idaqar && isset($startfromx) && isset($enddatex)) {
+    $where = " WHERE sanaddate > $startfromx AND sanaddate < $enddatex";
+}
+
+// Pagination
+$sql = "SELECT COUNT(idsanad) as dd FROM sanad $where";
+$rownum = mysql_fetch_array(mysql_query($sql, $link));
+$rownum = $rownum['dd'];
+$rowperpage = isset($rowperpage) ? intval($rowperpage) : 40;
+$pagenum = ceil($rownum / $rowperpage);
+
+// Display count
+echo '<div class="alert alert-info mb-3">';
+echo '<i class="bi bi-info-circle me-2"></i>';
+echo 'عدد السندات: <strong class="text-danger">' . $rownum . '</strong> سند';
+echo '</div>';
+
+// Pagination
+if ($pagenum > 1) {
+    echo '<nav aria-label="Page navigation"><ul class="pagination justify-content-center">';
+    for ($xi = 1; $xi <= $pagenum; $xi++) {
+        $active = ($page == $xi) ? 'active' : '';
+        if (($xi > ($page - 4) && $xi < ($page + 4)) || $xi == 1 || $xi == $pagenum || $xi < 4 || $xi > ($pagenum - 4)) {
+            echo '<li class="page-item ' . $active . '"><a class="page-link" href="allsanad.hnt?page=' . $xi . '&where=' . urlencode($where) . '">' . $xi . '</a></li>';
+        } elseif ($xi == ($page - 4) || $xi == ($page + 4)) {
+            echo '<li class="page-item disabled"><span class="page-link">...</span></li>';
+        }
+    }
+    echo '</ul></nav>';
+}
+
+// Calculate limit
+$limit = ($page - 1) * $rowperpage;
+$limit = $limit . "," . $rowperpage;
+if ($page == 1 || $page == '') {
+    $limit = $rowperpage;
+}
+
+// Get vouchers
+$sql = "SELECT * FROM sanad $where ORDER BY idsanad DESC LIMIT $limit";
+$result = mysql_query($sql, $link);
+?>
+
+                    <div class="table-responsive">
+                        <table class="table table-hover table-striped align-middle">
+                            <thead class="table-light">
+                                <tr class="text-center">
+                                    <th><i class="bi bi-hash me-1"></i>رقم السند</th>
+                                    <th><i class="bi bi-person me-1"></i>اسم المستأجر</th>
+                                    <th><i class="bi bi-currency-exchange me-1"></i>المبلغ</th>
+                                    <th>المستلم</th>
+                                    <th><i class="bi bi-file-text me-1"></i>البيان</th>
+                                    <th><i class="bi bi-building me-1"></i>العقار</th>
+                                    <th><i class="bi bi-calendar me-1"></i>التاريخ</th>
+                                    <th class="text-center">الإجراءات</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+<?php
+while ($row = mysql_fetch_array($result)) {
+    // Prepare attachments link
+    if ($row['attachedimages']) {
+        $attachedimagelink = "<a href='/aqary/admin/include/uploadcenter.hnt?ids=" . $row['attachedimages'] . "&table=sanad&tableid=idsanad&tableidvalue=" . $row['idsanad'] . "' class='btn btn-sm btn-outline-primary' target='_blank' title='عرض المرفقات'><i class='bi bi-paperclip'></i></a>";
+    } else {
+        $attachedimagelink = "<a href='/aqary/admin/include/uploadcenter.hnt?ids=0,0&table=sanad&tableid=idsanad&tableidvalue=" . $row['idsanad'] . "' class='btn btn-sm btn-outline-secondary' target='_blank' title='إضافة مرفقات'><i class='bi bi-link-45deg'></i></a>";
+    }
+
+    // Get property name
+    $sql2 = "SELECT aqarname FROM amlak WHERE idaqar='" . intval($row['idaqar']) . "'";
+    $rowaq = mysql_fetch_array(mysql_query($sql2, $link));
+
+    // Format date
+    if (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) {
+        $dhd = date("d/m/Y", $row['sanaddate']);
+    } else {
+        $dhd = ArabicTools::arabicDate('hj:d/m/Y', $row['sanaddate']);
+    }
+
+    $voucer_type = "";
+    if (!isset($rowaq['aqarname']) || !$rowaq['aqarname']) {
+        $dhd = $row['period'];
+        $voucer_type = "free2";
+    }
+?>
+                                <tr class="text-center">
+                                    <td><strong><?= htmlspecialchars($row['idsanad']) ?></strong></td>
+                                    <td><?= htmlspecialchars($row['mostagername']) ?></td>
+                                    <td><?= htmlspecialchars($row['depositeamount']) ?></td>
+                                    <td><?= htmlspecialchars($row['recivername']) ?></td>
+                                    <td><?= htmlspecialchars($row['mybyan']) ?></td>
+                                    <td><?= isset($rowaq['aqarname']) ? htmlspecialchars($rowaq['aqarname']) : '-' ?></td>
+                                    <td><?= $dhd ?></td>
+                                    <td>
+                                        <div class="btn-group btn-group-sm" role="group">
+                                            <?= $attachedimagelink ?>
+                                            <a href="../../../sendsms.hnt?idsanad=<?= $row['idsanad'] ?>" class="btn btn-sm btn-outline-success" target="_blank" title="إرسال SMS">
+                                                <i class="bi bi-envelope"></i>
+                                            </a>
+                                            <button type="button" class="btn btn-sm btn-outline-info"
+                                                    onclick="openvbs('<?= isset($server) ? $server : '' ?>/aqary/admin/include/amlak/read_word_voucher.hnt?idsanad=<?= $row['idsanad'] ?>');"
+                                                    title="فتح بالوورد">
+                                                <i class="bi bi-file-word"></i>
+                                            </button>
+                                            <a href="selectprintform.hnt?formtype=recivevoucher&id=<?= $row['idsanad'] ?>&voucer_type=<?= $voucer_type ?>"
+                                               class="btn btn-sm btn-primary" target="_blank" title="عرض">
+                                                <i class="bi bi-eye"></i>
+                                            </a>
+                                        </div>
+                                    </td>
+                                </tr>
+<?php
+}
+?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<iframe style="display:none" name="wordd" id="wordd"></iframe>
+
+<?php
+require('../../../foter.hnt');
+?>

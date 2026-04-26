@@ -25,6 +25,7 @@ $showtasfia = isset($showtasfia) ? intval($showtasfia) : 0;
 $hidecommision = isset($hidecommision) ? intval($hidecommision) : 0;
 $bankid = isset($bankid) ? intval($bankid) : 0;
 $payment_type = isset($payment_type) ? intval($payment_type) : 0;
+$money_source_filter = isset($money_source_filter) && $money_source_filter !== '' ? intval($money_source_filter) : -1;
 
 // AJAX handler to fetch bank accounts for selected property
 if (isset($_POST['ajax_action']) && $_POST['ajax_action'] == 'get_property_bank_accounts') {
@@ -52,7 +53,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] == 'get_property_bank_
     exit;
 }
 
-$sc_title = "كشف حساب مالك";
+$sc_title = "كشف المبالغ المسلمة";
 $sc_id = "50";
 
 include_once "../../../nocash.hnt";
@@ -79,52 +80,45 @@ if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], tr
     if (!$_exp_start) $_exp_start = time() - 15768000;
     if (!$_exp_end)   $_exp_end   = time() + 86400;
 
-    $_showtasfia   = isset($_GET['showtasfia'])   ? intval($_GET['showtasfia'])   : 0;
-    $_bankid       = isset($_GET['bankid'])        ? intval($_GET['bankid'])        : 0;
-    $_payment_type = isset($_GET['payment_type']) ? intval($_GET['payment_type']) : 0;
+    $_bankid       = isset($_GET['bankid'])              ? intval($_GET['bankid'])              : 0;
+    $_payment_type = isset($_GET['payment_type'])        ? intval($_GET['payment_type'])        : 0;
+    $_money_src    = isset($_GET['money_source_filter']) && $_GET['money_source_filter'] !== '' ? intval($_GET['money_source_filter']) : -1;
 
-    $_tasfia_f = $_showtasfia ? " AND tasfia = '' " : "";
-    $_bk_f     = $_bankid > 0       ? " AND sanadrakam IN (SELECT sanadrakam FROM sanad WHERE bankid = '" . $_bankid . "')" : "";
-    $_pt_f     = $_payment_type > 0 ? " AND sanadrakam IN (SELECT sanadrakam FROM sanad WHERE payment_type = '" . $_payment_type . "')" : "";
+    $_bk_f  = $_bankid       > 0  ? " AND bankid = '"       . $_bankid       . "'" : "";
+    $_pt_f  = $_payment_type > 0  ? " AND payment_type = '" . $_payment_type . "'" : "";
+    $_ms_f  = $_money_src    >= 0 ? " AND money_source = '"  . $_money_src    . "'" : "";
 
-    $exp_headers = ['النوع', 'البيان', 'التاريخ', 'دائن', 'مدين'];
+    $exp_sql = "SELECT sanadid, mostafeed, bayan, sanadate, payment_type, money_source, amount
+                FROM sanadsarf
+                WHERE aqarid = '" . intval($idaqar) . "'
+                AND sanadate > '" . $_exp_start . "'
+                AND sanadate < '" . $_exp_end . "'
+                $_bk_f $_pt_f $_ms_f
+                ORDER BY sanadate ASC";
+    $exp_res = mysql_query($exp_sql, $link);
+
+    $_ptLabels = [1 => 'نقداً', 2 => 'شيك', 3 => 'طريقة أخرى', 4 => 'تحويل بنكي', 5 => 'شبكة'];
+    $exp_headers = ['رقم السند', 'المستفيد', 'البيان', 'التاريخ', 'طريقة الصرف', 'مصدر المبلغ', 'المبلغ'];
     $exp_rows = [];
-
-    // Income (eradat)
-    $exp_res = mysql_query("SELECT pymentdesription, paymentdate, amount, mysa3ee, tamen, mywater, services
-                            FROM eradat WHERE idaqar='" . intval($idaqar) . "'
-                            AND paymentdate > '$_exp_start' AND paymentdate < '$_exp_end'
-                            $_tasfia_f $_bk_f $_pt_f", $link);
     while ($r = mysql_fetch_array($exp_res)) {
-        $net = floatval($r['amount']) - floatval($r['mysa3ee']) - floatval($r['services']);
-        $exp_rows[] = ['إيراد', str_replace('+', ' بدون ', $r['pymentdesription']), date('d/m/Y', $r['paymentdate']), number_format($net, 2, '.', ''), ''];
+        $_pt = intval($r['payment_type']); if ($_pt < 1) $_pt = 1;
+        $_ms = intval($r['money_source']) == 1 ? 'حساب المالك' : 'المكتب';
+        $exp_rows[] = [
+            intval($r['sanadid']),
+            $r['mostafeed'],
+            $r['bayan'],
+            date('d/m/Y', $r['sanadate']),
+            isset($_ptLabels[$_pt]) ? $_ptLabels[$_pt] : 'نقداً',
+            $_ms,
+            number_format($r['amount'], 2, '.', ''),
+        ];
     }
-
-    // Expenses (masrofat)
-    $exp_res = mysql_query("SELECT payeddue, payeddate, amount FROM masrofat
-                            WHERE fund_source = 0 AND idaqar='" . intval($idaqar) . "'
-                            AND payeddate > '$_exp_start' AND payeddate < '$_exp_end'
-                            $_tasfia_f", $link);
-    while ($r = mysql_fetch_array($exp_res)) {
-        $exp_rows[] = ['مصروف', str_replace('+', ' بدون ', $r['payeddue']), date('d/m/Y', $r['payeddate']), '', number_format($r['amount'], 2, '.', '')];
-    }
-
-    // Vouchers delivered to owner (sanadsarf)
-    $exp_res = mysql_query("SELECT bayan, sanadate, amount FROM sanadsarf
-                            WHERE aqarid='" . intval($idaqar) . "'
-                            AND sanadate > '$_exp_start' AND sanadate < '$_exp_end'
-                            $_tasfia_f", $link);
-    while ($r = mysql_fetch_array($exp_res)) {
-        $exp_rows[] = ['تسليم للمالك', $r['bayan'], date('d/m/Y', $r['sanadate']), '', number_format($r['amount'], 2, '.', '')];
-    }
-
-    usort($exp_rows, function($a, $b) { return strcmp($a[2], $b[2]); });
 
     $_exp_type = trim($_GET['export']);
     $_fn = date('Ymd_His');
     if ($_exp_type === 'csv') {
         header('Content-Type: text/csv; charset=UTF-8');
-        header('Content-Disposition: attachment; filename="kashf_malek_' . $_fn . '.csv"');
+        header('Content-Disposition: attachment; filename="delivered_money_' . $_fn . '.csv"');
         $_out = fopen('php://output', 'w');
         fwrite($_out, "\xEF\xBB\xBF");
         fputcsv($_out, $exp_headers, ',', '"', '\\');
@@ -133,7 +127,7 @@ if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], tr
         exit;
     }
     header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="kashf_malek_' . $_fn . '.xls"');
+    header('Content-Disposition: attachment; filename="delivered_money_' . $_fn . '.xls"');
     echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
     foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
     echo '</tr>';
@@ -217,16 +211,8 @@ if ($startfromx) {
     $enddate = $enddatex;
 }
 
-$checked1 = " checked ";
-$checked2 = "";
-if ($showtasfia == 1) {
-    $checked1 = "";
-    $checked2 = " checked ";
-}
-
 // Initialize totals
-$totalincome = 0;
-$totaloutcome = 0;
+$totaldelivered = 0;
 ?>
 
 <?php if ($hidecommision): ?>
@@ -250,7 +236,7 @@ $totaloutcome = 0;
                 <div class="card-body p-4">
                     <div class="alert alert-info mb-4">
                         <i class="bi bi-calendar-event me-2"></i>
-                        <strong>كشف حساب مالك <?= htmlspecialchars($aqarname) ?> بتاريخ:</strong>
+                        <strong>كشف المبالغ المسلمة <?= htmlspecialchars($aqarname) ?> بتاريخ:</strong>
                         <?php
                         if (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) {
             echo $h_date2;
@@ -314,15 +300,12 @@ $totaloutcome = 0;
                         </div>
 
                         <div class="row g-2 mb-3">
-                            <div class="col-12">
+                            <div class="col-md-4">
                                 <label class="form-label fw-bold">
-                                    <i class="bi bi-calendar-range me-1"></i>
-                                    الفترة الزمنية
+                                    <i class="bi bi-calendar-event me-1"></i>
+                                    من تاريخ
                                 </label>
-                            </div>
-                            <div class="col-md-6">
-                                <div class="row g-2">
-                                    <div class="col-12 mb-1"><small class="text-muted">من تاريخ</small></div>
+                                <div class="row g-1">
                                     <div class="col-4">
                                         <input type="text" class="form-control form-control-sm" name="dd" id="dd" value="<?= $daxx[3] ?>" placeholder="يوم">
                                     </div>
@@ -334,9 +317,12 @@ $totaloutcome = 0;
                                     </div>
                                 </div>
                             </div>
-                            <div class="col-md-6">
-                                <div class="row g-2">
-                                    <div class="col-12 mb-1"><small class="text-muted">إلى تاريخ</small></div>
+                            <div class="col-md-4">
+                                <label class="form-label fw-bold">
+                                    <i class="bi bi-calendar-check me-1"></i>
+                                    إلى تاريخ
+                                </label>
+                                <div class="row g-1">
                                     <div class="col-4">
                                         <input type="text" class="form-control form-control-sm" name="dd2" id="dd2" value="<?= $dax2[3] ?>" placeholder="يوم">
                                     </div>
@@ -348,18 +334,16 @@ $totaloutcome = 0;
                                     </div>
                                 </div>
                             </div>
-                        </div>
-
-                        <div class="mb-3">
-                            <div class="form-check form-check-inline">
-                                <input class="form-check-input" type="radio" name="showtasfia" id="k1" <?= $checked1 ?>
-                                       onclick="applyFilters(0);">
-                                <label class="form-check-label" for="k1">عرض جميع المبالغ والمصروفات</label>
-                            </div>
-                            <div class="form-check form-check-inline">
-                                <input class="form-check-input" type="radio" name="showtasfia" id="k2" <?= $checked2 ?>
-                                       onclick="applyFilters(1);">
-                                <label class="form-check-label" for="k2">عرض المبالغ والمصروفات غير المسلمة للمالك</label>
+                            <div class="col-md-4">
+                                <label for="money_source_filter" class="form-label fw-bold">
+                                    <i class="bi bi-wallet2 me-1"></i>
+                                    مصدر المبلغ
+                                </label>
+                                <select class="form-select form-select-sm" id="money_source_filter" name="money_source_filter">
+                                    <option value="-1" <?= $money_source_filter == -1 ? 'selected' : '' ?>>الكل</option>
+                                    <option value="0"  <?= $money_source_filter === 0  ? 'selected' : '' ?>>من حساب المكتب</option>
+                                    <option value="1"  <?= $money_source_filter === 1  ? 'selected' : '' ?>>من حساب المالك (تحويل داخلي)</option>
+                                </select>
                             </div>
                         </div>
 
@@ -372,10 +356,6 @@ $totaloutcome = 0;
                                 <i class="bi bi-printer me-1"></i>
                                 عرض للطباعة
                             </button>
-                            <button type="button" class="btn btn-outline-info" onclick="printReport(1);">
-                                <i class="bi bi-printer me-1"></i>
-                                طباعة بدون العمولة
-                            </button>
                             <button type="button" class="btn btn-secondary" onclick="window.location.href='reports.hnt';">
                                 <i class="bi bi-x-circle me-1"></i>
                                 إلغاء
@@ -383,7 +363,7 @@ $totaloutcome = 0;
                             <?php
                             $_ep = $_GET; unset($_ep['export']);
                             $_eq = http_build_query($_ep);
-                            $_eu = 'kashf_7esabmalek.hnt?' . $_eq . ($_eq ? '&' : '');
+                            $_eu = 'delivered_money.hnt?' . $_eq . ($_eq ? '&' : '');
                             ?>
                             <a href="<?= htmlspecialchars($_eu . 'export=csv') ?>" class="btn btn-outline-success">
                                 <i class="bi bi-filetype-csv me-1"></i>تصدير CSV
@@ -399,195 +379,108 @@ $totaloutcome = 0;
 
 <?php
 if ($idaqar) {
-    $sql = "SELECT * FROM amlak WHERE idaqar = '" . intval($idaqar) . "'";
-    $aqinfo = mysql_fetch_array(mysql_query($sql, $link));
-    $water = $tamen = "";
+    // Build filters directly on sanadsarf columns
+    $bankid_filter_str       = $bankid > 0              ? " AND bankid = '"        . intval($bankid)              . "'" : "";
+    $payment_type_filter_str = $payment_type > 0        ? " AND payment_type = '"  . intval($payment_type)        . "'" : "";
+    $money_source_filter_str = $money_source_filter >= 0 ? " AND money_source = '" . intval($money_source_filter) . "'" : "";
 
-    if (!($aqinfo['addwaterto'] == "" || $aqinfo['addwaterto'] == "malek")) {
-        $water = " - mywater ";
-    }
-
-    if (!($aqinfo['addtameento'] == "" || $aqinfo['addtameento'] == "malek")) {
-        $tamen = " - tamen ";
-    }
-
-    $tasfia_filter = "";
-    if ($showtasfia) {
-        $tasfia_filter = " AND tasfia = '' ";
-    }
-
-    // Build filters for bankid and payment_type
-    $bankid_filter = "";
-    $payment_type_filter = "";
-
-    if ($bankid > 0) {
-        $bankid_filter = " AND sanadrakam IN (SELECT sanadrakam FROM sanad WHERE bankid = '" . intval($bankid) . "')";
-    }
-
-    if ($payment_type > 0) {
-        $payment_type_filter = " AND sanadrakam IN (SELECT sanadrakam FROM sanad WHERE payment_type = '" . intval($payment_type) . "')";
-    }
-
-    $sql = "SELECT *, (amount - mysa3ee - services $water $tamen) AS amount2 FROM eradat
-            WHERE idaqar='" . intval($idaqar) . "'
-            AND paymentdate > '" . intval($startfrom) . "'
-            AND paymentdate < '" . intval($enddate) . "'
-            $tasfia_filter
-            $bankid_filter
-            $payment_type_filter";
-
+    $sql = "SELECT * FROM sanadsarf
+            WHERE aqarid = '" . intval($idaqar) . "'
+            AND sanadate > '" . intval($startfrom) . "'
+            AND sanadate < '" . intval($enddate) . "'
+            $bankid_filter_str
+            $payment_type_filter_str
+            $money_source_filter_str
+            ORDER BY sanadate ASC";
     $result = mysql_query($sql, $link);
+
+    $payTypeLabels = [1 => 'نقداً', 2 => 'شيك', 3 => 'طريقة أخرى', 4 => 'تحويل بنكي', 5 => 'شبكة'];
+    $payTypeIcons  = [1 => 'bi-cash', 2 => 'bi-file-earmark-check', 3 => 'bi-three-dots', 4 => 'bi-arrow-left-right', 5 => 'bi-credit-card-2-front'];
 ?>
-            <!-- Account Statement Table -->
+            <!-- Delivered Money Table -->
             <div class="card shadow-sm">
                 <div class="card-body">
                     <div class="table-responsive">
                         <table class="table table-hover table-striped align-middle">
                             <thead class="table-light">
                                 <tr class="text-center">
-                                    <th><i class="bi bi-hash me-1"></i>سند رقم</th>
+                                    <th><i class="bi bi-hash me-1"></i>رقم السند</th>
+                                    <th><i class="bi bi-person me-1"></i>المستفيد</th>
                                     <th><i class="bi bi-file-text me-1"></i>البيان</th>
                                     <th><i class="bi bi-calendar me-1"></i>التاريخ</th>
-                                    <th>المبلغ</th>
-                                    <th>التأمين</th>
-                                    <th>المياه</th>
-                                    <th class="hidecommision">العمولة</th>
-                                    <th>خدمات</th>
-                                    <th><i class="bi bi-arrow-down-circle me-1"></i>دائن (له)</th>
-                                    <th><i class="bi bi-arrow-up-circle me-1"></i>مدين (عليه)</th>
+                                    <th><i class="bi bi-credit-card me-1"></i>طريقة الصرف</th>
+                                    <th><i class="bi bi-wallet2 me-1"></i>مصدر المبلغ</th>
+                                    <th><i class="bi bi-cash-stack me-1"></i>المبلغ المصروف</th>
                                     <th class="screenonlyonly">تفاصيل</th>
                                 </tr>
                             </thead>
                             <tbody>
 <?php
     $counx = 0;
-    $allsandrakam = array();
-
-    while ($row = mysql_fetch_array($result)) {
-        // Remove duplicated entries
-        if (in_array($row['sanadrakam'], $allsandrakam)) {
-            $rid = mysql_fetch_array(mysql_query("SELECT sanadrakam FROM eradat WHERE sanadrakam='" . addslashes($row['sanadrakam']) . "'"));
-            if ($rid['sanadrakam']) {
-                loginfo("critical", "delete", "تم حذف الايرد رقم سند: {$row['sanadrakam']} البيان", "", "eradat", $row['sanadrakam'], $link);
-                mysql_query("DELETE FROM eradat WHERE sanadrakam='" . addslashes($row['sanadrakam']) . "'", $link);
-            }
-            continue;
-        }
-        $allsandrakam[] = $row['sanadrakam'];
-
-        $counx++;
-
-        // Format date
-        if (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) {
-            $payment_date = date("d/m/Y", $row['paymentdate']);
-        } else {
-            $payment_date = $arabicTools->arabicDate('hj:d/m/Y', $row['paymentdate']);
-        }
-?>
-                                <tr class="text-center">
-                                    <td><strong><?= htmlspecialchars($row['sanadrakam']) ?></strong></td>
-                                    <td><?= htmlspecialchars(str_replace("+", " بدون ", $row['pymentdesription'])) ?></td>
-                                    <td><?= $payment_date ?></td>
-                                    <td><?= number_format($row['amount'], 2) ?></td>
-                                    <td><?= number_format($row['tamen'], 2) ?></td>
-                                    <td><?= number_format($row['mywater'], 2) ?></td>
-                                    <td class="hidecommision"><?= number_format($row['mysa3ee'], 2) ?></td>
-                                    <td><?= number_format($row['services'], 2) ?></td>
-                                    <td><strong class="text-success"><?= number_format($row['amount2'], 2) ?></strong></td>
-                                    <td>0</td>
-                                    <td class="screenonlyonly"></td>
-                                </tr>
-<?php
-        $totalincome += $row['amount2'];
-    }
-
-    // Get expenses
-    $sql = "SELECT * FROM masrofat WHERE  fund_source = 0 AND idaqar='" . intval($idaqar) . "'
-            AND payeddate > '" . intval($startfrom) . "'
-            AND payeddate < '" . intval($enddate) . "'
-            $tasfia_filter";
-    $result = mysql_query($sql, $link);
-
     while ($row = mysql_fetch_array($result)) {
         $counx++;
 
-        // Format date
-        if (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll != 5))) {
-            $payed_date = date("d/m/Y", $row['payeddate']);
-        } else {
-            $payed_date = $arabicTools->arabicDate('hj:d/m/Y', $row['payeddate']);
-        }
-?>
-                                <tr class="text-center">
-                                    <td>x</td>
-                                    <td><?= htmlspecialchars(str_replace("+", " بدون ", $row['payeddue'])) ?></td>
-                                    <td><?= $payed_date ?></td>
-                                    <td>0</td>
-                                    <td>0</td>
-                                    <td>0</td>
-                                    <td class="hidecommision">0</td>
-                                    <td>0</td>
-                                    <td>0</td>
-                                    <td><strong class="text-danger"><?= number_format($row['amount'], 2) ?></strong></td>
-                                    <td class="screenonlyonly"></td>
-                                </tr>
-<?php
-        $totaloutcome += $row['amount'];
-    }
-
-    // Get payment vouchers
-    $sql = "SELECT * FROM sanadsarf WHERE aqarid='" . intval($idaqar) . "'
-            AND sanadate > '" . intval($startfrom) . "'
-            AND sanadate < '" . intval($enddate) . "'
-            $tasfia_filter";
-    $result = mysql_query($sql, $link);
-
-    while ($row = mysql_fetch_array($result)) {
-        $counx++;
-
-        // Format date
         if (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) {
             $sanad_date = date("d/m/Y", $row['sanadate']);
         } else {
             $sanad_date = $arabicTools->arabicDate('hj:d/m/Y', $row['sanadate']);
         }
+
+        $ptype    = intval($row['payment_type']);
+        if ($ptype < 1) $ptype = 1;
+        $payLabel = isset($payTypeLabels[$ptype]) ? $payTypeLabels[$ptype] : 'نقداً';
+        $payIcon  = isset($payTypeIcons[$ptype])  ? $payTypeIcons[$ptype]  : 'bi-cash';
+        $msource  = intval($row['money_source']);
+
+        $totaldelivered += floatval($row['amount']);
 ?>
                                 <tr class="text-center">
-                                    <td><strong><?= htmlspecialchars($row['sanadid']) ?></strong></td>
+                                    <td><strong><?= intval($row['sanadid']) ?></strong></td>
+                                    <td><?= htmlspecialchars($row['mostafeed']) ?></td>
                                     <td><?= htmlspecialchars($row['bayan']) ?></td>
                                     <td><?= $sanad_date ?></td>
-                                    <td>0</td>
-                                    <td></td>
-                                    <td></td>
-                                    <td class="hidecommision"></td>
-                                    <td></td>
-                                    <td>0</td>
-                                    <td><strong class="text-danger"><?= number_format($row['amount'], 2) ?></strong></td>
+                                    <td>
+                                        <span class="badge bg-secondary">
+                                            <i class="bi <?= $payIcon ?> me-1"></i><?= $payLabel ?>
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <?php if ($msource == 1): ?>
+                                            <span class="badge bg-warning text-dark">
+                                                <i class="bi bi-person-fill me-1"></i>حساب المالك
+                                            </span>
+                                        <?php else: ?>
+                                            <span class="badge bg-success">
+                                                <i class="bi bi-building me-1"></i>المكتب
+                                            </span>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td><strong class="text-danger"><?= number_format(floatval($row['amount']), 2) ?></strong></td>
                                     <td class="screenonlyonly">
-                                        <button type="button" class="btn btn-sm btn-info"
-                                                onclick="window.location.href='sendmony-sanad.hnt?iderad=<?= $row['iderad'] ?>';">
+                                        <a href="sendmony-sanad.hnt?iderad=<?= intval($row['iderad']) ?>"
+                                           class="btn btn-sm btn-outline-info" target="_blank">
                                             <i class="bi bi-eye"></i>
-                                        </button>
+                                        </a>
                                     </td>
                                 </tr>
 <?php
-        $totaloutcome += $row['amount'];
+    }
+
+    if ($counx == 0) {
+        echo "<tr><td colspan='8' class='text-center text-muted py-5'>
+                <i class='bi bi-inbox fs-1 d-block mb-2'></i>لا توجد مبالغ مسلمة في هذه الفترة
+              </td></tr>";
     }
 ?>
-                                <tr class="table-secondary fw-bold text-center">
-                                    <td colspan="8" class="text-end">الإجمالي</td>
-                                    <td><strong class="text-success"><?= number_format($totalincome, 2) ?></strong></td>
-                                    <td><strong class="text-danger"><?= number_format($totaloutcome, 2) ?></strong></td>
-                                    <td></td>
-                                </tr>
                                 <tr class="table-primary fw-bold text-center">
-                                    <td colspan="8" class="text-end"><h5 class="mb-0">الصافي</h5></td>
+                                    <td colspan="6" class="text-end">
+                                        <h5 class="mb-0">إجمالي المبالغ المسلمة للمالك</h5>
+                                    </td>
                                     <td colspan="2">
-                                        <h5 class="mb-0 <?= ($totalincome - $totaloutcome) >= 0 ? 'text-success' : 'text-danger' ?>">
-                                            <?= number_format($totalincome - $totaloutcome, 2) ?>
+                                        <h5 class="mb-0 text-danger">
+                                            <?= number_format($totaldelivered, 2) ?> <?= isset($myomla) ? $myomla : 'ريال' ?>
                                         </h5>
                                     </td>
-                                    <td></td>
                                 </tr>
                             </tbody>
                         </table>
@@ -598,62 +491,6 @@ if ($idaqar) {
 }
 ?>
 
-<?php if ($report != 1 && $idaqar): ?>
-            <!-- Owner Percentage Calculation -->
-            <div class="card shadow-sm mt-4">
-                <div class="card-header bg-warning text-dark">
-                    <h5 class="mb-0">
-                        <i class="bi bi-calculator me-2"></i>
-                        حساب النسبة المستحقة
-                    </h5>
-                </div>
-                <div class="card-body">
-                    <div class="alert alert-warning">
-                        <i class="bi bi-exclamation-triangle me-2"></i>
-                        <strong>ملحوظة:</strong> هذه النسبة لن تظهر عند الدخول على تقرير الطباعة
-                    </div>
-
-<?php
-    $sql = "SELECT persentage FROM amlak WHERE idaqar='" . intval($idaqar) . "'";
-    $persentage = mysql_fetch_array(mysql_query($sql, $link));
-    $per = isset($persentage['persentage']) ? $persentage['persentage'] / 100 : 0;
-
-    if ($per < 100) {
-        if ($per < 1) {
-            $per = $per * 100;
-        }
-    }
-
-    $commission = ($per * $totalincome) / 100;
-    $net_for_owner = $totalincome - $totaloutcome - $commission;
-?>
-                    <div class="row g-3">
-                        <div class="col-md-6">
-                            <div class="card bg-light">
-                                <div class="card-body">
-                                    <h6 class="card-title">النسبة المستحقة</h6>
-                                    <p class="mb-0">
-                                        (<?= $per ?>% × <?= number_format($totalincome, 2) ?>) / 100 =
-                                        <strong class="text-primary"><?= number_format($commission, 2) ?> <?= isset($myomla) ? $myomla : 'ريال' ?></strong>
-                                    </p>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <div class="card bg-success text-white">
-                                <div class="card-body">
-                                    <h6 class="card-title">صافي المستحق للمالك الآن</h6>
-                                    <p class="mb-0">
-                                        (<?= number_format($totalincome - $totaloutcome, 2) ?> - <?= number_format($commission, 2) ?>) =
-                                        <strong><?= number_format($net_for_owner, 2) ?> <?= isset($myomla) ? $myomla : 'ريال' ?></strong>
-                                    </p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-<?php endif; ?>
         </div>
     </div>
 </div>
@@ -694,7 +531,7 @@ $(document).ready(function() {
         }
 
         $.ajax({
-            url: 'kashf_7esabmalek.hnt',
+            url: 'delivered_money.hnt',
             type: 'POST',
             data: {
                 ajax_action: 'get_property_bank_accounts',
@@ -720,61 +557,50 @@ $(document).ready(function() {
         });
     }
 
-    // Update hidden bankid field when bank account selector changes
+    // Update hidden bankid field when bank account selector changes, then recalculate
     $('#bank_account_filter').on('change', function() {
         $('#bankid').val($(this).val());
+        recalculate();
     });
+
+    // Recalculate on payment type or money source change
+    $('#payment_type_filter, #money_source_filter').on('change', function() {
+        recalculate();
+    });
+
+    // Sync Select2 display with PHP-rendered selected value
+    $('#money_source_filter').val('<?= $money_source_filter ?>').trigger('change.select2');
 });
 
-function buildFilterUrl(showtasfia, report, hidecommision) {
-    const idaqar = $('#idaqar').val() || 0;
-    const aqarname = encodeURIComponent($('#aqarname').val() || '');
-    const dd = $('#dd').val();
-    const mm = $('#mm').val();
-    const yy = $('#yy').val();
-    const dd2 = $('#dd2').val();
-    const mm2 = $('#mm2').val();
-    const yy2 = $('#yy2').val();
-    const bankid = $('#bankid').val() || 0;
-    const payment_type = $('#payment_type_filter').val() || 0;
+function buildFilterUrl(report, hidecommision) {
+    const idaqar      = $('#idaqar').val() || 0;
+    const aqarname    = encodeURIComponent($('#aqarname').val() || '');
+    const dd = $('#dd').val(), mm = $('#mm').val(), yy = $('#yy').val();
+    const dd2 = $('#dd2').val(), mm2 = $('#mm2').val(), yy2 = $('#yy2').val();
+    const bankid          = $('#bankid').val() || 0;
+    const payment_type    = $('#payment_type_filter').val() || 0;
+    const money_source    = $('#money_source_filter').val();
 
-    let url = 'kashf_7esabmalek.hnt?idaqar=' + idaqar + '&aqarname=' + aqarname;
+    let url = 'delivered_money.hnt?idaqar=' + idaqar + '&aqarname=' + aqarname;
     url += '&startfrom=' + dd + '-' + mm + '-' + yy;
-    url += '&enddate=' + dd2 + '-' + mm2 + '-' + yy2;
+    url += '&enddate='   + dd2 + '-' + mm2 + '-' + yy2;
 
-    if (bankid > 0) {
-        url += '&bankid=' + bankid;
-    }
-
-    if (payment_type > 0) {
-        url += '&payment_type=' + payment_type;
-    }
-
-    if (showtasfia) {
-        url += '&showtasfia=' + showtasfia;
-    }
-
-    if (report) {
-        url += '&report=1';
-    }
-
-    if (hidecommision) {
-        url += '&hidecommision=1';
-    }
+    if (bankid > 0)       url += '&bankid='             + bankid;
+    if (payment_type > 0) url += '&payment_type='       + payment_type;
+    if (money_source !== '' && money_source !== '-1')
+                          url += '&money_source_filter=' + money_source;
+    if (report)           url += '&report=1';
+    if (hidecommision)    url += '&hidecommision=1';
 
     return url;
 }
 
 function recalculate() {
-    window.location.href = buildFilterUrl(<?= $showtasfia ?>, 0, 0);
-}
-
-function applyFilters(showtasfia) {
-    window.location.href = buildFilterUrl(showtasfia, 0, 0);
+    window.location.href = buildFilterUrl(0, 0);
 }
 
 function printReport(hidecommision) {
-    window.location.href = buildFilterUrl(<?= $showtasfia ?>, 1, hidecommision);
+    window.location.href = buildFilterUrl(1, hidecommision);
 }
 </script>
 

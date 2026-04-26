@@ -26,6 +26,88 @@ $enddatex = isset($enddatex) ? $enddatex : '';
 $fund_source = isset($fund_source) && $fund_source !== '' ? intval($fund_source) : -1; // -1 = all
 $idmasrofcod = isset($idmasrofcod) && $idmasrofcod !== '' ? intval($idmasrofcod) : 0;
 
+// Export handler — self-contained, runs before any HTML output
+if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], true)) {
+    include_once "../../../nocash.hnt";
+    include_once  "../../../connectdb.hnt";
+    require '../arabicTools.class.hnt';
+    include_once "amlakfunctions.hnt";
+
+    // Date processing
+    $_exp_start = isset($_GET['startfromx']) && intval($_GET['startfromx']) ? intval($_GET['startfromx']) : 0;
+    $_exp_end   = isset($_GET['enddatex'])   && intval($_GET['enddatex'])   ? intval($_GET['enddatex'])   : 0;
+    if (!$_exp_start && isset($_GET['startfrom']) && $_GET['startfrom']) {
+        $_d = explode("-", "0-0-0-" . $_GET['startfrom']);
+        if (isset($_d[5])) $_exp_start = mktime(0, 0, 0, $_d[4], $_d[3], $_d[5]);
+    }
+    if (!$_exp_end && isset($_GET['enddate']) && $_GET['enddate']) {
+        $_d = explode("-", "0-0-0-" . $_GET['enddate']);
+        if (isset($_d[5])) $_exp_end = mktime(0, 0, 0, $_d[4], $_d[3], $_d[5]) + 86400;
+    }
+    if (!$_exp_start) $_exp_start = time() - 15768000;
+    if (!$_exp_end)   $_exp_end   = time() + 86400;
+
+    // Build WHERE clause
+    $exp_where = " AND m.payeddate >= '" . intval($_exp_start) . "' AND m.payeddate <= '" . intval($_exp_end) . "'";
+    if ($idsubaqar) {
+        $exp_where .= " AND m.idsubaqar = '" . intval($idsubaqar) . "'";
+    }
+    if ($fund_source >= 0) {
+        $exp_where .= " AND m.fund_source = '" . intval($fund_source) . "'";
+    }
+    if ($idmasrofcod > 0) {
+        $exp_where .= " AND m.idmasrofcod = '" . intval($idmasrofcod) . "'";
+    }
+
+    $exp_sql = "SELECT m.*, ad.aqarsubtype, ad.rakam
+                FROM masrofat m
+                LEFT JOIN amlakdetails ad ON m.idsubaqar = ad.idsubaqar
+                WHERE m.idaqar = '" . intval($idaqar) . "'
+                $exp_where
+                ORDER BY m.payeddate DESC";
+    $exp_res = mysql_query($exp_sql, $link);
+
+    $exp_headers = ['البيان', 'الوحدة', 'المبلغ', 'مدفوع عن طريق', 'مصدر الصرف', 'التاريخ'];
+    $exp_rows = [];
+    while ($r = mysql_fetch_array($exp_res)) {
+        $unit_display = '';
+        if (!empty($r['aqarsubtype'])) {
+            $unit_display = displaysubtype($r['aqarsubtype']) . ' رقم ' . $r['rakam'];
+        } else {
+            $unit_display = 'العقار بالكامل';
+        }
+        $exp_rows[] = [
+            $r['payeddue'],
+            $unit_display,
+            number_format($r['amount'], 2, '.', ''),
+            $r['payedby'],
+            intval($r['fund_source']) == 1 ? 'المالك' : 'المكتب',
+            date('d/m/Y', $r['payeddate'])
+        ];
+    }
+
+    $_exp_type = trim($_GET['export']);
+    $_fn = date('Ymd_His');
+    if ($_exp_type === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="masrofat_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="masrofat_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>';
+    exit;
+}
+
 // Check if this is an AJAX request
 $is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
 
@@ -532,6 +614,17 @@ if (!$is_ajax_request) {
 										<i class="bi bi-printer me-1"></i>
 										تقرير للطباعة
 									</button>
+									<?php
+									$_ep = $_GET; unset($_ep['export']);
+									$_eq = http_build_query($_ep);
+									$_eu = htmlspecialchars('masrofat_report.hnt?' . $_eq . ($_eq ? '&' : '') . 'export=');
+									?>
+									<a href="<?= $_eu ?>csv" class="btn btn-outline-success">
+										<i class="bi bi-filetype-csv me-1"></i>تصدير CSV
+									</a>
+									<a href="<?= $_eu ?>xls" class="btn btn-outline-success">
+										<i class="bi bi-file-earmark-excel me-1"></i>تصدير Excel
+									</a>
 									<a href="/aqary/admin/amlak.hnt" class="btn btn-outline-secondary">
 										<i class="bi bi-arrow-counterclockwise me-1"></i>
 										إلغاء وعودة
@@ -551,7 +644,7 @@ if (!$is_ajax_request) {
 					<i class="bi bi-file-earmark-bar-graph me-2"></i>
 					تقرير الصيانات والمصروفات
 				</h3>
-						
+
 			</div>
 			<div class="col-md-3">			<span class="report-info-label">العقار</span>
 						<div class="report-info-value"><?= htmlspecialchars($propertyName, ENT_QUOTES, 'UTF-8') ?></div></div>
@@ -559,7 +652,7 @@ if (!$is_ajax_request) {
 						<div class="report-info-value"><?= $currentDate ?></div></div>
 
 
-	 
+
 		</div>
 
 		<!-- Expenses Table -->
@@ -598,7 +691,8 @@ if (!$is_ajax_request) {
 									$unitDisplay = "العقار بالكامل";
 								}
 
-								$maintenanceDate = $arabicTools->arabicDate('hj:d/m/Y', $row['payeddate']);
+								$dateFormat = ($hnt_dll || $hnt_supper_dll == 5) ? 'ar:d/m/Y' : 'hj:d/m/Y';
+								$maintenanceDate = $arabicTools->arabicDate($dateFormat, $row['payeddate']);
 							?>
 								<?php
 									$fs = isset($row['fund_source']) ? intval($row['fund_source']) : 0;

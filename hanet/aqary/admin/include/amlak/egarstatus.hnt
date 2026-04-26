@@ -8,12 +8,99 @@ extract($_REQUEST);
 
 // Include database and authentication
 include_once "../../../nocash.hnt";
-$canscroll = 1;
-include_once "../../../header.hnt";
 require '../arabicTools.class.hnt';
 require '../uCal.class.hnt';
 $dcal = new uCal;
 include_once "amlakfunctions.hnt";
+
+// Export handler - must run before header.hnt outputs HTML
+$exportType = isset($_GET['export']) ? trim($_GET['export']) : '';
+if (!in_array($exportType, ['csv', 'xls'], true)) {
+    $exportType = '';
+}
+if ($exportType !== '') {
+    include_once  "../../../connectdb.hnt";
+    $exp_base = "SELECT aksat.*,
+        egar.vat_type,
+        mostagereen.mostagername, mostagereen.mostagertel,
+        amlakdetails.rakam, amlakdetails.hnt_dll_type, amlakdetails.aqarsubtype, amlakdetails.idaqar,
+        amlak.aqarname
+    FROM aksat
+    LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
+    INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
+    INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
+    LEFT JOIN amlak ON amlakdetails.idaqar = amlak.idaqar
+    WHERE aksat.iscomplete = 0 AND aksat.kastdate > 0";
+    $exp_min = " AND aksat.kastid = (SELECT MIN(kastid) FROM aksat a2 WHERE a2.idsubaqar = aksat.idsubaqar AND a2.iscomplete = 0 AND a2.kastdate > 0)";
+
+    if (isset($searchbyidaqar) && $searchbyidaqar) {
+        $exp_sql = $exp_base . " AND amlakdetails.idaqar = '" . intval($searchbyidaqar) . "'" . $exp_min . " ORDER BY aksat.kastdate";
+    } elseif (isset($searchbyname) && $searchbyname) {
+        $sn = mysql_real_escape_string(trim($searchbyname));
+        $exp_sql = $exp_base . " AND (mostagereen.mostagername LIKE '%{$sn}%' OR mostagereen.mostagertel LIKE '%{$sn}%' OR mostagereen.mostageridnumber LIKE '%{$sn}%')" . $exp_min . " ORDER BY aksat.kastdate";
+    } elseif (isset($searchbyowner) && $searchbyowner) {
+        $exp_sql = $exp_base . " AND amlak.ownerid = '" . intval(trim($searchbyowner)) . "'" . $exp_min . " ORDER BY aksat.kastdate";
+    } elseif (isset($searchall) && $searchall) {
+        $exp_sql = $exp_base . " AND aksat.kastdate < '" . time() . "' ORDER BY aksat.idsubaqar";
+    } else {
+        $exp_sql = $exp_base . $exp_min . " ORDER BY aksat.kastdate LIMIT 1000";
+    }
+
+    $exp_result = mysql_query($exp_sql, $link);
+    $exp_rows = [];
+    while ($erow = mysql_fetch_assoc($exp_result)) {
+        $water    = floatval($erow['water']    ?? 0);
+        $sa3ee    = floatval($erow['sa3ee']    ?? 0);
+        $services = floatval($erow['services'] ?? 0);
+        $rentVal  = $erow['kastvalue'] - $water - $sa3ee - $services;
+        $vat = 0;
+        if (intval($erow['vat_type']) == 1) $vat = $sa3ee * 0.15;
+        if (intval($erow['vat_type']) == 2) $vat = ($sa3ee * 0.15) + ($rentVal * 0.15);
+
+        $exp_rows[] = [
+            $erow['mostagername'],
+            $erow['mostagertel'],
+            $erow['aqarname'],
+            displaysubtype($erow['aqarsubtype']) . ' ' . $erow['rakam'],
+            $erow['kastname'],
+            number_format($erow['kastvalue'], 2, '.', ''),
+            number_format($vat, 2, '.', ''),
+            number_format($erow['dof3at'], 2, '.', ''),
+            number_format($erow['kastvalue'] + $vat - $erow['dof3at'], 2, '.', ''),
+            date("d/m/Y", $erow['kastdate'])
+        ];
+    }
+
+    $exp_headers = ['اسم المستأجر', 'هاتف', 'العقار', 'الوحدة', 'القسط', 'القيمة', 'الضريبة', 'المدفوع', 'المتبقي', 'تاريخ الاستحقاق'];
+    $filenameDate = date('Ymd_His');
+
+    if ($exportType === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="egarstatus_' . $filenameDate . '.csv"');
+        $out = fopen('php://output', 'w');
+        fwrite($out, "\xEF\xBB\xBF");
+        fputcsv($out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $r) fputcsv($out, $r, ',', '"', '\\');
+        fclose($out);
+        exit;
+    }
+
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="egarstatus_' . $filenameDate . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $h) echo '<th>' . htmlspecialchars($h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $r) {
+        echo '<tr>';
+        foreach ($r as $cell) echo '<td>' . htmlspecialchars($cell) . '</td>';
+        echo '</tr>';
+    }
+    echo '</table></body></html>';
+    exit;
+}
+
+$canscroll = 1;
+include_once "../../../header.hnt";
 
 // Process contract termination
 if (isset($endidsubaqar) && $endidsubaqar) {
@@ -626,6 +713,16 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                         <i class="bi bi-lightning-charge text-danger me-1"></i>
                         إجراءات سريعة
                     </label>
+                    <?php
+                    $exp_params = [];
+                    if (isset($searchbyidaqar) && $searchbyidaqar) $exp_params['searchbyidaqar'] = intval($searchbyidaqar);
+                    if (isset($searchbyname)   && $searchbyname)   $exp_params['searchbyname']   = trim($searchbyname);
+                    if (isset($searchbyowner)  && $searchbyowner)  $exp_params['searchbyowner']  = intval($searchbyowner);
+                    if (isset($searchall)      && $searchall)      $exp_params['searchall']      = 1;
+                    $exp_qs      = $exp_params ? '?' . http_build_query($exp_params) . '&' : '?';
+                    $exp_csv_url = htmlspecialchars('egarstatus.hnt' . $exp_qs . 'export=csv');
+                    $exp_xls_url = htmlspecialchars('egarstatus.hnt' . $exp_qs . 'export=xls');
+                    ?>
                     <div class="d-grid gap-2">
                         <button type='button' onClick="window.location.href='egarstatus.hnt?searchall=1;'"
                             class='btn btn-warning'>
@@ -635,6 +732,12 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                             class='btn btn-secondary'>
                             <i class="bi bi-list-ul me-2"></i>عرض الكل
                         </button>
+                        <a href="<?= $exp_csv_url ?>" class="btn btn-outline-success">
+                            <i class="bi bi-filetype-csv me-2"></i>تصدير CSV
+                        </a>
+                        <a href="<?= $exp_xls_url ?>" class="btn btn-outline-success">
+                            <i class="bi bi-file-earmark-excel me-2"></i>تصدير Excel
+                        </a>
                     </div>
                 </div>
             </div>

@@ -26,17 +26,73 @@ $sc_title = "كشف حساب مستأجر";
 $sc_id = "58";
 
 include_once "../../../nocash.hnt";
-if ($report == 1) {
-    include_once "../../../report_header.hnt";
-} else {
-    include_once "../../../header.hnt";
-}
-
 require '../arabicTools.class.hnt';
 require '../uCal.class.hnt';
 $dcal = new uCal;
 $arabicTools = new ArabicTools();
 include_once "amlakfunctions.hnt";
+
+if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], true) && $mostagerid) {
+    include_once  "../../../connectdb.hnt";
+    $_exp_start = isset($_GET['startfromx']) && intval($_GET['startfromx']) ? intval($_GET['startfromx']) : 0;
+    $_exp_end   = isset($_GET['enddatex'])   && intval($_GET['enddatex'])   ? intval($_GET['enddatex'])   : 0;
+    if (!$_exp_start && isset($_GET['startfrom']) && $_GET['startfrom']) {
+        $_d = explode("-", "0-0-0-" . $_GET['startfrom']);
+        if (isset($_d[5])) $_exp_start = mktime(0, 0, 0, $_d[4], $_d[3], $_d[5]);
+    }
+    if (!$_exp_end && isset($_GET['enddate']) && $_GET['enddate']) {
+        $_d = explode("-", "0-0-0-" . $_GET['enddate']);
+        if (isset($_d[5])) $_exp_end = mktime(0, 0, 0, $_d[4], $_d[3], $_d[5]) + 86400;
+    }
+    if (!$_exp_start) $_exp_start = time() - 15768000;
+    if (!$_exp_end)   $_exp_end   = time() + 86400;
+
+    $exp_headers = ['النوع', 'البيان', 'الفترة', 'التاريخ', 'دائن', 'مدين'];
+    $exp_rows = [];
+
+    $res1 = mysql_query("SELECT s.depositeamount, s.sanaddate, s.mybyan, s.period FROM sanad s
+        INNER JOIN aksat ak ON s.kastid = ak.kastid
+        WHERE s.mostagerid = '" . intval($mostagerid) . "'
+        AND s.sanaddate > '" . $_exp_start . "' AND s.sanaddate < '" . $_exp_end . "'
+        ORDER BY s.sanaddate", $link);
+    while ($r = mysql_fetch_array($res1))
+        $exp_rows[] = ['محصل', $r['mybyan'], $r['period'], date('d/m/Y', $r['sanaddate']), number_format($r['depositeamount'], 2, '.', ''), '0.00'];
+
+    $res2 = mysql_query("SELECT ak.kastvalue, ak.dof3at, ak.kastdate, ak.kastname FROM aksat ak
+        INNER JOIN amlakdetails ad ON ak.idsubaqar = ad.idsubaqar
+        WHERE ad.mostagerid = '" . intval($mostagerid) . "'
+        AND ak.iscomplete = 0
+        AND ak.kastdate > '" . $_exp_start . "' AND ak.kastdate < '" . $_exp_end . "'
+        ORDER BY ak.kastdate", $link);
+    while ($r = mysql_fetch_array($res2)) {
+        $rem = $r['kastvalue'] - $r['dof3at'];
+        if ($rem > 0)
+            $exp_rows[] = ['غير محصل', 'القسط رقم ' . $r['kastname'], '', date('d/m/Y', $r['kastdate']), '0.00', number_format($rem, 2, '.', '')];
+    }
+
+    $_exp_type = trim($_GET['export']); $_fn = date('Ymd_His');
+    if ($_exp_type === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="kashf_mostager_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w'); fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out); exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="kashf_mostager_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>'; exit;
+}
+
+if ($report == 1) {
+    include_once "../../../report_header.hnt";
+} else {
+    include_once "../../../header.hnt";
+}
 
 // Get tenant date type
 if ($mostagerid) {
@@ -205,6 +261,17 @@ if ($startfromx) {
                                 <i class="bi bi-x-circle me-1"></i>
                                 إلغاء
                             </button>
+                            <?php
+                            $_ep = $_GET; unset($_ep['export']);
+                            $_eq = http_build_query($_ep);
+                            $_eu = 'kashf_7esabmostager.hnt?' . $_eq . ($_eq ? '&' : '');
+                            ?>
+                            <a href="<?= htmlspecialchars($_eu . 'export=csv') ?>" class="btn btn-outline-success">
+                                <i class="bi bi-filetype-csv me-1"></i>تصدير CSV
+                            </a>
+                            <a href="<?= htmlspecialchars($_eu . 'export=xls') ?>" class="btn btn-outline-success">
+                                <i class="bi bi-file-earmark-excel me-1"></i>تصدير Excel
+                            </a>
                         </div>
                     </form>
 <?php endif; ?>

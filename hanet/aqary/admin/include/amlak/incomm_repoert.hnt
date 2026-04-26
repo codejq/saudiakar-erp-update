@@ -28,20 +28,21 @@ $payment_type = isset($payment_type) ? intval($payment_type) : 0;
 
 // AJAX handler to fetch all bank accounts
 if (isset($_POST['ajax_action']) && $_POST['ajax_action'] == 'get_all_bank_accounts') {
+
     include_once "../../../reqloginajax.hnt";
     header('Content-Type: application/json; charset=utf-8');
-    
+
     // Fetch all bank accounts
-    $sql = "SELECT id, bankname, acountholder, acountnumber 
-            FROM bankacounts 
+    $sql = "SELECT id, bankname, acountholder, acountnumber
+            FROM bankacounts
             ORDER BY bankname, id DESC";
     $result = mysql_query($sql, $link);
-    
+
     $accounts = [];
     while ($row = mysql_fetch_assoc($result)) {
         $accounts[] = $row;
     }
-    
+
     echo json_encode(['success' => true, 'accounts' => $accounts], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
     exit;
 }
@@ -50,6 +51,93 @@ $sc_title = "  تقرير اجمالي الإيرادات  ";
 $sc_id = "50";
 
 include_once "../../../nocash.hnt";
+
+// Export handler — runs before any HTML output
+if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], true)) {
+    include_once  "../../../connectdb.hnt";
+    require '../arabicTools.class.hnt';
+    require '../uCal.class.hnt';
+    $_dcal = new uCal;
+    $_arabicTools = new ArabicTools();
+    include_once "amlakfunctions.hnt";
+
+    // Date processing
+    $_exp_start = isset($_GET['startfromx']) && intval($_GET['startfromx']) ? intval($_GET['startfromx']) : 0;
+    $_exp_end   = isset($_GET['enddatex'])   && intval($_GET['enddatex'])   ? intval($_GET['enddatex'])   : 0;
+    if (!$_exp_start && isset($_GET['startfrom']) && $_GET['startfrom']) {
+        $_d = explode("-", "0-0-0-" . $_GET['startfrom']);
+        if (isset($_d[5])) $_exp_start = mktime(0, 0, 0, $_d[4], $_d[3], $_d[5]);
+    }
+    if (!$_exp_end && isset($_GET['enddate']) && $_GET['enddate']) {
+        $_d = explode("-", "0-0-0-" . $_GET['enddate']);
+        if (isset($_d[5])) $_exp_end = mktime(0, 0, 0, $_d[4], $_d[3], $_d[5]) + 86400;
+    }
+    if (!$_exp_start) $_exp_start = time() - 15768000;
+    if (!$_exp_end)   $_exp_end   = time() + 86400;
+
+    $_showtasfia = isset($_GET['showtasfia']) ? intval($_GET['showtasfia']) : 0;
+    $_bankid = isset($_GET['bankid']) ? intval($_GET['bankid']) : 0;
+    $_payment_type = isset($_GET['payment_type']) ? intval($_GET['payment_type']) : 0;
+
+    $_tasfia_filter = $_showtasfia ? " AND e.tasfia = '' " : "";
+    $_bankid_filter = $_bankid > 0 ? " AND e.sanadrakam IN (SELECT sanadrakam FROM sanad WHERE bankid = '" . intval($_bankid) . "')" : "";
+    $_pt_filter = $_payment_type > 0 ? " AND e.sanadrakam IN (SELECT sanadrakam FROM sanad WHERE payment_type = '" . intval($_payment_type) . "')" : "";
+
+    $exp_sql = "SELECT a.aqarname,
+                       COUNT(DISTINCT e.sanadrakam) as transaction_count,
+                       SUM(e.amount) as total_amount,
+                       SUM(e.mysa3ee) as total_commission,
+                       SUM(e.mywater) as total_water,
+                       SUM(e.tamen) as total_tamen,
+                       SUM(e.services) as total_services
+                FROM amlak a
+                LEFT JOIN eradat e ON a.idaqar = e.idaqar
+                    AND e.paymentdate > '" . intval($_exp_start) . "'
+                    AND e.paymentdate < '" . intval($_exp_end) . "'
+                    $_tasfia_filter
+                    $_bankid_filter
+                    $_pt_filter
+                GROUP BY a.idaqar, a.aqarname
+                HAVING transaction_count > 0
+                ORDER BY a.aqarname";
+    $exp_res = mysql_query($exp_sql, $link);
+
+    $exp_headers = ['العقار', 'عدد المعاملات', 'إجمالي الإيراد', 'العمولة', 'المياه', 'التأمين', 'الخدمات'];
+    $exp_rows = [];
+    while ($r = mysql_fetch_array($exp_res)) {
+        $exp_rows[] = [
+            $r['aqarname'],
+            $r['transaction_count'],
+            number_format($r['total_amount'], 2, '.', ''),
+            number_format($r['total_commission'], 2, '.', ''),
+            number_format($r['total_water'], 2, '.', ''),
+            number_format($r['total_tamen'], 2, '.', ''),
+            number_format($r['total_services'], 2, '.', ''),
+        ];
+    }
+
+    $_exp_type = trim($_GET['export']);
+    $_fn = date('Ymd_His');
+    if ($_exp_type === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="incomm_report_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="incomm_report_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>';
+    exit;
+}
+
 $canscroll = 1;
 
 if ($report == 1) {
@@ -278,6 +366,17 @@ $totaloutcome = 0;
                                 <i class="bi bi-x-circle me-1"></i>
                                 إلغاء
                             </button>
+                            <?php
+                            $_ep = $_GET; unset($_ep['export']);
+                            $_eq = http_build_query($_ep);
+                            $_eu = 'incomm_repoert.hnt?' . $_eq . ($_eq ? '&' : '');
+                            ?>
+                            <a href="<?= htmlspecialchars($_eu . 'export=csv') ?>" class="btn btn-outline-success">
+                                <i class="bi bi-filetype-csv me-1"></i>تصدير CSV
+                            </a>
+                            <a href="<?= htmlspecialchars($_eu . 'export=xls') ?>" class="btn btn-outline-success">
+                                <i class="bi bi-file-earmark-excel me-1"></i>تصدير Excel
+                            </a>
                         </div>
                     </form>
 <?php endif; ?>
@@ -303,7 +402,7 @@ if ($payment_type > 0) {
 }
 
 // Query to get aggregated income by building
-$sql = "SELECT 
+$sql = "SELECT
             a.idaqar,
             a.aqarname,
             a.addwaterto,
@@ -357,17 +456,17 @@ $result = mysql_query($sql, $link);
         // Calculate net income based on property settings
         $water_deduction = 0;
         $tamen_deduction = 0;
-        
+
         if (!($row['addwaterto'] == "" || $row['addwaterto'] == "malek")) {
             $water_deduction = $row['total_water'];
         }
-        
+
         if (!($row['addtameento'] == "" || $row['addtameento'] == "malek")) {
             $tamen_deduction = $row['total_tamen'];
         }
-        
+
         $net_income = $row['total_amount'] - $row['total_commission'] - $row['total_services'] - $water_deduction - $tamen_deduction;
-        
+
         $grand_total_amount += $row['total_amount'];
         $grand_total_tamen += $row['total_tamen'];
         $grand_total_water += $row['total_water'];
@@ -412,7 +511,7 @@ $result = mysql_query($sql, $link);
 $(document).ready(function() {
     // Load all bank accounts on page load
     loadAllBankAccounts();
-    
+
     function loadAllBankAccounts() {
         $.ajax({
             url: 'incomm_repoert.hnt',
@@ -426,7 +525,7 @@ $(document).ready(function() {
                     const select = $('#bank_account_filter');
                     const currentBankId = <?= $bankid ?>;
                     select.html('<option value="0">الكل</option>');
-                    
+
                     response.accounts.forEach(function(acc) {
                         const label = acc.bankname + ' - ' + acc.acountholder + ' (' + acc.acountnumber + ')';
                         const selected = (acc.id == currentBankId) ? ' selected' : '';
@@ -436,7 +535,7 @@ $(document).ready(function() {
             }
         });
     }
-    
+
     // Update hidden bankid field when bank account selector changes
     $('#bank_account_filter').on('change', function() {
         $('#bankid').val($(this).val());
@@ -452,31 +551,31 @@ function buildFilterUrl(showtasfia, report, hidecommision) {
     const yy2 = $('#yy2').val();
     const bankid = $('#bankid').val() || 0;
     const payment_type = $('#payment_type_filter').val() || 0;
-    
+
     let url = 'incomm_repoert.hnt?';
     url += 'startfrom=' + dd + '-' + mm + '-' + yy;
     url += '&enddate=' + dd2 + '-' + mm2 + '-' + yy2;
-    
+
     if (bankid > 0) {
         url += '&bankid=' + bankid;
     }
-    
+
     if (payment_type > 0) {
         url += '&payment_type=' + payment_type;
     }
-    
+
     if (showtasfia) {
         url += '&showtasfia=' + showtasfia;
     }
-    
+
     if (report) {
         url += '&report=1';
     }
-    
+
     if (hidecommision) {
         url += '&hidecommision=1';
     }
-    
+
     return url;
 }
 

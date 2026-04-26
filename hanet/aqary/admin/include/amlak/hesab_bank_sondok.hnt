@@ -19,19 +19,89 @@ if ($hesabkind == "bank") {
     $sc_title = "تقرير حساب الصندوق";
 }
 
-// Include authentication and database
-if ($report == 1) {
-    include_once "../../../nocash.hnt";
-    include_once "../../../report_header.hnt";
-} else {
-    include_once "../../../nocash.hnt";
-    include_once "../../../header.hnt";
-}
-
-// Include required files
+include_once "../../../nocash.hnt";
 require '../arabicTools.class.hnt';
 $arabicTools = new ArabicTools();
 include_once "arabic_num.class.hnt";
+
+// Export handler — runs before any HTML output
+if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], true)) {
+    include_once "../../../connectdb.hnt";
+    $_hk     = isset($_GET['hesabkind']) ? trim($_GET['hesabkind']) : 'sondok';
+    $_startx = isset($_GET['startfromx']) && intval($_GET['startfromx']) ? intval($_GET['startfromx']) : 0;
+    if (!$_startx && isset($_GET['startfrom']) && $_GET['startfrom']) {
+        $_d = explode("-", "0-0-0-" . $_GET['startfrom']);
+        if (isset($_d[5])) $_startx = mktime(0, 0, 0, $_d[4], $_d[3], $_d[5]);
+    }
+    if (!$_startx) $_startx = time() - 15768000;
+
+    if ($_hk === 'sondok') {
+        $_r1 = mysql_fetch_array(mysql_query("SELECT SUM(depositeamount) as dd FROM sanad WHERE payment_type='1' AND sanaddate > '$_startx'", $link));
+        $_r2 = mysql_fetch_array(mysql_query("SELECT SUM(amount) as dd FROM masrofat WHERE fund_source = 0 AND payeddate > '$_startx'", $link));
+        $_r3 = mysql_fetch_array(mysql_query("SELECT SUM(amount) as dd FROM sanadsarf WHERE (qayedtype='5' OR qayedtype='7' OR qayedtype='9') AND sanadate > '$_startx'", $link));
+        $_r4 = mysql_fetch_array(mysql_query("SELECT SUM(amount) as dd FROM sanadsarf WHERE qayedtype='1' AND sanadate > '$_startx'", $link));
+        $_r5 = mysql_fetch_array(mysql_query("SELECT SUM(amount) as dd FROM sanadsarf WHERE qayedtype='2' AND sanadate > '$_startx'", $link));
+        $_r6 = mysql_fetch_array(mysql_query("SELECT SUM(amount) as dd FROM sanadsarf WHERE qayedtype='3' AND sanadate > '$_startx'", $link));
+        $_w1 = floatval($_r1['dd']); $_w2 = floatval($_r2['dd']); $_w3 = floatval($_r3['dd']);
+        $_w4 = floatval($_r4['dd']); $_w5 = floatval($_r5['dd']); $_w6 = floatval($_r6['dd']);
+        $_w7 = $_w1 - $_w2 - $_w3 - $_w4 + $_w5 - $_w6;
+        $exp_rows = [
+            ['وارد التحصيل لحساب الصندوق',              number_format($_w1, 2, '.', '')],
+            ['إجمالي مصروفات العقارات',                  number_format($_w2, 2, '.', '')],
+            ['إجمالي مصروفات المكتب والأجور والنثريات',  number_format($_w3, 2, '.', '')],
+            ['إجمالي محول من الصندوق إلى البنك',          number_format($_w4, 2, '.', '')],
+            ['إجمالي وارد إلى الصندوق من البنك',          number_format($_w5, 2, '.', '')],
+            ['إجمالي مبالغ مدفوعة لأصحاب العقار',        number_format($_w6, 2, '.', '')],
+            ['رصيد الصندوق الحالي',                       number_format($_w7, 2, '.', '')],
+        ];
+    } else {
+        $_r1 = mysql_fetch_array(mysql_query("SELECT SUM(depositeamount) as dd FROM sanad WHERE payment_type!='1' AND sanaddate > '$_startx'", $link));
+        $_r3 = mysql_fetch_array(mysql_query("SELECT SUM(amount) as dd FROM sanadsarf WHERE (qayedtype='6' OR qayedtype='8' OR qayedtype='10') AND sanadate > '$_startx'", $link));
+        $_r4 = mysql_fetch_array(mysql_query("SELECT SUM(amount) as dd FROM sanadsarf WHERE qayedtype='1' AND sanadate > '$_startx'", $link));
+        $_r5 = mysql_fetch_array(mysql_query("SELECT SUM(amount) as dd FROM sanadsarf WHERE qayedtype='2' AND sanadate > '$_startx'", $link));
+        $_r6 = mysql_fetch_array(mysql_query("SELECT SUM(amount) as dd FROM sanadsarf WHERE qayedtype='4' AND sanadate > '$_startx'", $link));
+        $_w1 = floatval($_r1['dd']); $_w3 = floatval($_r3['dd']); $_w4 = floatval($_r4['dd']);
+        $_w5 = floatval($_r5['dd']); $_w6 = floatval($_r6['dd']);
+        $_w7 = $_w1 + $_w4 - $_w3 - $_w5 - $_w6;
+        $exp_rows = [
+            ['وارد التحصيل لحساب البنك',                               number_format($_w1, 2, '.', '')],
+            ['إجمالي وارد إلى البنك من الصندوق',                        number_format($_w4, 2, '.', '')],
+            ['إجمالي مصروفات المكتب والأجور عن طريق البنك',             number_format($_w3, 2, '.', '')],
+            ['إجمالي محول من البنك إلى الصندوق',                        number_format($_w5, 2, '.', '')],
+            ['إجمالي مبالغ مدفوعة لأصحاب العقار عن طريق البنك',        number_format($_w6, 2, '.', '')],
+            ['رصيد البنك الحالي',                                        number_format($_w7, 2, '.', '')],
+        ];
+    }
+
+    $exp_headers = ['البيان', 'المبلغ'];
+    $_exp_type = trim($_GET['export']);
+    $_fn = date('Ymd_His');
+    $_title = $_hk === 'bank' ? 'hesab_bank' : 'hesab_sondok';
+    if ($_exp_type === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="' . $_title . '_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="' . $_title . '_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>';
+    exit;
+}
+
+if ($report == 1) {
+    include_once "../../../report_header.hnt";
+} else {
+    include_once "../../../header.hnt";
+}
 
 // Get current date in Arabic
 $daxx_now = date("H/i/s/m/d/Y");
@@ -397,6 +467,17 @@ if ($report != 1) {
                     <i class="bi bi-x-circle me-2"></i>
                     إلغاء الأمر
                 </button>
+                <?php
+                $_ep = $_GET; unset($_ep['export']);
+                $_eq = http_build_query($_ep);
+                $_eu = 'hesab_bank_sondok.hnt?' . $_eq . ($_eq ? '&' : '');
+                ?>
+                <a href="<?= htmlspecialchars($_eu . 'export=csv') ?>" class="btn btn-outline-success btn-lg me-2">
+                    <i class="bi bi-filetype-csv me-1"></i>تصدير CSV
+                </a>
+                <a href="<?= htmlspecialchars($_eu . 'export=xls') ?>" class="btn btn-outline-success btn-lg">
+                    <i class="bi bi-file-earmark-excel me-1"></i>تصدير Excel
+                </a>
             </div>
         </div>
     </div>

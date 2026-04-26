@@ -1,0 +1,471 @@
+<?php
+// Set page variables
+$sc_title = "تقرير بجميع الشواغر المتوفرة";
+$sc_id = "51";
+
+// Extract request variables
+extract($_REQUEST);
+
+// Check if this is a report view (print mode)
+$report = isset($report) && $report == 1 ? 1 : 0;
+
+// Include required files early (needed by export handler)
+require '../arabicTools.class.hnt';
+include_once "arabic_num.class.hnt";
+include_once "amlakfunctions.hnt";
+
+// Export handler — runs before any HTML output
+if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], true)) {
+    include_once "../../../nocash.hnt";
+    include_once  "../../../connectdb.hnt";
+
+    $exp_sql = "SELECT ad.idsubaqar, ad.rakam, ad.price, a.aqarname,
+                       COALESCE(st.aqarsubtypename, '') as aqarsubtypename
+                FROM amlakdetails ad
+                LEFT JOIN amlak a ON ad.idaqar = a.idaqar
+                LEFT JOIN aqarsubtype st ON ad.aqarsubtype = st.aqarsubtype
+                WHERE ad.mostagerid = 0
+                ORDER BY ad.aqarsubtype";
+    $exp_res = mysql_query($exp_sql, $link);
+
+    $exp_headers = ['م', 'نوع الوحدة', 'رقم', 'العقار', 'الإيجار السنوي'];
+    $exp_rows = [];
+    $xx = 0;
+    while ($r = mysql_fetch_array($exp_res)) {
+        $xx++;
+        $exp_rows[] = [$xx, $r['aqarsubtypename'], $r['rakam'], $r['aqarname'], number_format($r['price'], 2, '.', '')];
+    }
+
+    $_exp_type = trim($_GET['export']);
+    $_fn = date('Ymd_His');
+    if ($_exp_type === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="allshawagher_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="allshawagher_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>';
+    exit;
+}
+
+// Include authentication and database
+if ($report == 1) {
+    include_once "../../../nocash.hnt";
+    include_once "../../../report_header.hnt";
+} else {
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+}
+
+// Get current date in Arabic
+$daxx = date("H/i/s/m/d/Y");
+$daxx = explode("/", $daxx);
+$h_date = mktime($daxx[0], $daxx[1], $daxx[2], $daxx[3], $daxx[4], $daxx[5]);
+$h_date2 = arabicDate("ar:l d/F -Y h:iA", $h_date);
+$h_date1 = arabicDate('hj:l d-F-Y هـ', $h_date);
+$display_date = ($hnt_dll || $hnt_supper_dll == 5) ? $h_date2 : $h_date1;
+
+// Get vacant properties data
+$sqlaq = "SELECT idsubaqar, rakam, idaqar, aqarsubtype, price FROM amlakdetails WHERE mostagerid = 0 ORDER BY aqarsubtype";
+$resaq = mysql_query($sqlaq, $link);
+
+// Calculate total
+$sumation = mysql_fetch_array(mysql_query("SELECT SUM(price) as dd FROM amlakdetails WHERE mostagerid = 0", $link));
+$total_price = isset($sumation['dd']) ? $sumation['dd'] : 0;
+
+// Count vacant properties
+$vacant_count = mysql_num_rows($resaq);
+
+// Only render HTML if NOT in report mode, otherwise use report layout
+if ($report != 1) {
+?>
+
+<style>
+.section-header {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1.5rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.1rem;
+}
+
+.stats-card {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    text-align: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.stats-card .number {
+    font-size: 2.5rem;
+    font-weight: bold;
+    margin-bottom: 0.5rem;
+}
+
+.stats-card .label {
+    font-size: 1rem;
+    opacity: 0.9;
+}
+
+.property-table {
+    background: white;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.property-table thead {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+}
+
+.property-table thead th {
+    padding: 1rem;
+    font-weight: 600;
+    text-align: center;
+    border: none;
+}
+
+.property-table tbody tr {
+    transition: background-color 0.2s;
+}
+
+.property-table tbody tr:hover {
+    background-color: #fff3cd;
+}
+
+.property-table tbody td {
+    padding: 0.75rem;
+    text-align: center;
+    border-bottom: 1px solid #dee2e6;
+}
+
+.property-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.total-row {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    font-weight: bold;
+    font-size: 1.1rem;
+}
+
+.total-row td {
+    padding: 1rem !important;
+    border: none !important;
+}
+
+.badge-property {
+    background: linear-gradient(135deg, #29a0f0ff 0%, #146594ff 100%);
+    color: white;
+    padding: 0.25rem 0.75rem;
+    border-radius: 4px;
+    font-size: 0.875rem;
+}
+
+@media print {
+    .no-print {
+        display: none !important;
+    }
+}
+</style>
+
+<div class="container-fluid py-3">
+    <!-- Page Header -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-house-check-fill me-2"></i>
+                <?= $sc_title ?>
+            </h4>
+        </div>
+        <div class="card-body p-4">
+            <div class="text-center mb-3">
+                <h5 class="text-muted">
+                    <i class="bi bi-calendar3 me-2"></i>
+                    بتاريخ: <?= $display_date ?>
+                </h5>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="text-center mb-4 no-print">
+                <button type="button" class="btn btn-primary btn-lg me-2" onclick="window.location.href='allshawagher.hnt?report=1'">
+                    <i class="bi bi-printer-fill me-2"></i>
+                    عرض تقرير صالح للطباعة
+                </button>
+                <?php
+                $_ep = $_GET; unset($_ep['export']);
+                $_eq = http_build_query($_ep);
+                $_eu = htmlspecialchars('allshawagher.hnt?' . $_eq . ($_eq ? '&' : '') . 'export=');
+                ?>
+                <a href="<?= $_eu ?>csv" class="btn btn-outline-success btn-lg me-2">
+                    <i class="bi bi-filetype-csv me-1"></i>تصدير CSV
+                </a>
+                <a href="<?= $_eu ?>xls" class="btn btn-outline-success btn-lg me-2">
+                    <i class="bi bi-file-earmark-excel me-1"></i>تصدير Excel
+                </a>
+                <button type="button" class="btn btn-outline-secondary btn-lg" onclick="window.location.href='reports.hnt'">
+                    <i class="bi bi-x-circle me-2"></i>
+                    إلغاء الأمر
+                </button>
+            </div>
+
+            <!-- Statistics Cards -->
+            <div class="row g-4 mb-4">
+                <div class="col-md-6">
+                    <div class="stats-card">
+                        <div class="number"><?= $vacant_count ?></div>
+                        <div class="label">
+                            <i class="bi bi-house-door me-1"></i>
+                            عدد الشواغر المتوفرة
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="stats-card">
+                        <div class="number"><?= number_format($total_price, 2) ?></div>
+                        <div class="label">
+                            <i class="bi bi-cash-stack me-1"></i>
+                            إجمالي الإيجارات (<?= $myomla ?>)
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Properties Table -->
+            <?php if ($vacant_count > 0) { ?>
+            <div class="table-responsive">
+                <table class="table property-table mb-0">
+                    <thead>
+                        <tr>
+                            <th style="width: 80px;">م</th>
+                            <th>العقار</th>
+                            <th style="width: 150px;">الإيجار السنوي</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php
+                        $xx = 0;
+                        mysql_data_seek($resaq, 0); // Reset pointer
+                        while ($rowaq = mysql_fetch_array($resaq)) {
+                            $xx++;
+                            $property_type = displaysubtype($rowaq['aqarsubtype']);
+                            $property_name = displayaqarname($rowaq['idaqar']);
+                            $price_formatted = number_format($rowaq['price'], 2);
+                        ?>
+                        <tr>
+                            <td><strong><?= $xx ?></strong></td>
+                            <td class="text-start">
+                                <span class="badge-property"><?= $property_type ?></span>
+                                <span class="ms-2">رقم <?= $rowaq['rakam'] ?></span>
+                                <span class="text-muted ms-2">موجود في</span>
+                                <strong><?= $property_name ?></strong>
+                            </td>
+                            <td>
+                                <strong><?= $price_formatted ?></strong>
+                                <small class="text-muted d-block"><?= $myomla ?></small>
+                            </td>
+                        </tr>
+                        <?php } ?>
+                        <tr class="total-row">
+                            <td colspan="2">
+                                <i class="bi bi-calculator me-2"></i>
+                                الإجمــــالي
+                            </td>
+                            <td>
+                                <?= number_format($total_price, 2) ?>
+                                <small class="d-block" style="opacity: 0.9;"><?= $myomla ?></small>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <?php } else { ?>
+            <div class="alert alert-info text-center" role="alert">
+                <i class="bi bi-info-circle me-2" style="font-size: 2rem;"></i>
+                <h5>لا توجد شواغر متوفرة حالياً</h5>
+                <p class="mb-0">جميع الوحدات مؤجرة</p>
+            </div>
+            <?php } ?>
+        </div>
+    </div>
+</div>
+
+<?php
+    require('../../../foter.hnt');
+} else {
+    // Report Mode (Print Layout)
+?>
+
+<style>
+@media print {
+    body {
+        font-family: 'Arial', sans-serif;
+    }
+}
+
+.report-container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+.report-header {
+    text-align: center;
+    margin-bottom: 30px;
+    border-bottom: 3px solid #189c2a;
+    padding-bottom: 20px;
+}
+
+.report-title {
+    font-size: 24px;
+    font-weight: bold;
+    color: #189c2a;
+    margin-bottom: 10px;
+}
+
+.report-date {
+    font-size: 14px;
+    color: #666;
+}
+
+.report-stats {
+    display: flex;
+    justify-content: space-around;
+    margin-bottom: 30px;
+    padding: 15px;
+    background: #f8f9fa;
+    border-radius: 8px;
+}
+
+.report-stat {
+    text-align: center;
+}
+
+.report-stat-number {
+    font-size: 28px;
+    font-weight: bold;
+    color: #189c2a;
+}
+
+.report-stat-label {
+    font-size: 12px;
+    color: #666;
+}
+
+.report-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 20px;
+}
+
+.report-table thead {
+    background: #189c2a;
+    color: white;
+}
+
+.report-table th,
+.report-table td {
+    padding: 12px;
+    text-align: center;
+    border: 1px solid #ddd;
+}
+
+.report-table tbody tr:nth-child(even) {
+    background: #f8f9fa;
+}
+
+.report-table tfoot {
+    background: #189c2a;
+    color: white;
+    font-weight: bold;
+    font-size: 16px;
+}
+
+.report-table tfoot td {
+    padding: 15px;
+}
+</style>
+
+<div class="report-container">
+    <div class="report-header">
+        <div class="report-title"><?= $sc_title ?></div>
+        <div class="report-date">بتاريخ: <?= $display_date ?></div>
+    </div>
+
+    <div class="report-stats">
+        <div class="report-stat">
+            <div class="report-stat-number"><?= $vacant_count ?></div>
+            <div class="report-stat-label">عدد الشواغر</div>
+        </div>
+        <div class="report-stat">
+            <div class="report-stat-number"><?= number_format($total_price, 2) ?></div>
+            <div class="report-stat-label">إجمالي الإيجارات (<?= $myomla ?>)</div>
+        </div>
+    </div>
+
+    <?php if ($vacant_count > 0) { ?>
+    <table class="report-table">
+        <thead>
+            <tr>
+                <th style="width: 60px;">م</th>
+                <th>العقار</th>
+                <th style="width: 150px;">الإيجار السنوي</th>
+            </tr>
+        </thead>
+        <tbody>
+            <?php
+            $xx = 0;
+            mysql_data_seek($resaq, 0); // Reset pointer
+            while ($rowaq = mysql_fetch_array($resaq)) {
+                $xx++;
+                $property_type = displaysubtype($rowaq['aqarsubtype']);
+                $property_name = displayaqarname($rowaq['idaqar']);
+                $price_formatted = number_format($rowaq['price'], 2);
+            ?>
+            <tr>
+                <td><?= $xx ?></td>
+                <td style="text-align: right;">
+                    <?= $property_type ?> رقم <?= $rowaq['rakam'] ?> موجود في <?= $property_name ?>
+                </td>
+                <td><?= $price_formatted ?> <?= $myomla ?></td>
+            </tr>
+            <?php } ?>
+        </tbody>
+        <tfoot>
+            <tr>
+                <td colspan="2">الإجمــــالي</td>
+                <td><?= number_format($total_price, 2) ?> <?= $myomla ?></td>
+            </tr>
+        </tfoot>
+    </table>
+    <?php } else { ?>
+    <div style="text-align: center; padding: 40px; background: #f8f9fa; border-radius: 8px;">
+        <h4>لا توجد شواغر متوفرة حالياً</h4>
+        <p>جميع الوحدات مؤجرة</p>
+    </div>
+    <?php } ?>
+</div>
+
+<?php
+    require("../../../reportfooter.hnt");
+}
+?>

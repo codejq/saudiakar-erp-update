@@ -15,21 +15,72 @@ $enddatex = isset($enddatex) ? $enddatex : null;
 // Check if this is a report view (print mode)
 $report = isset($report) && $report == 1 ? 1 : 0;
 
-// Include authentication and database
-if ($report == 1) {
-    include_once "../../../nocash.hnt";
-    include_once "../../../report_header.hnt";
-} else {
-    include_once "../../../nocash.hnt";
-    include_once "../../../header.hnt";
-}
-
-// Include required files
+include_once "../../../nocash.hnt";
 require '../arabicTools.class.hnt';
 include_once "arabic_num.class.hnt";
 include_once "amlakfunctions.hnt";
-
 $arabicTools = new ArabicTools();
+
+// Export handler — runs before any HTML output
+if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], true)) {
+    include_once "../../../connectdb.hnt";
+    $_exp_start = isset($_GET['startfromx']) && intval($_GET['startfromx']) ? intval($_GET['startfromx']) : 0;
+    $_exp_end   = isset($_GET['enddatex'])   && intval($_GET['enddatex'])   ? intval($_GET['enddatex'])   : 0;
+    if (!$_exp_start && isset($_GET['startfrom']) && $_GET['startfrom']) {
+        $_d = explode("-", "0-0-0-" . $_GET['startfrom']);
+        if (isset($_d[5])) $_exp_start = mktime(0, 0, 0, $_d[4], $_d[3], $_d[5]);
+    }
+    if (!$_exp_end && isset($_GET['enddate']) && $_GET['enddate']) {
+        $_d = explode("-", "0-0-0-" . $_GET['enddate']);
+        if (isset($_d[5])) $_exp_end = mktime(0, 0, 0, $_d[4], $_d[3], $_d[5]) + 86400;
+    }
+    if (!$_exp_start) $_exp_start = time() - 15768000;
+    if (!$_exp_end)   $_exp_end   = time() + 86400;
+
+    $exp_sql = "SELECT m.idmasrofcod, SUM(m.amount) as xp, mt.masrofkind
+                FROM masrofat m
+                LEFT JOIN masrofattakweed mt ON m.idmasrofcod = mt.idmasrofcod
+                WHERE m.payeddate > '" . intval($_exp_start) . "'
+                AND m.payeddate < '" . intval($_exp_end) . "'
+                GROUP BY m.idmasrofcod, mt.masrofkind
+                ORDER BY xp DESC";
+    $exp_res = mysql_query($exp_sql, $link);
+
+    $exp_headers = ['م', 'نوع المصروف', 'إجمالي القيمة'];
+    $exp_rows = [];
+    $xx = 0;
+    while ($r = mysql_fetch_array($exp_res)) {
+        $xx++;
+        $exp_rows[] = [$xx, $r['masrofkind'] ?: 'غير محدد', number_format($r['xp'], 2, '.', '')];
+    }
+
+    $_exp_type = trim($_GET['export']);
+    $_fn = date('Ymd_His');
+    if ($_exp_type === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="masrofat_eglalyat_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="masrofat_eglalyat_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>';
+    exit;
+}
+
+if ($report == 1) {
+    include_once "../../../report_header.hnt";
+} else {
+    include_once "../../../header.hnt";
+}
 
 // Get current date in Arabic
 $daxx_now = date("H/i/s/m/d/Y");
@@ -262,6 +313,17 @@ if ($report != 1) {
                     <i class="bi bi-x-circle me-2"></i>
                     إلغاء الأمر
                 </button>
+                <?php
+                $_ep = $_GET; unset($_ep['export']);
+                $_eq = http_build_query($_ep);
+                $_eu = 'masrofateglalyat.hnt?' . $_eq . ($_eq ? '&' : '');
+                ?>
+                <a href="<?= htmlspecialchars($_eu . 'export=csv') ?>" class="btn btn-outline-success btn-lg me-2">
+                    <i class="bi bi-filetype-csv me-1"></i>تصدير CSV
+                </a>
+                <a href="<?= htmlspecialchars($_eu . 'export=xls') ?>" class="btn btn-outline-success btn-lg">
+                    <i class="bi bi-file-earmark-excel me-1"></i>تصدير Excel
+                </a>
             </div>
 
             <!-- Statistics Cards -->
