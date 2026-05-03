@@ -372,6 +372,22 @@ function getBooleanTrue() {
     return window.UniverCore && window.UniverCore.BooleanNumber ? window.UniverCore.BooleanNumber.TRUE : 1;
 }
 
+function getBooleanFalse() {
+    return window.UniverCore && window.UniverCore.BooleanNumber ? window.UniverCore.BooleanNumber.FALSE : 0;
+}
+
+function getWorkbookLocale() {
+    if (window.UniverCore && window.UniverCore.LocaleType && window.UniverCore.LocaleType.AR_SA) {
+        return window.UniverCore.LocaleType.AR_SA;
+    }
+
+    return 'ar-SA';
+}
+
+function getWorkbookAppVersion() {
+    return window.UniverCore && window.UniverCore.version ? window.UniverCore.version : '0.21.1';
+}
+
 function getArabicLocaleOverrides() {
     return {
         formula: {
@@ -419,63 +435,184 @@ function normalizeWorkbookDataForRtl(workbookData) {
         return workbookData;
     }
 
+    if (!workbookData.id) {
+        workbookData.id = 'workbook-' + Date.now();
+    }
+
+    if (!workbookData.name) {
+        workbookData.name = getSheetTitle();
+    }
+
+    if (!workbookData.appVersion) {
+        workbookData.appVersion = getWorkbookAppVersion();
+    }
+
+    if (!workbookData.locale) {
+        workbookData.locale = getWorkbookLocale();
+    }
+
+    if (!workbookData.styles) {
+        workbookData.styles = {};
+    }
+
+    if (!Array.isArray(workbookData.sheetOrder)) {
+        workbookData.sheetOrder = Object.keys(workbookData.sheets);
+    }
+
     Object.keys(workbookData.sheets).forEach(function (sheetKey) {
         if (!workbookData.sheets[sheetKey]) {
             workbookData.sheets[sheetKey] = {};
+        }
+
+        if (!workbookData.sheets[sheetKey].id) {
+            workbookData.sheets[sheetKey].id = sheetKey;
+        }
+
+        if (!workbookData.sheets[sheetKey].name) {
+            workbookData.sheets[sheetKey].name = 'Sheet1';
+        }
+
+        if (!workbookData.sheets[sheetKey].tabColor) {
+            workbookData.sheets[sheetKey].tabColor = '';
+        }
+
+        if (typeof workbookData.sheets[sheetKey].hidden === 'undefined') {
+            workbookData.sheets[sheetKey].hidden = getBooleanFalse();
+        }
+
+        if (!workbookData.sheets[sheetKey].rowCount) {
+            workbookData.sheets[sheetKey].rowCount = 1000;
         }
 
         if (!workbookData.sheets[sheetKey].columnCount || workbookData.sheets[sheetKey].columnCount < minimumSheetColumnCount) {
             workbookData.sheets[sheetKey].columnCount = minimumSheetColumnCount;
         }
 
+        if (!workbookData.sheets[sheetKey].freeze) {
+            workbookData.sheets[sheetKey].freeze = {
+                xSplit: 0,
+                ySplit: 0,
+                startRow: -1,
+                startColumn: -1
+            };
+        }
+
+        if (typeof workbookData.sheets[sheetKey].zoomRatio === 'undefined') {
+            workbookData.sheets[sheetKey].zoomRatio = 1;
+        }
+
+        if (typeof workbookData.sheets[sheetKey].scrollTop === 'undefined') {
+            workbookData.sheets[sheetKey].scrollTop = 0;
+        }
+
+        if (typeof workbookData.sheets[sheetKey].scrollLeft === 'undefined') {
+            workbookData.sheets[sheetKey].scrollLeft = 0;
+        }
+
+        if (!workbookData.sheets[sheetKey].defaultColumnWidth) {
+            workbookData.sheets[sheetKey].defaultColumnWidth = 88;
+        }
+
+        if (!workbookData.sheets[sheetKey].defaultRowHeight) {
+            workbookData.sheets[sheetKey].defaultRowHeight = 24;
+        }
+
+        if (!Array.isArray(workbookData.sheets[sheetKey].mergeData)) {
+            workbookData.sheets[sheetKey].mergeData = [];
+        }
+
+        if (!workbookData.sheets[sheetKey].cellData) {
+            workbookData.sheets[sheetKey].cellData = {};
+        }
+
+        if (!workbookData.sheets[sheetKey].rowData) {
+            workbookData.sheets[sheetKey].rowData = {};
+        }
+
+        if (!workbookData.sheets[sheetKey].columnData) {
+            workbookData.sheets[sheetKey].columnData = {};
+        }
+
+        if (typeof workbookData.sheets[sheetKey].showGridlines === 'undefined') {
+            workbookData.sheets[sheetKey].showGridlines = getBooleanTrue();
+        }
+
+        if (!workbookData.sheets[sheetKey].rowHeader) {
+            workbookData.sheets[sheetKey].rowHeader = {
+                width: 46,
+                hidden: getBooleanFalse()
+            };
+        }
+
+        if (!workbookData.sheets[sheetKey].columnHeader) {
+            workbookData.sheets[sheetKey].columnHeader = {
+                height: 20,
+                hidden: getBooleanFalse()
+            };
+        }
+
         workbookData.sheets[sheetKey].rightToLeft = getBooleanTrue();
+    });
+
+    workbookData.sheetOrder = workbookData.sheetOrder.filter(function (sheetId) {
+        return !!workbookData.sheets[sheetId];
+    });
+
+    Object.keys(workbookData.sheets).forEach(function (sheetId) {
+        if (workbookData.sheetOrder.indexOf(sheetId) === -1) {
+            workbookData.sheetOrder.push(sheetId);
+        }
     });
 
     return workbookData;
 }
 
-function applyRuntimeWorksheetRtl(workbook) {
-    if (!workbook || !univerAPI || typeof univerAPI.executeCommand !== 'function' || typeof workbook.getSheets !== 'function') {
-        return;
-    }
-
-    var workbookId = typeof workbook.getId === 'function' ? workbook.getId() : undefined;
-
-    requestAnimationFrame(function () {
-        workbook.getSheets().forEach(function (sheet) {
-            if (!sheet || typeof sheet.getSheetId !== 'function') {
-                return;
-            }
-
-            var params = {
-                subUnitId: sheet.getSheetId(),
-                rightToLeft: getBooleanTrue()
-            };
-
-            if (workbookId) {
-                params.unitId = workbookId;
-            }
-
-            try {
-                univerAPI.executeCommand('sheet.command.set-worksheet-right-to-left', params);
-            } catch (error) {
-                console.error('Applying worksheet RTL failed:', error);
-            }
-        });
-    });
-}
-
 function createBlankWorkbookData() {
+    var sheetId = 'sheet-' + Date.now();
+
     return {
-        id: 'sheet-' + Date.now(),
+        id: 'workbook-' + Date.now(),
         name: getSheetTitle(),
+        appVersion: getWorkbookAppVersion(),
+        locale: getWorkbookLocale(),
+        styles: {},
+        sheetOrder: [sheetId],
         sheets: {
-            ['sheet-' + Date.now()]: {
+            [sheetId]: {
+                id: sheetId,
                 name: 'Sheet1',
+                tabColor: '',
+                hidden: getBooleanFalse(),
+                rowCount: 1000,
                 columnCount: minimumSheetColumnCount,
+                zoomRatio: 1,
+                freeze: {
+                    xSplit: 0,
+                    ySplit: 0,
+                    startRow: -1,
+                    startColumn: -1
+                },
+                scrollTop: 0,
+                scrollLeft: 0,
+                defaultColumnWidth: 88,
+                defaultRowHeight: 24,
+                mergeData: [],
+                cellData: {},
+                rowData: {},
+                columnData: {},
+                showGridlines: getBooleanTrue(),
+                rowHeader: {
+                    width: 46,
+                    hidden: getBooleanFalse()
+                },
+                columnHeader: {
+                    height: 20,
+                    hidden: getBooleanFalse()
+                },
                 rightToLeft: getBooleanTrue()
             }
-        }
+        },
+        resources: []
     };
 }
 
@@ -521,7 +658,6 @@ function bootUniver(workbookData) {
     univer = created.univer;
     univerAPI = created.univerAPI;
     activeWorkbook = univerAPI.createWorkbook(normalizeWorkbookDataForRtl(workbookData || createBlankWorkbookData()));
-    applyRuntimeWorksheetRtl(activeWorkbook);
     refreshToolbarToggleButton();
 }
 
