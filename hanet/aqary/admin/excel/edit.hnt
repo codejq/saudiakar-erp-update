@@ -921,7 +921,9 @@ function buildSheetTableHtml(sheet, sheetName) {
 
 function printCurrentSheet() {
     var context;
-    var printWindow = null;
+    var printFrame;
+    var printDocument;
+    var printHtml;
 
     try {
         context = getActiveSheetContext();
@@ -936,21 +938,19 @@ function printCurrentSheet() {
         return;
     }
 
-    printWindow = window.open('', '_blank', 'width=1400,height=900');
-
-    if (!printWindow) {
-        setStatus('error', 'تعذر فتح نافذة الطباعة');
-        return;
-    }
-
     setStatus('idle', 'جاري تجهيز الورقة للطباعة');
-    printWindow.onafterprint = function () {
-        setStatus('idle', 'جاهز');
-        printWindow.close();
-    };
 
-    printWindow.document.open();
-    printWindow.document.write([
+    printFrame = document.createElement('iframe');
+    printFrame.style.position = 'fixed';
+    printFrame.style.right = '0';
+    printFrame.style.bottom = '0';
+    printFrame.style.width = '0';
+    printFrame.style.height = '0';
+    printFrame.style.border = '0';
+    printFrame.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(printFrame);
+
+    printHtml = [
         '<!doctype html>',
         '<html lang="ar" dir="rtl">',
         '<head>',
@@ -966,11 +966,31 @@ function printCurrentSheet() {
         '</head>',
         '<body>',
         buildSheetTableHtml(context.sheet, context.sheetName),
-        '<script>window.onload=function(){setTimeout(function(){window.print();window.close();},100);};<\/script>',
         '</body>',
         '</html>'
-    ].join(''));
-    printWindow.document.close();
+    ].join('');
+
+    printDocument = printFrame.contentWindow.document;
+    printDocument.open();
+    printDocument.write(printHtml);
+    printDocument.close();
+
+    setTimeout(function () {
+        try {
+            printFrame.contentWindow.focus();
+            printFrame.contentWindow.print();
+            setStatus('idle', 'جاهز');
+        } catch (error) {
+            console.error('Print iframe failed:', error);
+            setStatus('error', 'تعذر فتح نافذة الطباعة');
+        }
+
+        setTimeout(function () {
+            if (printFrame && printFrame.parentNode) {
+                printFrame.parentNode.removeChild(printFrame);
+            }
+        }, 1000);
+    }, 150);
 }
 
 function exportCurrentSheetToExcel() {
