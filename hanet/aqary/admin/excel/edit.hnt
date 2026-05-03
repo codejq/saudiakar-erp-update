@@ -116,6 +116,8 @@ body {
     min-width: 44px;
 }
 
+#print-sheet-btn,
+#export-excel-btn,
 #fullscreen-toggle-btn {
     display: inline-flex;
     align-items: center;
@@ -124,6 +126,8 @@ body {
     min-width: 44px;
 }
 
+#print-sheet-btn i,
+#export-excel-btn i,
 #toolbar-toggle-btn i,
 #fullscreen-toggle-btn i {
     font-size: 1rem;
@@ -239,6 +243,19 @@ body {
         max-width: none;
     }
 }
+
+@media print {
+    html,
+    body {
+        height: auto;
+        background: #ffffff !important;
+    }
+
+    body * {
+        visibility: hidden;
+    }
+}
+
 </style>
 
 <div class="container-fluid p-3 p-lg-4" id="excel-page">
@@ -256,6 +273,12 @@ body {
             </div>
             <button type="button" id="toolbar-toggle-btn" class="btn btn-outline-secondary" aria-expanded="false" title="إظهار أو إخفاء شريط أدوات Univer">
                 <i class="bi bi-layout-sidebar-inset"></i>
+            </button>
+            <button type="button" id="print-sheet-btn" class="btn btn-outline-secondary" title="طباعة الورقة الحالية">
+                <i class="bi bi-printer"></i>
+            </button>
+            <button type="button" id="export-excel-btn" class="btn btn-outline-secondary" title="تصدير الورقة الحالية إلى إكسل">
+                <i class="bi bi-file-earmark-excel"></i>
             </button>
             <button type="button" id="fullscreen-toggle-btn" class="btn btn-outline-secondary" aria-expanded="false" title="عرض المحرر بملء الشاشة">
                 <i class="bi bi-fullscreen"></i>
@@ -729,6 +752,270 @@ function toggleEditorFullscreen() {
     }
 }
 
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function sanitizeFileName(value) {
+    return String(value || 'sheet')
+        .replace(/[\\/:*?"<>|]+/g, '-')
+        .replace(/\s+/g, ' ')
+        .trim() || 'sheet';
+}
+
+function getActiveSheetContext() {
+    var workbook = univerAPI && univerAPI.getActiveWorkbook ? univerAPI.getActiveWorkbook() : activeWorkbook;
+    var payload = getWorkbookPayload();
+    var activeSheet = workbook && typeof workbook.getActiveSheet === 'function' ? workbook.getActiveSheet() : null;
+    var activeSheetId = activeSheet && typeof activeSheet.getSheetId === 'function' ? activeSheet.getSheetId() : null;
+    var activeSheetName = activeSheet && typeof activeSheet.getName === 'function' ? activeSheet.getName() : '';
+    var sheetSnapshot = null;
+
+    if (!activeSheetId && Array.isArray(payload.sheetOrder) && payload.sheetOrder.length) {
+        activeSheetId = payload.sheetOrder[0];
+    }
+
+    if (activeSheetId && payload.sheets && payload.sheets[activeSheetId]) {
+        sheetSnapshot = payload.sheets[activeSheetId];
+    }
+
+    if (!sheetSnapshot && payload.sheets) {
+        activeSheetId = Object.keys(payload.sheets)[0];
+        sheetSnapshot = activeSheetId ? payload.sheets[activeSheetId] : null;
+    }
+
+    if (sheetSnapshot && sheetSnapshot.name) {
+        activeSheetName = sheetSnapshot.name;
+    }
+
+    return {
+        payload: payload,
+        sheetId: activeSheetId,
+        sheetName: activeSheetName || 'Sheet1',
+        sheet: sheetSnapshot
+    };
+}
+
+function getCellDisplayValue(cell) {
+    if (!cell) {
+        return '';
+    }
+
+    if (typeof cell.f === 'string' && cell.f) {
+        return cell.f.charAt(0) === '=' ? cell.f : '=' + cell.f;
+    }
+
+    if (typeof cell.v === 'undefined' || cell.v === null) {
+        return '';
+    }
+
+    if (typeof cell.v === 'object') {
+        try {
+            return JSON.stringify(cell.v);
+        } catch (error) {
+            return '';
+        }
+    }
+
+    return String(cell.v);
+}
+
+function getSheetBounds(sheet) {
+    var maxRow = -1;
+    var maxColumn = -1;
+    var cellData = sheet && sheet.cellData ? sheet.cellData : {};
+
+    Object.keys(cellData).forEach(function (rowKey) {
+        var rowIndex = Number(rowKey);
+        var row = cellData[rowKey] || {};
+
+        Object.keys(row).forEach(function (columnKey) {
+            var columnIndex = Number(columnKey);
+            var value = getCellDisplayValue(row[columnKey]);
+
+            if (value !== '') {
+                if (rowIndex > maxRow) {
+                    maxRow = rowIndex;
+                }
+
+                if (columnIndex > maxColumn) {
+                    maxColumn = columnIndex;
+                }
+            }
+        });
+    });
+
+    return {
+        endRow: Math.max(maxRow, 29),
+        endColumn: Math.max(maxColumn, 9)
+    };
+}
+
+function getColumnLabel(columnIndex) {
+    var label = '';
+    var value = columnIndex + 1;
+
+    while (value > 0) {
+        value -= 1;
+        label = String.fromCharCode(65 + (value % 26)) + label;
+        value = Math.floor(value / 26);
+    }
+
+    return label;
+}
+
+function getOrderedColumnIndexes(sheet, bounds) {
+    var columns = [];
+    var columnIndex;
+    var rtl = sheet && String(sheet.rightToLeft) === String(getBooleanTrue());
+
+    if (rtl) {
+        for (columnIndex = bounds.endColumn; columnIndex >= 0; columnIndex -= 1) {
+            columns.push(columnIndex);
+        }
+
+        return columns;
+    }
+
+    for (columnIndex = 0; columnIndex <= bounds.endColumn; columnIndex += 1) {
+        columns.push(columnIndex);
+    }
+
+    return columns;
+}
+
+function buildSheetTableHtml(sheet, sheetName) {
+    var bounds = getSheetBounds(sheet || {});
+    var columns = getOrderedColumnIndexes(sheet || {}, bounds);
+    var cellData = sheet && sheet.cellData ? sheet.cellData : {};
+    var html = [];
+    var rowIndex;
+
+    html.push('<table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:12px;">');
+    html.push('<caption style="caption-side:top;text-align:right;font-weight:bold;font-size:16px;padding:8px 0;">' + escapeHtml(sheetName) + '</caption>');
+    html.push('<thead><tr><th style="background:#f3f6fb;">#</th>');
+    columns.forEach(function (columnIndex) {
+        html.push('<th style="background:#f3f6fb;">' + escapeHtml(getColumnLabel(columnIndex)) + '</th>');
+    });
+    html.push('</tr></thead><tbody>');
+
+    for (rowIndex = 0; rowIndex <= bounds.endRow; rowIndex += 1) {
+        html.push('<tr>');
+        html.push('<th style="background:#f9fbfe;">' + escapeHtml(rowIndex + 1) + '</th>');
+        columns.forEach(function (columnIndex) {
+            var row = cellData[rowIndex] || cellData[String(rowIndex)] || {};
+            var cell = row[columnIndex] || row[String(columnIndex)] || null;
+            html.push('<td>' + escapeHtml(getCellDisplayValue(cell)) + '</td>');
+        });
+        html.push('</tr>');
+    }
+
+    html.push('</tbody></table>');
+    return html.join('');
+}
+
+function printCurrentSheet() {
+    var context;
+    var printWindow = null;
+
+    try {
+        context = getActiveSheetContext();
+    } catch (error) {
+        console.error('Build print sheet context failed:', error);
+        setStatus('error', 'تعذر تجهيز الورقة للطباعة');
+        return;
+    }
+
+    if (!context.sheet) {
+        setStatus('error', 'لا توجد ورقة حالية للطباعة');
+        return;
+    }
+
+    printWindow = window.open('', '_blank', 'width=1400,height=900');
+
+    if (!printWindow) {
+        setStatus('error', 'تعذر فتح نافذة الطباعة');
+        return;
+    }
+
+    setStatus('idle', 'جاري تجهيز الورقة للطباعة');
+    printWindow.onafterprint = function () {
+        setStatus('idle', 'جاهز');
+        printWindow.close();
+    };
+
+    printWindow.document.open();
+    printWindow.document.write([
+        '<!doctype html>',
+        '<html lang="ar" dir="rtl">',
+        '<head>',
+        '<meta charset="utf-8">',
+        '<title>طباعة الورقة الحالية</title>',
+        '<style>',
+        'html,body{margin:0;padding:0;background:#fff;font-family:Arial,sans-serif;}',
+        'body{padding:12mm;}',
+        'table{direction:rtl;}',
+        'th,td{text-align:center;vertical-align:middle;white-space:nowrap;}',
+        '@page{size:landscape;margin:10mm;}',
+        '</style>',
+        '</head>',
+        '<body>',
+        buildSheetTableHtml(context.sheet, context.sheetName),
+        '<script>window.onload=function(){setTimeout(function(){window.print();window.close();},100);};<\/script>',
+        '</body>',
+        '</html>'
+    ].join(''));
+    printWindow.document.close();
+}
+
+function exportCurrentSheetToExcel() {
+    var context;
+    var workbookTitle;
+    var blob;
+    var url;
+    var link;
+    var html;
+
+    try {
+        context = getActiveSheetContext();
+    } catch (error) {
+        console.error('Build export sheet context failed:', error);
+        setStatus('error', 'تعذر تجهيز الورقة للتصدير');
+        return;
+    }
+
+    if (!context.sheet) {
+        setStatus('error', 'لا توجد ورقة حالية للتصدير');
+        return;
+    }
+
+    workbookTitle = sanitizeFileName(getSheetTitle());
+    html = [
+        '<html lang="ar" dir="rtl">',
+        '<head><meta charset="UTF-8"></head>',
+        '<body>',
+        buildSheetTableHtml(context.sheet, context.sheetName),
+        '</body>',
+        '</html>'
+    ].join('');
+
+    blob = new Blob(['\ufeff', html], { type: 'application/vnd.ms-excel;charset=UTF-8' });
+    url = window.URL.createObjectURL(blob);
+    link = document.createElement('a');
+    link.href = url;
+    link.download = sanitizeFileName(workbookTitle + '-' + context.sheetName) + '.xls';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+    setStatus('saved', 'تم تصدير الورقة إلى إكسل');
+}
+
 function saveSheet() {
     if (!univerAPI) {
         setStatus('error', 'المحرر غير جاهز للحفظ');
@@ -792,6 +1079,8 @@ function initEditor() {
 
 document.getElementById('save-btn').addEventListener('click', saveSheet);
 document.getElementById('toolbar-toggle-btn').addEventListener('click', toggleUniverToolbar);
+document.getElementById('print-sheet-btn').addEventListener('click', printCurrentSheet);
+document.getElementById('export-excel-btn').addEventListener('click', exportCurrentSheetToExcel);
 document.getElementById('fullscreen-toggle-btn').addEventListener('click', toggleEditorFullscreen);
 
 document.getElementById('sheet-title-input').addEventListener('input', function () {
@@ -811,6 +1100,15 @@ window.addEventListener('beforeunload', function () {
     if (univer && typeof univer.dispose === 'function') {
         univer.dispose();
     }
+});
+
+window.addEventListener('beforeprint', function () {
+    document.body.classList.add('printing-sheet');
+});
+
+window.addEventListener('afterprint', function () {
+    document.body.classList.remove('printing-sheet');
+    setStatus('idle', 'جاهز');
 });
 
 document.addEventListener('fullscreenchange', refreshFullscreenToggleButton);
