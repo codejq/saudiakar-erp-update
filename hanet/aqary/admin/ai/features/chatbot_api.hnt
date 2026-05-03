@@ -1,0 +1,169 @@
+<?php
+/**
+ * AI Chatbot API
+ * Handles chat conversations with AI assistant
+ */
+
+// Include legacy system database connection
+require_once('../../../connectdb.hnt');
+
+// Mark as AJAX request for authentication
+$is_ajax_request = true;
+
+// Include authentication - will validate user session
+require_once('../../../reqloginajax.hnt');
+
+// Increase execution time for slow AI models
+set_time_limit(180); // 3 minutes
+
+// Set JSON response header
+header('Content-Type: application/json; charset=utf-8');
+
+// Include library classes
+require_once('../lib/OpenRouterAPI.class.php');
+
+// Check if user is authenticated
+if (!isset($_SESSION['useridv'])) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+
+/**
+ * Get friendly model name from model ID
+ */
+function getFriendlyModelName($model_id) {
+    $model_names = [
+        'openai/gpt-3.5-turbo' => 'GPT-3.5 Turbo',
+        'openai/gpt-4-turbo-preview' => 'GPT-4 Turbo',
+        'openai/gpt-4' => 'GPT-4',
+        'openai/gpt-4o' => 'GPT-4o',
+        'openai/gpt-4o-mini' => 'GPT-4o Mini',
+        'anthropic/claude-3-opus' => 'Claude 3 Opus',
+        'anthropic/claude-3-sonnet' => 'Claude 3 Sonnet',
+        'anthropic/claude-3-haiku' => 'Claude 3 Haiku',
+        'google/gemini-pro' => 'Gemini Pro',
+        'google/gemini-flash-1.5' => 'Gemini Flash 1.5',
+        'meta-llama/llama-3.1-70b-instruct' => 'Llama 3.1 70B'
+    ];
+    
+    return $model_names[$model_id] ?? $model_id;
+}
+
+try {
+    // Get input
+    $message = isset($_POST['message']) ? trim($_POST['message']) : '';
+    $history = isset($_POST['history']) ? json_decode($_POST['history'], true) : [];
+
+    if (empty($message)) {
+        throw new Exception('الرجاء إدخال رسالة');
+    }
+
+    // Initialize AI
+    $ai = new OpenRouterAPI($link);
+
+    // Set feature for logging
+    $_REQUEST['feature'] = 'chatbot';
+
+    // Build conversation context with system message
+    $messages = [
+        [
+            'role' => 'system',
+            'content' => buildSystemPrompt()
+        ]
+    ];
+
+    // Add conversation history (limit to last 10 messages to save tokens)
+    $recent_history = array_slice($history, -10);
+    foreach ($recent_history as $msg) {
+        $messages[] = [
+            'role' => $msg['role'],
+            'content' => $msg['content']
+        ];
+    }
+
+    // Generate response
+    $options = [
+        'max_tokens' => 500,
+        'temperature' => 0.7,
+        'cache' => false // Don't cache chat responses
+    ];
+
+    $start_time = microtime(true);
+    $response = $ai->chat($messages, $options);
+    $end_time = microtime(true);
+
+    if (!$response) {
+        throw new Exception('فشل في الحصول على رد. يرجى المحاولة مرة أخرى.');
+    }
+
+    // Get usage stats
+    $usage = $ai->getUsageStats();
+    $execution_time = round(($end_time - $start_time) * 1000);
+
+    // Calculate cost
+    $cost = 0;
+    if (isset($usage['prompt_tokens']) && isset($usage['completion_tokens'])) {
+        $input_cost = ($usage['prompt_tokens'] / 1000) * 0.0005;
+        $output_cost = ($usage['completion_tokens'] / 1000) * 0.0015;
+        $cost = $input_cost + $output_cost;
+    }
+
+    // Return success response
+    echo json_encode([
+        'success' => true,
+        'response' => $response,
+        'stats' => [
+            'tokens' => $usage['total_tokens'] ?? 0,
+            'cost' => number_format($cost, 6),
+            'execution_time_ms' => $execution_time,
+            'model' => getFriendlyModelName($ai->getLastModel())
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'message' => $e->getMessage(),
+        'error_details' => [
+            'file' => basename($e->getFile()),
+            'line' => $e->getLine(),
+            'trace' => $e->getTraceAsString()
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+/**
+ * Build system prompt for the chatbot
+ */
+function buildSystemPrompt() {
+    return "أنت مساعد ذكي لنظام إدارة العقارات السعودي. دورك هو مساعدة المستخدمين في:
+
+1. إدارة العقارات: إضافة وتعديل العقارات، المالكين، والوحدات
+2. إدارة العقود: إنشاء وتجديد عقود الإيجار
+3. إدارة المستأجرين: متابعة المستأجرين والدفعات
+4. التقارير المالية: عرض وفهم التقارير المالية
+5. ميزات الذكاء الاصطناعي المتاحة في النظام
+
+المبادئ التوجيهية:
+- تحدث باللغة العربية الفصحى
+- كن واضحاً ومفيداً ومختصراً
+- قدم خطوات عملية عندما يُطلب منك
+- إذا لم تكن متأكداً من شيء، اعترف بذلك
+- ركز على نظام إدارة العقارات السعودي
+- اذكر الميزات المتاحة في النظام عند الحاجة
+
+الميزات المتوفرة:
+- مولد وصف العقارات بالذكاء الاصطناعي
+- مولد رسائل البريد الإلكتروني
+- المساعد الذكي (أنت)
+- تحليل البيانات والتقارير
+- إدارة المالكين والمستأجرين
+- متابعة الدفعات والعقود
+- تكامل مع منصة إيجار الإلكترونية
+
+تذكر: أنت هنا للمساعدة وتسهيل استخدام النظام.";
+}
+?>

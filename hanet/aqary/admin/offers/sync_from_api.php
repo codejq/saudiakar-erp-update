@@ -20,14 +20,15 @@ require_once("../../connectdb.hnt");
 require_once("ApiKey.php");
 
 // Database setup
-$qdb_db_offers = "aqary_offers";
-$offers_link = mysql_connect($qdb_server.":".$qdb_port, $qdb_user, $qdb_pass);
+$offers_link = mysql_connect($qdb_server.":".$qdb_port, $qdb_user, $qdb_pass, true);
 
 if (!$offers_link) {
     die("Failed to connect to MySQL server: " . mysql_error());
 }
 
-mysql_select_db($qdb_db_offers, $offers_link);
+if (!mysql_select_db($qdb_db_offers, $offers_link)) {
+    die("Failed to select database '{$qdb_db_offers}': " . mysql_error($offers_link));
+}
 
 // Set UTF-8 character set for proper Arabic text handling
 mysql_query("SET NAMES 'utf8mb4'", $offers_link);

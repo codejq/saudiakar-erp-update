@@ -1,0 +1,426 @@
+<?php
+/**
+ * AI Report Generator API
+ * Generates intelligent reports from property data
+ */
+
+// Include legacy system database connection
+require_once('../../../connectdb.hnt');
+
+// Mark as AJAX request for authentication
+$is_ajax_request = true;
+
+// Include authentication - will validate user session
+require_once('../../../reqloginajax.hnt');
+
+// Increase execution time for AI models
+set_time_limit(180); // 3 minutes
+
+// Set JSON response header
+header('Content-Type: application/json; charset=utf-8');
+
+// Include library classes
+require_once('../lib/OpenRouterAPI.class.php');
+
+// Check if user is authenticated
+if (!isset($_SESSION['useridv'])) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+/**
+ * Get friendly model name from model ID
+ */
+function getFriendlyModelName($model_id) {
+    $model_names = [
+        'openai/gpt-3.5-turbo' => 'GPT-3.5 Turbo',
+        'openai/gpt-4-turbo-preview' => 'GPT-4 Turbo',
+        'openai/gpt-4' => 'GPT-4',
+        'openai/gpt-4o' => 'GPT-4o',
+        'openai/gpt-4o-mini' => 'GPT-4o Mini',
+        'anthropic/claude-3-opus' => 'Claude 3 Opus',
+        'anthropic/claude-3-sonnet' => 'Claude 3 Sonnet',
+        'anthropic/claude-3-haiku' => 'Claude 3 Haiku',
+        'google/gemini-pro' => 'Gemini Pro',
+        'google/gemini-flash-1.5' => 'Gemini Flash 1.5',
+        'meta-llama/llama-3.1-70b-instruct' => 'Llama 3.1 70B'
+    ];
+
+    return $model_names[$model_id] ?? $model_id;
+}
+
+try {
+    // Get input parameters
+    $report_type = $_POST['report_type'] ?? '';
+    $time_period = $_POST['time_period'] ?? 'current_year';
+    $start_date = $_POST['start_date'] ?? '';
+    $end_date = $_POST['end_date'] ?? '';
+    $additional_context = $_POST['additional_context'] ?? '';
+
+    if (empty($report_type)) {
+        throw new Exception('يجب تحديد نوع التقرير');
+    }
+
+    // Calculate date range
+    list($date_from, $date_to) = calculateDateRange($time_period, $start_date, $end_date);
+
+    // Fetch data based on report type
+    $data = fetchReportData($link, $report_type, $date_from, $date_to);
+
+    // Build the AI prompt
+    $prompt = buildReportPrompt($report_type, $data, $date_from, $date_to, $additional_context);
+
+    // Initialize AI
+    $ai = new OpenRouterAPI($link);
+
+    // Set feature for logging
+    $_REQUEST['feature'] = 'report_generator';
+
+    // Generate report
+    $options = [
+        'max_tokens' => 1500,
+        'temperature' => 0.6, // More focused and consistent
+        'cache' => false // Reports should be fresh
+    ];
+
+    $start_time = microtime(true);
+    $generated_report = $ai->complete($prompt, $options);
+    $end_time = microtime(true);
+
+    if (!$generated_report) {
+        throw new Exception('فشل في الحصول على استجابة من AI. يرجى التحقق من الإعدادات والاتصال بالإنترنت.');
+    }
+
+    // Get usage stats
+    $usage = $ai->getUsageStats();
+    $execution_time = round(($end_time - $start_time) * 1000);
+
+    // Calculate cost
+    $cost = 0;
+    if (isset($usage['prompt_tokens']) && isset($usage['completion_tokens'])) {
+        $input_cost = ($usage['prompt_tokens'] / 1000) * 0.0005;
+        $output_cost = ($usage['completion_tokens'] / 1000) * 0.0015;
+        $cost = $input_cost + $output_cost;
+    }
+
+    // Return success response
+    echo json_encode([
+        'success' => true,
+        'report' => $generated_report,
+        'stats' => [
+            'tokens' => $usage['total_tokens'] ?? 0,
+            'cost' => number_format($cost, 6),
+            'execution_time_ms' => $execution_time,
+            'model' => getFriendlyModelName($ai->getLastModel())
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'message' => $e->getMessage(),
+        'error_details' => [
+            'file' => basename($e->getFile()),
+            'line' => $e->getLine(),
+            'trace' => $e->getTraceAsString()
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+/**
+ * Calculate date range based on time period
+ */
+function calculateDateRange($time_period, $start_date, $end_date) {
+    $now = time();
+
+    switch ($time_period) {
+        case 'current_month':
+            return [
+                strtotime('first day of this month'),
+                strtotime('last day of this month')
+            ];
+
+        case 'last_month':
+            return [
+                strtotime('first day of last month'),
+                strtotime('last day of last month')
+            ];
+
+        case 'current_quarter':
+            $quarter = ceil(date('n') / 3);
+            $first_month = ($quarter - 1) * 3 + 1;
+            return [
+                strtotime(date('Y') . '-' . $first_month . '-01'),
+                strtotime('last day of +' . (2 + ($quarter - 1) * 3) . ' months', strtotime(date('Y') . '-01-01'))
+            ];
+
+        case 'current_year':
+            return [
+                strtotime(date('Y') . '-01-01'),
+                strtotime(date('Y') . '-12-31')
+            ];
+
+        case 'last_year':
+            $last_year = date('Y') - 1;
+            return [
+                strtotime($last_year . '-01-01'),
+                strtotime($last_year . '-12-31')
+            ];
+
+        case 'custom':
+            if (!empty($start_date) && !empty($end_date)) {
+                return [strtotime($start_date), strtotime($end_date)];
+            }
+            throw new Exception('يجب تحديد تاريخ البداية والنهاية للفترة المخصصة');
+
+        default:
+            throw new Exception('فترة زمنية غير صالحة');
+    }
+}
+
+/**
+ * Fetch report data from database
+ */
+function fetchReportData($link, $report_type, $date_from, $date_to) {
+    $data = [];
+
+    switch ($report_type) {
+        case 'properties':
+            $data = fetchPropertiesData($link);
+            break;
+
+        case 'revenue':
+            $data = fetchRevenueData($link, $date_from, $date_to);
+            break;
+
+        case 'occupancy':
+            $data = fetchOccupancyData($link);
+            break;
+
+        case 'performance':
+            $data = fetchPerformanceData($link, $date_from, $date_to);
+            break;
+
+        default:
+            throw new Exception('نوع تقرير غير صالح');
+    }
+
+    return $data;
+}
+
+/**
+ * Fetch properties data
+ */
+function fetchPropertiesData($link) {
+    $data = ['properties' => [], 'units' => [], 'summary' => []];
+
+    // Get properties count
+    $sql = "SELECT COUNT(*) as total FROM amlak";
+    $result = mysqli_query($link, $sql);
+    $data['summary']['total_properties'] = mysqli_fetch_assoc($result)['total'];
+
+    // Get units count
+    $sql = "SELECT COUNT(*) as total FROM amlakdetails";
+    $result = mysqli_query($link, $sql);
+    $data['summary']['total_units'] = mysqli_fetch_assoc($result)['total'];
+
+    // Get occupied units
+    $sql = "SELECT COUNT(*) as total FROM amlakdetails WHERE mostagerid > 0";
+    $result = mysqli_query($link, $sql);
+    $data['summary']['occupied_units'] = mysqli_fetch_assoc($result)['total'];
+
+    // Get vacant units
+    $data['summary']['vacant_units'] = $data['summary']['total_units'] - $data['summary']['occupied_units'];
+
+    // Get properties by type
+    $sql = "SELECT aqartype, COUNT(*) as count FROM amlak GROUP BY aqartype";
+    $result = mysqli_query($link, $sql);
+    while ($row = mysqli_fetch_assoc($result)) {
+        $data['properties'][] = $row;
+    }
+
+    return $data;
+}
+
+/**
+ * Fetch revenue data
+ */
+function fetchRevenueData($link, $date_from, $date_to) {
+    $data = ['payments' => [], 'summary' => []];
+
+    // Get total payments
+    $sql = "SELECT SUM(dof3at) as total_collected, COUNT(*) as payment_count
+            FROM aksat
+            WHERE iscomplete = 1 AND kastdate >= ? AND kastdate <= ?";
+    $stmt = mysqli_prepare($link, $sql);
+    mysqli_stmt_bind_param($stmt, 'ii', $date_from, $date_to);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $summary = mysqli_fetch_assoc($result);
+    $data['summary']['total_collected'] = $summary['total_collected'] ?? 0;
+    $data['summary']['payment_count'] = $summary['payment_count'] ?? 0;
+    mysqli_stmt_close($stmt);
+
+    // Get pending payments
+    $sql = "SELECT SUM(kastvalue - dof3at) as total_pending, COUNT(*) as pending_count
+            FROM aksat
+            WHERE iscomplete = 0 AND kastdate >= ? AND kastdate <= ?";
+    $stmt = mysqli_prepare($link, $sql);
+    mysqli_stmt_bind_param($stmt, 'ii', $date_from, $date_to);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $summary = mysqli_fetch_assoc($result);
+    $data['summary']['total_pending'] = $summary['total_pending'] ?? 0;
+    $data['summary']['pending_count'] = $summary['pending_count'] ?? 0;
+    mysqli_stmt_close($stmt);
+
+    // Get overdue payments
+    $now = time();
+    $sql = "SELECT SUM(kastvalue - dof3at) as total_overdue, COUNT(*) as overdue_count
+            FROM aksat
+            WHERE iscomplete = 0 AND kastdate < ?";
+    $stmt = mysqli_prepare($link, $sql);
+    mysqli_stmt_bind_param($stmt, 'i', $now);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $summary = mysqli_fetch_assoc($result);
+    $data['summary']['total_overdue'] = $summary['total_overdue'] ?? 0;
+    $data['summary']['overdue_count'] = $summary['overdue_count'] ?? 0;
+    mysqli_stmt_close($stmt);
+
+    return $data;
+}
+
+/**
+ * Fetch occupancy data
+ */
+function fetchOccupancyData($link) {
+    $data = ['summary' => [], 'by_type' => []];
+
+    // Get total units
+    $sql = "SELECT COUNT(*) as total FROM amlakdetails";
+    $result = mysqli_query($link, $sql);
+    $data['summary']['total_units'] = mysqli_fetch_assoc($result)['total'];
+
+    // Get occupied units
+    $sql = "SELECT COUNT(*) as total FROM amlakdetails WHERE mostagerid > 0";
+    $result = mysqli_query($link, $sql);
+    $data['summary']['occupied_units'] = mysqli_fetch_assoc($result)['total'];
+
+    // Calculate occupancy rate
+    if ($data['summary']['total_units'] > 0) {
+        $data['summary']['occupancy_rate'] = round(($data['summary']['occupied_units'] / $data['summary']['total_units']) * 100, 2);
+    } else {
+        $data['summary']['occupancy_rate'] = 0;
+    }
+
+    // Get occupancy by property
+    $sql = "SELECT a.aqarname, a.aqartype,
+            COUNT(ad.idsubaqar) as total_units,
+            SUM(CASE WHEN ad.mostagerid > 0 THEN 1 ELSE 0 END) as occupied_units
+            FROM amlak a
+            LEFT JOIN amlakdetails ad ON a.idaqar = ad.idaqar
+            GROUP BY a.idaqar, a.aqarname, a.aqartype
+            HAVING total_units > 0
+            ORDER BY occupied_units DESC
+            LIMIT 10";
+    $result = mysqli_query($link, $sql);
+    while ($row = mysqli_fetch_assoc($result)) {
+        $row['occupancy_rate'] = round(($row['occupied_units'] / $row['total_units']) * 100, 2);
+        $data['by_type'][] = $row;
+    }
+
+    return $data;
+}
+
+/**
+ * Fetch performance data
+ */
+function fetchPerformanceData($link, $date_from, $date_to) {
+    $data = ['summary' => [], 'by_property' => []];
+
+    // Get total revenue
+    $sql = "SELECT SUM(dof3at) as total_revenue
+            FROM aksat
+            WHERE kastdate >= ? AND kastdate <= ?";
+    $stmt = mysqli_prepare($link, $sql);
+    mysqli_stmt_bind_param($stmt, 'ii', $date_from, $date_to);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $data['summary']['total_revenue'] = mysqli_fetch_assoc($result)['total_revenue'] ?? 0;
+    mysqli_stmt_close($stmt);
+
+    // Get collection rate
+    $sql = "SELECT
+            SUM(kastvalue) as total_expected,
+            SUM(dof3at) as total_collected
+            FROM aksat
+            WHERE kastdate >= ? AND kastdate <= ?";
+    $stmt = mysqli_prepare($link, $sql);
+    mysqli_stmt_bind_param($stmt, 'ii', $date_from, $date_to);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $summary = mysqli_fetch_assoc($result);
+    if ($summary['total_expected'] > 0) {
+        $data['summary']['collection_rate'] = round(($summary['total_collected'] / $summary['total_expected']) * 100, 2);
+    } else {
+        $data['summary']['collection_rate'] = 0;
+    }
+    mysqli_stmt_close($stmt);
+
+    // Get average rent
+    $sql = "SELECT AVG(price) as avg_rent FROM amlakdetails WHERE mostagerid > 0";
+    $result = mysqli_query($link, $sql);
+    $data['summary']['avg_rent'] = mysqli_fetch_assoc($result)['avg_rent'] ?? 0;
+
+    return $data;
+}
+
+/**
+ * Build AI prompt for report generation
+ */
+function buildReportPrompt($report_type, $data, $date_from, $date_to, $additional_context) {
+    $date_from_str = date('Y-m-d', $date_from);
+    $date_to_str = date('Y-m-d', $date_to);
+
+    $report_types = [
+        'properties' => 'تقرير العقارات',
+        'revenue' => 'تقرير الإيرادات',
+        'occupancy' => 'تقرير الإشغال',
+        'performance' => 'تقرير الأداء'
+    ];
+
+    $report_name = $report_types[$report_type] ?? 'تقرير عام';
+
+    $prompt = "أنت محلل عقاري خبير في نظام إدارة العقارات السعودي.\n\n";
+    $prompt .= "مهمتك: إنشاء $report_name شامل واحترافي باللغة العربية.\n\n";
+    $prompt .= "الفترة الزمنية: من $date_from_str إلى $date_to_str\n\n";
+
+    if (!empty($additional_context)) {
+        $prompt .= "تعليمات إضافية: $additional_context\n\n";
+    }
+
+    $prompt .= "البيانات:\n";
+    $prompt .= json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT) . "\n\n";
+
+    $prompt .= "المطلوب:\n";
+    $prompt .= "1. ملخص تنفيذي قصير\n";
+    $prompt .= "2. تحليل مفصل للبيانات\n";
+    $prompt .= "3. النقاط الإيجابية والسلبية\n";
+    $prompt .= "4. رؤى وملاحظات مهمة\n";
+    $prompt .= "5. توصيات عملية\n\n";
+
+    $prompt .= "المواصفات:\n";
+    $prompt .= "- استخدم اللغة العربية الفصحى\n";
+    $prompt .= "- كن واضحاً ومختصراً ومفيداً\n";
+    $prompt .= "- اعرض الأرقام والنسب المئوية\n";
+    $prompt .= "- استخدم تنسيق احترافي مع عناوين واضحة\n";
+    $prompt .= "- الطول: 500-800 كلمة\n\n";
+
+    $prompt .= "التقرير:\n";
+
+    return $prompt;
+}
+?>

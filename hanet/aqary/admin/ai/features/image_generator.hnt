@@ -216,6 +216,21 @@ try {
     $hf_token = $ai_config['huggingface_api_token'] ?? null;
     $openai_key = $ai_config['openai_api_key'] ?? null;
 
+    if ($image_provider === 'huggingface') {
+        if (!empty($together_key)) {
+            $image_provider = 'together';
+        } elseif (!empty($openai_key)) {
+            $image_provider = 'openai';
+        } elseif (!empty($ai_config['api_key'])) {
+            $image_provider = 'openrouter';
+        } else {
+            throw new Exception(
+                'مزود Hugging Face للصور لم يعد مدعوماً في هذا المسار. ' .
+                'يرجى استخدام Together AI أو OpenAI أو OpenRouter من إعدادات الذكاء الاصطناعي.'
+            );
+        }
+    }
+
     // Auto mode: try Together first, then Hugging Face, then fallback to OpenAI/OpenRouter
     if ($image_provider === 'auto') {
         if (!empty($together_key)) {
@@ -254,10 +269,11 @@ try {
     } else {
         // Fallback to OpenRouter if configured
         if (!empty($ai_config['api_key'])) {
-            $image_url = generateImageWithOpenRouter($link, $english_prompt, $image_model);
-            $provider_name = 'OpenRouter (' . $image_model . ')';
+            $openrouter_image_model = normalizeOpenRouterImageModel($image_model);
+            $image_url = generateImageWithOpenRouter($link, $english_prompt, $openrouter_image_model);
+            $provider_name = 'OpenRouter (' . $openrouter_image_model . ')';
             $cost = 0.05; // Estimate
-            $model_used = $image_model;
+            $model_used = $openrouter_image_model;
         } else {
             throw new Exception(
                 'لم يتم تكوين أي مفتاح API لإنشاء الصور. ' .
@@ -559,6 +575,27 @@ function getUserPreferredImageModel($link, $user_id) {
 
     // Default to DALL-E 3
     return 'openai/dall-e-3';
+}
+
+/**
+ * Ensure OpenRouter image generation uses an image-capable model.
+ */
+function normalizeOpenRouterImageModel($model) {
+    $model = trim((string)$model);
+
+    $supported_image_models = [
+        'google/gemini-3.1-flash-image-preview',
+        'google/gemini-2.5-flash-image',
+        'black-forest-labs/flux.2-pro',
+        'black-forest-labs/flux.2-flex',
+        'sourceful/riverflow-v2-standard-preview'
+    ];
+
+    if (in_array($model, $supported_image_models, true)) {
+        return $model;
+    }
+
+    return 'google/gemini-2.5-flash-image';
 }
 
 /**

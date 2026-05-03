@@ -1,0 +1,706 @@
+<?php
+$sc_title     = "محرر الجداول";
+$sc_id        = "301";
+$canscroll    = 0;
+include_once "../../nocash.hnt";
+include_once "../../header.hnt";
+include_once "../../connectdb.hnt";
+
+$sheet_id        = intval($_GET['id'] ?? 0);
+$user_id         = intval($_SESSION['useridv'] ?? 1);
+$sheet_title     = 'جدول جديد';
+$sheet_data_json = 'null';
+
+if ($sheet_id > 0) {
+    $stmt = $db->prepare(
+        "SELECT title, sheet_data FROM excel_sheets WHERE id=? AND user_id=?"
+    );
+    $stmt->bind_param('ii', $sheet_id, $user_id);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $sheet  = $result->fetch_assoc();
+    if ($sheet) {
+        $sheet_title     = $sheet['title'];
+        $sheet_data_json = $sheet['sheet_data'] ?: 'null';
+    } else {
+        $sheet_id = 0;
+    }
+}
+?>
+
+<link rel="stylesheet" href="lib/univer/preset-sheets-core.css">
+
+<style>
+html, body {
+    height: 100%;
+}
+
+body {
+    background: #eef3f8;
+}
+
+#excel-page {
+    min-height: calc(100vh - 120px);
+}
+
+#excel-app {
+    min-height: calc(100vh - 120px);
+    display: flex;
+    flex-direction: column;
+    background: #ffffff;
+    border: 1px solid #dbe3ee;
+    border-radius: 18px;
+    overflow: hidden;
+    box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+}
+
+#excel-topbar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    padding: 1rem 1.25rem;
+    background: linear-gradient(135deg, #ffffff 0%, #f8fbff 100%);
+    border-bottom: 1px solid #e5edf6;
+}
+
+#topbar-title {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-width: 0;
+    flex: 1 1 260px;
+}
+
+#topbar-title i {
+    width: 42px;
+    height: 42px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #217346, #34a853);
+    color: #fff;
+    font-size: 1.15rem;
+}
+
+#topbar-text {
+    min-width: 0;
+}
+
+#topbar-text h1 {
+    font-size: 1.05rem;
+    margin: 0;
+    color: #122033;
+    font-weight: 700;
+}
+
+#topbar-text p {
+    margin: 0.15rem 0 0;
+    color: #66758a;
+    font-size: 0.85rem;
+}
+
+#sheet-title-input {
+    min-width: 220px;
+    flex: 1 1 240px;
+    max-width: 360px;
+    font-weight: 600;
+}
+
+#toolbar-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    min-width: 44px;
+}
+
+#fullscreen-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    min-width: 44px;
+}
+
+#toolbar-toggle-btn i,
+#fullscreen-toggle-btn i {
+    font-size: 1rem;
+}
+
+#save-status {
+    display: inline-flex;
+    align-items: center;
+    min-height: 36px;
+    padding: 0.35rem 0.8rem;
+    border-radius: 999px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+#save-status.idle {
+    background: #eef4ff;
+    color: #51627a;
+}
+
+#save-status.saving {
+    background: #fff3cd;
+    color: #8a6d1d;
+}
+
+#save-status.saved {
+    background: #d1e7dd;
+    color: #0f5132;
+}
+
+#save-status.error {
+    background: #f8d7da;
+    color: #842029;
+}
+
+#save-status.warning {
+    background: #ffe5b4;
+    color: #8a5a00;
+}
+
+#editor-warning {
+    margin: 0;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+}
+
+#sheet-shell {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 70vh;
+    background: #f8fbff;
+    direction: rtl;
+}
+
+#univer-container,
+#editor-error {
+    position: absolute;
+    inset: 0;
+}
+
+#univer-container {
+    min-height: 100%;
+    direction: rtl;
+}
+
+#editor-error {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    background: linear-gradient(135deg, #fff7f7 0%, #fff 100%);
+}
+
+#editor-error.is-visible {
+    display: flex;
+}
+
+#editor-error-card {
+    width: min(540px, 100%);
+    background: #ffffff;
+    border: 1px solid #f1c3c8;
+    border-radius: 18px;
+    padding: 1.5rem;
+    box-shadow: 0 16px 32px rgba(132, 32, 41, 0.08);
+}
+
+#editor-error-card h2 {
+    margin: 0 0 0.75rem;
+    font-size: 1.2rem;
+    color: #842029;
+}
+
+#editor-error-card p {
+    margin: 0;
+    color: #6b2830;
+    line-height: 1.7;
+}
+
+@media (max-width: 768px) {
+    #excel-page,
+    #excel-app {
+        min-height: calc(100vh - 90px);
+        border-radius: 0;
+    }
+
+    #excel-topbar {
+        padding: 0.9rem;
+    }
+
+    #sheet-title-input {
+        max-width: none;
+    }
+}
+</style>
+
+<div class="container-fluid p-3 p-lg-4" id="excel-page">
+    <div id="excel-app">
+        <div id="excel-topbar">
+            <a href="index.hnt" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-arrow-right me-1"></i>رجوع
+            </a>
+            <div id="topbar-title">
+                <i class="bi bi-file-earmark-spreadsheet"></i>
+                <div id="topbar-text">
+                    <h1>محرر الجداول</h1>
+                    <p>Univer Sheets داخل المتصفح مع حفظ مباشر إلى النظام الحالي</p>
+                </div>
+            </div>
+            <button type="button" id="toolbar-toggle-btn" class="btn btn-outline-secondary" aria-expanded="false" title="إظهار أو إخفاء شريط أدوات Univer">
+                <i class="bi bi-layout-sidebar-inset"></i>
+            </button>
+            <button type="button" id="fullscreen-toggle-btn" class="btn btn-outline-secondary" aria-expanded="false" title="عرض المحرر بملء الشاشة">
+                <i class="bi bi-fullscreen"></i>
+            </button>
+            <input type="text" id="sheet-title-input" class="form-control" value="<?= htmlspecialchars($sheet_title, ENT_QUOTES, 'UTF-8') ?>" placeholder="اسم الجدول">
+            <button type="button" id="save-btn" class="btn btn-success">
+                <i class="bi bi-save me-1"></i>حفظ
+            </button>
+            <span id="save-status" class="idle">جاهز</span>
+        </div>
+        <div id="editor-warning" class="alert alert-warning d-none px-4 py-3"></div>
+        <div id="sheet-shell">
+            <div id="univer-container"></div>
+            <div id="editor-error">
+                <div id="editor-error-card">
+                    <h2>تعذر تشغيل محرر الجداول</h2>
+                    <p id="editor-error-message"></p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="lib/vendor/react.production.min.js"></script>
+<script src="lib/vendor/react-dom.production.min.js"></script>
+<script src="lib/vendor/rxjs.umd.min.js"></script>
+<script src="lib/vendor/echarts.min.js"></script>
+<script src="lib/univer/presets.umd.js"></script>
+<script src="lib/univer/preset-sheets-core.umd.js"></script>
+<script src="lib/univer/locales/design-fa-IR.js"></script>
+<script src="lib/univer/locales/docs-ui-fa-IR.js"></script>
+<script src="lib/univer/locales/sheets-fa-IR.js"></script>
+<script src="lib/univer/locales/sheets-formula-fa-IR.js"></script>
+<script src="lib/univer/locales/sheets-formula-ui-fa-IR.js"></script>
+<script src="lib/univer/locales/sheets-formula-ui-ar-SA.js"></script>
+<script src="lib/univer/locales/sheets-numfmt-ui-fa-IR.js"></script>
+<script src="lib/univer/locales/sheets-ui-fa-IR.js"></script>
+<script src="lib/univer/locales/ui-fa-IR.js"></script>
+<script src="lib/univer/locales/design-ar-SA.js"></script>
+<script src="lib/univer/locales/docs-ui-ar-SA.js"></script>
+<script src="lib/univer/locales/sheets-ar-SA.js"></script>
+<script src="lib/univer/locales/sheets-ui-ar-SA.js"></script>
+<script src="lib/univer/locales/ui-ar-SA.js"></script>
+<script src="lib/univer/locales/ar-SA.js"></script>
+<script>
+var sheetId = <?= (int) $sheet_id ?>;
+var initialSheetTitle = <?= json_encode($sheet_title, JSON_UNESCAPED_UNICODE) ?>;
+var savedWorkbookPayload = <?= json_encode($sheet_data_json, JSON_UNESCAPED_UNICODE) ?>;
+var univer = null;
+var univerAPI = null;
+var activeWorkbook = null;
+var isToolbarVisible = false;
+var minimumSheetColumnCount = 100;
+
+function setStatus(type, message) {
+    var el = document.getElementById('save-status');
+    el.className = type;
+    el.textContent = message;
+}
+
+function showEditorError(message) {
+    document.getElementById('editor-error-message').textContent = message;
+    document.getElementById('editor-error').classList.add('is-visible');
+}
+
+function hideEditorError() {
+    document.getElementById('editor-error').classList.remove('is-visible');
+}
+
+function showEditorWarning(message) {
+    var el = document.getElementById('editor-warning');
+    el.textContent = message;
+    el.classList.remove('d-none');
+}
+
+function hideEditorWarning() {
+    document.getElementById('editor-warning').classList.add('d-none');
+    document.getElementById('editor-warning').textContent = '';
+}
+
+function ensureDependencies() {
+    return !!(
+        window.React &&
+        window.ReactDOM &&
+        window.rxjs &&
+        window.echarts &&
+        window.UniverPresets &&
+        window.UniverCore &&
+        window.UniverPresetSheetsCore &&
+        window.UniverPresetSheetsCoreArSA
+    );
+}
+
+function parseSavedWorkbookData() {
+    if (!savedWorkbookPayload || savedWorkbookPayload === 'null') {
+        return null;
+    }
+
+    try {
+        return JSON.parse(savedWorkbookPayload);
+    } catch (error) {
+        console.error('Invalid saved workbook JSON:', error);
+        showEditorWarning('تعذر قراءة البيانات المحفوظة، لذلك تم فتح جدول جديد فارغ.');
+        setStatus('warning', 'تم تجاهل البيانات المحفوظة غير الصالحة');
+        return null;
+    }
+}
+
+function getSheetTitle() {
+    return document.getElementById('sheet-title-input').value.trim() || 'جدول جديد';
+}
+
+function getBooleanTrue() {
+    return window.UniverCore && window.UniverCore.BooleanNumber ? window.UniverCore.BooleanNumber.TRUE : 1;
+}
+
+function getArabicLocaleOverrides() {
+    return {
+        formula: {
+            insert: {
+                tooltip: 'الدوال',
+                common: 'الدوال الشائعة'
+            },
+            functionType: {
+                financial: 'المالية',
+                date: 'التاريخ والوقت',
+                math: 'الرياضيات والمثلثات',
+                statistical: 'الإحصائية',
+                lookup: 'البحث والمرجع',
+                database: 'قاعدة البيانات',
+                text: 'النص',
+                logical: 'المنطقية',
+                information: 'المعلومات',
+                engineering: 'الهندسية',
+                cube: 'المكعب',
+                compatibility: 'التوافق',
+                web: 'الويب',
+                array: 'المصفوفات',
+                univer: 'Univer',
+                user: 'مخصصة من المستخدم',
+                definedname: 'الأسماء المعرّفة'
+            },
+            moreFunctions: {
+                confirm: 'تأكيد',
+                prev: 'السابق',
+                next: 'التالي',
+                searchFunctionPlaceholder: 'ابحث عن دالة',
+                allFunctions: 'كل الدوال',
+                syntax: 'الصياغة'
+            },
+            operation: {
+                copyFormulaOnly: 'نسخ الصيغة فقط',
+                pasteFormula: 'لصق الصيغة'
+            }
+        }
+    };
+}
+
+function normalizeWorkbookDataForRtl(workbookData) {
+    if (!workbookData || !workbookData.sheets) {
+        return workbookData;
+    }
+
+    Object.keys(workbookData.sheets).forEach(function (sheetKey) {
+        if (!workbookData.sheets[sheetKey]) {
+            workbookData.sheets[sheetKey] = {};
+        }
+
+        if (!workbookData.sheets[sheetKey].columnCount || workbookData.sheets[sheetKey].columnCount < minimumSheetColumnCount) {
+            workbookData.sheets[sheetKey].columnCount = minimumSheetColumnCount;
+        }
+
+        workbookData.sheets[sheetKey].rightToLeft = getBooleanTrue();
+    });
+
+    return workbookData;
+}
+
+function applyRuntimeWorksheetRtl(workbook) {
+    if (!workbook || !univerAPI || typeof univerAPI.executeCommand !== 'function' || typeof workbook.getSheets !== 'function') {
+        return;
+    }
+
+    var workbookId = typeof workbook.getId === 'function' ? workbook.getId() : undefined;
+
+    requestAnimationFrame(function () {
+        workbook.getSheets().forEach(function (sheet) {
+            if (!sheet || typeof sheet.getSheetId !== 'function') {
+                return;
+            }
+
+            var params = {
+                subUnitId: sheet.getSheetId(),
+                rightToLeft: getBooleanTrue()
+            };
+
+            if (workbookId) {
+                params.unitId = workbookId;
+            }
+
+            try {
+                univerAPI.executeCommand('sheet.command.set-worksheet-right-to-left', params);
+            } catch (error) {
+                console.error('Applying worksheet RTL failed:', error);
+            }
+        });
+    });
+}
+
+function createBlankWorkbookData() {
+    return {
+        id: 'sheet-' + Date.now(),
+        name: getSheetTitle(),
+        sheets: {
+            ['sheet-' + Date.now()]: {
+                name: 'Sheet1',
+                columnCount: minimumSheetColumnCount,
+                rightToLeft: getBooleanTrue()
+            }
+        }
+    };
+}
+
+function bootUniver(workbookData) {
+    if (!ensureDependencies()) {
+        throw new Error('ملفات Univer المحلية لم يتم تحميلها بالكامل.');
+    }
+
+    if (univer && typeof univer.dispose === 'function') {
+        univer.dispose();
+    }
+
+    hideEditorError();
+    document.getElementById('univer-container').innerHTML = '';
+    document.getElementById('univer-container').setAttribute('dir', 'rtl');
+
+    var createUniver = window.UniverPresets.createUniver;
+    var LocaleType = window.UniverCore.LocaleType;
+    var mergeLocales = window.UniverCore.mergeLocales;
+    var UniverSheetsCorePreset = window.UniverPresetSheetsCore.UniverSheetsCorePreset;
+    var activeLocale = LocaleType && LocaleType.AR_SA ? LocaleType.AR_SA : 'ar-SA';
+
+    var created = createUniver({
+        locale: activeLocale,
+        locales: {
+            [activeLocale]: mergeLocales(window.UniverPresetSheetsCoreArSA, getArabicLocaleOverrides())
+        },
+        presets: [
+            UniverSheetsCorePreset({
+                container: 'univer-container',
+                header: isToolbarVisible,
+                toolbar: isToolbarVisible,
+                footer: {
+                    sheetBar: true,
+                    statisticBar: false,
+                    menus: true,
+                    zoomSlider: true
+                }
+            })
+        ]
+    });
+
+    univer = created.univer;
+    univerAPI = created.univerAPI;
+    activeWorkbook = univerAPI.createWorkbook(normalizeWorkbookDataForRtl(workbookData || createBlankWorkbookData()));
+    applyRuntimeWorksheetRtl(activeWorkbook);
+    refreshToolbarToggleButton();
+}
+
+function getWorkbookPayload() {
+    var workbook = univerAPI && univerAPI.getActiveWorkbook ? univerAPI.getActiveWorkbook() : activeWorkbook;
+
+    if (!workbook || typeof workbook.save !== 'function') {
+        throw new Error('لا توجد ورقة عمل جاهزة للحفظ حالياً.');
+    }
+
+    var payload = normalizeWorkbookDataForRtl(workbook.save());
+    payload.name = getSheetTitle();
+    return payload;
+}
+
+function toggleUniverToolbar() {
+    var snapshot = null;
+
+    try {
+        if (univerAPI) {
+            snapshot = getWorkbookPayload();
+        }
+    } catch (error) {
+        console.error('Unable to snapshot workbook before toolbar toggle:', error);
+        setStatus('error', 'تعذر تبديل شريط الأدوات حالياً');
+        return;
+    }
+
+    isToolbarVisible = !isToolbarVisible;
+
+    try {
+        bootUniver(snapshot || createBlankWorkbookData());
+        setStatus('idle', isToolbarVisible ? 'تم إظهار شريط الأدوات' : 'تم إخفاء شريط الأدوات');
+    } catch (error) {
+        console.error('Toolbar toggle failed:', error);
+        isToolbarVisible = !isToolbarVisible;
+        refreshToolbarToggleButton();
+        setStatus('error', 'فشل تبديل شريط الأدوات');
+    }
+}
+
+function isEditorFullscreen() {
+    return document.fullscreenElement === document.getElementById('excel-app');
+}
+
+function toggleEditorFullscreen() {
+    var editor = document.getElementById('excel-app');
+
+    if (!editor) {
+        return;
+    }
+
+    if (isEditorFullscreen()) {
+        if (document.exitFullscreen) {
+            document.exitFullscreen().catch(function (error) {
+                console.error('Exit fullscreen failed:', error);
+                setStatus('error', 'تعذر الخروج من وضع ملء الشاشة');
+            });
+        }
+
+        return;
+    }
+
+    if (editor.requestFullscreen) {
+        editor.requestFullscreen().catch(function (error) {
+            console.error('Enter fullscreen failed:', error);
+            setStatus('error', 'تعذر تشغيل وضع ملء الشاشة');
+        });
+    }
+}
+
+function saveSheet() {
+    if (!univerAPI) {
+        setStatus('error', 'المحرر غير جاهز للحفظ');
+        return;
+    }
+
+    var fd = new FormData();
+    fd.append('action', 'save');
+    fd.append('id', sheetId);
+    fd.append('title', getSheetTitle());
+
+    try {
+        fd.append('sheet_data', JSON.stringify(getWorkbookPayload()));
+    } catch (error) {
+        console.error('Serialize workbook failed:', error);
+        setStatus('error', 'تعذر تجهيز البيانات للحفظ');
+        return;
+    }
+
+    setStatus('saving', 'جاري الحفظ...');
+
+    fetch('ajax.hnt', {
+        method: 'POST',
+        body: fd
+    })
+        .then(function (response) {
+            return response.json();
+        })
+        .then(function (data) {
+            if (!data.success) {
+                throw new Error(data.error || 'فشل الحفظ');
+            }
+
+            sheetId = data.id;
+            history.replaceState(null, '', 'edit.hnt?id=' + sheetId);
+            setStatus('saved', 'تم الحفظ ' + new Date().toLocaleTimeString('ar-SA'));
+        })
+        .catch(function (error) {
+            console.error('Save request failed:', error);
+            setStatus('error', error.message || 'تعذر الاتصال بالخادم');
+        });
+}
+
+function initEditor() {
+    hideEditorWarning();
+    setStatus('idle', 'جاهز');
+
+    var workbookData = parseSavedWorkbookData();
+
+    try {
+        bootUniver(workbookData || createBlankWorkbookData());
+        if (!workbookData) {
+            setStatus('idle', 'جاهز');
+        }
+    } catch (error) {
+        console.error('Boot Univer failed:', error);
+        showEditorError(error.message || 'حدث خطأ أثناء تشغيل Univer.');
+        setStatus('error', 'فشل تحميل المحرر');
+    }
+}
+
+document.getElementById('save-btn').addEventListener('click', saveSheet);
+document.getElementById('toolbar-toggle-btn').addEventListener('click', toggleUniverToolbar);
+document.getElementById('fullscreen-toggle-btn').addEventListener('click', toggleEditorFullscreen);
+
+document.getElementById('sheet-title-input').addEventListener('input', function () {
+    if (document.getElementById('save-status').className !== 'saving') {
+        setStatus('idle', 'جاهز للحفظ');
+    }
+});
+
+document.addEventListener('keydown', function (event) {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        saveSheet();
+    }
+});
+
+window.addEventListener('beforeunload', function () {
+    if (univer && typeof univer.dispose === 'function') {
+        univer.dispose();
+    }
+});
+
+document.addEventListener('fullscreenchange', refreshFullscreenToggleButton);
+
+function refreshToolbarToggleButton() {
+    var button = document.getElementById('toolbar-toggle-btn');
+    var icon = button.querySelector('i');
+    button.setAttribute('aria-expanded', isToolbarVisible ? 'true' : 'false');
+    button.className = isToolbarVisible ? 'btn btn-outline-success' : 'btn btn-outline-secondary';
+    button.title = isToolbarVisible ? 'إخفاء شريط أدوات Univer' : 'إظهار شريط أدوات Univer';
+    icon.className = isToolbarVisible ? 'bi bi-layout-sidebar-inset-reverse' : 'bi bi-layout-sidebar-inset';
+}
+
+function refreshFullscreenToggleButton() {
+    var button = document.getElementById('fullscreen-toggle-btn');
+    var icon = button.querySelector('i');
+    var fullscreen = isEditorFullscreen();
+    button.setAttribute('aria-expanded', fullscreen ? 'true' : 'false');
+    button.className = fullscreen ? 'btn btn-outline-success' : 'btn btn-outline-secondary';
+    button.title = fullscreen ? 'الخروج من وضع ملء الشاشة' : 'عرض المحرر بملء الشاشة';
+    icon.className = fullscreen ? 'bi bi-fullscreen-exit' : 'bi bi-fullscreen';
+}
+
+refreshToolbarToggleButton();
+refreshFullscreenToggleButton();
+initEditor();
+</script>
+
+<?php require("../../foter.hnt"); ?>

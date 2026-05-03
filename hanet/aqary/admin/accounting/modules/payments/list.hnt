@@ -186,13 +186,26 @@ if ($paymentMethod !== '') {
     $filteredParams[] = $paymentMethod;
 }
 
+$paymentsQueryErrors = [];
+
 $countQuery = "SELECT COUNT(*) AS total_rows FROM (" . $filteredPaymentsQuery . ") payment_rows_count";
 $countStmt = $db->prepare($countQuery);
 $totalRows = 0;
 if ($countStmt) {
     bindStatementParams($countStmt, $filteredTypes, $filteredParams);
-    $countStmt->execute();
-    $totalRows = (int)($countStmt->get_result()->fetch_assoc()['total_rows'] ?? 0);
+    if ($countStmt->execute()) {
+        $countResult = $countStmt->get_result();
+        if ($countResult) {
+            $countRow = $countResult->fetch_assoc();
+            $totalRows = (int)($countRow['total_rows'] ?? 0);
+        } else {
+            $paymentsQueryErrors[] = 'Count query get_result failed: ' . $countStmt->error;
+        }
+    } else {
+        $paymentsQueryErrors[] = 'Count query execute failed: ' . $countStmt->error;
+    }
+} else {
+    $paymentsQueryErrors[] = 'Count query prepare failed: ' . $db->error;
 }
 
 $totalPages = max(1, (int)ceil($totalRows / $pageSize));
@@ -205,12 +218,12 @@ $statsQuery = "
         COUNT(*) AS total_payments,
         COALESCE(SUM(payment_rows.amount), 0) AS total_collected,
         COUNT(DISTINCT payment_rows.customer_id) AS unique_customers,
-        COALESCE(SUM(CASE WHEN DATE_FORMAT(payment_rows.entry_date, '%Y-%m') = ? THEN 1 ELSE 0 END), 0) AS current_month_payments
+        COALESCE(SUM(CASE WHEN YEAR(payment_rows.entry_date) = ? AND MONTH(payment_rows.entry_date) = ? THEN 1 ELSE 0 END), 0) AS current_month_payments
     FROM (" . $filteredPaymentsQuery . ") payment_rows
 ";
 $statsStmt = $db->prepare($statsQuery);
-$statsTypes = 's' . $filteredTypes;
-$statsParams = array_merge([date('Y-m')], $filteredParams);
+$statsTypes = 'ii' . $filteredTypes;
+$statsParams = array_merge([(int)date('Y'), (int)date('n')], $filteredParams);
 $paymentsStats = [
     'total_payments' => 0,
     'total_collected' => 0,
@@ -219,8 +232,18 @@ $paymentsStats = [
 ];
 if ($statsStmt) {
     bindStatementParams($statsStmt, $statsTypes, $statsParams);
-    $statsStmt->execute();
-    $paymentsStats = array_merge($paymentsStats, $statsStmt->get_result()->fetch_assoc() ?: []);
+    if ($statsStmt->execute()) {
+        $statsResult = $statsStmt->get_result();
+        if ($statsResult) {
+            $paymentsStats = array_merge($paymentsStats, $statsResult->fetch_assoc() ?: []);
+        } else {
+            $paymentsQueryErrors[] = 'Stats query get_result failed: ' . $statsStmt->error;
+        }
+    } else {
+        $paymentsQueryErrors[] = 'Stats query execute failed: ' . $statsStmt->error;
+    }
+} else {
+    $paymentsQueryErrors[] = 'Stats query prepare failed: ' . $db->error;
 }
 
 $paymentsDataQuery = $filteredPaymentsQuery . " ORDER BY payment_rows.entry_date DESC, payment_rows.entry_id DESC";
@@ -236,9 +259,17 @@ if (!$isPrintMode && $exportType === '') {
 $stmt = $db->prepare($paymentsDataQuery);
 if ($stmt) {
     bindStatementParams($stmt, $paymentsDataTypes, $paymentsDataParams);
-    $stmt->execute();
-    $paymentsResult = $stmt->get_result();
+    if ($stmt->execute()) {
+        $paymentsResult = $stmt->get_result();
+        if (!$paymentsResult) {
+            $paymentsQueryErrors[] = 'Payments data query get_result failed: ' . $stmt->error;
+        }
+    } else {
+        $paymentsQueryErrors[] = 'Payments data query execute failed: ' . $stmt->error;
+        $paymentsResult = false;
+    }
 } else {
+    $paymentsQueryErrors[] = 'Payments data query prepare failed: ' . $db->error;
     $paymentsResult = false;
 }
 
@@ -315,6 +346,12 @@ $currentMonthPayments = (int)$paymentsStats['current_month_payments'];
 
 include_once "../../../../header.hnt";
 ?>
+
+<?php if (!empty($paymentsQueryErrors)) { ?>
+<div class="alert alert-danger" style="margin: 15px; direction: ltr; text-align: left; white-space: pre-wrap;">
+<?php echo htmlspecialchars(implode("\n", $paymentsQueryErrors)); ?>
+</div>
+<?php } ?>
 
 <style>
 :root {

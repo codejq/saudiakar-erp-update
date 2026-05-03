@@ -2,8 +2,8 @@
 require_once("../../connectdb.hnt");
 require_once("../../mysql.php");
 
-$qdb_db_offers = "aqary_offers";
-$offers_link = mysql_connect($qdb_server.":".$qdb_port, $qdb_user, $qdb_pass);
+
+$offers_link = mysql_connect($qdb_server.":".$qdb_port, $qdb_user, $qdb_pass, true);
 
 if (!$offers_link) {
     echo ("Failed to connect to MySQL server: " . mysql_error());
@@ -83,31 +83,34 @@ if ($db_exists) {
 $create_db_query = "CREATE DATABASE IF NOT EXISTS `{$qdb_db_offers}` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci";
 if (!mysql_query($create_db_query, $offers_link)) {
     echo("Error creating database: " . mysql_error($offers_link) . "\n");
+} else {
+    echo "<br> قاعدة البيانات العروض '{$qdb_db_offers}' تم انشاؤها .\n";
 }
-echo "<br> قاعدة البيانات العروض '{$qdb_db_offers}' تم انشاؤها .\n";
 
 // Select the database (now that it exists)
 if (!mysql_select_db($qdb_db_offers, $offers_link)) {
     echo ("Error selecting database: " . mysql_error($offers_link) . "\n");
-}
-echo "Database '{$qdb_db_offers}' selected.\n";
+    return;
+} else {
+    echo "Database '{$qdb_db_offers}' selected.\n";
 
-// Drop any existing tables to remove orphaned tablespaces
-// This handles the case where database didn't exist but .ibd files do
-echo "<br> جاري فحص وحذف أي جداول موجودة (tablespaces)...\n";
-$tables_check = mysql_query("SHOW TABLES", $offers_link);
-if ($tables_check) {
-    $dropped_count = 0;
-    while ($row = mysql_fetch_array($tables_check)) {
-        $table_name = $row[0];
-        if (mysql_query("DROP TABLE IF EXISTS `{$table_name}`", $offers_link)) {
-            $dropped_count++;
+    // Drop any existing tables to remove orphaned tablespaces
+    // This handles the case where database didn't exist but .ibd files do
+    echo "<br> جاري فحص وحذف أي جداول موجودة (tablespaces)...\n";
+    $tables_check = mysql_query("SHOW TABLES", $offers_link);
+    if ($tables_check) {
+        $dropped_count = 0;
+        while ($row = mysql_fetch_array($tables_check)) {
+            $table_name = $row[0];
+            if (mysql_query("DROP TABLE IF EXISTS `{$table_name}`", $offers_link)) {
+                $dropped_count++;
+            }
         }
-    }
-    if ($dropped_count > 0) {
-        echo "<br> تم حذف {$dropped_count} جدول قديم.\n";
-    } else {
-        echo "<br> لا توجد جداول قديمة.\n";
+        if ($dropped_count > 0) {
+            echo "<br> تم حذف {$dropped_count} جدول قديم.\n";
+        } else {
+            echo "<br> لا توجد جداول قديمة.\n";
+        }
     }
 }
 

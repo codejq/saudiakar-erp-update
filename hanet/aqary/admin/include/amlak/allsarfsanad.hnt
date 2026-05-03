@@ -56,6 +56,27 @@ require '../uCal.class.hnt';
 $dcal = new uCal;
 include_once "amlakfunctions.hnt";
 
+function convertGregorianDisplayDateToTimestamp($date_value) {
+    $date_value = trim($date_value);
+    if ($date_value === '') {
+        return 0;
+    }
+
+    $parts = explode('/', $date_value);
+    if (count($parts) !== 3) {
+        return 0;
+    }
+
+    $day = intval($parts[0]);
+    $month = intval($parts[1]);
+    $year = intval($parts[2]);
+    if ($day < 1 || $month < 1 || $year < 1) {
+        return 0;
+    }
+
+    return mktime(0, 0, 0, $month, $day, $year);
+}
+
 // Export handler — runs before any HTML output
 if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], true)) {
     include_once "../../../connectdb.hnt";
@@ -128,7 +149,11 @@ if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], tr
     echo '</table></body></html>'; exit;
 }
 
+if(isset($_POST['ajax_action'])){
+    include_once "../../../reqloginajax.hnt";
+}else{
 include_once "../../../header.hnt";
+}
 
 // Process date filters → unix timestamps (support Hijri and Gregorian)
 $startfrom_ts = 0;
@@ -155,6 +180,17 @@ if ($enddate) {
     $dd2 = $dax2[3]; $mm2 = $dax2[4]; $yy2 = $dax2[5];
 }
 
+if (!$startfrom_ts) {
+    $startfrom_ts = time();
+}
+
+if (!$enddate_ts) {
+    $enddate_ts = (time() + (30 * 86400)) + 86399;
+}
+
+$startfrom_picker_value = date("d/m/Y", $startfrom_ts);
+$enddate_picker_value = date("d/m/Y", $enddate_ts);
+
 // Build shared filter params string for pagination links
 $filter_params  = $search   ? '&search='        . urlencode($search)   : '';
 $filter_params .= $idaqar   ? '&idaqar='         . $idaqar . '&aqarname=' . urlencode($aqarname) : '';
@@ -166,6 +202,52 @@ $filter_params .= $bankid > 0 ? '&bankid=' . $bankid : '';
 
 // Ensure table structure is up to date
 mysql_query("ALTER TABLE sanadsarf ADD attachedimages varchar(500) NOT NULL", $link);
+
+if (isset($_POST['ajax_action']) && $_POST['ajax_action'] == 'update_limited_voucher') {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $edit_sanadid = isset($_POST['edit_sanadid']) ? intval($_POST['edit_sanadid']) : 0;
+    $edit_sanadate = convertGregorianDisplayDateToTimestamp(isset($_POST['edit_sanadate']) ? $_POST['edit_sanadate'] : '');
+    $edit_payment_type = isset($_POST['edit_payment_type']) ? intval($_POST['edit_payment_type']) : 0;
+    $edit_money_source = isset($_POST['edit_money_source']) ? intval($_POST['edit_money_source']) : -1;
+
+    if ($edit_sanadid < 1) {
+        echo json_encode(['success' => false, 'message' => 'رقم السند غير صحيح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    }
+
+    if (!$edit_sanadate) {
+        echo json_encode(['success' => false, 'message' => 'تاريخ السند غير صحيح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    }
+
+    if (!in_array($edit_payment_type, [1, 2, 3, 4, 5], true)) {
+        echo json_encode(['success' => false, 'message' => 'طريقة الصرف غير صحيحة'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    }
+
+    if (!in_array($edit_money_source, [0, 1], true)) {
+        echo json_encode(['success' => false, 'message' => 'مصدر المبلغ غير صحيح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    }
+
+    $existing_voucher = mysql_fetch_array(mysql_query("SELECT sanadid FROM sanadsarf WHERE sanadid='" . $edit_sanadid . "' LIMIT 1", $link));
+    if (!isset($existing_voucher['sanadid']) || !$existing_voucher['sanadid']) {
+        echo json_encode(['success' => false, 'message' => 'السند غير موجود'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    }
+
+    $update_sql = "UPDATE sanadsarf SET sanadate='" . $edit_sanadate . "', payment_type='" . $edit_payment_type . "', money_source='" . $edit_money_source . "' WHERE sanadid='" . $edit_sanadid . "' LIMIT 1";
+    $updated = mysql_query($update_sql, $link);
+
+    if ($updated) {
+        echo json_encode(['success' => true, 'message' => 'تم تحديث بيانات السند بنجاح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    }
+
+    echo json_encode(['success' => false, 'message' => 'تعذر تحديث بيانات السند'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit();
+}
 
 // Handle AJAX delete request
 if ($deltesanadid && $ajax_request == 1) {
@@ -206,6 +288,8 @@ if ($deltesanadid && $ajax_request == 1) {
                     <form name="form" id="filter_form" method="get" action="?">
                         <input type="hidden" name="formuid" id="formuid"
                                value="<?= str_replace('.', '', microtime(true) . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+                        <input type="hidden" name="startfrom" id="startfrom" value="<?= htmlspecialchars(str_replace('/', '-', $startfrom_picker_value)) ?>">
+                        <input type="hidden" name="enddate" id="enddate" value="<?= htmlspecialchars(str_replace('/', '-', $enddate_picker_value)) ?>">
 
                         <div class="row g-3 mb-3">
                             <div class="col-md-3">
@@ -272,20 +356,18 @@ if ($deltesanadid && $ajax_request == 1) {
                                 <label class="form-label fw-bold">
                                     <i class="bi bi-calendar-event me-1"></i>من تاريخ
                                 </label>
-                                <div class="row g-1">
-                                    <div class="col-4"><input type="text" class="form-control form-control-sm" id="dd"  value="<?= $dd  ?>" placeholder="يوم"></div>
-                                    <div class="col-4"><input type="text" class="form-control form-control-sm" id="mm"  value="<?= $mm  ?>" placeholder="شهر"></div>
-                                    <div class="col-4"><input type="text" class="form-control form-control-sm" id="yy"  value="<?= $yy  ?>" placeholder="سنة"></div>
+                                <div class="input-group">
+                                    <input type="text" class="form-control form-control-sm datepicker-input" id="startfrom_picker" value="<?= htmlspecialchars($startfrom_picker_value) ?>" placeholder="dd/mm/yyyy" autocomplete="off" onchange="recalculate();">
+                                    <span class="input-group-text"><i class="bi bi-calendar3"></i></span>
                                 </div>
                             </div>
                             <div class="col-md-3">
                                 <label class="form-label fw-bold">
                                     <i class="bi bi-calendar-check me-1"></i>إلى تاريخ
                                 </label>
-                                <div class="row g-1">
-                                    <div class="col-4"><input type="text" class="form-control form-control-sm" id="dd2" value="<?= $dd2 ?>" placeholder="يوم"></div>
-                                    <div class="col-4"><input type="text" class="form-control form-control-sm" id="mm2" value="<?= $mm2 ?>" placeholder="شهر"></div>
-                                    <div class="col-4"><input type="text" class="form-control form-control-sm" id="yy2" value="<?= $yy2 ?>" placeholder="سنة"></div>
+                                <div class="input-group">
+                                    <input type="text" class="form-control form-control-sm datepicker-input" id="enddate_picker" value="<?= htmlspecialchars($enddate_picker_value) ?>" placeholder="dd/mm/yyyy" autocomplete="off" onchange="recalculate();">
+                                    <span class="input-group-text"><i class="bi bi-calendar3"></i></span>
                                 </div>
                             </div>
                             <div class="col-md-6">
@@ -433,7 +515,7 @@ $total_amount = 0;
                                     if (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) {
                                         $dhd = date("d/m/Y", $row['sanadate']);
                                     } else {
-                                        $dhd = ArabicTools::arabicDate('hj:d/m/Y', $row['sanadate']);
+                                        $dhd = new ArabicTools() -> arabicDate('hj:d/m/Y', $row['sanadate']);
                                     }
 
                                     // Payment type badge
@@ -447,6 +529,7 @@ $total_amount = 0;
 
                                     // Money source badge
                                     $msource = intval($row['money_source']);
+                                    $rowaq_name = isset($rowaq['aqarname']) ? $rowaq['aqarname'] : '-';
                                 ?>
                                 <tr class="text-center">
                                     <td><strong><?= htmlspecialchars($row['sanadid']) ?></strong></td>
@@ -454,7 +537,7 @@ $total_amount = 0;
                                     <td><?= htmlspecialchars($row['amount']) ?></td>
                                     <td><?= htmlspecialchars($row['mowazaf']) ?></td>
                                     <td><?= htmlspecialchars($row['bayan']) ?></td>
-                                    <td><?= isset($rowaq['aqarname']) ? htmlspecialchars($rowaq['aqarname']) : '-' ?></td>
+                                    <td><?= htmlspecialchars($rowaq_name) ?></td>
                                     <td><?= $dhd ?></td>
                                     <td><span class="badge bg-<?= $payColor ?>"><i class="bi <?= $payIcon ?> me-1"></i><?= $payLabel ?></span></td>
                                     <td>
@@ -468,9 +551,18 @@ $total_amount = 0;
                                         <div class="btn-group btn-group-sm" role="group">
                                             <?= $attachedimagelink ?>
                                             <button type="button" class="btn btn-sm btn-outline-info"
-                                                    onclick="openvbs('<?= isset($server) ? $server : '' ?>/aqary/admin/include/amlak/read_word_voucher.hnt?sanadid=<?= $row['sanadid'] ?>');"
-                                                    title="فتح بالوورد">
-                                                <i class="bi bi-file-word"></i>
+                                                    data-sanadid="<?= intval($row['sanadid']) ?>"
+                                                    data-mostafeed="<?= htmlspecialchars($row['mostafeed'], ENT_QUOTES) ?>"
+                                                    data-amount="<?= htmlspecialchars(number_format($row['amount'], 2), ENT_QUOTES) ?>"
+                                                    data-bayan="<?= htmlspecialchars($row['bayan'], ENT_QUOTES) ?>"
+                                                    data-aqarname="<?= htmlspecialchars($rowaq_name, ENT_QUOTES) ?>"
+                                                    data-mowazaf="<?= htmlspecialchars($row['mowazaf'], ENT_QUOTES) ?>"
+                                                    data-edit-date="<?= htmlspecialchars(date('d/m/Y', $row['sanadate']), ENT_QUOTES) ?>"
+                                                    data-payment-type="<?= intval($ptype) ?>"
+                                                    data-money-source="<?= intval($msource) ?>"
+                                                    onclick="openEditVoucherModal(this);"
+                                                    title="تعديل البيانات المحددة">
+                                                <i class="bi bi-pencil-square"></i>
                                             </button>
                                             <a href="selectprintform.hnt?formtype=paymentvaoucher&id=<?= $row['sanadid'] ?>"
                                                class="btn btn-sm btn-primary" target="_blank" title="عرض">
@@ -512,8 +604,91 @@ $total_amount = 0;
 
 <iframe style="display:none" name="wordd" id="wordd"></iframe>
 
+<style>
+div.datepicker,
+.datepicker-dropdown {
+    z-index: 2000 !important;
+}
+</style>
+
+<div class="modal fade" id="editVoucherModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">تعديل بيانات سند الصرف</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form id="editVoucherForm">
+                <div class="modal-body">
+                    <input type="hidden" name="ajax_action" value="update_limited_voucher">
+                    <input type="hidden" name="edit_sanadid" id="edit_sanadid">
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">رقم السند</label>
+                            <input type="text" class="form-control bg-light text-muted" id="edit_readonly_sanadid" readonly>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">المستفيد</label>
+                            <input type="text" class="form-control bg-light text-muted" id="edit_readonly_mostafeed" readonly>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">المبلغ</label>
+                            <input type="text" class="form-control bg-light text-muted" id="edit_readonly_amount" readonly>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">العقار</label>
+                            <input type="text" class="form-control bg-light text-muted" id="edit_readonly_aqarname" readonly>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">المستلم</label>
+                            <input type="text" class="form-control bg-light text-muted" id="edit_readonly_mowazaf" readonly>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">البيان</label>
+                            <input type="text" class="form-control bg-light text-muted" id="edit_readonly_bayan" readonly>
+                        </div>
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold">تاريخ السند</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control voucher-edit-datepicker" name="edit_sanadate" id="edit_sanadate" placeholder="dd/mm/yyyy" autocomplete="off" required>
+                                <span class="input-group-text voucher-edit-datepicker-trigger"><i class="bi bi-calendar3"></i></span>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold">طريقة الصرف</label>
+                            <select class="form-select" name="edit_payment_type" id="edit_payment_type" required>
+                                <option value="1">نقداً</option>
+                                <option value="2">شيك</option>
+                                <option value="3">طريقة أخرى</option>
+                                <option value="4">تحويل بنكي</option>
+                                <option value="5">شبكة</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold">مصدر المبلغ</label>
+                            <select class="form-select" name="edit_money_source" id="edit_money_source" required>
+                                <option value="0">من حساب المكتب</option>
+                                <option value="1">من حساب المالك</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="alert alert-light border mt-3 mb-0">يمكن تعديل التاريخ وطريقة الصرف ومصدر المبلغ فقط. باقي البيانات للعرض فقط.</div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                    <button type="submit" class="btn btn-primary" id="saveVoucherChangesBtn">حفظ التعديلات</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 <script>
     // Modern ES6+ JavaScript
+
+let editVoucherModalInstance = null;
 
 // Open Word voucher
 const openWordVoucher = (sanadid) => {
@@ -567,6 +742,26 @@ const deleteVoucher = async (sanadid) => {
     }
 };
 
+function openEditVoucherModal(button) {
+    const data = button.dataset;
+    $('#edit_sanadid').val(data.sanadid || '');
+    $('#edit_readonly_sanadid').val(data.sanadid || '');
+    $('#edit_readonly_mostafeed').val(data.mostafeed || '');
+    $('#edit_readonly_amount').val(data.amount || '');
+    $('#edit_readonly_bayan').val(data.bayan || '');
+    $('#edit_readonly_aqarname').val(data.aqarname || '');
+    $('#edit_readonly_mowazaf').val(data.mowazaf || '');
+    $('#edit_sanadate').val(data.editDate || '');
+    $('#edit_payment_type').val(data.paymentType || '1').trigger('change');
+    $('#edit_money_source').val(data.moneySource || '0').trigger('change');
+
+    if (!editVoucherModalInstance) {
+        editVoucherModalInstance = new bootstrap.Modal(document.getElementById('editVoucherModal'));
+    }
+
+    editVoucherModalInstance.show();
+}
+
 function loadBankAccounts() {
     const idaqar = $('#idaqar').val();
     $.ajax({
@@ -589,12 +784,35 @@ function loadBankAccounts() {
     });
 }
 
+function formatPickerDateForQuery(value) {
+    value = (value || '').trim();
+    if (!value) {
+        return '';
+    }
+
+    const parts = value.split(/[\/-]/);
+    if (parts.length !== 3) {
+        return value;
+    }
+
+    const day = String(parseInt(parts[0], 10) || 0).padStart(2, '0');
+    const month = String(parseInt(parts[1], 10) || 0).padStart(2, '0');
+    const year = String(parseInt(parts[2], 10) || 0);
+
+    return day + '-' + month + '-' + year;
+}
+
+function syncDateFilters() {
+    $('#startfrom').val(formatPickerDateForQuery($('#startfrom_picker').val()));
+    $('#enddate').val(formatPickerDateForQuery($('#enddate_picker').val()));
+}
+
 function buildFilterUrl() {
     const search    = encodeURIComponent($('#search').val() || '');
     const idaqar    = $('#idaqar').val() || 0;
     const aqarname  = encodeURIComponent($('#aqarname').val() || '');
-    const dd = $('#dd').val(), mm = $('#mm').val(), yy = $('#yy').val();
-    const dd2 = $('#dd2').val(), mm2 = $('#mm2').val(), yy2 = $('#yy2').val();
+    const startfrom = formatPickerDateForQuery($('#startfrom_picker').val());
+    const enddate = formatPickerDateForQuery($('#enddate_picker').val());
     const bankid              = $('#bankid').val() || 0;
     const payment_type_f      = $('#payment_type_f_select').val() || 0;
     const money_source_filter = $('#money_source_filter').val();
@@ -602,42 +820,128 @@ function buildFilterUrl() {
     let url = 'allsarfsanad.hnt?';
     if (search)    url += '&search='   + search;
     if (idaqar > 0) url += '&idaqar=' + idaqar + '&aqarname=' + aqarname;
-    if (dd && mm && yy)   url += '&startfrom=' + dd + '-' + mm + '-' + yy;
-    if (dd2 && mm2 && yy2) url += '&enddate='  + dd2 + '-' + mm2 + '-' + yy2;
+    if (startfrom) url += '&startfrom=' + encodeURIComponent(startfrom);
+    if (enddate) url += '&enddate='  + encodeURIComponent(enddate);
     if (bankid > 0) url += '&bankid=' + bankid;
     if (payment_type_f > 0) url += '&payment_type_f=' + payment_type_f;
     if (money_source_filter !== '' && money_source_filter !== '-1') url += '&money_source_filter=' + money_source_filter;
     return url;
 }
 
+function navigateIfChanged(url) {
+    const targetUrl = new URL(url, window.location.href);
+    const currentUrl = new URL(window.location.href);
+
+    if (targetUrl.pathname === currentUrl.pathname && targetUrl.search === currentUrl.search) {
+        return;
+    }
+
+    window.location.href = targetUrl.toString();
+}
+
 function recalculate() {
-    window.location.href = buildFilterUrl();
+    syncDateFilters();
+    navigateIfChanged(buildFilterUrl());
 }
 
 // Initialize on page load
 $(document).ready(function() {
+    const calendarType = 'gregorian';
+    let suppressAutoRecalculate = true;
+
+    $('.datepicker-input').each(function() {
+        const $input = $(this);
+        $input.attr('data-calendartype', calendarType);
+        $input.data('calendartype', calendarType);
+        $input.datepicker({
+            format: 'dd/mm/yyyy',
+            language: 'ar',
+            rtl: true,
+            autoclose: true,
+            todayHighlight: true,
+            orientation: 'bottom auto',
+            weekStart: 0,
+            calendarType: calendarType
+        });
+    });
+
+    $('.input-group-text').off('click.datepicker').on('click.datepicker', function() {
+        const input = $(this).closest('.input-group').find('input.datepicker-input:first');
+        if (input.length) {
+            input.focus();
+            try {
+                input.datepicker('show');
+            } catch (e) {}
+        }
+    });
+
+    $('.datepicker-input').on('changeDate change', function() {
+        if (suppressAutoRecalculate) {
+            return;
+        }
+        recalculate();
+    });
+
+    $('.voucher-edit-datepicker').each(function() {
+        const $input = $(this);
+        $input.attr('data-calendartype', calendarType);
+        $input.data('calendartype', calendarType);
+        $input.datepicker({
+            format: 'dd/mm/yyyy',
+            language: 'ar',
+            rtl: true,
+            autoclose: true,
+            todayHighlight: true,
+            orientation: 'bottom auto',
+            weekStart: 0,
+            calendarType: calendarType
+        });
+    });
+
+    $('.voucher-edit-datepicker-trigger').off('click.datepicker').on('click.datepicker', function() {
+        const input = $(this).closest('.input-group').find('input.voucher-edit-datepicker:first');
+        if (input.length) {
+            input.focus();
+            try {
+                input.datepicker('show');
+            } catch (e) {}
+        }
+    });
+
     // Sync Select2 display with PHP-rendered selected value
     $('#money_source_filter').val('<?= $money_source_filter ?>').trigger('change.select2');
 
     // Auto-recalculate on dropdown changes
     $('#payment_type_f_select, #money_source_filter').on('change', function() {
+        if (suppressAutoRecalculate) {
+            return;
+        }
         recalculate();
     });
 
     // Bank account filter: update hidden field and recalculate on change
     $('#bank_account_filter').on('change', function() {
         $('#bankid').val($(this).val());
+        if (suppressAutoRecalculate) {
+            return;
+        }
         recalculate();
     });
 
     // Reload bank list when property changes (ajaxfilldiv polling)
     loadBankAccounts();
     let lastIdaqar = $('#idaqar').val();
+    let lastAqarname = $('#aqarname').val();
     setInterval(function() {
         const cur = $('#idaqar').val();
-        if (cur !== lastIdaqar) {
+        const curName = $('#aqarname').val();
+        if (cur !== lastIdaqar || curName !== lastAqarname) {
             lastIdaqar = cur;
+            lastAqarname = curName;
             loadBankAccounts();
+            if (!suppressAutoRecalculate) {
+                recalculate();
+            }
         }
     }, 500);
 
@@ -645,6 +949,45 @@ $(document).ready(function() {
     if (searchInput && !searchInput.value) {
         searchInput.focus();
     }
+
+    $('#editVoucherForm').on('submit', async function(e) {
+        e.preventDefault();
+        const saveButton = $('#saveVoucherChangesBtn');
+        saveButton.prop('disabled', true);
+
+        try {
+            const formData = new FormData(this);
+
+            const response = await fetch('allsarfsanad.hnt', {
+                method: 'POST',
+                body: formData
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                if (editVoucherModalInstance) {
+                    editVoucherModalInstance.hide();
+                }
+                setTimeout(function() {
+                    window.location.reload();
+                }, 300);
+                return;
+            }
+
+            alert(result.message || 'تعذر تحديث بيانات السند');
+        } catch (error) {
+            alert('حدث خطأ أثناء تحديث بيانات السند');
+        } finally {
+            saveButton.prop('disabled', false);
+        }
+    });
+
+    setTimeout(function() {
+        suppressAutoRecalculate = false;
+        syncDateFilters();
+        lastIdaqar = $('#idaqar').val();
+        lastAqarname = $('#aqarname').val();
+    }, 0);
 });
 </script>
 

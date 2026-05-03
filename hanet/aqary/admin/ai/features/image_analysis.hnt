@@ -1,0 +1,363 @@
+<?php
+/**
+ * AI Image Analysis API
+ * تحليل الصور بالذكاء الاصطناعي - Backend
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+// Include legacy system database connection
+require_once('../../../connectdb.hnt');
+
+// Mark as AJAX request for authentication
+$is_ajax_request = true;
+
+// Include authentication
+require_once('../../../reqloginajax.hnt');
+
+// Set JSON response header
+header('Content-Type: application/json; charset=utf-8');
+
+// Check if user is authenticated
+if (!isset($_SESSION['useridv'])) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+// Include OpenRouter API class
+require_once('../lib/OpenRouterAPI.class.php');
+
+/**
+ * Get user's preferred chat model (for Vision analysis)
+ */
+function getUserPreferredModel($link, $user_id) {
+    $stmt = mysqli_prepare($link, "SELECT preferred_model, model_name FROM ai_user_preferences WHERE userid = ?");
+    if (!$stmt) {
+        return 'openai/gpt-4o'; // Default model with vision
+    }
+
+    mysqli_stmt_bind_param($stmt, "i", $user_id);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+
+    if ($row = mysqli_fetch_assoc($result)) {
+        mysqli_stmt_close($stmt);
+        return $row['preferred_model'] ?: 'openai/gpt-4o';
+    }
+
+    mysqli_stmt_close($stmt);
+    return 'openai/gpt-4o'; // Default fallback
+}
+
+/**
+ * Ensure image analysis uses a vision-capable model.
+ */
+function normalizeVisionModel($model) {
+    $model = trim((string)$model);
+
+    $supported_vision_models = [
+        'openai/gpt-4o',
+        'openai/gpt-4.1',
+        'openai/gpt-4.1-mini',
+        'google/gemini-2.5-flash',
+        'google/gemini-2.5-pro',
+        'anthropic/claude-3.5-sonnet',
+        'anthropic/claude-3.7-sonnet'
+    ];
+
+    if (in_array($model, $supported_vision_models, true)) {
+        return $model;
+    }
+
+    return 'openai/gpt-4o';
+}
+
+/**
+ * Build analysis prompt based on type
+ */
+function buildAnalysisPrompt($analysis_type, $custom_question = '') {
+    $prompts = [
+        'detailed' => 'قم بتحليل هذه الصورة للعقار بشكل تفصيلي. صف المساحة، التصميم المعماري، الألوان المستخدمة، نوع الأرضيات والجدران، الإضاءة، وأي مميزات أخرى تلاحظها. اكتب الوصف باللغة العربية بأسلوب احترافي.',
+
+        'marketing' => 'اكتب وصفاً تسويقياً جذاباً لهذا العقار باللغة العربية. ركز على المميزات الجمالية والعملية التي تجعله جذاباً للمشترين أو المستأجرين. استخدم لغة تسويقية احترافية ومقنعة.',
+
+        'technical' => 'قم بتحليل تقني لهذا العقار. صف المواد المستخدمة في البناء، جودة التشطيبات، حالة العقار، نوع النوافذ والأبواب، نظام الإضاءة، وأي ملاحظات تقنية أخرى. اكتب التحليل باللغة العربية بأسلوب تقني احترافي.',
+
+        'valuation' => 'قم بتقييم جودة هذا العقار من خلال الصورة. حدد العوامل التي تؤثر على قيمته (الموقع الظاهر، جودة التشطيبات، التصميم، الحالة العامة، المميزات). قدم تقييماً مبدئياً للمستوى (راقي، متوسط، بسيط) مع التبرير. اكتب التقييم باللغة العربية.',
+
+        'custom' => $custom_question
+    ];
+
+    return $prompts[$analysis_type] ?? $prompts['detailed'];
+}
+
+/**
+ * Analyze image using OpenRouter Vision API
+ */
+function analyzeImageWithVision($link, $image_data, $prompt, $model) {
+    $start_time = microtime(true);
+
+    try {
+        // Extract base64 data if it includes data URL prefix
+        if (strpos($image_data, 'data:image') === 0) {
+            // Already in correct format
+            $image_url = $image_data;
+        } else {
+            // Add data URL prefix if not present
+            $image_url = $image_data;
+        }
+
+        // Build request for OpenRouter Vision API
+        $data = [
+            'model' => $model,
+            'messages' => [
+                [
+                    'role' => 'user',
+                    'content' => [
+                        [
+                            'type' => 'text',
+                            'text' => $prompt
+                        ],
+                        [
+                            'type' => 'image_url',
+                            'image_url' => [
+                                'url' => $image_url
+                            ]
+                        ]
+                    ]
+                ]
+            ],
+            'max_tokens' => 2000 // Enough for detailed analysis
+        ];
+
+        // Load API configuration
+        $config_data = require('../config/api_config.hnt');
+        $ai_config = $config_data['config'];
+
+        if (empty($ai_config['api_key'])) {
+            throw new Exception('OpenRouter API key not configured');
+        }
+
+        $api_key = $ai_config['api_key'];
+
+        // Make API request using cURL
+        $ch = curl_init('https://openrouter.ai/api/v1/chat/completions');
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => json_encode($data),
+            CURLOPT_HTTPHEADER => [
+                'Authorization: Bearer ' . $api_key,
+                'Content-Type: application/json',
+                'HTTP-Referer: ' . ($_SERVER['HTTP_HOST'] ?? 'localhost'),
+                'X-Title: Real Estate AI Analysis'
+            ],
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => 0
+        ]);
+
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+        if (curl_errno($ch)) {
+            $error = curl_error($ch);
+            //curl_close($ch);
+            throw new Exception('cURL Error: ' . $error);
+        }
+
+        //curl_close($ch);
+
+        if ($http_code !== 200) {
+            $error_data = json_decode($response, true);
+            $error_message = $error_data['error']['message'] ?? 'HTTP Error ' . $http_code;
+            throw new Exception('API Error: ' . $error_message);
+        }
+
+        $result = json_decode($response, true);
+
+        if (!isset($result['choices'][0]['message']['content'])) {
+            throw new Exception('No analysis returned from model');
+        }
+
+        $analysis_text = $result['choices'][0]['message']['content'];
+
+        // Calculate execution time and stats
+        $execution_time = round((microtime(true) - $start_time) * 1000);
+
+        $stats = [
+            'model' => $model,
+            'prompt_tokens' => $result['usage']['prompt_tokens'] ?? 0,
+            'completion_tokens' => $result['usage']['completion_tokens'] ?? 0,
+            'total_tokens' => $result['usage']['total_tokens'] ?? 0,
+            'cost' => calculateCost($result['usage'] ?? [], $model),
+            'execution_time_ms' => $execution_time
+        ];
+
+        return [
+            'success' => true,
+            'analysis' => $analysis_text,
+            'stats' => $stats
+        ];
+
+    } catch (Exception $e) {
+        return [
+            'success' => false,
+            'message' => $e->getMessage()
+        ];
+    }
+}
+
+/**
+ * Calculate approximate cost based on usage
+ */
+function calculateCost($usage, $model) {
+    if (empty($usage)) {
+        return 0;
+    }
+
+    $prompt_tokens = $usage['prompt_tokens'] ?? 0;
+    $completion_tokens = $usage['completion_tokens'] ?? 0;
+
+    // Approximate pricing (varies by model)
+    // GPT-4o: $2.50 input, $10 output per 1M tokens
+    $input_cost = ($prompt_tokens / 1000000) * 2.50;
+    $output_cost = ($completion_tokens / 1000000) * 10.00;
+
+    return number_format($input_cost + $output_cost, 6);
+}
+
+/**
+ * Log usage to database
+ */
+function logUsage($link, $user_id, $stats, $analysis_type) {
+    $stmt = mysqli_prepare($link,
+        "INSERT INTO ai_usage_log (userid, feature, model, prompt_tokens, completion_tokens, total_tokens, cost, response_time, created_date)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())"
+    );
+
+    if (!$stmt) {
+        return false;
+    }
+
+    $feature = 'image_analysis_' . $analysis_type;
+    $cost = floatval($stats['cost']);
+
+    mysqli_stmt_bind_param($stmt, "issiiidi",
+        $user_id,
+        $feature,
+        $stats['model'],
+        $stats['prompt_tokens'],
+        $stats['completion_tokens'],
+        $stats['total_tokens'],
+        $cost,
+        $stats['execution_time_ms']
+    );
+
+    $result = mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+
+    return $result;
+}
+
+/**
+ * Save analysis to database
+ */
+function saveAnalysis($link, $user_id, $analysis, $analysis_type) {
+    $stmt = mysqli_prepare($link,
+        "INSERT INTO ai_generated_content (entity_type, entity_id, content_type, generated_text, model, userid, created_date)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())"
+    );
+
+    if (!$stmt) {
+        throw new Exception('Failed to prepare statement');
+    }
+
+    $entity_type = 'image_analysis';
+    $entity_id = 0; // Generic, not tied to specific property
+    $content_type = 'analysis_' . $analysis_type;
+    $model = 'vision';
+
+    mysqli_stmt_bind_param($stmt, "sisssi",
+        $entity_type,
+        $entity_id,
+        $content_type,
+        $analysis,
+        $model,
+        $user_id
+    );
+
+    $result = mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+
+    if (!$result) {
+        throw new Exception('Failed to save analysis');
+    }
+
+    return true;
+}
+
+// Main execution
+try {
+    // Handle save action
+    if (isset($_POST['action']) && $_POST['action'] === 'save') {
+        $analysis = $_POST['analysis'] ?? '';
+        $analysis_type = $_POST['analysis_type'] ?? 'detailed';
+
+        if (empty($analysis)) {
+            throw new Exception('No analysis to save');
+        }
+
+        $user_id = $_SESSION['useridv'];
+        saveAnalysis($link, $user_id, $analysis, $analysis_type);
+
+        echo json_encode([
+            'success' => true,
+            'message' => 'تم حفظ التحليل بنجاح'
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    // Handle image analysis
+    $user_id = $_SESSION['useridv'];
+    $image_data = $_POST['image'] ?? '';
+    $analysis_type = $_POST['analysis_type'] ?? 'detailed';
+    $custom_question = $_POST['custom_question'] ?? '';
+
+    // Validate input
+    if (empty($image_data)) {
+        throw new Exception('No image provided');
+    }
+
+    // Get user's preferred model
+    $model = normalizeVisionModel(getUserPreferredModel($link, $user_id));
+
+    // Build analysis prompt
+    $prompt = buildAnalysisPrompt($analysis_type, $custom_question);
+
+    // Analyze image
+    $result = analyzeImageWithVision($link, $image_data, $prompt, $model);
+
+    if (!$result['success']) {
+        throw new Exception($result['message']);
+    }
+
+    // Log usage
+    logUsage($link, $user_id, $result['stats'], $analysis_type);
+
+    // Return success response
+    echo json_encode([
+        'success' => true,
+        'analysis' => $result['analysis'],
+        'stats' => $result['stats']
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'message' => $e->getMessage()
+    ], JSON_UNESCAPED_UNICODE);
+}
+?>

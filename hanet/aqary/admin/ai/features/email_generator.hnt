@@ -1,0 +1,179 @@
+<?php
+/**
+ * AI Email Template Generator
+ * Generates professional email templates for various purposes
+ */
+
+// Include legacy system database connection
+require_once('../../../connectdb.hnt');
+
+// Mark as AJAX request for authentication
+$is_ajax_request = true;
+
+// Include authentication - will validate user session
+require_once('../../../reqloginajax.hnt');
+
+// Increase execution time for slow AI models
+set_time_limit(180); // 3 minutes
+
+// Set JSON response header
+header('Content-Type: application/json; charset=utf-8');
+
+// Include library classes
+require_once('../lib/OpenRouterAPI.class.php');
+
+// Check if user is authenticated
+if (!isset($_SESSION['useridv'])) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+
+/**
+ * Get friendly model name from model ID
+ */
+function getFriendlyModelName($model_id) {
+    $model_names = [
+        'openai/gpt-3.5-turbo' => 'GPT-3.5 Turbo',
+        'openai/gpt-4-turbo-preview' => 'GPT-4 Turbo',
+        'openai/gpt-4' => 'GPT-4',
+        'openai/gpt-4o' => 'GPT-4o',
+        'openai/gpt-4o-mini' => 'GPT-4o Mini',
+        'anthropic/claude-3-opus' => 'Claude 3 Opus',
+        'anthropic/claude-3-sonnet' => 'Claude 3 Sonnet',
+        'anthropic/claude-3-haiku' => 'Claude 3 Haiku',
+        'google/gemini-pro' => 'Gemini Pro',
+        'google/gemini-flash-1.5' => 'Gemini Flash 1.5',
+        'meta-llama/llama-3.1-70b-instruct' => 'Llama 3.1 70B'
+    ];
+    
+    return $model_names[$model_id] ?? $model_id;
+}
+
+try {
+    // Get input parameters
+    $email_type = isset($_POST['email_type']) ? $_POST['email_type'] : 'general';
+    $recipient_name = isset($_POST['recipient_name']) ? trim($_POST['recipient_name']) : '';
+    $context = isset($_POST['context']) ? trim($_POST['context']) : '';
+    $tone = isset($_POST['tone']) ? $_POST['tone'] : 'professional'; // professional, friendly, formal
+    $language = isset($_POST['language']) ? $_POST['language'] : 'arabic'; // arabic, english
+
+    // Email type templates
+    $email_types = [
+        'payment_reminder' => 'تذكير بالدفع',
+        'contract_renewal' => 'تجديد العقد',
+        'maintenance_notice' => 'إشعار صيانة',
+        'welcome_tenant' => 'رسالة ترحيب للمستأجر',
+        'property_viewing' => 'موعد معاينة عقار',
+        'invoice' => 'إرسال فاتورة',
+        'complaint_response' => 'الرد على شكوى',
+        'general' => 'رسالة عامة'
+    ];
+
+    // Build the prompt
+    $prompt = buildEmailPrompt($email_type, $recipient_name, $context, $tone, $language, $email_types);
+
+    // Initialize AI
+    $ai = new OpenRouterAPI($link);
+
+    // Set feature for logging
+    $_REQUEST['feature'] = 'email_generator';
+
+    // Generate email
+    $options = [
+        'max_tokens' => 600,
+        'temperature' => 0.6, // Less creative, more consistent
+        'cache' => false // Don't cache emails (usually unique)
+    ];
+
+    $start_time = microtime(true);
+    $generated_email = $ai->complete($prompt, $options);
+    $end_time = microtime(true);
+
+    if (!$generated_email) {
+        throw new Exception('فشل في الحصول على استجابة من AI. يرجى التحقق من الإعدادات والاتصال بالإنترنت.');
+    }
+
+    // Get usage stats
+    $usage = $ai->getUsageStats();
+    $execution_time = round(($end_time - $start_time) * 1000);
+
+    // Calculate cost
+    $cost = 0;
+    if (isset($usage['prompt_tokens']) && isset($usage['completion_tokens'])) {
+        $input_cost = ($usage['prompt_tokens'] / 1000) * 0.0005;
+        $output_cost = ($usage['completion_tokens'] / 1000) * 0.0015;
+        $cost = $input_cost + $output_cost;
+    }
+
+    // Return success response
+    echo json_encode([
+        'success' => true,
+        'email' => $generated_email,
+        'stats' => [
+            'tokens' => $usage['total_tokens'] ?? 0,
+            'cost' => number_format($cost, 6),
+            'execution_time_ms' => $execution_time,
+            'model' => getFriendlyModelName($ai->getLastModel())
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'message' => $e->getMessage(),
+        'error_details' => [
+            'file' => basename($e->getFile()),
+            'line' => $e->getLine(),
+            'trace' => $e->getTraceAsString()
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+/**
+ * Build AI prompt for email generation
+ */
+function buildEmailPrompt($email_type, $recipient_name, $context, $tone, $language, $email_types) {
+    $email_type_ar = $email_types[$email_type] ?? 'رسالة عامة';
+
+    // Tone instructions
+    $tone_instructions = [
+        'professional' => 'احترافية ومهنية',
+        'friendly' => 'ودية ولطيفة',
+        'formal' => 'رسمية ومحترمة'
+    ];
+
+    $tone_text = $tone_instructions[$tone] ?? $tone_instructions['professional'];
+
+    // Language instruction
+    $lang_instruction = ($language === 'english') ?
+        'Write the email in English' :
+        'اكتب الرسالة باللغة العربية الفصحى';
+
+    // Build prompt
+    $prompt = "$lang_instruction\n\n";
+    $prompt .= "اكتب بريد إلكتروني $tone_text من النوع: $email_type_ar\n\n";
+
+    if (!empty($recipient_name)) {
+        $prompt .= "المستلم: $recipient_name\n";
+    }
+
+    if (!empty($context)) {
+        $prompt .= "\nالسياق والمعلومات الإضافية:\n$context\n";
+    }
+
+    $prompt .= "\nالمتطلبات:
+- ابدأ بتحية مناسبة
+- كن واضحاً ومباشراً في الموضوع
+- استخدم لغة " . $tone_text . "
+- اختم بختام احترافي
+- أضف توقيع مناسب (يمكن للمستخدم تعديله)
+- الطول: 150-250 كلمة
+
+البريد الإلكتروني:";
+
+    return $prompt;
+}
+?>

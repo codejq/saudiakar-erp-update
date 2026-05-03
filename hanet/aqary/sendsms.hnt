@@ -12,14 +12,64 @@ if (isset($_REQUEST['showsmssettings']) && $_REQUEST['showsmssettings'] == 1) {
 // Extract request variables
 extract($_REQUEST);
 
+$selected_property_id = isset($_REQUEST['idaqar']) ? intval($_REQUEST['idaqar']) : 0;
+
 // Check if this is an AJAX request
 $is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+$is_property_numbers_ajax = isset($_POST['ajax_action']) && $_POST['ajax_action'] == 'get_property_tenant_numbers';
 
 // Include authentication and database
-if (!$is_ajax_request) {
+if ($is_property_numbers_ajax) {
+    include_once "reqloginajax.hnt";
+} elseif (!$is_ajax_request) {
     include_once "nocash.hnt";
     require_once('iconv_cross.hnt');
     include_once "header.hnt";
+}
+
+if ($is_property_numbers_ajax) {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $ajax_property_id = isset($_POST['idaqar']) ? intval($_POST['idaqar']) : 0;
+    $numbers = array();
+
+    if ($ajax_property_id > 0) {
+        $sql = "SELECT mostagereen.mostagertel
+                FROM amlakdetails
+                INNER JOIN mostagereen ON mostagereen.mostagerid = amlakdetails.mostagerid
+                WHERE amlakdetails.idaqar='" . $ajax_property_id . "'
+                AND amlakdetails.mostagerid > 0
+                AND mostagereen.mostagertel IS NOT NULL
+                AND mostagereen.mostagertel != ''";
+        $result_numbers = mysql_query($sql, $link);
+
+        while ($row_number = mysql_fetch_array($result_numbers)) {
+            $normalized = str_replace(array(" ", ",", ";", "\r\n", "-", "+", "\r", "\n", "\t", "\\", "/"), ",", $row_number['mostagertel']);
+            $normalized = explode(",", $normalized);
+
+            for ($i = 0; $i < count($normalized); $i++) {
+                $tel = trim($normalized[$i]);
+                if (strlen($tel) > 8) {
+                    if (substr($tel, 0, 1) == "0" && substr($tel, 1, 1) == "5") {
+                        $tel = "966" . ltrim($tel, '0');
+                    }
+                    if (substr($tel, 0, 3) != "966" && substr($tel, 0, 1) == "5" && strlen($tel) == 9) {
+                        $tel = "966" . $tel;
+                    }
+                    if (substr($tel, 0, 3) == "966") {
+                        $numbers[] = $tel;
+                    }
+                }
+            }
+        }
+    }
+
+    $numbers = array_values(array_unique(array_filter($numbers)));
+    echo json_encode([
+        'success' => true,
+        'numbers' => implode("\n", $numbers)
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
 }
 
 // Initialize user agent for API calls
@@ -49,16 +99,20 @@ if (isset($_REQUEST['mobile']) && $_REQUEST['mobile'] != "") {
 
 // ========== LOAD PROPERTY/TENANT DATA ==========
 if (isset($idsubaqar) && $idsubaqar && !isset($mostagerid)) {
-    $sql = "SELECT hnt_dll_type, mostagerid FROM amlakdetails WHERE idsubaqar = '" . intval($idsubaqar) . "'";
-    $idaqar = mysql_fetch_array(mysql_query($sql, $link));
-    $mostagerid = $idaqar['mostagerid'];
-    $hnt_dll_type = $idaqar['hnt_dll_type'];
-    $hnt_dll = $idaqar['hnt_dll_type'];
+    $sql = "SELECT idaqar, hnt_dll_type, mostagerid FROM amlakdetails WHERE idsubaqar = '" . intval($idsubaqar) . "'";
+    $idaqar_data = mysql_fetch_array(mysql_query($sql, $link));
+    $mostagerid = $idaqar_data['mostagerid'];
+    $hnt_dll_type = $idaqar_data['hnt_dll_type'];
+    $hnt_dll = $idaqar_data['hnt_dll_type'];
+    if (!$selected_property_id) {
+        $selected_property_id = isset($idaqar_data['idaqar']) ? intval($idaqar_data['idaqar']) : 0;
+    }
 }
 
 // ========== LOAD MESSAGE TEMPLATES ==========
 $mailreadydata = '';
 $smsto = '';
+$auto_fill_property_numbers = $selected_property_id > 0 && !(isset($_REQUEST['idsubaqar']) && $_REQUEST['idsubaqar']) && !(isset($_REQUEST['mostagerid']) && $_REQUEST['mostagerid']) && !(isset($_REQUEST['idsanad']) && $_REQUEST['idsanad']);
 
 // Property template
 if (isset($_REQUEST['ardid']) && $_REQUEST['ardid']) {
@@ -727,6 +781,8 @@ if (!$is_ajax_request) {
 
         <!-- QR Codes & Quick Actions -->
         <div class="col-lg-6">
+
+
             <div class="card shadow-sm border-0 mb-4">
                 <div class="card-body p-4">
                     <div class="section-header">
@@ -771,6 +827,41 @@ if (!$is_ajax_request) {
                     </div>
                 </div>
             </div>
+
+
+                        <div class="card shadow-sm border-0 mb-4">
+                <div class="card-body p-4">
+                    <div class="section-header">
+                        <i class="bi bi-building"></i>
+                        <span>إشعار جميع مستأجرين عقار</span>
+                    </div>
+
+                    <div class="mb-0">
+                        <label class="form-label">
+                            <i class="bi bi-building text-primary me-1"></i>
+                            العقار
+                        </label>
+                        <div class="d-flex gap-2 align-items-start">
+                            <select id="smsPropertySelect" name="idaqar" class="form-select">
+                                <option value="0">-- اختر العقار --</option>
+                                <?php
+                                $sql = "SELECT idaqar, aqarname, users FROM amlak";
+                                if (isset($user_data['groupid']) && $user_data['groupid'] > 2 && isset($user_data['userid'])) {
+                                    $sql = "SELECT idaqar, aqarname, users FROM amlak WHERE users LIKE '%," . intval($user_data['userid']) . ",%'";
+                                }
+                                $property_result = mysql_query($sql, $link);
+                                while ($property_row = mysql_fetch_array($property_result)) {
+                                    $selected = ($selected_property_id == $property_row['idaqar']) ? 'selected' : '';
+                                    echo '<option value="' . intval($property_row['idaqar']) . '" ' . $selected . '>' . htmlspecialchars($property_row['aqarname'], ENT_QUOTES, 'UTF-8') . '</option>';
+                                }
+                                ?>
+                            </select>
+                            <button type="button" id="clearSmsPropertySelect" class="btn btn-primary   px-4">إالغاء</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
 
             <!-- Quick Links -->
             <div class="card shadow-sm border-0">
@@ -825,6 +916,29 @@ if (!$is_ajax_request) {
 <script src="converttoUnicode.js.hnt"></script>
 <script>
 $(document).ready(function() {
+    function loadPropertyTenantNumbers(propertyId) {
+        if (!propertyId || parseInt(propertyId, 10) < 1) {
+            $('#smsto').val('').trigger('input');
+            return;
+        }
+
+        $.ajax({
+            url: 'sendsms.hnt',
+            type: 'POST',
+            dataType: 'json',
+            data: {
+                ajax_action: 'get_property_tenant_numbers',
+                idaqar: propertyId
+            },
+            success: function(response) {
+                if (!response || !response.success) {
+                    return;
+                }
+                $('#smsto').val(response.numbers || '').trigger('input');
+            }
+        });
+    }
+
     // ========== CHARACTER COUNTER ==========
     function updateCharCount() {
         const count = $('#smstxtbody').val().length;
@@ -881,6 +995,18 @@ $(document).ready(function() {
         clearTimeout(qrTimeout);
         qrTimeout = setTimeout(regenerateQRCodes, 1000);
     });
+
+    $('#smsPropertySelect').on('change', function() {
+        loadPropertyTenantNumbers($(this).val());
+    });
+
+    $('#clearSmsPropertySelect').on('click', function() {
+        $('#smsPropertySelect').val('0').trigger('change');
+    });
+
+    <?php if ($auto_fill_property_numbers): ?>
+    loadPropertyTenantNumbers('<?= intval($selected_property_id) ?>');
+    <?php endif; ?>
 
     // ========== SMS FORM SUBMISSION ==========
     $('#smsForm').on('submit', function(e) {

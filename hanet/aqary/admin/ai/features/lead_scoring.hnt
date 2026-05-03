@@ -1,0 +1,263 @@
+<?php
+/**
+ * AI Lead Scoring API
+ * Evaluates and scores potential customers
+ */
+
+// Include legacy system database connection
+require_once('../../../connectdb.hnt');
+
+// Mark as AJAX request for authentication
+$is_ajax_request = true;
+
+// Include authentication - will validate user session
+require_once('../../../reqloginajax.hnt');
+
+// Increase execution time for AI models
+set_time_limit(180); // 3 minutes
+
+// Set JSON response header
+header('Content-Type: application/json; charset=utf-8');
+
+// Include library classes
+require_once('../lib/OpenRouterAPI.class.php');
+
+// Check if user is authenticated
+if (!isset($_SESSION['useridv'])) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+/**
+ * Get friendly model name from model ID
+ */
+function getFriendlyModelName($model_id) {
+    $model_names = [
+        'openai/gpt-3.5-turbo' => 'GPT-3.5 Turbo',
+        'openai/gpt-4-turbo-preview' => 'GPT-4 Turbo',
+        'openai/gpt-4' => 'GPT-4',
+        'openai/gpt-4o' => 'GPT-4o',
+        'openai/gpt-4o-mini' => 'GPT-4o Mini',
+        'anthropic/claude-3-opus' => 'Claude 3 Opus',
+        'anthropic/claude-3-sonnet' => 'Claude 3 Sonnet',
+        'anthropic/claude-3-haiku' => 'Claude 3 Haiku',
+        'google/gemini-pro' => 'Gemini Pro',
+        'google/gemini-flash-1.5' => 'Gemini Flash 1.5',
+        'meta-llama/llama-3.1-70b-instruct' => 'Llama 3.1 70B'
+    ];
+
+    return $model_names[$model_id] ?? $model_id;
+}
+
+try {
+    // Get input parameters
+    $customer_name = $_POST['customer_name'] ?? '';
+    $contact_method = $_POST['contact_method'] ?? '';
+    $property_type = $_POST['property_type'] ?? '';
+    $budget = $_POST['budget'] ?? 0;
+    $timeline = $_POST['timeline'] ?? '';
+    $previous_interaction = $_POST['previous_interaction'] ?? 'none';
+    $response_quality = $_POST['response_quality'] ?? 'average';
+    $decision_maker = $_POST['decision_maker'] ?? 'unknown';
+    $additional_notes = $_POST['additional_notes'] ?? '';
+
+    if (empty($customer_name)) {
+        throw new Exception('يجب إدخال اسم العميل');
+    }
+
+    // Build the AI prompt
+    $prompt = buildLeadScoringPrompt(
+        $customer_name,
+        $contact_method,
+        $property_type,
+        $budget,
+        $timeline,
+        $previous_interaction,
+        $response_quality,
+        $decision_maker,
+        $additional_notes
+    );
+
+    // Initialize AI
+    $ai = new OpenRouterAPI($link);
+
+    // Set feature for logging
+    $_REQUEST['feature'] = 'lead_scoring';
+
+    // Generate evaluation
+    $options = [
+        'max_tokens' => 800,
+        'temperature' => 0.5, // More consistent scoring
+        'cache' => false // Each lead is unique
+    ];
+
+    $start_time = microtime(true);
+    $ai_response = $ai->complete($prompt, $options);
+    $end_time = microtime(true);
+
+    if (!$ai_response) {
+        throw new Exception('فشل في الحصول على استجابة من AI.');
+    }
+
+    // Parse the AI response to extract score
+    $score = extractScore($ai_response);
+    $analysis = $ai_response;
+
+    // Get usage stats
+    $usage = $ai->getUsageStats();
+    $execution_time = round(($end_time - $start_time) * 1000);
+
+    // Calculate cost
+    $cost = 0;
+    if (isset($usage['prompt_tokens']) && isset($usage['completion_tokens'])) {
+        $input_cost = ($usage['prompt_tokens'] / 1000) * 0.0005;
+        $output_cost = ($usage['completion_tokens'] / 1000) * 0.0015;
+        $cost = $input_cost + $output_cost;
+    }
+
+    // Return success response
+    echo json_encode([
+        'success' => true,
+        'score' => $score,
+        'analysis' => $analysis,
+        'stats' => [
+            'tokens' => $usage['total_tokens'] ?? 0,
+            'cost' => number_format($cost, 6),
+            'execution_time_ms' => $execution_time,
+            'model' => getFriendlyModelName($ai->getLastModel())
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'message' => $e->getMessage(),
+        'error_details' => [
+            'file' => basename($e->getFile()),
+            'line' => $e->getLine(),
+            'trace' => $e->getTraceAsString()
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+/**
+ * Build AI prompt for lead scoring
+ */
+function buildLeadScoringPrompt($customer_name, $contact_method, $property_type, $budget,
+                                $timeline, $previous_interaction, $response_quality,
+                                $decision_maker, $additional_notes) {
+
+    $contact_methods_ar = [
+        'phone' => 'اتصال هاتفي',
+        'whatsapp' => 'واتساب',
+        'email' => 'بريد إلكتروني',
+        'website' => 'موقع إلكتروني',
+        'walk_in' => 'زيارة مباشرة',
+        'referral' => 'إحالة'
+    ];
+
+    $property_types_ar = [
+        'apartment' => 'شقة',
+        'villa' => 'فيلا',
+        'office' => 'مكتب',
+        'shop' => 'محل تجاري',
+        'warehouse' => 'مستودع',
+        'land' => 'أرض'
+    ];
+
+    $timelines_ar = [
+        'urgent' => 'عاجل (خلال أسبوع)',
+        'soon' => 'قريباً (خلال شهر)',
+        'flexible' => 'مرن (خلال 3 أشهر)',
+        'exploring' => 'استكشاف فقط'
+    ];
+
+    $interactions_ar = [
+        'none' => 'لا يوجد',
+        'inquiry' => 'استفسار سابق',
+        'viewing' => 'معاينة عقار',
+        'offer' => 'تقديم عرض'
+    ];
+
+    $quality_ar = [
+        'excellent' => 'ممتازة - متعاون جداً',
+        'good' => 'جيدة - متعاون',
+        'average' => 'متوسطة',
+        'poor' => 'ضعيفة - غير متجاوب'
+    ];
+
+    $decision_ar = [
+        'yes' => 'نعم',
+        'no' => 'لا - يحتاج موافقة آخرين',
+        'unknown' => 'غير معروف'
+    ];
+
+    $prompt = "أنت خبير في تقييم العملاء المحتملين (Lead Scoring) في مجال العقارات.\n\n";
+    $prompt .= "مهمتك: تقييم العميل المحتمل وإعطاء درجة من 0 إلى 100، مع تحليل مفصل.\n\n";
+
+    $prompt .= "معلومات العميل:\n";
+    $prompt .= "- الاسم: $customer_name\n";
+    $prompt .= "- طريقة التواصل: " . ($contact_methods_ar[$contact_method] ?? $contact_method) . "\n";
+    $prompt .= "- نوع العقار المطلوب: " . ($property_types_ar[$property_type] ?? $property_type) . "\n";
+    $prompt .= "- الميزانية: " . ($budget > 0 ? number_format($budget) . " ريال" : "غير محددة") . "\n";
+    $prompt .= "- الإطار الزمني: " . ($timelines_ar[$timeline] ?? $timeline) . "\n";
+    $prompt .= "- تفاعل سابق: " . ($interactions_ar[$previous_interaction] ?? $previous_interaction) . "\n";
+    $prompt .= "- جودة الاستجابة: " . ($quality_ar[$response_quality] ?? $response_quality) . "\n";
+    $prompt .= "- صاحب القرار: " . ($decision_ar[$decision_maker] ?? $decision_maker) . "\n";
+
+    if (!empty($additional_notes)) {
+        $prompt .= "- ملاحظات إضافية: $additional_notes\n";
+    }
+
+    $prompt .= "\nمعايير التقييم:\n";
+    $prompt .= "1. جدية العميل (30 نقطة): الإطار الزمني، الميزانية المحددة\n";
+    $prompt .= "2. احتمالية الإتمام (25 نقطة): جودة الاستجابة، صاحب القرار، تفاعل سابق\n";
+    $prompt .= "3. قيمة العميل (25 نقطة): الميزانية، نوع العقار\n";
+    $prompt .= "4. سهولة التعامل (20 نقطة): طريقة التواصل، جودة التواصل\n\n";
+
+    $prompt .= "المطلوب:\n";
+    $prompt .= "1. الدرجة النهائية (0-100) في أول سطر فقط برقم واضح\n";
+    $prompt .= "2. تقييم كل معيار\n";
+    $prompt .= "3. نقاط القوة والضعف\n";
+    $prompt .= "4. توصيات عملية لزيادة فرص الإتمام\n";
+    $prompt .= "5. الخطوات التالية المقترحة\n\n";
+
+    $prompt .= "تنسيق الإجابة:\n";
+    $prompt .= "الدرجة: [الرقم من 0-100]\n\n";
+    $prompt .= "[باقي التحليل والتوصيات باللغة العربية]\n\n";
+
+    $prompt .= "ملاحظة: كن واقعياً في التقييم، لا تبالغ في التفاؤل أو التشاؤم.\n\n";
+
+    $prompt .= "التقييم:\n";
+
+    return $prompt;
+}
+
+/**
+ * Extract score from AI response
+ */
+function extractScore($ai_response) {
+    // Try to find score in first line
+    if (preg_match('/الدرجة[:\s]*(\d+)/u', $ai_response, $matches)) {
+        return intval($matches[1]);
+    }
+
+    // Try to find score anywhere in text
+    if (preg_match('/(\d+)\s*\/\s*100/', $ai_response, $matches)) {
+        return intval($matches[1]);
+    }
+
+    // Try to find score as a standalone number
+    if (preg_match('/^(\d+)$/m', $ai_response, $matches)) {
+        $score = intval($matches[1]);
+        if ($score >= 0 && $score <= 100) {
+            return $score;
+        }
+    }
+
+    // Default to 50 if no score found
+    return 50;
+}
+?>

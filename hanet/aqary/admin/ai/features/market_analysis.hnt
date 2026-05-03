@@ -1,0 +1,355 @@
+<?php
+/**
+ * AI Market Analysis API
+ * Analyzes market trends and property valuations
+ */
+
+// Include legacy system database connection
+require_once('../../../connectdb.hnt');
+
+// Mark as AJAX request for authentication
+$is_ajax_request = true;
+
+// Include authentication - will validate user session
+require_once('../../../reqloginajax.hnt');
+
+// Increase execution time for AI models
+set_time_limit(180); // 3 minutes
+
+// Set JSON response header
+header('Content-Type: application/json; charset=utf-8');
+
+// Include library classes
+require_once('../lib/OpenRouterAPI.class.php');
+
+// Check if user is authenticated
+if (!isset($_SESSION['useridv'])) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+/**
+ * Get friendly model name from model ID
+ */
+function getFriendlyModelName($model_id) {
+    $model_names = [
+        'openai/gpt-3.5-turbo' => 'GPT-3.5 Turbo',
+        'openai/gpt-4-turbo-preview' => 'GPT-4 Turbo',
+        'openai/gpt-4' => 'GPT-4',
+        'openai/gpt-4o' => 'GPT-4o',
+        'openai/gpt-4o-mini' => 'GPT-4o Mini',
+        'anthropic/claude-3-opus' => 'Claude 3 Opus',
+        'anthropic/claude-3-sonnet' => 'Claude 3 Sonnet',
+        'anthropic/claude-3-haiku' => 'Claude 3 Haiku',
+        'google/gemini-pro' => 'Gemini Pro',
+        'google/gemini-flash-1.5' => 'Gemini Flash 1.5',
+        'meta-llama/llama-3.1-70b-instruct' => 'Llama 3.1 70B'
+    ];
+
+    return $model_names[$model_id] ?? $model_id;
+}
+
+try {
+    // Get input parameters
+    $analysis_type = $_POST['analysis_type'] ?? '';
+    $location = $_POST['location'] ?? '';
+    $property_type = $_POST['property_type'] ?? 'all';
+    $time_frame = $_POST['time_frame'] ?? 'current';
+    $focus_area = $_POST['focus_area'] ?? 'general';
+    $additional_context = $_POST['additional_context'] ?? '';
+
+    if (empty($analysis_type)) {
+        throw new Exception('يجب تحديد نوع التحليل');
+    }
+
+    // Fetch market data from database
+    $market_data = fetchMarketData($link, $property_type, $location);
+
+    // Build the AI prompt
+    $prompt = buildMarketAnalysisPrompt(
+        $analysis_type,
+        $location,
+        $property_type,
+        $time_frame,
+        $focus_area,
+        $additional_context,
+        $market_data
+    );
+
+    // Initialize AI
+    $ai = new OpenRouterAPI($link);
+
+    // Set feature for logging
+    $_REQUEST['feature'] = 'market_analysis';
+
+    // Generate analysis
+    $options = [
+        'max_tokens' => 1200,
+        'temperature' => 0.7, // More creative for insights
+        'cache' => false // Market analysis should be fresh
+    ];
+
+    $start_time = microtime(true);
+    $analysis = $ai->complete($prompt, $options);
+    $end_time = microtime(true);
+
+    if (!$analysis) {
+        throw new Exception('فشل في الحصول على استجابة من AI.');
+    }
+
+    // Get usage stats
+    $usage = $ai->getUsageStats();
+    $execution_time = round(($end_time - $start_time) * 1000);
+
+    // Calculate cost
+    $cost = 0;
+    if (isset($usage['prompt_tokens']) && isset($usage['completion_tokens'])) {
+        $input_cost = ($usage['prompt_tokens'] / 1000) * 0.0005;
+        $output_cost = ($usage['completion_tokens'] / 1000) * 0.0015;
+        $cost = $input_cost + $output_cost;
+    }
+
+    // Return success response
+    echo json_encode([
+        'success' => true,
+        'analysis' => $analysis,
+        'stats' => [
+            'tokens' => $usage['total_tokens'] ?? 0,
+            'cost' => number_format($cost, 6),
+            'execution_time_ms' => $execution_time,
+            'model' => getFriendlyModelName($ai->getLastModel())
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'message' => $e->getMessage(),
+        'error_details' => [
+            'file' => basename($e->getFile()),
+            'line' => $e->getLine(),
+            'trace' => $e->getTraceAsString()
+        ]
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+/**
+ * Fetch market data from database
+ */
+function fetchMarketData($link, $property_type, $location) {
+    $data = [
+        'total_properties' => 0,
+        'total_units' => 0,
+        'occupied_units' => 0,
+        'vacant_units' => 0,
+        'occupancy_rate' => 0,
+        'average_rent' => 0,
+        'min_rent' => 0,
+        'max_rent' => 0,
+        'properties_by_type' => []
+    ];
+
+    // Get total properties
+    $sql = "SELECT COUNT(*) as total FROM amlak";
+    $params = [];
+    $types = '';
+
+    if (!empty($location)) {
+        $sql .= " WHERE aqaraddress LIKE ?";
+        $params[] = "%$location%";
+        $types .= 's';
+    }
+
+    if (!empty($params)) {
+        $stmt = mysqli_prepare($link, $sql);
+        mysqli_stmt_bind_param($stmt, $types, ...$params);
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
+        $data['total_properties'] = mysqli_fetch_assoc($result)['total'];
+        mysqli_stmt_close($stmt);
+    } else {
+        $result = mysqli_query($link, $sql);
+        $data['total_properties'] = mysqli_fetch_assoc($result)['total'];
+    }
+
+    // Get units data
+    $sql = "SELECT
+            COUNT(*) as total_units,
+            SUM(CASE WHEN mostagerid > 0 THEN 1 ELSE 0 END) as occupied_units,
+            AVG(CASE WHEN mostagerid > 0 THEN price ELSE NULL END) as avg_rent,
+            MIN(CASE WHEN mostagerid > 0 THEN price ELSE NULL END) as min_rent,
+            MAX(CASE WHEN mostagerid > 0 THEN price ELSE NULL END) as max_rent
+            FROM amlakdetails";
+
+    $result = mysqli_query($link, $sql);
+    $units = mysqli_fetch_assoc($result);
+
+    $data['total_units'] = $units['total_units'] ?? 0;
+    $data['occupied_units'] = $units['occupied_units'] ?? 0;
+    $data['vacant_units'] = $data['total_units'] - $data['occupied_units'];
+
+    if ($data['total_units'] > 0) {
+        $data['occupancy_rate'] = round(($data['occupied_units'] / $data['total_units']) * 100, 2);
+    }
+
+    $data['average_rent'] = round($units['avg_rent'] ?? 0, 2);
+    $data['min_rent'] = round($units['min_rent'] ?? 0, 2);
+    $data['max_rent'] = round($units['max_rent'] ?? 0, 2);
+
+    // Get properties by type
+    $sql = "SELECT aqartype, COUNT(*) as count
+            FROM amlak
+            GROUP BY aqartype
+            ORDER BY count DESC
+            LIMIT 10";
+    $result = mysqli_query($link, $sql);
+    while ($row = mysqli_fetch_assoc($result)) {
+        $data['properties_by_type'][] = $row;
+    }
+
+    // Get recent payment trends (last 6 months)
+    $six_months_ago = strtotime('-6 months');
+    $sql = "SELECT
+            COUNT(*) as payment_count,
+            SUM(dof3at) as total_collected,
+            AVG(dof3at) as avg_payment
+            FROM aksat
+            WHERE iscomplete = 1 AND kastdate >= ?";
+    $stmt = mysqli_prepare($link, $sql);
+    mysqli_stmt_bind_param($stmt, 'i', $six_months_ago);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $payments = mysqli_fetch_assoc($result);
+
+    $data['payment_count'] = $payments['payment_count'] ?? 0;
+    $data['total_collected'] = round($payments['total_collected'] ?? 0, 2);
+    $data['avg_payment'] = round($payments['avg_payment'] ?? 0, 2);
+    mysqli_stmt_close($stmt);
+
+    return $data;
+}
+
+/**
+ * Build AI prompt for market analysis
+ */
+function buildMarketAnalysisPrompt($analysis_type, $location, $property_type,
+                                   $time_frame, $focus_area, $additional_context,
+                                   $market_data) {
+
+    $analysis_types_ar = [
+        'market_trends' => 'اتجاهات السوق',
+        'price_analysis' => 'تحليل الأسعار',
+        'competition' => 'تحليل المنافسة',
+        'demand_supply' => 'العرض والطلب'
+    ];
+
+    $property_types_ar = [
+        'all' => 'جميع الأنواع',
+        'apartment' => 'شقق',
+        'villa' => 'فلل',
+        'office' => 'مكاتب',
+        'shop' => 'محلات تجارية',
+        'warehouse' => 'مستودعات',
+        'land' => 'أراضي'
+    ];
+
+    $time_frames_ar = [
+        'current' => 'الوضع الحالي',
+        'last_quarter' => 'آخر 3 أشهر',
+        'last_year' => 'آخر سنة',
+        'forecast' => 'توقعات المستقبل'
+    ];
+
+    $focus_areas_ar = [
+        'general' => 'تحليل عام',
+        'investment' => 'فرص استثمارية',
+        'pricing' => 'استراتيجية التسعير',
+        'risks' => 'المخاطر والتحديات'
+    ];
+
+    $analysis_name = $analysis_types_ar[$analysis_type] ?? 'تحليل عام';
+
+    $prompt = "أنت خبير في تحليل السوق العقاري السعودي.\n\n";
+    $prompt .= "مهمتك: إجراء $analysis_name شامل واحترافي.\n\n";
+
+    $prompt .= "معلومات التحليل:\n";
+    $prompt .= "- نوع التحليل: $analysis_name\n";
+
+    if (!empty($location)) {
+        $prompt .= "- المنطقة: $location\n";
+    } else {
+        $prompt .= "- المنطقة: غير محددة (تحليل عام)\n";
+    }
+
+    $prompt .= "- نوع العقار: " . ($property_types_ar[$property_type] ?? $property_type) . "\n";
+    $prompt .= "- الإطار الزمني: " . ($time_frames_ar[$time_frame] ?? $time_frame) . "\n";
+    $prompt .= "- التركيز: " . ($focus_areas_ar[$focus_area] ?? $focus_area) . "\n\n";
+
+    if (!empty($additional_context)) {
+        $prompt .= "معلومات إضافية: $additional_context\n\n";
+    }
+
+    $prompt .= "البيانات المتوفرة:\n";
+    $prompt .= "- إجمالي العقارات: " . number_format($market_data['total_properties']) . "\n";
+    $prompt .= "- إجمالي الوحدات: " . number_format($market_data['total_units']) . "\n";
+    $prompt .= "- الوحدات المؤجرة: " . number_format($market_data['occupied_units']) . "\n";
+    $prompt .= "- الوحدات الشاغرة: " . number_format($market_data['vacant_units']) . "\n";
+    $prompt .= "- معدل الإشغال: " . $market_data['occupancy_rate'] . "%\n";
+    $prompt .= "- متوسط الإيجار: " . number_format($market_data['average_rent']) . " ريال\n";
+    $prompt .= "- نطاق الأسعار: من " . number_format($market_data['min_rent']) . " إلى " . number_format($market_data['max_rent']) . " ريال\n";
+    $prompt .= "- إجمالي المدفوعات (6 أشهر): " . number_format($market_data['total_collected']) . " ريال\n\n";
+
+    if (!empty($market_data['properties_by_type'])) {
+        $prompt .= "توزيع العقارات حسب النوع:\n";
+        foreach ($market_data['properties_by_type'] as $type) {
+            $prompt .= "  - " . $type['aqartype'] . ": " . $type['count'] . " عقار\n";
+        }
+        $prompt .= "\n";
+    }
+
+    $prompt .= "المطلوب:\n";
+
+    switch ($analysis_type) {
+        case 'market_trends':
+            $prompt .= "1. تحليل الاتجاهات الحالية في السوق\n";
+            $prompt .= "2. التغيرات المتوقعة في المستقبل القريب\n";
+            $prompt .= "3. العوامل المؤثرة في السوق\n";
+            $prompt .= "4. توصيات للمستثمرين والملاك\n";
+            break;
+
+        case 'price_analysis':
+            $prompt .= "1. تحليل الأسعار الحالية ومقارنتها بالسوق\n";
+            $prompt .= "2. تحديد ما إذا كانت الأسعار مناسبة أم مرتفعة\n";
+            $prompt .= "3. توصيات لاستراتيجية التسعير\n";
+            $prompt .= "4. فرص زيادة الإيرادات\n";
+            break;
+
+        case 'competition':
+            $prompt .= "1. تحليل المنافسة في السوق\n";
+            $prompt .= "2. نقاط القوة والضعف مقارنة بالمنافسين\n";
+            $prompt .= "3. فرص التميز في السوق\n";
+            $prompt .= "4. استراتيجيات للتفوق على المنافسين\n";
+            break;
+
+        case 'demand_supply':
+            $prompt .= "1. تحليل العرض والطلب في السوق\n";
+            $prompt .= "2. تحديد الفجوات في السوق\n";
+            $prompt .= "3. فرص الاستثمار المناسبة\n";
+            $prompt .= "4. توقعات العرض والطلب المستقبلية\n";
+            break;
+    }
+
+    $prompt .= "\nالمواصفات:\n";
+    $prompt .= "- استخدم اللغة العربية الفصحى\n";
+    $prompt .= "- كن تحليلياً ومعتمداً على البيانات\n";
+    $prompt .= "- قدم رؤى عملية وقابلة للتنفيذ\n";
+    $prompt .= "- استخدم تنسيق احترافي مع عناوين واضحة\n";
+    $prompt .= "- الطول: 600-900 كلمة\n\n";
+
+    $prompt .= "التحليل:\n";
+
+    return $prompt;
+}
+?>
