@@ -8,7 +8,24 @@
 extract($_REQUEST);
 
 // Initialize variables
-$idaqar = isset($idaqar) ? intval($idaqar) : 0;
+$selectedPropertyIds = [];
+if (isset($_REQUEST['idaqar'])) {
+    if (is_array($_REQUEST['idaqar'])) {
+        foreach ($_REQUEST['idaqar'] as $propertyId) {
+            $propertyId = intval($propertyId);
+            if ($propertyId > 0) {
+                $selectedPropertyIds[] = $propertyId;
+            }
+        }
+    } else {
+        $propertyId = intval($_REQUEST['idaqar']);
+        if ($propertyId > 0) {
+            $selectedPropertyIds[] = $propertyId;
+        }
+    }
+}
+$selectedPropertyIds = array_values(array_unique($selectedPropertyIds));
+$idaqar = isset($selectedPropertyIds[0]) ? intval($selectedPropertyIds[0]) : 0;
 $aqarname = isset($aqarname) ? trim($aqarname) : '';
 $report = isset($report) ? intval($report) : 0;
 $startfrom = isset($startfrom) ? trim($startfrom) : '';
@@ -52,7 +69,51 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] == 'get_property_bank_
     exit;
 }
 
-$sc_title = "كشف حساب مالك";
+if (isset($_POST['ajax_action']) && $_POST['ajax_action'] == 'get_multi_property_bank_accounts') {
+    include_once "../../../reqloginajax.hnt";
+    header('Content-Type: application/json; charset=utf-8');
+    $ajaxPropertyIds = [];
+
+    if (isset($_POST['idaqar'])) {
+        if (is_array($_POST['idaqar'])) {
+            foreach ($_POST['idaqar'] as $propertyId) {
+                $propertyId = intval($propertyId);
+                if ($propertyId > 0) {
+                    $ajaxPropertyIds[] = $propertyId;
+                }
+            }
+        } else {
+            $propertyId = intval($_POST['idaqar']);
+            if ($propertyId > 0) {
+                $ajaxPropertyIds[] = $propertyId;
+            }
+        }
+    }
+
+    $ajaxPropertyIds = array_values(array_unique($ajaxPropertyIds));
+
+    if (!count($ajaxPropertyIds)) {
+        echo json_encode(['success' => true, 'accounts' => []], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        exit;
+    }
+
+    $ajaxPropertyIdsSql = implode(',', $ajaxPropertyIds);
+    $sql = "SELECT DISTINCT id, bankname, acountholder, acountnumber
+            FROM bankacounts
+            WHERE ownerid2 = 0 OR ownerid2 IN ($ajaxPropertyIdsSql)
+            ORDER BY ownerid2 DESC, id DESC";
+    $result = mysql_query($sql, $link);
+
+    $accounts = [];
+    while ($row = mysql_fetch_assoc($result)) {
+        $accounts[] = $row;
+    }
+
+    echo json_encode(['success' => true, 'accounts' => $accounts], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+
+$sc_title = "كشف حساب العقارات المختارة";
 $sc_id = "50";
 
 include_once "../../../nocash.hnt";
@@ -65,8 +126,9 @@ include_once "amlakfunctions.hnt";
 $local_hnt_dll_type = (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) ? 1 : 0;
 
 // Export handler — runs before any HTML output
-if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], true) && $idaqar) {
+if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], true) && count($selectedPropertyIds)) {
     include_once  "../../../connectdb.hnt";
+    $selectedPropertyIdsSql = implode(',', $selectedPropertyIds);
     $_exp_start = isset($_GET['startfromx']) && intval($_GET['startfromx']) ? intval($_GET['startfromx']) : 0;
     $_exp_end   = isset($_GET['enddatex'])   && intval($_GET['enddatex'])   ? intval($_GET['enddatex'])   : 0;
     if (!$_exp_start && isset($_GET['startfrom']) && $_GET['startfrom']) {
@@ -90,38 +152,44 @@ if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], tr
     $_pt_eradat_f = $_payment_type > 0 ? " AND eradat.sanadrakam IN (SELECT sanadrakam FROM sanad WHERE payment_type = '" . $_payment_type . "')" : "";
     $_pt_sanadsarf_f = $_payment_type > 0 ? " AND sanadsarf.payment_type = '" . $_payment_type . "'" : "";
 
-    $exp_headers = ['النوع', 'البيان', 'التاريخ', 'دائن', 'مدين'];
+    $exp_headers = ['العقار', 'النوع', 'البيان', 'التاريخ', 'دائن', 'مدين'];
     $exp_rows = [];
 
-    // Income (eradat)
-    $exp_res = mysql_query("SELECT eradat.pymentdesription, eradat.paymentdate, eradat.amount, eradat.mysa3ee, eradat.tamen, eradat.mywater, eradat.services
-                            FROM eradat WHERE idaqar='" . intval($idaqar) . "'
-                            AND paymentdate > '$_exp_start' AND paymentdate < '$_exp_end'
-                            $_tasfia_f $_bk_eradat_f $_pt_eradat_f", $link);
+    $exp_res = mysql_query("SELECT eradat.pymentdesription, eradat.paymentdate, eradat.amount, eradat.mysa3ee, eradat.tamen, eradat.mywater, eradat.services,
+                                    eradat.idaqar, amlak.aqarname, amlak.addwaterto, amlak.addtameento
+                             FROM eradat
+                             LEFT JOIN amlak ON eradat.idaqar = amlak.idaqar
+                             WHERE eradat.idaqar IN ($selectedPropertyIdsSql)
+                             AND paymentdate > '$_exp_start' AND paymentdate < '$_exp_end'
+                             $_tasfia_f $_bk_eradat_f $_pt_eradat_f", $link);
     while ($r = mysql_fetch_array($exp_res)) {
-        $net = floatval($r['amount']) - floatval($r['mysa3ee']) - floatval($r['services']);
-        $exp_rows[] = ['إيراد', str_replace('+', ' بدون ', $r['pymentdesription']), date('d/m/Y', $r['paymentdate']), number_format($net, 2, '.', ''), ''];
+        $water = ($r['addwaterto'] == "" || $r['addwaterto'] == "malek") ? 0 : floatval($r['mywater']);
+        $tamen = ($r['addtameento'] == "" || $r['addtameento'] == "malek") ? 0 : floatval($r['tamen']);
+        $net = floatval($r['amount']) - floatval($r['mysa3ee']) - floatval($r['services']) - $water - $tamen;
+        $exp_rows[] = [isset($r['aqarname']) ? $r['aqarname'] : '', 'إيراد', str_replace('+', ' بدون ', $r['pymentdesription']), date('d/m/Y', $r['paymentdate']), number_format($net, 2, '.', ''), ''];
     }
 
-    // Expenses (masrofat)
-    $exp_res = mysql_query("SELECT payeddue, payeddate, amount FROM masrofat
-                            WHERE fund_source = 0 AND idaqar='" . intval($idaqar) . "'
-                            AND payeddate > '$_exp_start' AND payeddate < '$_exp_end'
-                            $_tasfia_f", $link);
+    $exp_res = mysql_query("SELECT masrofat.payeddue, masrofat.payeddate, masrofat.amount, masrofat.idaqar, amlak.aqarname
+                             FROM masrofat
+                             LEFT JOIN amlak ON masrofat.idaqar = amlak.idaqar
+                             WHERE fund_source = 0 AND masrofat.idaqar IN ($selectedPropertyIdsSql)
+                             AND payeddate > '$_exp_start' AND payeddate < '$_exp_end'
+                             $_tasfia_f", $link);
     while ($r = mysql_fetch_array($exp_res)) {
-        $exp_rows[] = ['مصروف', str_replace('+', ' بدون ', $r['payeddue']), date('d/m/Y', $r['payeddate']), '', number_format($r['amount'], 2, '.', '')];
+        $exp_rows[] = [isset($r['aqarname']) ? $r['aqarname'] : '', 'مصروف', str_replace('+', ' بدون ', $r['payeddue']), date('d/m/Y', $r['payeddate']), '', number_format($r['amount'], 2, '.', '')];
     }
 
-    // Vouchers delivered to owner (sanadsarf)
-    $exp_res = mysql_query("SELECT sanadsarf.bayan, sanadsarf.sanadate, sanadsarf.amount FROM sanadsarf
-                            WHERE aqarid='" . intval($idaqar) . "'
-                            AND sanadate > '$_exp_start' AND sanadate < '$_exp_end'
-                            $_tasfia_f $_bk_sanadsarf_f $_pt_sanadsarf_f", $link);
+    $exp_res = mysql_query("SELECT sanadsarf.bayan, sanadsarf.sanadate, sanadsarf.amount, sanadsarf.aqarid, amlak.aqarname
+                             FROM sanadsarf
+                             LEFT JOIN amlak ON sanadsarf.aqarid = amlak.idaqar
+                             WHERE sanadsarf.aqarid IN ($selectedPropertyIdsSql)
+                             AND sanadate > '$_exp_start' AND sanadate < '$_exp_end'
+                             $_tasfia_f $_bk_sanadsarf_f $_pt_sanadsarf_f", $link);
     while ($r = mysql_fetch_array($exp_res)) {
-        $exp_rows[] = ['تسليم للمالك', $r['bayan'], date('d/m/Y', $r['sanadate']), '', number_format($r['amount'], 2, '.', '')];
+        $exp_rows[] = [isset($r['aqarname']) ? $r['aqarname'] : '', 'تسليم للمالك', $r['bayan'], date('d/m/Y', $r['sanadate']), '', number_format($r['amount'], 2, '.', '')];
     }
 
-    usort($exp_rows, function($a, $b) { return strcmp($a[2], $b[2]); });
+    usort($exp_rows, function($a, $b) { return strcmp($a[3], $b[3]); });
 
     $_exp_type = trim($_GET['export']);
     $_fn = date('Ymd_His');
@@ -152,11 +220,30 @@ if ($report == 1) {
     include_once "../../../header.hnt";
 }
 
-if ($idaqar) {
-    $sql = "SELECT * FROM amlak WHERE idaqar = '" . intval($idaqar) . "'";
-    $aqinfo = mysql_fetch_array(mysql_query($sql, $link));
-    $aqarname = isset($aqinfo['aqarname']) ? $aqinfo['aqarname'] : '';
+$selectedPropertyIdsSql = count($selectedPropertyIds) ? implode(',', $selectedPropertyIds) : '';
+$selectedProperties = [];
+$propertySettingsById = [];
+$allProperties = [];
+if ($selectedPropertyIdsSql !== '') {
+    $selectedPropertiesResult = mysql_query("SELECT idaqar, aqarname, persentage, addwaterto, addtameento FROM amlak WHERE idaqar IN ($selectedPropertyIdsSql) ORDER BY aqarname", $link);
+    while ($selectedProperty = mysql_fetch_assoc($selectedPropertiesResult)) {
+        $selectedProperties[] = $selectedProperty;
+        $propertySettingsById[intval($selectedProperty['idaqar'])] = $selectedProperty;
+    }
 }
+$allPropertiesResult = mysql_query("SELECT idaqar, aqarname FROM amlak ORDER BY aqarname", $link);
+while ($propertyRow = mysql_fetch_assoc($allPropertiesResult)) {
+    $allProperties[] = $propertyRow;
+}
+$selectedPropertyNames = array_map(function ($property) {
+    return $property['aqarname'];
+}, $selectedProperties);
+if (!$aqarname && count($selectedPropertyNames)) {
+    $aqarname = implode('، ', $selectedPropertyNames);
+}
+$reportSubjectText = count($selectedPropertyNames) === 1
+    ? $selectedPropertyNames[0]
+    : (count($selectedPropertyNames) ? 'العقارات المختارة (' . count($selectedPropertyNames) . ')' : 'بدون تحديد عقار');
 
 // Calculate dates
 $daxx = date("H/i/s/m/d/Y");
@@ -256,7 +343,7 @@ $totaloutcome = 0;
                 <div class="card-body p-4">
                     <div class="alert alert-info mb-4">
                         <i class="bi bi-calendar-event me-2"></i>
-                        <strong>كشف حساب مالك <?= htmlspecialchars($aqarname) ?> بتاريخ:</strong>
+                        <strong>كشف حساب العقارات المختارة: <?= htmlspecialchars($reportSubjectText) ?> بتاريخ:</strong>
                         <?php
                         if (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) {
             echo $h_date2;
@@ -275,33 +362,28 @@ $totaloutcome = 0;
                         <input type="hidden" name="bankid" id="bankid" value="<?= $bankid ?>">
                         <input type="hidden" name="startfrom" id="startfrom" value="<?= htmlspecialchars(str_replace('/', '-', $startfrom_picker_value)) ?>">
                         <input type="hidden" name="enddate" id="enddate" value="<?= htmlspecialchars(str_replace('/', '-', $enddate_picker_value)) ?>">
+                        <input type="hidden" name="aqarname" id="aqarname" value="<?= htmlspecialchars($aqarname) ?>">
 
                         <div class="row g-3 mb-3">
                             <div class="col-md-4">
-                                <label for="idaqar" class="form-label fw-bold">
+                                <label for="idaqar_select" class="form-label fw-bold">
                                     <i class="bi bi-building me-1"></i>
-                                    اختر اسم العقار
+                                    اختر العقارات
                                 </label>
-                                <div class="input-group  ">
-                                    <input type="hidden" name="idaqar_hidden" id="idaqar"
-                                           value="<?= $idaqar ?>">
-                                    <input type="text" class="form-control  " name="aqarname" id="aqarname"
-                                           value="<?= htmlspecialchars($aqarname) ?>"
-                                           onchange="recalculate();"
-                                           onclick="event.preventDefault(); event.stopPropagation(); ajaxfilldiv('select idaqar,aqarname from amlak','idaqar','aqarname');return false">
-                                    <button type="button" class="btn btn-primary btn-sm"
-                                            onclick="event.preventDefault(); event.stopPropagation(); ajaxfilldiv('select idaqar,aqarname from amlak','idaqar','aqarname'); return false;">
-                                        <i class="bi bi-search"></i>
-                                    </button>
-                                </div>
+                                <select class="form-select" name="idaqar[]" id="idaqar_select" multiple size="8">
+ <?php foreach ($allProperties as $propertyOption): ?>
+                                     <option value="<?= intval($propertyOption['idaqar']) ?>" <?= in_array(intval($propertyOption['idaqar']), $selectedPropertyIds, true) ? 'selected' : '' ?>><?= htmlspecialchars($propertyOption['aqarname']) ?></option>
+ <?php endforeach; ?>
+                                </select>
+                                <small class="text-muted">يمكنك اختيار أكثر من عقار بالضغط مع Ctrl أو Shift ثم الضغط على زر عرض التقرير.</small>
                             </div>
 
                             <div class="col-md-4">
                                 <label for="bank_account_filter" class="form-label fw-bold">
                                     <i class="bi bi-bank me-1"></i>
-                                    الحساب البنكي
+                                    الحسابات البنكية للعقارات المختارة
                                 </label>
-                                <select class="form-select form-select-sm" id="bank_account_filter" name="bankid_select" onchange="document.getElementById('bankid').value=this.value;recalculate();">
+                                <select class="form-select form-select-sm" id="bank_account_filter" name="bankid_select" onchange="document.getElementById('bankid').value=this.value;">
                                     <option value="0">الكل</option>
                                 </select>
                             </div>
@@ -382,7 +464,7 @@ $totaloutcome = 0;
                             <?php
                             $_ep = $_GET; unset($_ep['export']);
                             $_eq = http_build_query($_ep);
-                            $_eu = 'kashf_7esabmalek.hnt?' . $_eq . ($_eq ? '&' : '');
+                            $_eu = 'multi_property_report.hnt?' . $_eq . ($_eq ? '&' : '');
                             ?>
                             <a href="<?= htmlspecialchars($_eu . 'export=csv') ?>" class="btn btn-outline-success">
                                 <i class="bi bi-filetype-csv me-1"></i>تصدير CSV
@@ -397,19 +479,7 @@ $totaloutcome = 0;
             </div>
 
 <?php
-if ($idaqar) {
-    $sql = "SELECT * FROM amlak WHERE idaqar = '" . intval($idaqar) . "'";
-    $aqinfo = mysql_fetch_array(mysql_query($sql, $link));
-    $water = $tamen = "";
-
-    if (!($aqinfo['addwaterto'] == "" || $aqinfo['addwaterto'] == "malek")) {
-        $water = " - mywater ";
-    }
-
-    if (!($aqinfo['addtameento'] == "" || $aqinfo['addtameento'] == "malek")) {
-        $tamen = " - tamen ";
-    }
-
+if (count($selectedPropertyIds)) {
     $tasfia_filter = "";
     if ($showtasfia) {
         $tasfia_filter = " AND tasfia = '' ";
@@ -431,8 +501,9 @@ if ($idaqar) {
         $payment_type_sanadsarf_filter = " AND sanadsarf.payment_type = '" . intval($payment_type) . "'";
     }
 
-    $sql = "SELECT eradat.*, (amount - mysa3ee - services $water $tamen) AS amount2 FROM eradat
-            WHERE idaqar='" . intval($idaqar) . "'
+    $sql = "SELECT eradat.*, amlak.aqarname, amlak.addwaterto, amlak.addtameento FROM eradat
+            LEFT JOIN amlak ON eradat.idaqar = amlak.idaqar
+            WHERE eradat.idaqar IN ($selectedPropertyIdsSql)
             AND paymentdate > '" . intval($startfrom) . "'
             AND paymentdate < '" . intval($enddate) . "'
             $tasfia_filter
@@ -446,12 +517,13 @@ if ($idaqar) {
                 <div class="card-body">
                     <div class="table-responsive">
                         <table class="table table-hover table-striped align-middle">
-                            <thead class="table-light">
-                                <tr class="text-center">
-                                    <th><i class="bi bi-hash me-1"></i>سند رقم</th>
-                                    <th><i class="bi bi-file-text me-1"></i>البيان</th>
-                                    <th><i class="bi bi-calendar me-1"></i>التاريخ</th>
-                                    <th>المبلغ</th>
+                             <thead class="table-light">
+                                 <tr class="text-center">
+                                     <th><i class="bi bi-building me-1"></i>العقار</th>
+                                     <th><i class="bi bi-hash me-1"></i>سند رقم</th>
+                                     <th><i class="bi bi-file-text me-1"></i>البيان</th>
+                                     <th><i class="bi bi-calendar me-1"></i>التاريخ</th>
+                                     <th>المبلغ</th>
                                     <th>التأمين</th>
                                     <th>المياه</th>
                                     <th class="hidecommision">العمولة</th>
@@ -479,6 +551,9 @@ if ($idaqar) {
         $allsandrakam[] = $row['sanadrakam'];
 
         $counx++;
+        $rowWater = ($row['addwaterto'] == "" || $row['addwaterto'] == "malek") ? 0 : floatval($row['mywater']);
+        $rowTamen = ($row['addtameento'] == "" || $row['addtameento'] == "malek") ? 0 : floatval($row['tamen']);
+        $amount2 = floatval($row['amount']) - floatval($row['mysa3ee']) - floatval($row['services']) - $rowWater - $rowTamen;
 
         // Format date
         if (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) {
@@ -488,24 +563,27 @@ if ($idaqar) {
         }
 ?>
                                 <tr class="text-center">
-                                    <td><strong><?= htmlspecialchars($row['sanadrakam']) ?></strong></td>
-                                    <td><?= htmlspecialchars(str_replace("+", " بدون ", $row['pymentdesription'])) ?></td>
-                                    <td><?= $payment_date ?></td>
-                                    <td><?= number_format($row['amount'], 2) ?></td>
-                                    <td><?= number_format($row['tamen'], 2) ?></td>
-                                    <td><?= number_format($row['mywater'], 2) ?></td>
-                                    <td class="hidecommision"><?= number_format($row['mysa3ee'], 2) ?></td>
-                                    <td><?= number_format($row['services'], 2) ?></td>
-                                    <td><strong class="text-success"><?= number_format($row['amount2'], 2) ?></strong></td>
-                                    <td>0</td>
-                                    <td class="screenonlyonly"></td>
-                                </tr>
+                                     <td><?= htmlspecialchars(isset($row['aqarname']) ? $row['aqarname'] : '') ?></td>
+                                     <td><strong><?= htmlspecialchars($row['sanadrakam']) ?></strong></td>
+                                     <td><?= htmlspecialchars(str_replace("+", " بدون ", $row['pymentdesription'])) ?></td>
+                                     <td><?= $payment_date ?></td>
+                                     <td><?= number_format($row['amount'], 2) ?></td>
+                                     <td><?= number_format($row['tamen'], 2) ?></td>
+                                     <td><?= number_format($row['mywater'], 2) ?></td>
+                                     <td class="hidecommision"><?= number_format($row['mysa3ee'], 2) ?></td>
+                                     <td><?= number_format($row['services'], 2) ?></td>
+                                     <td><strong class="text-success"><?= number_format($amount2, 2) ?></strong></td>
+                                     <td>0</td>
+                                     <td class="screenonlyonly"></td>
+                                 </tr>
 <?php
-        $totalincome += $row['amount2'];
+        $totalincome += $amount2;
     }
 
     // Get expenses
-    $sql = "SELECT * FROM masrofat WHERE  fund_source = 0 AND idaqar='" . intval($idaqar) . "'
+    $sql = "SELECT masrofat.*, amlak.aqarname FROM masrofat
+            LEFT JOIN amlak ON masrofat.idaqar = amlak.idaqar
+            WHERE  fund_source = 0 AND masrofat.idaqar IN ($selectedPropertyIdsSql)
             AND payeddate > '" . intval($startfrom) . "'
             AND payeddate < '" . intval($enddate) . "'
             $tasfia_filter";
@@ -522,10 +600,11 @@ if ($idaqar) {
         }
 ?>
                                 <tr class="text-center">
-                                    <td>x</td>
-                                    <td><?= htmlspecialchars(str_replace("+", " بدون ", $row['payeddue'])) ?></td>
-                                    <td><?= $payed_date ?></td>
-                                    <td>0</td>
+                                     <td><?= htmlspecialchars(isset($row['aqarname']) ? $row['aqarname'] : '') ?></td>
+                                     <td>x</td>
+                                     <td><?= htmlspecialchars(str_replace("+", " بدون ", $row['payeddue'])) ?></td>
+                                     <td><?= $payed_date ?></td>
+                                     <td>0</td>
                                     <td>0</td>
                                     <td>0</td>
                                     <td class="hidecommision">0</td>
@@ -539,7 +618,9 @@ if ($idaqar) {
     }
 
     // Get payment vouchers
-    $sql = "SELECT sanadsarf.* FROM sanadsarf WHERE aqarid='" . intval($idaqar) . "'
+    $sql = "SELECT sanadsarf.*, amlak.aqarname FROM sanadsarf
+            LEFT JOIN amlak ON sanadsarf.aqarid = amlak.idaqar
+            WHERE sanadsarf.aqarid IN ($selectedPropertyIdsSql)
             AND sanadate > '" . intval($startfrom) . "'
             AND sanadate < '" . intval($enddate) . "'
             $tasfia_filter
@@ -558,10 +639,11 @@ if ($idaqar) {
         }
 ?>
                                 <tr class="text-center">
-                                    <td><strong><?= htmlspecialchars($row['sanadid']) ?></strong></td>
-                                    <td><?= htmlspecialchars($row['bayan']) ?></td>
-                                    <td><?= $sanad_date ?></td>
-                                    <td>0</td>
+                                     <td><?= htmlspecialchars(isset($row['aqarname']) ? $row['aqarname'] : '') ?></td>
+                                     <td><strong><?= htmlspecialchars($row['sanadid']) ?></strong></td>
+                                     <td><?= htmlspecialchars($row['bayan']) ?></td>
+                                     <td><?= $sanad_date ?></td>
+                                     <td>0</td>
                                     <td></td>
                                     <td></td>
                                     <td class="hidecommision"></td>
@@ -580,17 +662,17 @@ if ($idaqar) {
     }
 ?>
                                 <tr class="table-secondary fw-bold text-center">
-                                    <td colspan="8" class="text-end">الإجمالي</td>
-                                    <td><strong class="text-success"><?= number_format($totalincome, 2) ?></strong></td>
-                                    <td><strong class="text-danger"><?= number_format($totaloutcome, 2) ?></strong></td>
-                                    <td></td>
-                                </tr>
-                                <tr class="table-primary fw-bold text-center">
-                                    <td colspan="8" class="text-end"><h5 class="mb-0">الصافي</h5></td>
-                                    <td colspan="2">
-                                        <h5 class="mb-0 <?= ($totalincome - $totaloutcome) >= 0 ? 'text-success' : 'text-danger' ?>">
-                                            <?= number_format($totalincome - $totaloutcome, 2) ?>
-                                        </h5>
+                                     <td colspan="9" class="text-end">الإجمالي</td>
+                                     <td><strong class="text-success"><?= number_format($totalincome, 2) ?></strong></td>
+                                     <td><strong class="text-danger"><?= number_format($totaloutcome, 2) ?></strong></td>
+                                     <td></td>
+                                 </tr>
+                                 <tr class="table-primary fw-bold text-center">
+                                     <td colspan="9" class="text-end"><h5 class="mb-0">صافي العقارات المختارة</h5></td>
+                                     <td colspan="2">
+                                         <h5 class="mb-0 <?= ($totalincome - $totaloutcome) >= 0 ? 'text-success' : 'text-danger' ?>">
+                                             <?= number_format($totalincome - $totaloutcome, 2) ?>
+                                         </h5>
                                     </td>
                                     <td></td>
                                 </tr>
@@ -603,14 +685,14 @@ if ($idaqar) {
 }
 ?>
 
-<?php if ($report != 1 && $idaqar): ?>
+<?php if ($report != 1 && count($selectedPropertyIds)): ?>
             <!-- Owner Percentage Calculation -->
             <div class="card shadow-sm mt-4">
                 <div class="card-header bg-warning text-dark">
                     <h5 class="mb-0">
                         <i class="bi bi-calculator me-2"></i>
-                        حساب النسبة المستحقة
-                    </h5>
+                         حساب النسبة المستحقة للعقارات المختارة
+                     </h5>
                 </div>
                 <div class="card-body">
                     <div class="alert alert-warning">
@@ -619,30 +701,51 @@ if ($idaqar) {
                     </div>
 
 <?php
-    $sql = "SELECT persentage FROM amlak WHERE idaqar='" . intval($idaqar) . "'";
-    $persentage = mysql_fetch_array(mysql_query($sql, $link));
-    $per = isset($persentage['persentage']) ? $persentage['persentage'] / 100 : 0;
-
-    if ($per < 100) {
-        if ($per < 1) {
-            $per = $per * 100;
+    $incomeByProperty = [];
+    $incomeResult = mysql_query("SELECT eradat.idaqar, eradat.amount, eradat.mysa3ee, eradat.services, eradat.mywater, eradat.tamen, amlak.addwaterto, amlak.addtameento
+                                  FROM eradat
+                                  LEFT JOIN amlak ON eradat.idaqar = amlak.idaqar
+                                  WHERE eradat.idaqar IN ($selectedPropertyIdsSql)
+                                  AND paymentdate > '" . intval($startfrom) . "'
+                                  AND paymentdate < '" . intval($enddate) . "'
+                                  $tasfia_filter
+                                  $bankid_eradat_filter
+                                  $payment_type_eradat_filter", $link);
+    while ($incomeRow = mysql_fetch_array($incomeResult)) {
+        $incomePropertyId = intval($incomeRow['idaqar']);
+        $incomeWater = ($incomeRow['addwaterto'] == "" || $incomeRow['addwaterto'] == "malek") ? 0 : floatval($incomeRow['mywater']);
+        $incomeTamen = ($incomeRow['addtameento'] == "" || $incomeRow['addtameento'] == "malek") ? 0 : floatval($incomeRow['tamen']);
+        $incomeNet = floatval($incomeRow['amount']) - floatval($incomeRow['mysa3ee']) - floatval($incomeRow['services']) - $incomeWater - $incomeTamen;
+        if (!isset($incomeByProperty[$incomePropertyId])) {
+            $incomeByProperty[$incomePropertyId] = 0;
         }
+        $incomeByProperty[$incomePropertyId] += $incomeNet;
     }
 
-    $commission = ($per * $totalincome) / 100;
+    $commission = 0;
+    foreach ($selectedProperties as $selectedProperty) {
+        $per = isset($selectedProperty['persentage']) ? $selectedProperty['persentage'] / 100 : 0;
+        if ($per < 100) {
+            if ($per < 1) {
+                $per = $per * 100;
+            }
+        }
+        $propertyIncome = isset($incomeByProperty[intval($selectedProperty['idaqar'])]) ? $incomeByProperty[intval($selectedProperty['idaqar'])] : 0;
+        $commission += ($per * $propertyIncome) / 100;
+    }
     $net_for_owner = $totalincome - $totaloutcome - $commission;
 ?>
                     <div class="row g-3">
                         <div class="col-md-6">
                             <div class="card bg-light">
                                 <div class="card-body">
-                                    <h6 class="card-title">النسبة المستحقة</h6>
-                                    <p class="mb-0">
-                                        (<?= $per ?>% × <?= number_format($totalincome, 2) ?>) / 100 =
-                                        <strong class="text-primary"><?= number_format($commission, 2) ?> <?= isset($myomla) ? $myomla : 'ريال' ?></strong>
-                                    </p>
-                                </div>
-                            </div>
+                                     <h6 class="card-title">إجمالي النسبة المستحقة</h6>
+                                     <p class="mb-0">
+                                         تم احتساب النسبة حسب إعداد كل عقار مختار ليكون الإجمالي:
+                                         <strong class="text-primary"><?= number_format($commission, 2) ?> <?= isset($myomla) ? $myomla : 'ريال' ?></strong>
+                                     </p>
+                                 </div>
+                             </div>
                         </div>
                         <div class="col-md-6">
                             <div class="card bg-success text-white">
@@ -714,47 +817,30 @@ $(document).ready(function() {
 
     // Load bank accounts when property is selected via ajaxfilldiv
     // Monitor both idaqar (hidden) and aqarname (visible) fields
-    $('#idaqar, #aqarname').on('change propertychange', function() {
-        loadBankAccounts();
-    });
+     $('#idaqar_select').on('change', function() {
+         syncSelectedPropertySummary();
+         loadBankAccounts();
+         recalculate();
+     });
 
-    // Also trigger on DOMSubtreeModified for idaqar (catches ajaxfilldiv updates)
-    $('#idaqar').on('DOMSubtreeModified', function() {
-        loadBankAccounts();
-    });
-
-    // Load bank accounts on page load if property is selected
-    <?php if ($idaqar > 0): ?>
+     <?php if (count($selectedPropertyIds)): ?>
     loadBankAccounts();
-    <?php endif; ?>
-
-    // Set interval to check for changes from ajaxfilldiv (it updates values programmatically)
-    let lastIdaqar = $('#idaqar').val();
-    let lastAqarname = $('#aqarname').val();
-    setInterval(function() {
-        const currentIdaqar = $('#idaqar').val();
-        const currentAqarname = $('#aqarname').val();
-        if (currentIdaqar !== lastIdaqar || currentAqarname !== lastAqarname) {
-            lastIdaqar = currentIdaqar;
-            lastAqarname = currentAqarname;
-            loadBankAccounts();
-            recalculate();
-        }
-    }, 500);
+     <?php endif; ?>
 
     function loadBankAccounts() {
-        const idaqar = $('#idaqar').val();
-        if (!idaqar || idaqar == 0) {
+        const propertyIds = getSelectedPropertyIds();
+        if (!propertyIds.length) {
             $('#bank_account_filter').html('<option value="0">الكل</option>');
+            $('#bankid').val(0);
             return;
         }
 
         $.ajax({
-            url: 'kashf_7esabmalek.hnt',
+            url: 'multi_property_report.hnt',
             type: 'POST',
             data: {
-                ajax_action: 'get_property_bank_accounts',
-                idaqar: idaqar
+                ajax_action: 'get_multi_property_bank_accounts',
+                idaqar: propertyIds
             },
             dataType: 'json',
             success: function(response) {
@@ -777,14 +863,14 @@ $(document).ready(function() {
     }
 
     // Update hidden bankid field when bank account selector changes
-    $('#bank_account_filter').on('change', function() {
-        $('#bankid').val($(this).val());
-        recalculate();
-    });
+     $('#bank_account_filter').on('change', function() {
+         $('#bankid').val($(this).val());
+         recalculate();
+     });
 
-    $('#payment_type_filter').on('change', function() {
-        recalculate();
-    });
+     $('#payment_type_filter').on('change', function() {
+         recalculate();
+     });
 
     $('.datepicker-input').on('changeDate change', function() {
         recalculate();
@@ -818,15 +904,31 @@ function syncDateFilters() {
     $('#enddate').val(formatPickerDateForQuery($('#enddate_picker').val()));
 }
 
+function getSelectedPropertyIds() {
+    return ($('#idaqar_select').val() || []).filter(function(value) {
+        return parseInt(value, 10) > 0;
+    });
+}
+
+function syncSelectedPropertySummary() {
+    var selectedTexts = $('#idaqar_select option:selected').map(function() {
+        return $(this).text();
+    }).get();
+    $('#aqarname').val(selectedTexts.join('، '));
+}
+
 function buildFilterUrl(showtasfia, report, hidecommision) {
-    const idaqar = $('#idaqar').val() || 0;
+    const propertyIds = getSelectedPropertyIds();
     const aqarname = encodeURIComponent($('#aqarname').val() || '');
     const startfrom = formatPickerDateForQuery($('#startfrom_picker').val());
     const enddate = formatPickerDateForQuery($('#enddate_picker').val());
     const bankid = $('#bankid').val() || 0;
     const payment_type = $('#payment_type_filter').val() || 0;
 
-    let url = 'kashf_7esabmalek.hnt?idaqar=' + idaqar + '&aqarname=' + aqarname;
+    let url = 'multi_property_report.hnt?aqarname=' + aqarname;
+    propertyIds.forEach(function(propertyId) {
+        url += '&idaqar[]=' + encodeURIComponent(propertyId);
+    });
     url += '&startfrom=' + encodeURIComponent(startfrom);
     url += '&enddate=' + encodeURIComponent(enddate);
 
@@ -858,15 +960,7 @@ function recalculate() {
 }
 
 function resetFilters() {
-    const idaqar = $('#idaqar').val() || 0;
-    const aqarname = encodeURIComponent($('#aqarname').val() || '');
-    let url = 'kashf_7esabmalek.hnt';
-
-    if (idaqar > 0 || aqarname) {
-        url += '?idaqar=' + idaqar + '&aqarname=' + aqarname;
-    }
-
-    window.location.href = url;
+     window.location.href = 'multi_property_report.hnt';
 }
 
 function applyFilters(showtasfia) {
