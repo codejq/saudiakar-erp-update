@@ -10,6 +10,47 @@
 $sc_title = "تقرير ضريبة القيمة المضافة";
 $sc_id = "208";
 $use_accounting_theme = true;
+
+// Export handler — runs before header.hnt outputs any HTML
+if (isset($_GET['export']) && in_array($_GET['export'], ['csv', 'xls'], true)) {
+    include_once "../../../../reqloginajax.hnt";
+    $_dateFrom = $_GET['date_from'] ?? date('Y-m-01');
+    $_dateTo   = $_GET['date_to']   ?? date('Y-m-t');
+    foreach (['_dateFrom', '_dateTo'] as $_df) {
+        if ($$_df && strpos($$_df, '/') !== false) { $_p = explode('/', $$_df); if (count($_p) === 3) $$_df = $_p[2].'-'.$_p[1].'-'.$_p[0]; }
+    }
+    $exp_headers = ['النوع', 'المرجع', 'التاريخ', 'الجهة', 'المبلغ', 'الضريبة', 'الإجمالي'];
+    $exp_rows = [];
+    $_ss = $db->prepare("SELECT invoice_number, customer_name, invoice_date, subtotal, vat_amount, total_amount FROM acc_invoices WHERE invoice_date BETWEEN ? AND ? AND invoice_type IN ('standard','simplified') ORDER BY invoice_date");
+    if ($_ss) { $_ss->bind_param('ss', $_dateFrom, $_dateTo); $_ss->execute();
+        foreach ($_ss->get_result()->fetch_all(MYSQLI_ASSOC) as $_r) {
+            $exp_rows[] = ['مبيعات (مخرجات)', $_r['invoice_number'], $_r['invoice_date'], $_r['customer_name'], number_format((float)$_r['subtotal'], 2, '.', ''), number_format((float)$_r['vat_amount'], 2, '.', ''), number_format((float)$_r['total_amount'], 2, '.', '')];
+        }
+    }
+    $_ps = $db->prepare("SELECT je.entry_number, je.entry_date, je.description, SUM(jel.debit_amount) as amount, SUM(jel.debit_amount)*0.15 as vat_amount FROM acc_journal_entries je JOIN acc_journal_entry_lines jel ON je.entry_id=jel.entry_id JOIN acc_chart_of_accounts acc ON jel.account_id=acc.account_id WHERE je.entry_date BETWEEN ? AND ? AND je.status='posted' AND acc.vat_applicable=1 AND acc.account_type='expense' GROUP BY je.entry_id ORDER BY je.entry_date");
+    if ($_ps) { $_ps->bind_param('ss', $_dateFrom, $_dateTo); $_ps->execute();
+        foreach ($_ps->get_result()->fetch_all(MYSQLI_ASSOC) as $_r) {
+            $exp_rows[] = ['مشتريات (مدخلات)', $_r['entry_number'], $_r['entry_date'], $_r['description'], number_format((float)$_r['amount'], 2, '.', ''), number_format((float)$_r['vat_amount'], 2, '.', ''), number_format((float)($_r['amount'] + $_r['vat_amount']), 2, '.', '')];
+        }
+    }
+    $_fn = date('Ymd_His');
+    if ($_GET['export'] === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="vat_report_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w'); fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out); exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="vat_report_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>'; exit;
+}
+
 include_once "../../../../nocash.hnt";
 include_once "../../../../connectdb.hnt";
 include_once "../../../../header.hnt";
@@ -161,11 +202,22 @@ $netVAT = $totalSalesVAT - $totalPurchasesVAT;
                 </h1>
                 <p class="mb-0 opacity-75">VAT Report</p>
             </div>
-            <div>
+            <div class="d-flex flex-wrap gap-2 justify-content-end">
+                <?php
+                $_eq = '';
+                if (!empty($_GET['date_from'])) $_eq .= '&date_from=' . urlencode($_GET['date_from']);
+                if (!empty($_GET['date_to']))   $_eq .= '&date_to='   . urlencode($_GET['date_to']);
+                ?>
+                <a href="vat_report.hnt?export=csv<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-filetype-csv me-2"></i>تصدير CSV
+                </a>
+                <a href="vat_report.hnt?export=xls<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-file-earmark-excel me-2"></i>تصدير Excel
+                </a>
                 <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
                     <i class="bi bi-arrow-right me-2"></i>العودة
                 </button>
-                <button class="btn btn-light btn-lg ms-2" onclick="window.print()">
+                <button class="btn btn-light btn-lg" onclick="window.print()">
                     <i class="bi bi-printer me-2"></i>طباعة
                 </button>
             </div>

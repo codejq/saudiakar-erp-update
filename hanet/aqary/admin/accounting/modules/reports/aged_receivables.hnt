@@ -10,6 +10,49 @@
 $sc_title = "تقرير أعمار الذمم المدينة";
 $sc_id = "211";
 $use_accounting_theme = true;
+
+// Export handler — runs before header.hnt outputs any HTML
+if (isset($_GET['export']) && in_array($_GET['export'], ['csv', 'xls'], true)) {
+    include_once "../../../../reqloginajax.hnt";
+    include_once "../../includes/accounting_class.hnt";
+    $_am = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+    $_asOfDate = $_GET['as_of_date'] ?? date('Y-m-d');
+    if ($_asOfDate && strpos($_asOfDate, '/') !== false) { $_p = explode('/', $_asOfDate); if (count($_p) === 3) $_asOfDate = $_p[2].'-'.$_p[1].'-'.$_p[0]; }
+    $_showZero = isset($_GET['show_zero']) ? 1 : 0;
+    $_filters = [
+        'journal_id'     => !empty($_GET['journal_id'])     ? (int)$_GET['journal_id']     : null,
+        'cost_center_id' => !empty($_GET['cost_center_id']) ? (int)$_GET['cost_center_id'] : null,
+        'aqar_id'        => !empty($_GET['aqar_id'])        ? (int)$_GET['aqar_id']        : null,
+        'tenant_id'      => !empty($_GET['tenant_id'])      ? (int)$_GET['tenant_id']      : null,
+        'owner_id'       => !empty($_GET['owner_id'])       ? (int)$_GET['owner_id']       : null,
+        'egar_id'        => !empty($_GET['egar_id'])        ? (int)$_GET['egar_id']        : null,
+    ];
+    $_data = $_am->getAgedReceivablesData($_asOfDate, (bool)$_showZero, $_filters);
+    $exp_headers = ['اسم العميل', 'الحالي (0-30 يوم)', '31-60 يوم', '61-90 يوم', 'أكثر من 90 يوم', 'الإجمالي'];
+    $exp_rows = [];
+    foreach ($_data['customer_data'] as $_cd) {
+        $exp_rows[] = [$_cd['customer_name'], number_format((float)$_cd['current'], 2, '.', ''), number_format((float)$_cd['30'], 2, '.', ''), number_format((float)$_cd['60'], 2, '.', ''), number_format((float)$_cd['90_plus'], 2, '.', ''), number_format((float)$_cd['total'], 2, '.', '')];
+    }
+    $_t = $_data['totals'];
+    $exp_rows[] = ['الإجمالي', number_format((float)$_t['current'], 2, '.', ''), number_format((float)$_t['30'], 2, '.', ''), number_format((float)$_t['60'], 2, '.', ''), number_format((float)$_t['90_plus'], 2, '.', ''), number_format((float)$_t['total'], 2, '.', '')];
+    $_fn = date('Ymd_His');
+    if ($_GET['export'] === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="aged_receivables_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w'); fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out); exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="aged_receivables_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>'; exit;
+}
+
 include_once "../../../../nocash.hnt";
 include_once "../../../../connectdb.hnt";
 include_once "../../../../header.hnt";
@@ -148,11 +191,28 @@ $totalOutstanding = $agedData['total_outstanding'];
                 </h1>
                 <p class="mb-0 opacity-75">Aged Receivables Report</p>
             </div>
-            <div>
+            <div class="d-flex flex-wrap gap-2 justify-content-end">
+                <?php
+                $_eq = '';
+                if (!empty($_GET['as_of_date']))     $_eq .= '&as_of_date='     . urlencode($_GET['as_of_date']);
+                if (isset($_GET['show_zero']))       $_eq .= '&show_zero=1';
+                if (!empty($_GET['journal_id']))     $_eq .= '&journal_id='     . (int)$_GET['journal_id'];
+                if (!empty($_GET['cost_center_id'])) $_eq .= '&cost_center_id=' . (int)$_GET['cost_center_id'];
+                if (!empty($_GET['aqar_id']))        $_eq .= '&aqar_id='        . (int)$_GET['aqar_id'];
+                if (!empty($_GET['tenant_id']))      $_eq .= '&tenant_id='      . (int)$_GET['tenant_id'];
+                if (!empty($_GET['owner_id']))       $_eq .= '&owner_id='       . (int)$_GET['owner_id'];
+                if (!empty($_GET['egar_id']))        $_eq .= '&egar_id='        . (int)$_GET['egar_id'];
+                ?>
+                <a href="aged_receivables.hnt?export=csv<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-filetype-csv me-2"></i>تصدير CSV
+                </a>
+                <a href="aged_receivables.hnt?export=xls<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-file-earmark-excel me-2"></i>تصدير Excel
+                </a>
                 <button class="btn btn-light btn-lg" onclick="window.history.back()">
                     <i class="bi bi-arrow-right me-2"></i>العودة
                 </button>
-                <button class="btn btn-light btn-lg ms-2" onclick="window.print()">
+                <button class="btn btn-light btn-lg" onclick="window.print()">
                     <i class="bi bi-printer me-2"></i>طباعة
                 </button>
             </div>

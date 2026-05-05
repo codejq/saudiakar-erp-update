@@ -10,6 +10,52 @@
 $sc_title = "قائمة الدخل";
 $sc_id = "206";
 $use_accounting_theme = true;
+
+// Export handler — runs before header.hnt outputs any HTML
+if (isset($_GET['export']) && in_array($_GET['export'], ['csv', 'xls'], true)) {
+    include_once "../../../../reqloginajax.hnt";
+    include_once "../../includes/accounting_class.hnt";
+    $_am = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+    $_dateFrom = $_GET['date_from'] ?? date('Y-01-01');
+    $_dateTo   = $_GET['date_to']   ?? date('Y-m-d');
+    foreach (['_dateFrom', '_dateTo'] as $_df) {
+        if ($$_df && strpos($$_df, '/') !== false) { $_p = explode('/', $$_df); if (count($_p) === 3) $$_df = $_p[2].'-'.$_p[1].'-'.$_p[0]; }
+    }
+    $_filters = [
+        'journal_id'     => !empty($_GET['journal_id'])     ? (int)$_GET['journal_id']     : null,
+        'cost_center_id' => !empty($_GET['cost_center_id']) ? (int)$_GET['cost_center_id'] : null,
+        'aqar_id'        => !empty($_GET['aqar_id'])        ? (int)$_GET['aqar_id']        : null,
+        'tenant_id'      => !empty($_GET['tenant_id'])      ? (int)$_GET['tenant_id']      : null,
+        'owner_id'       => !empty($_GET['owner_id'])       ? (int)$_GET['owner_id']       : null,
+        'egar_id'        => !empty($_GET['egar_id'])        ? (int)$_GET['egar_id']        : null,
+    ];
+    $_data = $_am->getIncomeStatementData($_dateFrom, $_dateTo, $_filters);
+    $exp_headers = ['النوع', 'رمز الحساب', 'اسم الحساب', 'المبلغ (ر.س)'];
+    $exp_rows = [];
+    foreach ($_data['revenue_accounts'] as $_a) $exp_rows[] = ['إيراد', $_a['account_code'], $_a['account_name_ar'], number_format((float)$_a['amount'], 2, '.', '')];
+    $exp_rows[] = ['', '', 'إجمالي الإيرادات', number_format((float)$_data['total_revenue'], 2, '.', '')];
+    foreach ($_data['expense_accounts'] as $_a) $exp_rows[] = ['مصروف', $_a['account_code'], $_a['account_name_ar'], number_format((float)$_a['amount'], 2, '.', '')];
+    $exp_rows[] = ['', '', 'إجمالي المصروفات', number_format((float)$_data['total_expenses'], 2, '.', '')];
+    $_net = $_data['total_revenue'] - $_data['total_expenses'];
+    $exp_rows[] = ['', '', $_net >= 0 ? 'صافي الربح' : 'صافي الخسارة', number_format(abs($_net), 2, '.', '')];
+    $_fn = date('Ymd_His');
+    if ($_GET['export'] === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="income_statement_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w'); fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out); exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="income_statement_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>'; exit;
+}
+
 include_once "../../../../nocash.hnt";
 include_once "../../../../connectdb.hnt";
 include_once "../../../../header.hnt";
@@ -125,11 +171,28 @@ $netIncome = $totalRevenue - $totalExpenses;
                 </h1>
                 <p class="mb-0 opacity-75">Income Statement</p>
             </div>
-            <div>
+            <div class="d-flex flex-wrap gap-2 justify-content-end">
+                <?php
+                $_eq = '';
+                if (!empty($_GET['date_from']))      $_eq .= '&date_from='      . urlencode($_GET['date_from']);
+                if (!empty($_GET['date_to']))        $_eq .= '&date_to='        . urlencode($_GET['date_to']);
+                if (!empty($_GET['journal_id']))     $_eq .= '&journal_id='     . (int)$_GET['journal_id'];
+                if (!empty($_GET['cost_center_id'])) $_eq .= '&cost_center_id=' . (int)$_GET['cost_center_id'];
+                if (!empty($_GET['aqar_id']))        $_eq .= '&aqar_id='        . (int)$_GET['aqar_id'];
+                if (!empty($_GET['tenant_id']))      $_eq .= '&tenant_id='      . (int)$_GET['tenant_id'];
+                if (!empty($_GET['owner_id']))       $_eq .= '&owner_id='       . (int)$_GET['owner_id'];
+                if (!empty($_GET['egar_id']))        $_eq .= '&egar_id='        . (int)$_GET['egar_id'];
+                ?>
+                <a href="income_statement.hnt?export=csv<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-filetype-csv me-2"></i>تصدير CSV
+                </a>
+                <a href="income_statement.hnt?export=xls<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-file-earmark-excel me-2"></i>تصدير Excel
+                </a>
                 <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
                     <i class="bi bi-arrow-right me-2"></i>العودة
                 </button>
-                <button class="btn btn-light btn-lg ms-2" onclick="window.print()">
+                <button class="btn btn-light btn-lg" onclick="window.print()">
                     <i class="bi bi-printer me-2"></i>طباعة
                 </button>
             </div>

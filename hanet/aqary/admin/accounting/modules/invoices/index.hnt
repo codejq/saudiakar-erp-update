@@ -11,6 +11,70 @@
 $sc_title = "الفواتير الإلكترونية";
 $sc_id = "204";
 $use_accounting_theme = true;
+
+// Export / template handler — runs before any HTML output
+if (isset($_GET['export']) && in_array($_GET['export'], ['csv', 'xls', 'template'], true)) {
+    include_once "../../../../reqloginajax.hnt";
+    include_once "../../includes/accounting_class.hnt";
+
+    $_fn       = date('Ymd_His');
+    $_exp_type = $_GET['export'];
+
+    if ($_exp_type === 'template') {
+        $tpl_headers = ['رقم المجموعة', 'تاريخ الفاتورة (dd/mm/yyyy)', 'نوع المستند', 'اسم العميل', 'الرقم الضريبي للعميل', 'طريقة الدفع', 'ملاحظات', 'وصف البند', 'الكمية', 'السعر', 'نسبة الضريبة %', 'خصم'];
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="invoices_template_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $tpl_headers, ',', '"', '\\');
+        fputcsv($_out, ['1', date('d/m/Y'), 'standard', 'اسم العميل', '300000000000003', 'cash', 'ملاحظة اختيارية', 'خدمة إيجار', '1', '5000.00', '15', '0'], ',', '"', '\\');
+        fputcsv($_out, ['1', '', '', '', '', '', '', 'رسوم صيانة', '1', '500.00', '15', '0'], ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+
+    $exp_headers = ['رقم الفاتورة', 'التاريخ', 'نوع المستند', 'اسم العميل', 'الرقم الضريبي', 'المبلغ قبل الضريبة', 'ضريبة القيمة المضافة', 'الإجمالي', 'حالة السداد', 'حالة ZATCA'];
+    $exp_rows    = [];
+    $_er = $db->query("SELECT invoice_number, invoice_date, invoice_type, customer_name, customer_vat_number, subtotal, vat_amount, total_amount, payment_status, zatca_status FROM acc_invoices ORDER BY invoice_date DESC, invoice_id DESC");
+    if ($_er) {
+        while ($_inv = $_er->fetch_assoc()) {
+            $_typeLabels = ['standard' => 'فاتورة ضريبية', 'simplified' => 'فاتورة مبسطة', 'credit_note' => 'إشعار دائن', 'debit_note' => 'إشعار مدين'];
+            $exp_rows[] = [
+                $_inv['invoice_number'],
+                date('d/m/Y', strtotime($_inv['invoice_date'])),
+                $_typeLabels[$_inv['invoice_type']] ?? $_inv['invoice_type'],
+                $_inv['customer_name'],
+                $_inv['customer_vat_number'] ?? '',
+                number_format(floatval($_inv['subtotal']),    2, '.', ''),
+                number_format(floatval($_inv['vat_amount']),  2, '.', ''),
+                number_format(floatval($_inv['total_amount']), 2, '.', ''),
+                $_inv['payment_status'] ?? '',
+                $_inv['zatca_status'] ?? ''
+            ];
+        }
+    }
+
+    if ($_exp_type === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="invoices_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="invoices_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>';
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] != 'POST' && !isset($_POST['ajax_action'])) {
 include_once "../../../../header.hnt";
 
@@ -775,6 +839,99 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                 $response = ['success' => false, 'message' => 'فشل في تعديل الفاتورة: ' . $e->getMessage()];
             }
             break;
+
+        case 'import_invoices':
+            if (empty($_FILES['import_file']['tmp_name'])) {
+                $response = ['success' => false, 'message' => 'لم يتم رفع أي ملف'];
+                break;
+            }
+            $_handle = fopen($_FILES['import_file']['tmp_name'], 'r');
+            if (!$_handle) {
+                $response = ['success' => false, 'message' => 'تعذر قراءة الملف'];
+                break;
+            }
+            $_bom = fread($_handle, 3);
+            if ($_bom !== "\xEF\xBB\xBF") rewind($_handle);
+            fgetcsv($_handle, 0, ',', '"', '\\'); // skip header
+            // Build customer name→id cache
+            $_custRes = $db->query("SELECT customer_id, customer_name, vat_number FROM acc_customers WHERE is_active = 1");
+            $_custMap = [];
+            if ($_custRes) { while ($_cr = $_custRes->fetch_assoc()) { $_custMap[mb_strtolower($_cr['customer_name'])] = $_cr; } }
+            $_groups  = [];
+            $errors   = [];
+            $lineNum  = 1;
+            while (($_row = fgetcsv($_handle, 0, ',', '"', '\\')) !== false) {
+                $lineNum++;
+                if (count($_row) < 8 || empty(trim($_row[0]))) continue;
+                $_gk    = trim($_row[0]);
+                $_date  = trim($_row[1] ?? '');
+                $_type  = trim($_row[2] ?? '') ?: 'standard';
+                $_cname = trim($_row[3] ?? '');
+                $_cvat  = trim($_row[4] ?? '');
+                $_pay   = trim($_row[5] ?? '') ?: 'cash';
+                $_notes = trim($_row[6] ?? '');
+                $_idesc = trim($_row[7] ?? '');
+                $_qty   = floatval($_row[8] ?? 1);
+                $_price = floatval($_row[9] ?? 0);
+                $_vrate = floatval($_row[10] ?? 15);
+                $_disc  = floatval($_row[11] ?? 0);
+                if (!isset($_groups[$_gk])) $_groups[$_gk] = ['meta' => null, 'items' => []];
+                if ($_date && $_cname && !$_groups[$_gk]['meta']) {
+                    if (strpos($_date, '/') !== false) {
+                        $_dp = explode('/', $_date);
+                        if (count($_dp) === 3) $_date = $_dp[2].'-'.$_dp[1].'-'.$_dp[0];
+                    }
+                    $_groups[$_gk]['meta'] = [
+                        'invoice_type' => in_array($_type, ['standard','simplified','credit_note','debit_note']) ? $_type : 'standard',
+                        'customer_name' => $_cname, 'customer_vat' => $_cvat,
+                        'invoice_date' => $_date, 'payment_method' => $_pay, 'notes' => $_notes
+                    ];
+                }
+                if ($_idesc) {
+                    $_groups[$_gk]['items'][] = ['description' => $_idesc, 'quantity' => $_qty, 'unit_price' => $_price, 'vat_rate' => $_vrate, 'discount' => $_disc];
+                }
+            }
+            fclose($_handle);
+            $imported = 0;
+            foreach ($_groups as $_gk => $_g) {
+                if (!$_g['meta']) { $errors[] = "مجموعة $_gk: بيانات الفاتورة ناقصة (تاريخ أو عميل)"; continue; }
+                if (empty($_g['items'])) { $errors[] = "مجموعة $_gk: لا توجد بنود"; continue; }
+                // Resolve or create customer
+                $_custKey = mb_strtolower($_g['meta']['customer_name']);
+                if (isset($_custMap[$_custKey])) {
+                    $_custId = $_custMap[$_custKey]['customer_id'];
+                } else {
+                    $_insC = $db->prepare("INSERT INTO acc_customers (customer_name, vat_number, is_active, created_at, formuid) VALUES (?, ?, 1, NOW(), UUID())");
+                    $_insC->bind_param('ss', $_g['meta']['customer_name'], $_g['meta']['customer_vat']);
+                    $_insC->execute();
+                    $_custId = $_insC->insert_id;
+                    $_custMap[$_custKey] = ['customer_id' => $_custId, 'customer_name' => $_g['meta']['customer_name']];
+                }
+                $_invData = [
+                    'invoice_type' => $_g['meta']['invoice_type'],
+                    'customer_id'  => $_custId, 'customer_type' => 'tenant',
+                    'customer_name' => $_g['meta']['customer_name'],
+                    'customer_vat_number' => $_g['meta']['customer_vat'],
+                    'customer_address' => null,
+                    'invoice_date' => $_g['meta']['invoice_date'],
+                    'due_date' => null, 'payment_method' => $_g['meta']['payment_method'],
+                    'notes' => $_g['meta']['notes'], 'seller_source' => 'company',
+                    'seller_supplier_id' => null, 'seller_name' => null,
+                    'seller_vat_number' => null, 'seller_address' => null,
+                    'journal_id' => null, 'cost_center_id' => null,
+                    'tenant_id' => null, 'owner_id' => null, 'aqar_id' => null, 'subaqar_id' => null, 'egar_id' => null
+                ];
+                $_invItems = array_map(fn($_i) => [
+                    'description' => $_i['description'], 'quantity' => $_i['quantity'],
+                    'unit_price'  => $_i['unit_price'],  'vat_rate' => $_i['vat_rate'], 'discount' => $_i['discount']
+                ], $_g['items']);
+                $_res = $accountingManager->createInvoice($_invData, $_invItems);
+                if ($_res['success']) { $imported++; } else { $errors[] = "مجموعة $_gk: " . ($_res['error'] ?? 'خطأ غير معروف'); }
+            }
+            $msg = "تم استيراد $imported فاتورة بنجاح";
+            if (!empty($errors)) $msg .= "\n\nتنبيهات:\n" . implode("\n", $errors);
+            $response = ['success' => true, 'message' => $msg, 'imported' => $imported, 'errors' => $errors];
+            break;
     }
 
     echo json_encode($response, JSON_UNESCAPED_UNICODE);
@@ -990,11 +1147,20 @@ if ($suppliersResult) {
                 </h1>
                 <p class="mb-0 opacity-75">E-Invoices - ZATCA Compliant</p>
             </div>
-            <div>
+            <div class="d-flex flex-wrap gap-2 justify-content-end">
+                <a href="index.hnt?export=csv" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-filetype-csv me-2"></i>تصدير CSV
+                </a>
+                <a href="index.hnt?export=xls" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-file-earmark-excel me-2"></i>تصدير Excel
+                </a>
+                <button class="btn btn-warning btn-lg" data-bs-toggle="modal" data-bs-target="#importInvoicesModal">
+                    <i class="bi bi-upload me-2"></i>استيراد
+                </button>
                 <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
                     <i class="bi bi-arrow-right me-2"></i>العودة
                 </button>
-                <button class="btn btn-add-invoice btn-lg ms-2" data-bs-toggle="modal" data-bs-target="#addInvoiceModal">
+                <button class="btn btn-add-invoice btn-lg" data-bs-toggle="modal" data-bs-target="#addInvoiceModal">
                     <i class="bi bi-plus-circle me-2"></i>فاتورة جديدة
                 </button>
             </div>
@@ -1423,6 +1589,75 @@ if ($suppliersResult) {
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
                 <button type="button" class="btn btn-primary" id="submitInvoiceBtn" onclick="submitInvoice()">
                     <i class="bi bi-check-circle me-2"></i>حفظ الفاتورة
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Import Invoices Modal -->
+<div class="modal fade" id="importInvoicesModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-upload me-2"></i>استيراد الفواتير من CSV
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info mb-3">
+                    <h6 class="mb-2"><i class="bi bi-info-circle me-2"></i>خطوات الاستيراد</h6>
+                    <ol class="mb-0 small">
+                        <li>حمّل القالب أدناه</li>
+                        <li>أضف الفواتير — كل فاتورة لها <strong>رقم مجموعة</strong> فريد، كرره في كل بنودها</li>
+                        <li>أدخل بيانات الفاتورة (التاريخ، العميل...) في السطر الأول من كل مجموعة فقط</li>
+                        <li>احفظ الملف بصيغة CSV (UTF-8) وارفعه — العملاء غير الموجودين سيُنشَؤون تلقائياً</li>
+                    </ol>
+                </div>
+
+                <a href="index.hnt?export=template" class="btn btn-outline-success mb-4">
+                    <i class="bi bi-download me-2"></i>تحميل القالب (CSV)
+                </a>
+
+                <div class="table-responsive mb-4">
+                    <table class="table table-sm table-bordered align-middle">
+                        <thead class="table-light text-center">
+                            <tr><th>العمود</th><th>القيم المقبولة</th><th>مثال</th></tr>
+                        </thead>
+                        <tbody class="small">
+                            <tr><td>رقم المجموعة *</td><td>رقم (نفس الرقم لبنود الفاتورة الواحدة)</td><td>1</td></tr>
+                            <tr><td>تاريخ الفاتورة *</td><td>dd/mm/yyyy (السطر الأول فقط)</td><td>15/01/2025</td></tr>
+                            <tr><td>نوع المستند</td><td>standard / simplified / credit_note / debit_note</td><td>standard</td></tr>
+                            <tr><td>اسم العميل *</td><td>نص (السطر الأول فقط)</td><td>محمد أحمد</td></tr>
+                            <tr><td>الرقم الضريبي للعميل</td><td>15 رقم</td><td>300000000000003</td></tr>
+                            <tr><td>طريقة الدفع</td><td>cash / bank_transfer / credit_card</td><td>cash</td></tr>
+                            <tr><td>ملاحظات</td><td>نص</td><td></td></tr>
+                            <tr><td>وصف البند *</td><td>نص</td><td>خدمة إيجار</td></tr>
+                            <tr><td>الكمية</td><td>رقم</td><td>1</td></tr>
+                            <tr><td>السعر</td><td>رقم</td><td>5000.00</td></tr>
+                            <tr><td>نسبة الضريبة %</td><td>رقم</td><td>15</td></tr>
+                            <tr><td>خصم</td><td>رقم</td><td>0</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <form id="importInvoicesForm" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">اختر ملف CSV</label>
+                        <input type="file" class="form-control" id="import_invoices_file"
+                               name="import_file" accept=".csv,.txt">
+                        <div class="form-text">العملاء غير الموجودين سيُنشَؤون تلقائياً بالاسم المدخل</div>
+                    </div>
+                </form>
+
+                <div id="importInvoicesResult" style="display:none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-primary" id="importInvoicesSubmitBtn"
+                        onclick="submitInvoicesImport()">
+                    <i class="bi bi-upload me-2"></i>استيراد
                 </button>
             </div>
         </div>
@@ -2791,6 +3026,57 @@ var editParam = urlParams.get('edit');
 if (editParam) {
     editInvoice(parseInt(editParam));
 }
+
+function submitInvoicesImport() {
+    const fileInput = document.getElementById('import_invoices_file');
+    if (!fileInput.files.length) {
+        alert('يرجى اختيار ملف CSV أولاً');
+        return;
+    }
+
+    const btn = document.getElementById('importInvoicesSubmitBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>جاري الاستيراد...';
+
+    const formData = new FormData();
+    formData.append('ajax_action', 'import_invoices');
+    formData.append('import_file', fileInput.files[0]);
+
+    fetch('index.hnt', { method: 'POST', body: formData })
+        .then(r => r.json())
+        .then(data => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+
+            const resultDiv = document.getElementById('importInvoicesResult');
+            resultDiv.style.display = 'block';
+            const cls  = data.imported > 0 ? 'alert-success' : 'alert-warning';
+            const icon = data.imported > 0 ? 'check-circle' : 'exclamation-triangle';
+            resultDiv.innerHTML = `<div class="alert ${cls}"><i class="bi bi-${icon} me-2"></i>${data.message.replace(/\n/g, '<br>')}</div>`;
+
+            if (data.imported > 0) setTimeout(() => location.reload(), 2000);
+        })
+        .catch(() => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+            showResultModal(false, 'حدث خطأ أثناء الاستيراد', false);
+        });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const importModal = document.getElementById('importInvoicesModal');
+    if (importModal) {
+        importModal.addEventListener('show.bs.modal', function() {
+            document.getElementById('import_invoices_file').value = '';
+            const r   = document.getElementById('importInvoicesResult');
+            r.style.display = 'none';
+            r.innerHTML = '';
+            const btn = document.getElementById('importInvoicesSubmitBtn');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+        });
+    }
+});
 </script>
 
 <?php require("../../../../foter.hnt"); ?>

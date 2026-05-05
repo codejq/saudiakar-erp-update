@@ -10,6 +10,60 @@
 $sc_title = "حركة الصندوق والبنوك";
 $sc_id = "213";
 $use_accounting_theme = true;
+
+// Export handler — runs before header.hnt outputs any HTML
+if (isset($_GET['export']) && in_array($_GET['export'], ['csv', 'xls'], true)) {
+    include_once "../../../../reqloginajax.hnt";
+    include_once "../../includes/accounting_class.hnt";
+    $_am = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+    $_dateFrom = $_GET['date_from'] ?? date('Y-01-01');
+    $_dateTo   = $_GET['date_to']   ?? date('Y-m-d');
+    foreach (['_dateFrom', '_dateTo'] as $_df) {
+        if ($$_df && strpos($$_df, '/') !== false) { $_p = explode('/', $$_df); if (count($_p) === 3) $$_df = $_p[2].'-'.$_p[1].'-'.$_p[0]; }
+    }
+    $_accountId = !empty($_GET['account_id']) ? (int)$_GET['account_id'] : null;
+    $_filters = [
+        'journal_id'     => !empty($_GET['journal_id'])     ? (int)$_GET['journal_id']     : null,
+        'cost_center_id' => !empty($_GET['cost_center_id']) ? (int)$_GET['cost_center_id'] : null,
+        'aqar_id'        => !empty($_GET['aqar_id'])        ? (int)$_GET['aqar_id']        : null,
+        'tenant_id'      => !empty($_GET['tenant_id'])      ? (int)$_GET['tenant_id']      : null,
+        'owner_id'       => !empty($_GET['owner_id'])       ? (int)$_GET['owner_id']       : null,
+        'egar_id'        => !empty($_GET['egar_id'])        ? (int)$_GET['egar_id']        : null,
+    ];
+    $_md = $_am->getCashBankMovementData($_dateFrom, $_dateTo, $_accountId, $_filters);
+    $exp_headers = ['التاريخ', 'رقم القيد', 'الحساب', 'دفتر اليومية', 'مركز التكلفة', 'البيان', 'مقبوض', 'مدفوع', 'الرصيد الجاري'];
+    $exp_rows = [];
+    foreach ($_md['rows'] as $_r) {
+        $exp_rows[] = [
+            $_r['entry_date'] ?? '',
+            $_r['entry_number'] ?? '',
+            trim(($_r['account_code'] ?? '') . ' - ' . ($_r['account_name_ar'] ?? ''), ' -'),
+            $_r['journal'] ?? '',
+            $_r['cost_center'] ?? '',
+            $_r['description'] ?? '',
+            (float)($_r['debit_amount'] ?? 0) > 0 ? number_format((float)$_r['debit_amount'], 2, '.', '') : '',
+            (float)($_r['credit_amount'] ?? 0) > 0 ? number_format((float)$_r['credit_amount'], 2, '.', '') : '',
+            number_format((float)($_r['running_balance'] ?? 0), 2, '.', ''),
+        ];
+    }
+    $_fn = date('Ymd_His');
+    if ($_GET['export'] === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="cash_bank_movement_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w'); fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out); exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="cash_bank_movement_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>'; exit;
+}
+
 include_once "../../../../nocash.hnt";
 include_once "../../../../connectdb.hnt";
 include_once "../../../../header.hnt";
@@ -112,11 +166,29 @@ $endingBalance = $movementData['ending_balance'];
                 </h1>
                 <p class="mb-0 opacity-75">Cash / Bank Movement</p>
             </div>
-            <div>
+            <div class="d-flex flex-wrap gap-2 justify-content-end">
+                <?php
+                $_eq = '';
+                if (!empty($_GET['account_id']))     $_eq .= '&account_id='     . (int)$_GET['account_id'];
+                if (!empty($_GET['date_from']))      $_eq .= '&date_from='      . urlencode($_GET['date_from']);
+                if (!empty($_GET['date_to']))        $_eq .= '&date_to='        . urlencode($_GET['date_to']);
+                if (!empty($_GET['journal_id']))     $_eq .= '&journal_id='     . (int)$_GET['journal_id'];
+                if (!empty($_GET['cost_center_id'])) $_eq .= '&cost_center_id=' . (int)$_GET['cost_center_id'];
+                if (!empty($_GET['aqar_id']))        $_eq .= '&aqar_id='        . (int)$_GET['aqar_id'];
+                if (!empty($_GET['tenant_id']))      $_eq .= '&tenant_id='      . (int)$_GET['tenant_id'];
+                if (!empty($_GET['owner_id']))       $_eq .= '&owner_id='       . (int)$_GET['owner_id'];
+                if (!empty($_GET['egar_id']))        $_eq .= '&egar_id='        . (int)$_GET['egar_id'];
+                ?>
+                <a href="cash_bank_movement.hnt?export=csv<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-filetype-csv me-2"></i>تصدير CSV
+                </a>
+                <a href="cash_bank_movement.hnt?export=xls<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-file-earmark-excel me-2"></i>تصدير Excel
+                </a>
                 <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
                     <i class="bi bi-arrow-right me-2"></i>العودة
                 </button>
-                <button class="btn btn-light btn-lg ms-2" onclick="window.print()">
+                <button class="btn btn-light btn-lg" onclick="window.print()">
                     <i class="bi bi-printer me-2"></i>طباعة
                 </button>
             </div>

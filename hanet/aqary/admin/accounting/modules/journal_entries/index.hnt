@@ -11,6 +11,97 @@ $sc_title = "القيود اليومية";
 $sc_id = "202";
 $use_accounting_theme = true;
 
+// Export / template handler — runs before any HTML output
+if (isset($_GET['export']) && in_array($_GET['export'], ['csv', 'xls', 'template'], true)) {
+    include_once "../../../../reqloginajax.hnt";
+    include_once "../../includes/accounting_class.hnt";
+
+    $_fn       = date('Ymd_His');
+    $_exp_type = $_GET['export'];
+
+    if ($_exp_type === 'template') {
+        $tpl_headers = ['رقم المجموعة', 'تاريخ القيد (dd/mm/yyyy)', 'نوع القيد', 'وصف القيد', 'الحالة', 'رمز الحساب', 'بيان البند', 'مدين', 'دائن'];
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="journal_entries_template_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $tpl_headers, ',', '"', '\\');
+        fputcsv($_out, ['1', date('d/m/Y'), 'manual', 'قيد مثال', 'draft', '1010', 'نقد وارد', '1000.00', '0.00'], ',', '"', '\\');
+        fputcsv($_out, ['1', '', '', '', '', '2010', 'بنك', '0.00', '1000.00'], ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+
+    // Apply same filters as main page
+    $_search     = isset($_GET['search'])     ? $db->real_escape_string($_GET['search'])     : '';
+    $_status     = isset($_GET['status'])     ? $db->real_escape_string($_GET['status'])     : '';
+    $_etype      = isset($_GET['entry_type']) ? $db->real_escape_string($_GET['entry_type']) : '';
+    $_date_from  = isset($_GET['date_from'])  ? $_GET['date_from']  : '';
+    $_date_to    = isset($_GET['date_to'])    ? $_GET['date_to']    : '';
+    foreach (['_date_from', '_date_to'] as $_df) {
+        if ($$_df && strpos($$_df, '/') !== false) {
+            $_dp = explode('/', $$_df);
+            if (count($_dp) === 3) $$_df = $_dp[2].'-'.$_dp[1].'-'.$_dp[0];
+        }
+    }
+    $_where = [];
+    if ($_search)    $_where[] = "(entry_number LIKE '%$_search%' OR description LIKE '%$_search%')";
+    if ($_status)    $_where[] = "status = '$_status'";
+    if ($_etype)     $_where[] = "entry_type = '$_etype'";
+    if ($_date_from) $_where[] = "entry_date >= '$_date_from'";
+    if ($_date_to)   $_where[] = "entry_date <= '$_date_to'";
+    $_wc = !empty($_where) ? 'WHERE ' . implode(' AND ', $_where) : '';
+
+    $_er = $db->query("SELECT * FROM acc_journal_entries $_wc ORDER BY entry_date DESC, entry_id DESC");
+    $_eids = [];
+    $_emap = [];
+    while ($_row = $_er->fetch_assoc()) { $_eids[] = $_row['entry_id']; $_emap[$_row['entry_id']] = $_row; }
+
+    $exp_headers = ['رقم القيد', 'تاريخ القيد', 'نوع القيد', 'الحالة', 'وصف القيد', 'رمز الحساب', 'اسم الحساب', 'بيان البند', 'مدين', 'دائن'];
+    $exp_rows = [];
+    if (!empty($_eids)) {
+        $_lr = $db->query("SELECT jel.*, acc.account_code, acc.account_name_ar
+                           FROM acc_journal_entry_lines jel
+                           JOIN acc_chart_of_accounts acc ON jel.account_id = acc.account_id
+                           WHERE jel.entry_id IN (" . implode(',', $_eids) . ")
+                           ORDER BY jel.entry_id, jel.line_number");
+        while ($_l = $_lr->fetch_assoc()) {
+            $_e = $_emap[$_l['entry_id']];
+            $exp_rows[] = [
+                $_e['entry_number'],
+                date('d/m/Y', strtotime($_e['entry_date'])),
+                $_e['entry_type'],
+                $_e['status'],
+                $_e['description'],
+                $_l['account_code'],
+                $_l['account_name_ar'],
+                $_l['description'],
+                number_format(floatval($_l['debit_amount']),  2, '.', ''),
+                number_format(floatval($_l['credit_amount']), 2, '.', '')
+            ];
+        }
+    }
+
+    if ($_exp_type === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="journal_entries_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="journal_entries_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>';
+    exit;
+}
 
 if(isset($_POST['ajax_action'])){
     include_once "../../../../reqloginajax.hnt";
@@ -266,6 +357,90 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                 $response = ['success' => false, 'error' => 'Entry not found', 'message' => 'القيد غير موجود في النظام'];
             }
             break;
+
+        case 'import_entries':
+            if (empty($_FILES['import_file']['tmp_name'])) {
+                $response = ['success' => false, 'message' => 'لم يتم رفع أي ملف'];
+                break;
+            }
+            $handle = fopen($_FILES['import_file']['tmp_name'], 'r');
+            if (!$handle) {
+                $response = ['success' => false, 'message' => 'تعذر قراءة الملف'];
+                break;
+            }
+            $bom = fread($handle, 3);
+            if ($bom !== "\xEF\xBB\xBF") rewind($handle);
+            fgetcsv($handle, 0, ',', '"', '\\'); // skip header
+            // Build account-code → account_id map
+            $_allAcc = $accountingManager->getAllAccounts(['is_active' => 1, 'is_leaf' => 1]);
+            $_accMap = [];
+            foreach ($_allAcc as $_a) $_accMap[$_a['account_code']] = $_a['account_id'];
+            // Read and group rows by group-number column
+            $_groups = [];
+            $errors  = [];
+            $lineNum = 1;
+            while (($row = fgetcsv($handle, 0, ',', '"', '\\')) !== false) {
+                $lineNum++;
+                if (count($row) < 6 || empty(trim($row[0]))) continue;
+                $_gk   = trim($row[0]);
+                $_date = trim($row[1] ?? '');
+                $_type = trim($row[2] ?? '') ?: 'manual';
+                $_desc = trim($row[3] ?? '');
+                $_stat = trim($row[4] ?? '') ?: 'draft';
+                $_acc  = trim($row[5] ?? '');
+                $_ld   = trim($row[6] ?? '');
+                $_dr   = floatval($row[7] ?? 0);
+                $_cr   = floatval($row[8] ?? 0);
+                if (!isset($_groups[$_gk])) $_groups[$_gk] = ['meta' => null, 'lines' => []];
+                if ($_date && $_desc && !$_groups[$_gk]['meta']) {
+                    if (strpos($_date, '/') !== false) {
+                        $_dp = explode('/', $_date);
+                        if (count($_dp) === 3) $_date = $_dp[2].'-'.$_dp[1].'-'.$_dp[0];
+                    }
+                    $_groups[$_gk]['meta'] = [
+                        'entry_date'  => $_date,
+                        'entry_type'  => in_array($_type, ['manual','opening','closing','adjustment']) ? $_type : 'manual',
+                        'description' => $_desc,
+                        'status'      => in_array($_stat, ['draft','posted']) ? $_stat : 'draft',
+                        'journal_id'  => null, 'tenant_id' => null, 'owner_id' => null,
+                        'aqar_id'     => null, 'subaqar_id' => null, 'egar_id' => null,
+                        'reference_type' => null, 'reference_id' => null
+                    ];
+                }
+                if ($_acc) {
+                    $_groups[$_gk]['lines'][] = ['account_code' => $_acc, 'description' => $_ld, 'debit_amount' => $_dr, 'credit_amount' => $_cr, 'cost_center_id' => null];
+                }
+            }
+            fclose($handle);
+            $imported = 0;
+            foreach ($_groups as $_gk => $_g) {
+                if (!$_g['meta']) { $errors[] = "مجموعة $_gk: تاريخ أو وصف القيد مفقود"; continue; }
+                if (count($_g['lines']) < 2) { $errors[] = "مجموعة $_gk: يجب إضافة بندين على الأقل"; continue; }
+                $_resolved = [];
+                $_ok = true;
+                foreach ($_g['lines'] as $_li) {
+                    if (!isset($_accMap[$_li['account_code']])) {
+                        $errors[] = "مجموعة $_gk: رمز الحساب '{$_li['account_code']}' غير موجود";
+                        $_ok = false; break;
+                    }
+                    $_li['account_id'] = $_accMap[$_li['account_code']];
+                    $_resolved[] = $_li;
+                }
+                if (!$_ok) continue;
+                $_res = $accountingManager->createJournalEntry($_g['meta'], $_resolved);
+                if ($_res['success']) {
+                    $imported++;
+                    if ($_g['meta']['status'] === 'posted' && !empty($_res['entry_id'])) {
+                        $accountingManager->postJournalEntry($_res['entry_id']);
+                    }
+                } else {
+                    $errors[] = "مجموعة $_gk: " . ($_res['error'] ?? 'خطأ غير معروف');
+                }
+            }
+            $msg = "تم استيراد $imported قيد بنجاح";
+            if (!empty($errors)) $msg .= "\n\nتنبيهات:\n" . implode("\n", $errors);
+            $response = ['success' => true, 'message' => $msg, 'imported' => $imported, 'errors' => $errors];
+            break;
     }
 
     echo json_encode($response, JSON_UNESCAPED_UNICODE);
@@ -446,11 +621,28 @@ if (!empty($entries)) {
                 </h1>
                 <p class="mb-0 opacity-75">Journal Entries (<?= number_format($totalEntries) ?> قيد)</p>
             </div>
-            <div>
+            <div class="d-flex flex-wrap gap-2 justify-content-end">
+                <?php
+                $_eq = '';
+                if ($search)    $_eq .= '&search='    . urlencode($search);
+                if ($status)    $_eq .= '&status='    . urlencode($status);
+                if ($entryType) $_eq .= '&entry_type='. urlencode($entryType);
+                if ($dateFrom)  $_eq .= '&date_from=' . urlencode($dateFrom);
+                if ($dateTo)    $_eq .= '&date_to='   . urlencode($dateTo);
+                ?>
+                <a href="index.hnt?export=csv<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-filetype-csv me-2"></i>تصدير CSV
+                </a>
+                <a href="index.hnt?export=xls<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-file-earmark-excel me-2"></i>تصدير Excel
+                </a>
+                <button class="btn btn-warning btn-lg" data-bs-toggle="modal" data-bs-target="#importEntriesModal">
+                    <i class="bi bi-upload me-2"></i>استيراد
+                </button>
                 <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
                     <i class="bi bi-arrow-right me-2"></i>العودة
                 </button>
-                <button class="btn btn-add-entry btn-lg ms-2" data-bs-toggle="modal" data-bs-target="#addEntryModal">
+                <button class="btn btn-add-entry btn-lg" data-bs-toggle="modal" data-bs-target="#addEntryModal">
                     <i class="bi bi-plus-circle me-2"></i>قيد جديد
                 </button>
             </div>
@@ -901,6 +1093,74 @@ if (!empty($entries)) {
     </div>
 </div>
 
+<!-- Import Entries Modal -->
+<div class="modal fade" id="importEntriesModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-upload me-2"></i>استيراد القيود اليومية من CSV
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info mb-3">
+                    <h6 class="mb-2"><i class="bi bi-info-circle me-2"></i>خطوات الاستيراد</h6>
+                    <ol class="mb-0 small">
+                        <li>حمّل القالب أدناه</li>
+                        <li>أضف القيود — كل قيد له <strong>رقم مجموعة</strong> فريد، كرر نفس الرقم في كل بنود القيد</li>
+                        <li>أدخل التاريخ والوصف في السطر الأول من كل مجموعة فقط</li>
+                        <li>احفظ الملف بصيغة CSV (UTF-8) وارفعه</li>
+                    </ol>
+                </div>
+
+                <a href="index.hnt?export=template" class="btn btn-outline-success mb-4">
+                    <i class="bi bi-download me-2"></i>تحميل القالب (CSV)
+                </a>
+
+                <div class="table-responsive mb-4">
+                    <table class="table table-sm table-bordered align-middle">
+                        <thead class="table-light text-center">
+                            <tr>
+                                <th>العمود</th>
+                                <th>القيم المقبولة</th>
+                                <th>مثال</th>
+                            </tr>
+                        </thead>
+                        <tbody class="small">
+                            <tr><td>رقم المجموعة *</td><td>رقم (نفس الرقم لبنود القيد الواحد)</td><td>1</td></tr>
+                            <tr><td>تاريخ القيد *</td><td>dd/mm/yyyy (السطر الأول فقط)</td><td>15/01/2025</td></tr>
+                            <tr><td>نوع القيد</td><td>manual / opening / closing / adjustment</td><td>manual</td></tr>
+                            <tr><td>وصف القيد *</td><td>نص (السطر الأول فقط)</td><td>قيد إيراد إيجار</td></tr>
+                            <tr><td>الحالة</td><td>draft / posted</td><td>draft</td></tr>
+                            <tr><td>رمز الحساب *</td><td>رمز حساب ورقي موجود في النظام</td><td>1010</td></tr>
+                            <tr><td>بيان البند</td><td>نص</td><td>نقد وارد</td></tr>
+                            <tr><td>مدين</td><td>رقم</td><td>1000.00</td></tr>
+                            <tr><td>دائن</td><td>رقم</td><td>0.00</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <form id="importEntriesForm" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">اختر ملف CSV</label>
+                        <input type="file" class="form-control" id="import_entries_file" name="import_file" accept=".csv,.txt">
+                        <div class="form-text">الحسابات غير الموجودة أو القيود غير المتوازنة سيتم الإبلاغ عنها كتنبيهات</div>
+                    </div>
+                </form>
+
+                <div id="importEntriesResult" style="display:none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-primary" id="importEntriesSubmitBtn" onclick="submitEntriesImport()">
+                    <i class="bi bi-upload me-2"></i>استيراد
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Result Modal -->
 <div class="modal fade" id="resultModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
@@ -1052,43 +1312,43 @@ function submitEntry(status) {
 }
 
 function postEntry(entryId) {
-    if (!confirm('هل تريد ترحيل هذا القيد؟')) return;
+    confirm('هل تريد ترحيل هذا القيد؟', 'تأكيد الترحيل', function() {
+        const formData = new FormData();
+        formData.append('ajax_action', 'post_entry');
+        formData.append('entry_id', entryId);
 
-    const formData = new FormData();
-    formData.append('ajax_action', 'post_entry');
-    formData.append('entry_id', entryId);
-
-    fetch('index.hnt', {
-        method: 'POST',
-        body: formData
-    })
-    .then(response => response.json())
-    .then(data => {
-        showResultModal(data.success, data.message);
-        if (data.success) {
-            setTimeout(() => location.reload(), 1500);
-        }
-    });
+        fetch('index.hnt', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            showResultModal(data.success, data.message);
+            if (data.success) {
+                setTimeout(() => location.reload(), 1500);
+            }
+        });
+    }, function() {});
 }
 
 function deleteEntry(entryId) {
-    if (!confirm('هل أنت متأكد من حذف هذا القيد؟\n\nتنبيه: يمكن حذف المسودات فقط. القيود المرحّلة تحتاج إلى قيد عكسي.')) return;
+    confirm('هل أنت متأكد من حذف هذا القيد؟\n\nتنبيه: يمكن حذف المسودات فقط. القيود المرحّلة تحتاج إلى قيد عكسي.', 'تأكيد الحذف', function() {
+        const formData = new FormData();
+        formData.append('ajax_action', 'delete_entry');
+        formData.append('entry_id', entryId);
 
-    const formData = new FormData();
-    formData.append('ajax_action', 'delete_entry');
-    formData.append('entry_id', entryId);
-
-    fetch('index.hnt', {
-        method: 'POST',
-        body: formData
-    })
-    .then(response => response.json())
-    .then(data => {
-        showResultModal(data.success, data.message);
-        if (data.success) {
-            setTimeout(() => location.reload(), 1500);
-        }
-    });
+        fetch('index.hnt', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            showResultModal(data.success, data.message);
+            if (data.success) {
+                setTimeout(() => location.reload(), 1500);
+            }
+        });
+    }, function() {});
 }
 
 function showResultModal(success, message) {
@@ -1108,6 +1368,59 @@ function showResultModal(success, message) {
     messageEl.textContent = message;
     modal.show();
 }
+
+function submitEntriesImport() {
+    const fileInput = document.getElementById('import_entries_file');
+    if (!fileInput.files.length) {
+        alert('يرجى اختيار ملف CSV أولاً');
+        return;
+    }
+
+    const btn = document.getElementById('importEntriesSubmitBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>جاري الاستيراد...';
+
+    const formData = new FormData();
+    formData.append('ajax_action', 'import_entries');
+    formData.append('import_file', fileInput.files[0]);
+
+    fetch('index.hnt', { method: 'POST', body: formData })
+        .then(r => r.json())
+        .then(data => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+
+            const resultDiv = document.getElementById('importEntriesResult');
+            resultDiv.style.display = 'block';
+            const cls  = data.imported > 0 ? 'alert-success' : 'alert-warning';
+            const icon = data.imported > 0 ? 'check-circle' : 'exclamation-triangle';
+            resultDiv.innerHTML = `<div class="alert ${cls}"><i class="bi bi-${icon} me-2"></i>${data.message.replace(/\n/g, '<br>')}</div>`;
+
+            if (data.imported > 0) {
+                setTimeout(() => location.reload(), 2000);
+            }
+        })
+        .catch(() => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+            showResultModal(false, 'حدث خطأ أثناء الاستيراد');
+        });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const importModal = document.getElementById('importEntriesModal');
+    if (importModal) {
+        importModal.addEventListener('show.bs.modal', function() {
+            document.getElementById('import_entries_file').value = '';
+            const r = document.getElementById('importEntriesResult');
+            r.style.display = 'none';
+            r.innerHTML = '';
+            const btn = document.getElementById('importEntriesSubmitBtn');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+        });
+    }
+});
 
 // Add initial lines
 addLine();

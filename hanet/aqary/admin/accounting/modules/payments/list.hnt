@@ -14,6 +14,110 @@ include_once "../../../../nocash.hnt";
 include_once "../../../../connectdb.hnt";
 include_once "../../includes/accounting_class.hnt";
 
+// Import AJAX handler — runs before any HTML output
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    $action   = $_POST['ajax_action'];
+    $response = ['success' => false, 'message' => ''];
+
+    $_am  = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+    $_rjid = $_am->getDefaultJournalIdByCode('REC');
+
+    switch ($action) {
+        case 'import_payments':
+            if (empty($_FILES['import_file']['tmp_name'])) {
+                $response = ['success' => false, 'message' => 'لم يتم رفع أي ملف'];
+                break;
+            }
+            $handle = fopen($_FILES['import_file']['tmp_name'], 'r');
+            if (!$handle) {
+                $response = ['success' => false, 'message' => 'تعذر قراءة الملف'];
+                break;
+            }
+            $bom = fread($handle, 3);
+            if ($bom !== "\xEF\xBB\xBF") rewind($handle);
+            fgetcsv($handle, 0, ',', '"', '\\'); // skip header row
+
+            $imported = 0;
+            $errors   = [];
+            $lineNum  = 1;
+
+            while (($row = fgetcsv($handle, 0, ',', '"', '\\')) !== false) {
+                $lineNum++;
+                if (count($row) < 3 || empty(trim($row[1]))) continue;
+
+                $_date_raw    = trim($row[0] ?? '');
+                $_invoice_num = trim($row[1]);
+                $_amount_raw  = trim($row[2] ?? '0');
+                $_pay_method  = trim($row[3] ?? 'cash');
+                $_notes       = trim($row[4] ?? '');
+
+                // Convert DD/MM/YYYY → YYYY-MM-DD
+                if (strpos($_date_raw, '/') !== false) {
+                    $_dp = explode('/', $_date_raw);
+                    $_pay_date = count($_dp) === 3 ? "{$_dp[2]}-{$_dp[1]}-{$_dp[0]}" : date('Y-m-d');
+                } else {
+                    $_pay_date = $_date_raw ?: date('Y-m-d');
+                }
+
+                $_amount = floatval(str_replace(',', '', $_amount_raw));
+                if ($_amount <= 0) { $errors[] = "سطر $lineNum: المبلغ غير صالح ($_amount_raw)"; continue; }
+
+                $_valid_methods = ['cash', 'bank_transfer', 'credit_card', 'cheque'];
+                if (!in_array($_pay_method, $_valid_methods, true)) $_pay_method = 'cash';
+
+                $_inv_stmt = $db->prepare("SELECT * FROM acc_invoices WHERE invoice_number = ? AND payment_status IN ('unpaid','partial') LIMIT 1");
+                if (!$_inv_stmt) { $errors[] = "سطر $lineNum: خطأ داخلي"; continue; }
+                $_inv_stmt->bind_param('s', $_invoice_num);
+                $_inv_stmt->execute();
+                $_invoice = $_inv_stmt->get_result()->fetch_assoc();
+                if (!$_invoice) { $errors[] = "سطر $lineNum: الفاتورة '$_invoice_num' غير موجودة أو مدفوعة بالكامل"; continue; }
+
+                $_cash_acc = ($_pay_method === 'bank_transfer') ? 3 : 2;
+
+                $_entry_data = [
+                    'entry_date'     => $_pay_date,
+                    'entry_type'     => 'payment',
+                    'journal_id'     => $_rjid,
+                    'reference_type' => 'invoice',
+                    'reference_id'   => $_invoice['invoice_id'],
+                    'description'    => "دفعة للفاتورة {$_invoice['invoice_number']} - {$_invoice['customer_name']}",
+                    'status'         => 'posted',
+                    'notes'          => $_pay_method
+                ];
+                $_lines = [
+                    ['account_id' => $_cash_acc, 'description' => "استلام دفعة - {$_invoice['customer_name']}", 'debit_amount' => $_amount, 'credit_amount' => 0],
+                    ['account_id' => 4,           'description' => "تسديد فاتورة {$_invoice['invoice_number']}",  'debit_amount' => 0, 'credit_amount' => $_amount]
+                ];
+                $_result = $_am->createJournalEntry($_entry_data, $_lines);
+
+                if ($_result['success']) {
+                    if (!empty($_result['entry_id']) && !empty($_notes)) {
+                        $_nstmt = $db->prepare("UPDATE acc_journal_entries SET notes = ? WHERE entry_id = ?");
+                        if ($_nstmt) { $_nstmt->bind_param('si', $_notes, $_result['entry_id']); $_nstmt->execute(); }
+                    }
+                    $_paid_new      = $_invoice['paid_amount'] + $_amount;
+                    $_remaining_new = max(0, $_invoice['total_amount'] - $_paid_new);
+                    $_status_new    = ($_paid_new >= $_invoice['total_amount']) ? 'paid' : 'partial';
+                    $_upd = $db->prepare("UPDATE acc_invoices SET paid_amount=?, remaining_amount=?, payment_status=?, payment_method=? WHERE invoice_id=?");
+                    if ($_upd) { $_upd->bind_param('ddssi', $_paid_new, $_remaining_new, $_status_new, $_pay_method, $_invoice['invoice_id']); $_upd->execute(); }
+                    $imported++;
+                } else {
+                    $errors[] = "سطر $lineNum: فشل تسجيل دفعة الفاتورة '$_invoice_num'";
+                }
+            }
+            fclose($handle);
+
+            $msg = "تم استيراد $imported دفعة بنجاح";
+            if (!empty($errors)) $msg .= "\n\nتنبيهات:\n" . implode("\n", $errors);
+            $response = ['success' => true, 'message' => $msg, 'imported' => $imported, 'errors' => $errors];
+            break;
+    }
+
+    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 function getPaymentMethodLabel($method) {
     switch ($method) {
         case 'cash':
@@ -84,7 +188,7 @@ $allowedPaymentMethods = ['cash', 'bank_transfer', 'credit_card', 'cheque'];
 if (!in_array($paymentMethod, $allowedPaymentMethods, true)) {
     $paymentMethod = '';
 }
-if (!in_array($exportType, ['csv', 'xls'], true)) {
+if (!in_array($exportType, ['csv', 'xls', 'template'], true)) {
     $exportType = '';
 }
 
@@ -296,6 +400,18 @@ if ($search !== '') {
 
 if ($exportType !== '') {
     $filenameDate = date('Ymd_His');
+
+    if ($exportType === 'template') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="payments_template_' . $filenameDate . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, ['تاريخ الدفعة (dd/mm/yyyy)', 'رقم الفاتورة', 'المبلغ', 'طريقة الدفع', 'ملاحظات'], ',', '"', '\\');
+        fputcsv($_out, [date('d/m/Y'), 'INV-001', '5000.00', 'cash', ''], ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+
     if ($exportType === 'csv') {
         header('Content-Type: text/csv; charset=UTF-8');
         header('Content-Disposition: attachment; filename="payments_' . $filenameDate . '.csv"');
@@ -485,6 +601,9 @@ body {
                 <p class="mb-0 opacity-75">عرض جميع الدفعات المسجلة مع الفلاتر والتفاصيل</p>
             </div>
             <div class="d-flex gap-2 flex-wrap no-print">
+                <button class="btn btn-warning btn-lg header-btn" data-bs-toggle="modal" data-bs-target="#importPaymentsListModal">
+                    <i class="bi bi-upload me-2"></i>استيراد
+                </button>
                 <button class="btn btn-light btn-lg header-btn" onclick="window.location='../../index.hnt'">
                     <i class="bi bi-arrow-right me-2"></i>العودة
                 </button>
@@ -680,6 +799,68 @@ body {
     <?php endif; ?>
 </div>
 
+<!-- Import Payments List Modal -->
+<div class="modal fade" id="importPaymentsListModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header" style="background: linear-gradient(135deg, #4e627f 0%, #6c7fa6 100%); color: white;">
+                <h5 class="modal-title">
+                    <i class="bi bi-upload me-2"></i>استيراد مدفوعات من CSV
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info mb-3">
+                    <h6 class="mb-2"><i class="bi bi-info-circle me-2"></i>خطوات الاستيراد</h6>
+                    <ol class="mb-0 small">
+                        <li>حمّل القالب أدناه</li>
+                        <li>افتح الملف في Excel وأدخل البيانات حسب التنسيق</li>
+                        <li>احفظ الملف بصيغة CSV (UTF-8)</li>
+                        <li>ارفع الملف المعبأ</li>
+                    </ol>
+                </div>
+
+                <a href="list.hnt?export=template" class="btn btn-outline-success mb-4">
+                    <i class="bi bi-download me-2"></i>تحميل القالب (CSV)
+                </a>
+
+                <div class="table-responsive mb-4">
+                    <table class="table table-sm table-bordered align-middle">
+                        <thead class="table-light text-center">
+                            <tr><th>العمود</th><th>القيم المقبولة</th><th>مثال</th></tr>
+                        </thead>
+                        <tbody class="small">
+                            <tr><td>تاريخ الدفعة *</td><td>dd/mm/yyyy</td><td><?php echo date('d/m/Y'); ?></td></tr>
+                            <tr><td>رقم الفاتورة *</td><td>رقم فاتورة غير مدفوعة أو مدفوعة جزئياً</td><td>INV-001</td></tr>
+                            <tr><td>المبلغ *</td><td>رقم عشري موجب</td><td>5000.00</td></tr>
+                            <tr><td>طريقة الدفع</td><td>cash / bank_transfer / credit_card / cheque</td><td>cash</td></tr>
+                            <tr><td>ملاحظات</td><td>نص اختياري</td><td></td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <form id="importPaymentsListForm" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">اختر ملف CSV</label>
+                        <input type="file" class="form-control" id="import_payments_list_file"
+                               name="import_file" accept=".csv,.txt">
+                        <div class="form-text">الفواتير المدفوعة بالكامل سيتم تخطيها وإدراجها في التنبيهات</div>
+                    </div>
+                </form>
+
+                <div id="importPaymentsListResult" style="display:none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-primary" id="importPaymentsListSubmitBtn"
+                        onclick="submitPaymentsListImport()">
+                    <i class="bi bi-upload me-2"></i>استيراد
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <?php if ($isPrintMode): ?>
 <script>
 window.addEventListener('load', function() {
@@ -689,7 +870,59 @@ window.addEventListener('load', function() {
 <?php endif; ?>
 
 <script>
+function submitPaymentsListImport() {
+    const fileInput = document.getElementById('import_payments_list_file');
+    if (!fileInput.files.length) {
+        alert('يرجى اختيار ملف CSV أولاً');
+        return;
+    }
+
+    const btn = document.getElementById('importPaymentsListSubmitBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>جاري الاستيراد...';
+
+    const formData = new FormData();
+    formData.append('ajax_action', 'import_payments');
+    formData.append('import_file', fileInput.files[0]);
+
+    fetch('list.hnt', { method: 'POST', body: formData })
+        .then(r => r.json())
+        .then(data => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+
+            const resultDiv = document.getElementById('importPaymentsListResult');
+            resultDiv.style.display = 'block';
+            const cls  = data.imported > 0 ? 'alert-success' : 'alert-warning';
+            const icon = data.imported > 0 ? 'check-circle' : 'exclamation-triangle';
+            resultDiv.innerHTML = `<div class="alert ${cls}">
+                <i class="bi bi-${icon} me-2"></i>
+                ${data.message.replace(/\n/g, '<br>')}
+            </div>`;
+
+            if (data.imported > 0) setTimeout(() => location.reload(), 2000);
+        })
+        .catch(() => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+            alert('حدث خطأ أثناء الاستيراد');
+        });
+}
+
 $(document).ready(function() {
+    const importPaymentsListModal = document.getElementById('importPaymentsListModal');
+    if (importPaymentsListModal) {
+        importPaymentsListModal.addEventListener('show.bs.modal', function() {
+            document.getElementById('import_payments_list_file').value = '';
+            const r   = document.getElementById('importPaymentsListResult');
+            r.style.display = 'none';
+            r.innerHTML = '';
+            const btn = document.getElementById('importPaymentsListSubmitBtn');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+        });
+    }
+
     $('.datepicker-input').each(function() {
         $(this).datepicker({
             format: 'dd/mm/yyyy',

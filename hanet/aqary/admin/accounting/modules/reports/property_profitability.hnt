@@ -10,6 +10,62 @@
 $sc_title = "تقرير ربحية العقارات";
 $sc_id = "214";
 $use_accounting_theme = true;
+
+// Export handler — runs before header.hnt outputs any HTML
+if (isset($_GET['export']) && in_array($_GET['export'], ['csv', 'xls'], true)) {
+    include_once "../../../../reqloginajax.hnt";
+    include_once "../../includes/accounting_class.hnt";
+    $_am = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+    $_dateFrom = $_GET['date_from'] ?? date('Y-01-01');
+    $_dateTo   = $_GET['date_to']   ?? date('Y-m-d');
+    foreach (['_dateFrom', '_dateTo'] as $_df) {
+        if ($$_df && strpos($$_df, '/') !== false) { $_p = explode('/', $$_df); if (count($_p) === 3) $$_df = $_p[2].'-'.$_p[1].'-'.$_p[0]; }
+    }
+    $_propertyType = $_GET['property_type'] ?? 'all';
+    $_sortBy       = $_GET['sort_by'] ?? 'profit_desc';
+    $_costCenterId = !empty($_GET['cost_center_id']) ? (int)$_GET['cost_center_id'] : null;
+    $_rd = $_am->getPropertyProfitabilityReportData($_dateFrom, $_dateTo, $_costCenterId);
+    $_propertyData = $_rd['property_data'];
+    if ($_propertyType !== 'all') {
+        $_propertyData = array_filter($_propertyData, function($_p) use ($_propertyType) { return $_p['property_type'] === $_propertyType; });
+    }
+    switch ($_sortBy) {
+        case 'profit_asc':  uasort($_propertyData, function($_a, $_b) { return $_a['profit'] <=> $_b['profit']; }); break;
+        case 'margin_desc': uasort($_propertyData, function($_a, $_b) { return $_b['margin'] <=> $_a['margin']; }); break;
+        case 'margin_asc':  uasort($_propertyData, function($_a, $_b) { return $_a['margin'] <=> $_b['margin']; }); break;
+        default:            uasort($_propertyData, function($_a, $_b) { return $_b['profit'] <=> $_a['profit']; }); break;
+    }
+    $_ptLabels   = ['land' => 'أراضي', 'building' => 'عمائر', 'villa' => 'فلل', 'other' => 'أخرى'];
+    $exp_headers = ['العقار', 'نوع العقار', 'الإيرادات', 'المصروفات', 'صافي الربح', 'هامش الربح %'];
+    $exp_rows = [];
+    foreach ($_propertyData as $_prop) {
+        $exp_rows[] = [
+            $_prop['property_name'],
+            $_ptLabels[$_prop['property_type']] ?? $_prop['property_type'],
+            number_format((float)$_prop['income'],    2, '.', ''),
+            number_format((float)$_prop['expenses'],  2, '.', ''),
+            number_format((float)$_prop['profit'],    2, '.', ''),
+            number_format((float)$_prop['margin'],    2, '.', '') . '%',
+        ];
+    }
+    $_fn = date('Ymd_His');
+    if ($_GET['export'] === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="property_profitability_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w'); fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out); exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="property_profitability_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>'; exit;
+}
+
 include_once "../../../../nocash.hnt";
 include_once "../../../../connectdb.hnt";
 include_once "../../../../header.hnt";
@@ -211,11 +267,25 @@ $propertyTypes = [
                 </h1>
                 <p class="mb-0 opacity-75">Property Profitability Report</p>
             </div>
-            <div>
+            <div class="d-flex flex-wrap gap-2 justify-content-end">
+                <?php
+                $_eq = '';
+                if (!empty($_GET['date_from']))      $_eq .= '&date_from='      . urlencode($_GET['date_from']);
+                if (!empty($_GET['date_to']))        $_eq .= '&date_to='        . urlencode($_GET['date_to']);
+                if (!empty($_GET['property_type']) && $_GET['property_type'] !== 'all') $_eq .= '&property_type=' . urlencode($_GET['property_type']);
+                if (!empty($_GET['sort_by']))        $_eq .= '&sort_by='        . urlencode($_GET['sort_by']);
+                if (!empty($_GET['cost_center_id'])) $_eq .= '&cost_center_id=' . (int)$_GET['cost_center_id'];
+                ?>
+                <a href="property_profitability.hnt?export=csv<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-filetype-csv me-2"></i>تصدير CSV
+                </a>
+                <a href="property_profitability.hnt?export=xls<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-file-earmark-excel me-2"></i>تصدير Excel
+                </a>
                 <button class="btn btn-light btn-lg" onclick="window.history.back()">
                     <i class="bi bi-arrow-right me-2"></i>العودة
                 </button>
-                <button class="btn btn-light btn-lg ms-2" onclick="window.print()">
+                <button class="btn btn-light btn-lg" onclick="window.print()">
                     <i class="bi bi-printer me-2"></i>طباعة
                 </button>
             </div>

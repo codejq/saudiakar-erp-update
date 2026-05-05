@@ -10,6 +10,73 @@
 $sc_title = "إدارة العملاء";
 $sc_id = "209";
 $use_accounting_theme = true;
+
+// Export / template handler — runs before any HTML output
+if (isset($_GET['export']) && in_array($_GET['export'], ['csv', 'xls', 'template'], true)) {
+    include_once "../../../../reqloginajax.hnt";
+
+    $_fn       = date('Ymd_His');
+    $_exp_type = $_GET['export'];
+
+    if ($_exp_type === 'template') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="customers_template_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, ['اسم العميل', 'الرقم الضريبي', 'رقم الهاتف', 'البريد الإلكتروني', 'العنوان'], ',', '"', '\\');
+        fputcsv($_out, ['شركة الأمثلة للتجارة', '300000000000003', '0500000000', 'info@example.com', 'الرياض - حي العليا'], ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+
+    $_search = isset($_GET['search']) ? trim($_GET['search']) : '';
+    $_wc = "WHERE is_active = 1";
+    $_bind_types = '';
+    $_bind_params = [];
+    if ($_search !== '') {
+        $_wc .= " AND (customer_name LIKE ? OR vat_number LIKE ? OR phone LIKE ? OR email LIKE ?)";
+        $_sp = "%{$_search}%";
+        $_bind_types = 'ssss';
+        $_bind_params = [$_sp, $_sp, $_sp, $_sp];
+    }
+
+    $exp_headers = ['اسم العميل', 'الرقم الضريبي', 'رقم الهاتف', 'البريد الإلكتروني', 'العنوان'];
+    $exp_rows    = [];
+    $_er_stmt = $db->prepare("SELECT customer_name, vat_number, phone, email, address FROM acc_customers {$_wc} ORDER BY customer_name");
+    if ($_er_stmt) {
+        if ($_bind_types !== '') $_er_stmt->bind_param($_bind_types, ...$_bind_params);
+        $_er_stmt->execute();
+        $_er = $_er_stmt->get_result();
+        while ($_c = $_er->fetch_assoc()) {
+            $exp_rows[] = [$_c['customer_name'], $_c['vat_number'] ?? '', $_c['phone'] ?? '', $_c['email'] ?? '', $_c['address'] ?? ''];
+        }
+    }
+
+    if ($_exp_type === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="customers_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="customers_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) {
+        echo '<tr>';
+        foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>';
+        echo '</tr>';
+    }
+    echo '</table></body></html>';
+    exit;
+}
+
 if(isset($_POST['ajax_action'])){
     include_once "../../../../reqloginajax.hnt";
 }
@@ -44,6 +111,65 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
             } else {
                 $response['message'] = 'فشل في إضافة العميل';
             }
+            break;
+
+        case 'import_customers':
+            if (empty($_FILES['import_file']['tmp_name'])) {
+                $response = ['success' => false, 'message' => 'لم يتم رفع أي ملف'];
+                break;
+            }
+            $handle = fopen($_FILES['import_file']['tmp_name'], 'r');
+            if (!$handle) {
+                $response = ['success' => false, 'message' => 'تعذر قراءة الملف'];
+                break;
+            }
+            $bom = fread($handle, 3);
+            if ($bom !== "\xEF\xBB\xBF") rewind($handle);
+            fgetcsv($handle, 0, ',', '"', '\\'); // skip header row
+
+            $imported = 0;
+            $errors   = [];
+            $lineNum  = 1;
+
+            while (($row = fgetcsv($handle, 0, ',', '"', '\\')) !== false) {
+                $lineNum++;
+                if (count($row) < 1 || empty(trim($row[0]))) continue;
+
+                $_name    = trim($row[0]);
+                $_vat     = trim($row[1] ?? '');
+                $_phone   = trim($row[2] ?? '');
+                $_email   = trim($row[3] ?? '');
+                $_address = trim($row[4] ?? '');
+
+                // Skip duplicates
+                $_chk = $db->prepare("SELECT customer_id FROM acc_customers WHERE customer_name = ? LIMIT 1");
+                if ($_chk) {
+                    $_chk->bind_param('s', $_name);
+                    $_chk->execute();
+                    if ($_chk->get_result()->num_rows > 0) {
+                        $errors[] = "سطر $lineNum: العميل '$_name' موجود مسبقاً — تم تخطيه";
+                        continue;
+                    }
+                }
+
+                $_ins = $db->prepare("INSERT INTO acc_customers (customer_name, vat_number, phone, email, address, is_active, created_at) VALUES (?, ?, ?, ?, ?, 1, NOW())");
+                if (!$_ins) { $errors[] = "سطر $lineNum: خطأ داخلي"; continue; }
+                $_vat_val = $_vat ?: null;
+                $_phn_val = $_phone ?: null;
+                $_eml_val = $_email ?: null;
+                $_adr_val = $_address ?: null;
+                $_ins->bind_param('sssss', $_name, $_vat_val, $_phn_val, $_eml_val, $_adr_val);
+                if ($_ins->execute()) {
+                    $imported++;
+                } else {
+                    $errors[] = "سطر $lineNum: فشل إضافة '$_name'";
+                }
+            }
+            fclose($handle);
+
+            $msg = "تم استيراد $imported عميل بنجاح";
+            if (!empty($errors)) $msg .= "\n\nتنبيهات:\n" . implode("\n", $errors);
+            $response = ['success' => true, 'message' => $msg, 'imported' => $imported, 'errors' => $errors];
             break;
     }
 
@@ -220,11 +346,24 @@ if ($filterBalance == 'with_balance') {
                 </h1>
                 <p class="mb-0 opacity-75">Customer Management</p>
             </div>
-            <div>
+            <div class="d-flex flex-wrap gap-2 justify-content-end">
+                <?php
+                $_eq = '';
+                if (!empty($search)) $_eq .= '&search=' . urlencode($search);
+                ?>
+                <a href="index.hnt?export=csv<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-filetype-csv me-2"></i>تصدير CSV
+                </a>
+                <a href="index.hnt?export=xls<?= $_eq ?>" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-file-earmark-excel me-2"></i>تصدير Excel
+                </a>
+                <button class="btn btn-warning btn-lg" data-bs-toggle="modal" data-bs-target="#importCustomersModal">
+                    <i class="bi bi-upload me-2"></i>استيراد
+                </button>
                 <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
                     <i class="bi bi-arrow-right me-2"></i>العودة
                 </button>
-                <button class="btn btn-add-customer btn-lg ms-2" data-bs-toggle="modal" data-bs-target="#addCustomerModal">
+                <button class="btn btn-add-customer btn-lg" data-bs-toggle="modal" data-bs-target="#addCustomerModal">
                     <i class="bi bi-plus-circle me-2"></i>عميل جديد
                 </button>
             </div>
@@ -448,6 +587,68 @@ if ($filterBalance == 'with_balance') {
     </div>
 </div>
 
+<!-- Import Customers Modal -->
+<div class="modal fade" id="importCustomersModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header" style="background: linear-gradient(135deg, #4e627f 0%, #6c7fa6 100%); color: white;">
+                <h5 class="modal-title">
+                    <i class="bi bi-upload me-2"></i>استيراد عملاء من CSV
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info mb-3">
+                    <h6 class="mb-2"><i class="bi bi-info-circle me-2"></i>خطوات الاستيراد</h6>
+                    <ol class="mb-0 small">
+                        <li>حمّل القالب أدناه</li>
+                        <li>افتح الملف في Excel وأدخل البيانات حسب التنسيق</li>
+                        <li>احفظ الملف بصيغة CSV (UTF-8)</li>
+                        <li>ارفع الملف المعبأ</li>
+                    </ol>
+                </div>
+
+                <a href="index.hnt?export=template" class="btn btn-outline-success mb-4">
+                    <i class="bi bi-download me-2"></i>تحميل القالب (CSV)
+                </a>
+
+                <div class="table-responsive mb-4">
+                    <table class="table table-sm table-bordered align-middle">
+                        <thead class="table-light text-center">
+                            <tr><th>العمود</th><th>القيم المقبولة</th><th>مثال</th></tr>
+                        </thead>
+                        <tbody class="small">
+                            <tr><td>اسم العميل *</td><td>نص (يجب أن يكون فريداً)</td><td>شركة الأمثلة للتجارة</td></tr>
+                            <tr><td>الرقم الضريبي</td><td>15 رقماً يبدأ بـ 3</td><td>300000000000003</td></tr>
+                            <tr><td>رقم الهاتف</td><td>نص</td><td>0500000000</td></tr>
+                            <tr><td>البريد الإلكتروني</td><td>بريد إلكتروني صالح</td><td>info@example.com</td></tr>
+                            <tr><td>العنوان</td><td>نص اختياري</td><td>الرياض - حي العليا</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <form id="importCustomersForm" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">اختر ملف CSV</label>
+                        <input type="file" class="form-control" id="import_customers_file"
+                               name="import_file" accept=".csv,.txt">
+                        <div class="form-text">العملاء الموجودون مسبقاً سيتم تخطيهم وإدراجهم في التنبيهات</div>
+                    </div>
+                </form>
+
+                <div id="importCustomersResult" style="display:none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-primary" id="importCustomersSubmitBtn"
+                        onclick="submitCustomersImport()">
+                    <i class="bi bi-upload me-2"></i>استيراد
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Result Modal -->
 <div class="modal fade" id="resultModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
@@ -502,6 +703,60 @@ function viewStatement(customerId, customerName) {
 function createInvoice(customerName, vatNumber) {
     window.location = '../invoices/index.hnt?customer_name=' + encodeURIComponent(customerName) + '&vat_number=' + (vatNumber || '');
 }
+
+function submitCustomersImport() {
+    const fileInput = document.getElementById('import_customers_file');
+    if (!fileInput.files.length) {
+        alert('يرجى اختيار ملف CSV أولاً');
+        return;
+    }
+
+    const btn = document.getElementById('importCustomersSubmitBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>جاري الاستيراد...';
+
+    const formData = new FormData();
+    formData.append('ajax_action', 'import_customers');
+    formData.append('import_file', fileInput.files[0]);
+
+    fetch('index.hnt', { method: 'POST', body: formData })
+        .then(r => r.json())
+        .then(data => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+
+            const resultDiv = document.getElementById('importCustomersResult');
+            resultDiv.style.display = 'block';
+            const cls  = data.imported > 0 ? 'alert-success' : 'alert-warning';
+            const icon = data.imported > 0 ? 'check-circle' : 'exclamation-triangle';
+            resultDiv.innerHTML = `<div class="alert ${cls}">
+                <i class="bi bi-${icon} me-2"></i>
+                ${data.message.replace(/\n/g, '<br>')}
+            </div>`;
+
+            if (data.imported > 0) setTimeout(() => location.reload(), 2000);
+        })
+        .catch(() => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+            showResultModal(false, 'حدث خطأ أثناء الاستيراد');
+        });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const importCustomersModal = document.getElementById('importCustomersModal');
+    if (importCustomersModal) {
+        importCustomersModal.addEventListener('show.bs.modal', function() {
+            document.getElementById('import_customers_file').value = '';
+            const r   = document.getElementById('importCustomersResult');
+            r.style.display = 'none';
+            r.innerHTML = '';
+            const btn = document.getElementById('importCustomersSubmitBtn');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+        });
+    }
+});
 
 function showResultModal(success, message) {
     const modal = new bootstrap.Modal(document.getElementById('resultModal'));

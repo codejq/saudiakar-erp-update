@@ -10,6 +10,70 @@
 $sc_title = "دليل الحسابات";
 $sc_id = "201";
 $use_accounting_theme = true;
+
+// Export / template handler — runs before any HTML output
+if (isset($_GET['export']) && in_array($_GET['export'], ['csv', 'xls', 'template'], true)) {
+    include_once "../../../../reqloginajax.hnt";
+    include_once "../../includes/accounting_class.hnt";
+    $accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+
+    $_fn       = date('Ymd_His');
+    $_exp_type = $_GET['export'];
+    $exp_headers = ['رمز الحساب', 'اسم الحساب (عربي)', 'اسم الحساب (إنجليزي)', 'نوع الحساب', 'التصنيف', 'رمز الحساب الرئيسي', 'الرصيد الافتتاحي', 'جانب الرصيد (debit/credit)', 'خاضع للضريبة (0/1)', 'الوصف'];
+
+    if ($_exp_type === 'template') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="chart_of_accounts_template_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        fputcsv($_out, ['1010', 'حساب نقدي', 'Cash Account', 'asset', 'نقد', '', '0.00', 'debit', '0', ''], ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+
+    $accounts_exp = $accountingManager->getAllAccounts(['is_active' => 1]);
+    $parentCodes  = [];
+    foreach ($accounts_exp as $_a) $parentCodes[$_a['account_id']] = $_a['account_code'];
+
+    $exp_rows = [];
+    foreach ($accounts_exp as $_a) {
+        $_ob = floatval($_a['opening_balance'] ?? 0);
+        $exp_rows[] = [
+            $_a['account_code'],
+            $_a['account_name_ar'],
+            $_a['account_name_en'] ?? '',
+            $_a['account_type'],
+            $_a['account_category'] ?? '',
+            (isset($_a['parent_account_id']) && $_a['parent_account_id']) ? ($parentCodes[$_a['parent_account_id']] ?? '') : '',
+            number_format(abs($_ob), 2, '.', ''),
+            $_ob < 0 ? 'credit' : 'debit',
+            $_a['vat_applicable'] ?? 0,
+            $_a['description'] ?? ''
+        ];
+    }
+
+    if ($_exp_type === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="chart_of_accounts_' . $_fn . '.csv"');
+        $_out = fopen('php://output', 'w');
+        fwrite($_out, "\xEF\xBB\xBF");
+        fputcsv($_out, $exp_headers, ',', '"', '\\');
+        foreach ($exp_rows as $_r) fputcsv($_out, $_r, ',', '"', '\\');
+        fclose($_out);
+        exit;
+    }
+
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="chart_of_accounts_' . $_fn . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach ($exp_headers as $_h) echo '<th>' . htmlspecialchars($_h) . '</th>';
+    echo '</tr>';
+    foreach ($exp_rows as $_r) { echo '<tr>'; foreach ($_r as $_c) echo '<td>' . htmlspecialchars($_c) . '</td>'; echo '</tr>'; }
+    echo '</table></body></html>';
+    exit;
+}
+
 if(isset($_POST['ajax_action'])){
     include_once "../../../../reqloginajax.hnt";
     include_once "../../includes/accounting_class.hnt";
@@ -93,6 +157,77 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                 $response['success'] = true;
                 $response['account'] = $account;
             }
+            break;
+
+        case 'import_accounts':
+            if (empty($_FILES['import_file']['tmp_name'])) {
+                $response = ['success' => false, 'message' => 'لم يتم رفع أي ملف'];
+                break;
+            }
+            $handle = fopen($_FILES['import_file']['tmp_name'], 'r');
+            if (!$handle) {
+                $response = ['success' => false, 'message' => 'تعذر قراءة الملف'];
+                break;
+            }
+            // Strip UTF-8 BOM if present
+            $bom = fread($handle, 3);
+            if ($bom !== "\xEF\xBB\xBF") rewind($handle);
+            // Skip header row
+            fgetcsv($handle, 0, ',', '"', '\\');
+            // Build existing code→id map to resolve parent codes and detect duplicates
+            $_existing = $accountingManager->getAllAccounts([]);
+            $_codeToId = [];
+            foreach ($_existing as $_ea) $_codeToId[$_ea['account_code']] = $_ea['account_id'];
+            $imported = 0;
+            $errors   = [];
+            $lineNum  = 1;
+            while (($row = fgetcsv($handle, 0, ',', '"', '\\')) !== false) {
+                $lineNum++;
+                if (count($row) < 4 || empty(trim($row[0]))) continue;
+                $_code    = trim($row[0]);
+                $_nameAr  = trim($row[1]);
+                $_nameEn  = trim($row[2] ?? '');
+                $_type    = trim($row[3]);
+                $_cat     = trim($row[4] ?? '');
+                $_pCode   = trim($row[5] ?? '');
+                $_obAmt   = abs(floatval($row[6] ?? 0));
+                $_obSide  = strtolower(trim($row[7] ?? 'debit'));
+                $_vat     = intval($row[8] ?? 0);
+                $_desc    = trim($row[9] ?? '');
+                if (!in_array($_type, ['asset', 'liability', 'equity', 'revenue', 'expense'])) {
+                    $errors[] = "سطر $lineNum: نوع حساب غير صحيح '$_type'";
+                    continue;
+                }
+                if (isset($_codeToId[$_code])) {
+                    $errors[] = "سطر $lineNum: الحساب '$_code' موجود مسبقاً، تم تخطيه";
+                    continue;
+                }
+                $_parentId = null;
+                if ($_pCode && isset($_codeToId[$_pCode])) $_parentId = $_codeToId[$_pCode];
+                $res = $accountingManager->createAccount([
+                    'account_code'      => $_code,
+                    'account_name_ar'   => $_nameAr,
+                    'account_name_en'   => $_nameEn,
+                    'parent_account_id' => $_parentId,
+                    'account_type'      => $_type,
+                    'account_category'  => $_cat,
+                    'is_leaf'           => 1,
+                    'opening_balance'   => $_obSide === 'credit' ? -$_obAmt : $_obAmt,
+                    'is_active'         => 1,
+                    'vat_applicable'    => $_vat,
+                    'description'       => $_desc
+                ]);
+                if ($res['success']) {
+                    $imported++;
+                    if (!empty($res['account_id'])) $_codeToId[$_code] = $res['account_id'];
+                } else {
+                    $errors[] = "سطر $lineNum: " . ($res['error'] ?? 'خطأ غير معروف');
+                }
+            }
+            fclose($handle);
+            $msg = "تم استيراد $imported حساب بنجاح";
+            if (!empty($errors)) $msg .= "\n\nتنبيهات:\n" . implode("\n", $errors);
+            $response = ['success' => true, 'message' => $msg, 'imported' => $imported, 'errors' => $errors];
             break;
     }
 
@@ -300,11 +435,20 @@ foreach ($accountsByType as $type => $typeAccounts) {
                 </h1>
                 <p class="mb-0 opacity-75">Chart of Accounts</p>
             </div>
-            <div>
+            <div class="d-flex flex-wrap gap-2 justify-content-end">
+                <a href="index.hnt?export=csv" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-filetype-csv me-2"></i>تصدير CSV
+                </a>
+                <a href="index.hnt?export=xls" class="btn btn-outline-light btn-lg">
+                    <i class="bi bi-file-earmark-excel me-2"></i>تصدير Excel
+                </a>
+                <button class="btn btn-warning btn-lg" data-bs-toggle="modal" data-bs-target="#importAccountsModal">
+                    <i class="bi bi-upload me-2"></i>استيراد
+                </button>
                 <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
                     <i class="bi bi-arrow-right me-2"></i>العودة
                 </button>
-                <button class="btn btn-add-account btn-lg ms-2" onclick="openCreateAccountModal()">
+                <button class="btn btn-add-account btn-lg" onclick="openCreateAccountModal()">
                     <i class="bi bi-plus-circle me-2"></i>حساب جديد
                 </button>
             </div>
@@ -640,6 +784,74 @@ foreach ($accountsByType as $type => $typeAccounts) {
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إغلاق</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Import Accounts Modal -->
+<div class="modal fade" id="importAccountsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-upload me-2"></i>استيراد الحسابات من CSV
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info mb-3">
+                    <h6 class="mb-2"><i class="bi bi-info-circle me-2"></i>خطوات الاستيراد</h6>
+                    <ol class="mb-0 small">
+                        <li>حمّل القالب أدناه</li>
+                        <li>افتح الملف في Excel وأضف الحسابات حسب التنسيق</li>
+                        <li>احفظ الملف بصيغة CSV (UTF-8)</li>
+                        <li>ارفع الملف المعبأ — الحسابات الموجودة مسبقاً سيتم تخطيها</li>
+                    </ol>
+                </div>
+
+                <a href="index.hnt?export=template" class="btn btn-outline-success mb-4">
+                    <i class="bi bi-download me-2"></i>تحميل القالب (CSV)
+                </a>
+
+                <div class="table-responsive mb-4">
+                    <table class="table table-sm table-bordered align-middle">
+                        <thead class="table-light text-center">
+                            <tr>
+                                <th>العمود</th>
+                                <th>القيم المقبولة</th>
+                                <th>مثال</th>
+                            </tr>
+                        </thead>
+                        <tbody class="small">
+                            <tr><td>رمز الحساب *</td><td>نص</td><td>1010</td></tr>
+                            <tr><td>اسم الحساب (عربي) *</td><td>نص</td><td>حساب نقدي</td></tr>
+                            <tr><td>اسم الحساب (إنجليزي)</td><td>نص</td><td>Cash Account</td></tr>
+                            <tr><td>نوع الحساب *</td><td>asset / liability / equity / revenue / expense</td><td>asset</td></tr>
+                            <tr><td>التصنيف</td><td>نص</td><td>نقد</td></tr>
+                            <tr><td>رمز الحساب الرئيسي</td><td>رمز حساب موجود في النظام</td><td>10</td></tr>
+                            <tr><td>الرصيد الافتتاحي</td><td>رقم</td><td>5000.00</td></tr>
+                            <tr><td>جانب الرصيد</td><td>debit / credit</td><td>debit</td></tr>
+                            <tr><td>خاضع للضريبة</td><td>0 / 1</td><td>0</td></tr>
+                            <tr><td>الوصف</td><td>نص</td><td></td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <form id="importAccountsForm" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">اختر ملف CSV</label>
+                        <input type="file" class="form-control" id="import_file" name="import_file" accept=".csv,.txt">
+                    </div>
+                </form>
+
+                <div id="importResult" style="display:none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+                <button type="button" class="btn btn-primary" id="importSubmitBtn" onclick="submitImport()">
+                    <i class="bi bi-upload me-2"></i>استيراد
+                </button>
             </div>
         </div>
     </div>
@@ -1111,6 +1323,60 @@ function showResultModal(success, message) {
     messageEl.textContent = message;
     modal.show();
 }
+
+function submitImport() {
+    const fileInput = document.getElementById('import_file');
+    if (!fileInput.files.length) {
+        alert('يرجى اختيار ملف CSV أولاً');
+        return;
+    }
+
+    const btn = document.getElementById('importSubmitBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>جاري الاستيراد...';
+
+    const formData = new FormData();
+    formData.append('ajax_action', 'import_accounts');
+    formData.append('import_file', fileInput.files[0]);
+
+    fetch('index.hnt', { method: 'POST', body: formData })
+        .then(r => r.json())
+        .then(data => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+
+            const resultDiv = document.getElementById('importResult');
+            resultDiv.style.display = 'block';
+            const cls = (data.imported > 0) ? 'alert-success' : 'alert-warning';
+            const icon = (data.imported > 0) ? 'check-circle' : 'exclamation-triangle';
+            resultDiv.innerHTML = `<div class="alert ${cls}"><i class="bi bi-${icon} me-2"></i>${data.message.replace(/\n/g, '<br>')}</div>`;
+
+            if (data.imported > 0) {
+                setTimeout(() => location.reload(), 2000);
+            }
+        })
+        .catch(() => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+            showResultModal(false, 'حدث خطأ أثناء الاستيراد');
+        });
+}
+
+// Reset import modal state when it opens
+document.addEventListener('DOMContentLoaded', function() {
+    const importModal = document.getElementById('importAccountsModal');
+    if (importModal) {
+        importModal.addEventListener('show.bs.modal', function() {
+            document.getElementById('import_file').value = '';
+            const r = document.getElementById('importResult');
+            r.style.display = 'none';
+            r.innerHTML = '';
+            const btn = document.getElementById('importSubmitBtn');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-upload me-2"></i>استيراد';
+        });
+    }
+});
 
 function viewAccount(accountId) {
     fetchAccountDetails(accountId)
