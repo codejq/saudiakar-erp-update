@@ -15,6 +15,27 @@ $sc_id = "45";
 // Extract request variables
 extract($_REQUEST);
 
+$extend_contract = isset($_REQUEST['extend_contract']) ? intval($_REQUEST['extend_contract']) : 0;
+if ($extend_contract > 0) {
+  include_once "../../../reqlogin.hnt";
+
+  $contractResult = mysql_query("SELECT rakam3akdid, end3aqd, status, txt3akd FROM egar WHERE rakam3akdid='" . intval($extend_contract) . "'", $link);
+  $contractData = mysql_fetch_array($contractResult);
+
+  $contractStatus = '';
+  if ($contractData) {
+    $contractStatus = isset($contractData['status']) && $contractData['status'] != '' ? $contractData['status'] : ($contractData['txt3akd'] == '' ? 'active' : 'expired');
+  }
+
+  if ($contractData && intval($contractData['end3aqd']) > 0 && ($contractStatus == 'expired' || ($contractStatus == 'active' && intval($contractData['end3aqd']) < time()))) {
+    $newEndDate = strtotime("+1 year", intval($contractData['end3aqd']));
+    mysql_query("UPDATE egar SET end3aqd='" . intval($newEndDate) . "', status='active' WHERE rakam3akdid='" . intval($extend_contract) . "'", $link);
+  }
+
+  header("Location: all3kood.hnt");
+  exit();
+}
+
 // Check if this is an AJAX request
 $is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
 
@@ -241,6 +262,12 @@ if (!$is_ajax_request) {
       if (confirm('سوف يؤدي الإستمرار الى إنهاء عقد هذا المستأجر. هل أنت متأكد؟')) {
         window.location.href = 'emptyaqar.hnt?rakam3akdid=' + contractId;
       }
+    }
+
+    function confirmExtendContract(contractId) {
+      confirm('هل أنت متأكد من تمديد العقد لمدة سنة واحدة؟', 'تمديد العقد', () => {
+        window.location.href = 'all3kood.hnt?extend_contract=' + contractId;
+      });
     }
 
     /**
@@ -482,7 +509,12 @@ if (!$is_ajax_request) {
                   <td><?= htmlspecialchars($remainingDaysLabel, ENT_QUOTES, 'UTF-8') ?></td>
                   <td><?= $statusBadge ?></td>
                   <td>
-                    <?php if ($row['current_status'] != 'renewed' && $row['current_status'] != 'expired' && $row['current_status'] != 'terminated' && $row['current_status'] != 'cancelled') { ?>
+                    <?php if ($row['current_status'] == 'expired' || ($row['current_status'] == 'active' && intval($row['end3aqd']) < time())) { ?>
+                      <button type="button" class='btn btn-sm btn-primary'
+                        onclick="confirmExtendContract(<?= intval($row['rakam3akdid']) ?>);">
+                        <i class="bi bi-calendar-plus me-1"></i>تمديد
+                      </button>
+                    <?php } elseif ($row['current_status'] != 'renewed' && $row['current_status'] != 'terminated' && $row['current_status'] != 'cancelled') { ?>
                       <button type="button" class='btn btn-sm btn-danger <?= "policy_" . $sc_id . "_deleetes" ?>'
                         onclick="confirmTermination(<?= intval($row['rakam3akdid']) ?>);">
                         <i class="bi bi-x-circle me-1"></i>إنهاء
