@@ -1,0 +1,247 @@
+<?php
+// Set page variables
+$sc_title = "خطاب المطالبة";
+$sc_id = "66";
+
+// Extract request variables
+extract($_REQUEST);
+
+// Initialize variables to prevent undefined warnings
+$letternumber = isset($letternumber) ? intval($letternumber) : 1;
+$idaqar = isset($idaqar) ? intval($idaqar) : 0;
+$idsubaqar = isset($idsubaqar) ? intval($idsubaqar) : 0;
+$mostagerid = isset($mostagerid) ? intval($mostagerid) : 0;
+$idsanad = isset($idsanad) ? intval($idsanad) : 0;
+$sendmail = isset($sendmail) ? intval($sendmail) : 0;
+$sendsms = isset($sendsms) ? intval($sendsms) : 0;
+$hnt_dll = isset($hnt_dll) ? intval($hnt_dll) : 0;
+$smstemplate = isset($smstemplate) ? trim($smstemplate) : '';
+$letterlang = (isset($lang) && strtolower(trim($lang)) == 'en') ? 'en' : 'ar';
+$hnt_dll_type = 0;
+$sanaddata = array();
+
+// Include required files
+include_once "../../../nocash.hnt";
+include_once "../../../report_header.hnt";
+include_once "arabic_num.class.hnt";
+include_once "../arabicTools.class.hnt";
+require '../uCal.class.hnt';
+$dcal = new uCal;
+
+// Get sanad data if idsanad is provided
+if ($idsanad) {
+    $sanaddata = mysql_fetch_array(mysql_query("select * from sanad where idsanad='" . intval($idsanad) . "'", $link));
+    if ($sanaddata) {
+        $idsubaqar = isset($sanaddata['idsubaqar']) ? intval($sanaddata['idsubaqar']) : 0;
+    }
+}
+
+// Get property and tenant data
+if ($idsubaqar && !$mostagerid) {
+    $idaqar_data = mysql_fetch_array(mysql_query("select hnt_dll_type, mostagerid from amlakdetails where idsubaqar='" . intval($idsubaqar) . "'", $link));
+    if ($idaqar_data) {
+        $mostagerid = isset($idaqar_data['mostagerid']) ? intval($idaqar_data['mostagerid']) : 0;
+        $hnt_dll_type = isset($idaqar_data['hnt_dll_type']) ? intval($idaqar_data['hnt_dll_type']) : 0;
+    }
+}
+
+
+// Get tenant data
+$sql = "select * from mostagereen where mostagerid='" . intval($mostagerid) . "'";
+$row = mysql_fetch_array(mysql_query($sql, $link));
+if (!$row) {
+    $row = array(
+        'mostagername' => '',
+        'mostageremail' => '',
+        'mostagertel' => ''
+    );
+}
+
+// Get installment data
+$sql = "SELECT min(kastdate) as dd, aksat.* FROM aksat where iscomplete=0 and idsubaqar='" . intval($idsubaqar) . "' GROUP BY idsubaqar order by kastdate";
+$rowk = mysql_fetch_array(mysql_query($sql, $link));
+if (!$rowk) {
+    $rowk = array(
+        'kastdate' => time(),
+        'kastvalue' => 0
+    );
+}
+
+
+// Handle email sending request
+if ($sendmail == 1) {
+    $kastdate_gregorian = date("d/m/Y", $rowk['kastdate']);
+    $kastdate_hijri = ArabicTools::arabicDate('hj:d/m/Y', $rowk['kastdate']);
+
+    $maildata = "##@@##" . $row['mostageremail'] . "##@@## تذكير الإيجار ##@@##
+    المحترم / " . $row['mostagername'] . "  <br><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    السلام عليكم ورحمة الله وبركاته ،،،
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp
+    وبعــــد<br><br>نذكركم بقرب حلول موعد إستحقاق الإيجار الخاص بكم حيث تنتهي فترة الإيجار الحالية
+    فى " . $kastdate_gregorian . " م الموافق " . $kastdate_hijri . "هـ
+    <br><br>علماً بأن قيمة القسط المستحق
+    عن هذه الفترة : " . $rowk['kastvalue'] . " " . $myomla . "
+    <br><br><br><br><center>شاكرين لكم حسن تعاونكم معنا ،،،،
+    <br><br>مع تحيات <br><br>" . $bayanmaktabname . "
+    </center><br><br><br>
+    <hr color=000000 width=100%>
+    ت :" . $bayantel . "&nbsp;&nbsp;&nbsp;&nbsp;" . $bayanaddress . "
+    ";
+
+    echo $maildata;
+    exit();
+}
+
+// Handle SMS sending request
+if ($sendsms == 1) {
+    // Format date based on calendar type
+    if ($hnt_dll == 1) {
+        $kastdat = date("d/m/Y", $rowk['kastdate']);
+    } else {
+        $kastdat = ArabicTools::arabicDate('hj:d/m/Y', $rowk['kastdate']);
+    }
+
+    // Normalize phone numbers
+    $reparray = array(" ", ",", ";", "\r\n", "-", "+", "\r", "\n", "\t", "\\", "/");
+    $normlizedtel = str_replace($reparray, ",", $row['mostagertel']);
+    $normlizedtel = explode(",", $normlizedtel);
+
+    for ($i = 0; $i < count($normlizedtel); $i++) {
+        if (strlen($normlizedtel[$i]) > 8) {
+            $tel = $normlizedtel[$i];
+            if (isset($tel[0]) && isset($tel[1]) && $tel[0] == 0 && $tel[1] == 5) {
+                $normlizedtel[$i] = "966" . ltrim($tel, '0');
+            }
+        } else {
+            $normlizedtel[$i] = "";
+        }
+    }
+
+    $normlizedtel = array_filter($normlizedtel);
+    $normlizedtel = implode(";", $normlizedtel);
+    $smsdata = "##@@##" . $normlizedtel . "##@@##";
+
+    // Load SMS template
+    if ($smstemplate) {
+        $smstemplate_content = strip_tags(@file_get_contents("../../word/" . trim($smstemplate)));
+    }
+
+    if (!isset($smstemplate_content) || !$smstemplate_content) {
+        $smstemplate_content = strip_tags(@file_get_contents("../../word/sms.tpl"));
+    }
+
+    // Replace template variables
+    $temvar = array(
+        '{اسم_المرسل}',
+        '{تاريخ_الإستحقاق}',
+        '{مبلغ_المطالبة}',
+        '{_العملة_}'
+    );
+    $valuevar = array(
+        $row['mostagername'],
+        $kastdat,
+        $rowk['kastvalue'],
+        $myomla
+    );
+    $smstemplate_content = str_replace($temvar, $valuevar, $smstemplate_content);
+
+    echo $smsdata . $smstemplate_content;
+    exit();
+}
+
+
+
+
+// Handle SMS for receipt (sanad)
+if ($idsanad) {
+    // Format date based on calendar type
+    if ($hnt_dll == 1) {
+        $kastdat = date("d/m/Y", time());
+    } else {
+        $kastdat = ArabicTools::arabicDate('hj:d/m/Y', time());
+    }
+
+    // Normalize phone numbers
+    $reparray = array(" ", ",", ";", "\r\n", "-", "+", "\r", "\n", "\t", "\\", "/");
+    $normlizedtel = str_replace($reparray, ",", $row['mostagertel']);
+    $normlizedtel = explode(",", $normlizedtel);
+
+    for ($i = 0; $i < count($normlizedtel); $i++) {
+        if (strlen($normlizedtel[$i]) > 8) {
+            $tel = $normlizedtel[$i];
+            if (isset($tel[0]) && isset($tel[1]) && $tel[0] == 0 && $tel[1] == 5) {
+                $normlizedtel[$i] = "966" . ltrim($tel, '0');
+            }
+        } else {
+            $normlizedtel[$i] = "";
+        }
+    }
+
+    $normlizedtel = array_filter($normlizedtel);
+    $normlizedtel = implode(";", $normlizedtel);
+    $smsdata = "##@@##" . $normlizedtel . "##@@##";
+
+    $depositeamount = isset($sanaddata['depositeamount']) ? $sanaddata['depositeamount'] : 0;
+    $sanadrakam = isset($sanaddata['sanadrakam']) ? $sanaddata['sanadrakam'] : '';
+    $mybyan = isset($sanaddata['mybyan']) ? $sanaddata['mybyan'] : '';
+
+    $smstemplate_receipt = "تم استلام مبلغ : \r\n " . $depositeamount . " " . $myomla . " \r\n" .
+                           "سند رقم :" . $sanadrakam . " \r\n" .
+                           $mybyan . " \r\n المستأجر:" . $row['mostagername'];
+
+    echo $smsdata . $smstemplate_receipt;
+    exit();
+}
+
+
+
+
+// Prepare replacement variables for letter template
+$rep = array();
+$rep['اسم_المستأجر'] = $row['mostagername'];
+$rep['عشرة_مسافات'] = "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;";
+
+// Format dates based on calendar type
+if ($hnt_dll_type) {
+    $kastdate = date("d/m/Y", $rowk['kastdate']) . " م ";
+    $currentdate = date("d/m/Y", time()) . " م ";
+} else {
+    $dateo = $dcal->g2u(date("d", $rowk['kastdate']), date("m", $rowk['kastdate']), date("Y", $rowk['kastdate']));
+    $kastdate = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'] . " هـ ";
+    $dateo = $dcal->g2u(date("d", time()), date("m", time()), date("Y", time()));
+    $currentdate = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'] . " هـ ";
+}
+
+// Instantiate Arabic_num class for number to text conversion
+$arabic_num = new Arabic_num();
+
+// Set replacement values
+$rep['تاريخ_الإستحقاق'] = $kastdate;
+$rep['قيمة_القسط'] = $rowk['kastvalue'] . " " . $myomla;
+$rep['القسط_حروف'] = $arabic_num->numtostr($rowk['kastvalue']) . " " . $myomla;
+$rep['اسم_المكتب'] = $bayanmaktabname;
+$rep['تاريخ_الخطاب'] = $currentdate;
+
+// Default letter number
+if ($letternumber == "") {
+    $letternumber = 1;
+}
+
+// Load and process letter template
+$template_file = "../../word/letters/letter" . intval($letternumber) . ".tpl";
+if ($letterlang == 'en') {
+    $template_file = "../../word/letters/en/letter" . intval($letternumber) . ".tpl";
+}
+if (file_exists($template_file)) {
+    $html = file_get_contents($template_file);
+    $html = str_replace(array_keys($rep), array_values($rep), $html);
+    echo $html;
+} else {
+    echo "<div class='alert alert-danger'>خطأ: لم يتم العثور على قالب الخطاب رقم " . intval($letternumber) . "</div>";
+}
+
+require("../../../reportfooter.hnt");
+?>

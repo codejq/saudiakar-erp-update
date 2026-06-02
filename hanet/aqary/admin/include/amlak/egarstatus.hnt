@@ -13,6 +13,55 @@ require '../uCal.class.hnt';
 $dcal = new uCal;
 include_once "amlakfunctions.hnt";
 
+$isRestrictedAmlakUser = isset($user_data['groupid']) && intval($user_data['groupid']) > 2;
+$currentUserId = isset($user_data['userid']) ? intval($user_data['userid']) : 0;
+$assignedPropertyIds = array();
+$assignedPropertyIdsSql = "";
+$assignedPropertyFilterSql = "";
+$hasAssignedProperties = true;
+
+function prepareEgarStatusAssignedPropertyFilter($link)
+{
+    global $user_data, $isRestrictedAmlakUser, $currentUserId, $assignedPropertyIds, $assignedPropertyIdsSql, $assignedPropertyFilterSql, $hasAssignedProperties;
+
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start();
+    }
+
+    if ((!isset($user_data) || !is_array($user_data)) && isset($_SESSION['useridv'])) {
+        $user_data = mysql_fetch_array(mysql_query("SELECT * FROM user WHERE userid='" . intval($_SESSION['useridv']) . "'", $link));
+    }
+
+    $isRestrictedAmlakUser = isset($user_data['groupid']) && intval($user_data['groupid']) > 2;
+    $currentUserId = isset($user_data['userid']) ? intval($user_data['userid']) : 0;
+    $assignedPropertyIds = array();
+    $assignedPropertyIdsSql = "";
+    $assignedPropertyFilterSql = "";
+    $hasAssignedProperties = true;
+
+    if (!isset($user_data) || !is_array($user_data)) {
+        $isRestrictedAmlakUser = true;
+        $hasAssignedProperties = false;
+        return;
+    }
+
+    if ($isRestrictedAmlakUser) {
+        $assignedPropertiesResult = mysql_query("SELECT idaqar FROM amlak WHERE users LIKE '%," . $currentUserId . ",%'", $link);
+        while ($assignedProperty = mysql_fetch_array($assignedPropertiesResult)) {
+            $assignedPropertyId = intval($assignedProperty['idaqar']);
+            if ($assignedPropertyId > 0) {
+                $assignedPropertyIds[] = $assignedPropertyId;
+            }
+        }
+        $assignedPropertyIds = array_values(array_unique($assignedPropertyIds));
+        $hasAssignedProperties = count($assignedPropertyIds) > 0;
+        if ($hasAssignedProperties) {
+            $assignedPropertyIdsSql = implode(',', $assignedPropertyIds);
+            $assignedPropertyFilterSql = " AND amlakdetails.idaqar IN ($assignedPropertyIdsSql)";
+        }
+    }
+}
+
 // Export handler - must run before header.hnt outputs HTML
 $exportType = isset($_GET['export']) ? trim($_GET['export']) : '';
 if (!in_array($exportType, ['csv', 'xls'], true)) {
@@ -20,6 +69,7 @@ if (!in_array($exportType, ['csv', 'xls'], true)) {
 }
 if ($exportType !== '') {
     include_once  "../../../connectdb.hnt";
+    prepareEgarStatusAssignedPropertyFilter($link);
     $exp_base = "SELECT aksat.*,
         egar.vat_type,
         mostagereen.mostagername, mostagereen.mostagertel,
@@ -33,17 +83,19 @@ if ($exportType !== '') {
     WHERE aksat.iscomplete = 0 AND aksat.kastdate > 0";
     $exp_min = " AND aksat.kastid = (SELECT MIN(kastid) FROM aksat a2 WHERE a2.idsubaqar = aksat.idsubaqar AND a2.iscomplete = 0 AND a2.kastdate > 0)";
 
-    if (isset($searchbyidaqar) && $searchbyidaqar) {
-        $exp_sql = $exp_base . " AND amlakdetails.idaqar = '" . intval($searchbyidaqar) . "'" . $exp_min . " ORDER BY aksat.kastdate";
+    if ($isRestrictedAmlakUser && !$hasAssignedProperties) {
+        $exp_sql = $exp_base . " AND 1 = 0 ORDER BY aksat.kastdate";
+    } elseif (isset($searchbyidaqar) && $searchbyidaqar) {
+        $exp_sql = $exp_base . " AND amlakdetails.idaqar = '" . intval($searchbyidaqar) . "'" . $assignedPropertyFilterSql . $exp_min . " ORDER BY aksat.kastdate";
     } elseif (isset($searchbyname) && $searchbyname) {
         $sn = mysql_real_escape_string(trim($searchbyname));
-        $exp_sql = $exp_base . " AND (mostagereen.mostagername LIKE '%{$sn}%' OR mostagereen.mostagertel LIKE '%{$sn}%' OR mostagereen.mostageridnumber LIKE '%{$sn}%')" . $exp_min . " ORDER BY aksat.kastdate";
+        $exp_sql = $exp_base . $assignedPropertyFilterSql . " AND (mostagereen.mostagername LIKE '%{$sn}%' OR mostagereen.mostagertel LIKE '%{$sn}%' OR mostagereen.mostageridnumber LIKE '%{$sn}%')" . $exp_min . " ORDER BY aksat.kastdate";
     } elseif (isset($searchbyowner) && $searchbyowner) {
-        $exp_sql = $exp_base . " AND amlak.ownerid = '" . intval(trim($searchbyowner)) . "'" . $exp_min . " ORDER BY aksat.kastdate";
+        $exp_sql = $exp_base . $assignedPropertyFilterSql . " AND amlak.ownerid = '" . intval(trim($searchbyowner)) . "'" . $exp_min . " ORDER BY aksat.kastdate";
     } elseif (isset($searchall) && $searchall) {
-        $exp_sql = $exp_base . " AND aksat.kastdate < '" . time() . "' ORDER BY aksat.idsubaqar";
+        $exp_sql = $exp_base . $assignedPropertyFilterSql . " AND aksat.kastdate < '" . time() . "' ORDER BY aksat.idsubaqar";
     } else {
-        $exp_sql = $exp_base . $exp_min . " ORDER BY aksat.kastdate LIMIT 1000";
+        $exp_sql = $exp_base . $assignedPropertyFilterSql . $exp_min . " ORDER BY aksat.kastdate LIMIT 1000";
     }
 
     $exp_result = mysql_query($exp_sql, $link);
@@ -101,6 +153,7 @@ if ($exportType !== '') {
 
 $canscroll = 1;
 include_once "../../../header.hnt";
+prepareEgarStatusAssignedPropertyFilter($link);
 
 // Process contract termination
 if (isset($endidsubaqar) && $endidsubaqar) {
@@ -438,9 +491,35 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                 <a href='editmostager.hnt?idsubaqar=${src}' class='btn btn-info btn-sm' target='_blank'>
                     <i class="bi bi-person-badge me-1"></i>بيانات المستأجر
                 </a>
-                <a href='letter.hnt?idsubaqar=${src}' class='btn btn-warning btn-sm' target='_blank'>
-                    <i class="bi bi-envelope me-1"></i>خطاب تذكيري
-                </a>
+                <div class="btn-group">
+                    <button type="button" class="btn btn-warning btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+                        <i class="bi bi-envelope me-1"></i>خطاب تذكيري
+                    </button>
+                    <ul class="dropdown-menu text-end">
+                        <li><a class="dropdown-item" href="letter.hnt?idsubaqar=${src}" target="_blank">عربي</a></li>
+                        <li><a class="dropdown-item" href="letter.hnt?idsubaqar=${src}&lang=en" target="_blank">English</a></li>
+                    </ul>
+                </div>
+                <div class="btn-group">
+                    <button type="button" class="btn btn-danger btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+                        <i class="bi bi-exclamation-triangle me-1"></i>خطاب تأخير
+                    </button>
+                    <ul class="dropdown-menu text-end">
+                        <li><h6 class="dropdown-header">عربي</h6></li>
+                        <li><a class="dropdown-item" href="letter.hnt?idsubaqar=${src}&letternumber=1" target="_blank">خطاب مطالبة أول</a></li>
+                        <li><a class="dropdown-item" href="letter.hnt?idsubaqar=${src}&letternumber=2" target="_blank">خطاب مطالبة ثاني</a></li>
+                        <li><a class="dropdown-item" href="letter.hnt?idsubaqar=${src}&letternumber=3" target="_blank">إنذار أول</a></li>
+                        <li><a class="dropdown-item" href="letter.hnt?idsubaqar=${src}&letternumber=4" target="_blank">إنذار ثاني</a></li>
+                        <li><a class="dropdown-item" href="letter.hnt?idsubaqar=${src}&letternumber=5" target="_blank">إنذار ثالث</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><h6 class="dropdown-header">English</h6></li>
+                        <li><a class="dropdown-item" href="letter.hnt?idsubaqar=${src}&letternumber=1&lang=en" target="_blank">First Demand Letter</a></li>
+                        <li><a class="dropdown-item" href="letter.hnt?idsubaqar=${src}&letternumber=2&lang=en" target="_blank">Second Demand Letter</a></li>
+                        <li><a class="dropdown-item" href="letter.hnt?idsubaqar=${src}&letternumber=3&lang=en" target="_blank">First Notice</a></li>
+                        <li><a class="dropdown-item" href="letter.hnt?idsubaqar=${src}&letternumber=4&lang=en" target="_blank">Second Notice</a></li>
+                        <li><a class="dropdown-item" href="letter.hnt?idsubaqar=${src}&letternumber=5&lang=en" target="_blank">Third Notice</a></li>
+                    </ul>
+                </div>
                 <a href='motab3a.hnt?idsubaqar=${src}' class='btn btn-secondary btn-sm' target='_blank'>
                     <i class="bi bi-clipboard-check me-1"></i>تسجيل متابعة
                 </a>
@@ -659,7 +738,9 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                         <select name='searchbyidaqar' id='msgbox2position' class='form-select form-select-sm mb-3'>
                             <option value=''>جميع العقارات</option>
                             <?php
-                            mysql_data_seek($result, 0);
+                            if (mysql_num_rows($result) > 0) {
+                                mysql_data_seek($result, 0);
+                            }
                             while ($row = mysql_fetch_array($result)) {
                                 $selected = (isset($idaqar) && $idaqar == $row['idaqar']) || (isset($searchbyidaqar) && $searchbyidaqar == $row['idaqar']) ? " selected " : "";
                                 echo "<option value='{$row['idaqar']}' $selected>" . htmlspecialchars($row['aqarname'], ENT_QUOTES, 'UTF-8') . "</option>";
@@ -744,12 +825,41 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
         </div>
     </div>
 
+    <?php if ($isRestrictedAmlakUser && !$hasAssignedProperties) { ?>
+        <div class="alert alert-warning text-center p-4" role="alert">
+            <i class="bi bi-exclamation-triangle fs-3 d-block mb-3"></i>
+            <h5 class="fw-bold mb-3">لا توجد عقارات مخصصة لحسابك حالياً</h5>
+            <p class="mb-2">
+                يرجى التواصل مع مدير النظام وطلب ربط العقارات بحسابك حتى تتمكن من عرض حالة الإيجارات الخاصة بالعقارات المصرح لك بها.
+            </p>
+            <p class="mb-3">
+                على مدير النظام الدخول إلى شاشة التحكم بالعقار، ثم اختيار كل عقار على حدة وإضافة اسمك ضمن المستخدمين المصرح لهم بهذا العقار.
+            </p>
+            <div>
+                <a href="showeditaqar.hnt" class="btn btn-primary">
+                    <i class="bi bi-building-gear me-1"></i>
+                    التحكم بالعقار
+                </a>
+            </div>
+        </div>
+    <?php } else { ?>
+
     <?php
     $hnt_dll_defult = isset($hnt_dll) ? $hnt_dll : 0;
 
     // Pagination for main view
     if (!isset($searchbyidaqar) && !isset($searchbyname) && !isset($searchbyowner)) {
-        $sql = "SELECT MIN(kastid) AS dd FROM aksat WHERE iscomplete = 0 GROUP BY idsubaqar";
+        if ($isRestrictedAmlakUser) {
+            $sql = "SELECT MIN(aksat.kastid) AS dd
+                    FROM aksat
+                    INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
+                    WHERE aksat.iscomplete = 0
+                    AND aksat.kastdate > 0
+                    $assignedPropertyFilterSql
+                    GROUP BY aksat.idsubaqar";
+        } else {
+            $sql = "SELECT MIN(kastid) AS dd FROM aksat WHERE iscomplete = 0 GROUP BY idsubaqar";
+        }
         $rownum = mysql_query($sql, $link);
         $rownum = mysql_num_rows($rownum);
 
@@ -845,51 +955,33 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                 ORDER BY aksat.kastdate
                 LIMIT " . (isset($limit) ? $limit : 50);
 
-        if (isset($user_data['groupid']) && $user_data['groupid'] > 2) {
-            $sql = "SELECT idaqar FROM amlak WHERE users LIKE '%," . intval($user_data['userid']) . ",%'";
-            $user_aqars_result = mysql_query($sql, $link);
-            $user_aqars = array();
-            while ($ua = mysql_fetch_array($user_aqars_result)) {
-                $user_aqars[] = $ua['idaqar'];
-            }
-            $user_aqars = implode(',', $user_aqars);
-
-            if ($user_aqars) {
-                $user_subaqar = "SELECT idsubaqar FROM amlakdetails WHERE idaqar IN ($user_aqars)";
-                $user_subaqar_result = mysql_query($user_subaqar, $link);
-                $user_subaqar_arr = array();
-                while ($us = mysql_fetch_array($user_subaqar_result)) {
-                    $user_subaqar_arr[] = $us['idsubaqar'];
-                }
-                $user_subaqar = implode(',', $user_subaqar_arr);
-
-                if ($user_subaqar) {
-                    $sql = "SELECT
-                                aksat.*,
-                                egar.vat_type,
-                                mostagereen.mostagerid,
-                                mostagereen.mostagername,
-                                mostagereen.mostagertel,
-                                amlakdetails.rakam,
-                                amlakdetails.hnt_dll_type,
-                                amlakdetails.aqarsubtype,
-                                amlakdetails.idaqar
-                            FROM aksat
-                            LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
-                            INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
-                            INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
-                            WHERE aksat.iscomplete = 0
-                            AND aksat.idsubaqar IN ($user_subaqar)
-                            AND aksat.kastid = (
-                                SELECT MIN(kastid)
-                                FROM aksat AS a2
-                                WHERE a2.idsubaqar = aksat.idsubaqar
-                                AND a2.iscomplete = 0
-                            )
-                            ORDER BY aksat.kastdate
-                            LIMIT " . (isset($limit) ? $limit : 50);
-                }
-            }
+        if ($isRestrictedAmlakUser) {
+            $sql = "SELECT
+                        aksat.*,
+                        egar.vat_type,
+                        mostagereen.mostagerid,
+                        mostagereen.mostagername,
+                        mostagereen.mostagertel,
+                        amlakdetails.rakam,
+                        amlakdetails.hnt_dll_type,
+                        amlakdetails.aqarsubtype,
+                        amlakdetails.idaqar
+                    FROM aksat
+                    LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
+                    INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
+                    INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
+                    WHERE aksat.iscomplete = 0
+                    AND aksat.kastdate > 0
+                    $assignedPropertyFilterSql
+                    AND aksat.kastid = (
+                        SELECT MIN(kastid)
+                        FROM aksat AS a2
+                        WHERE a2.idsubaqar = aksat.idsubaqar
+                        AND a2.iscomplete = 0
+                        AND a2.kastdate > 0
+                    )
+                    ORDER BY aksat.kastdate
+                    LIMIT " . (isset($limit) ? $limit : 50);
         }
 
         if (isset($searchbyidaqar) && $searchbyidaqar) {
@@ -908,6 +1000,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                     INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar AND amlakdetails.idaqar = '" . intval($searchbyidaqar) . "'
                     INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
                     WHERE aksat.iscomplete = 0
+                    $assignedPropertyFilterSql
                     AND aksat.kastid = (
                         SELECT MIN(kastid)
                         FROM aksat AS a2
@@ -934,6 +1027,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                     INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
                     INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
                     WHERE aksat.iscomplete = 0
+                    $assignedPropertyFilterSql
                     AND (mostagereen.mostagername LIKE '%" . mysql_real_escape_string($searchbyname) . "%'
                          OR mostagereen.mostageridnumber LIKE '%" . mysql_real_escape_string($searchbyname) . "%'
                          OR mostagereen.mostagertel LIKE '%" . mysql_real_escape_string($searchbyname) . "%'
@@ -964,6 +1058,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                     INNER JOIN amlak ON amlakdetails.idaqar = amlak.idaqar AND amlak.ownerid = '" . intval(trim($searchbyowner)) . "'
                     INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
                     WHERE aksat.iscomplete = 0
+                    $assignedPropertyFilterSql
                     AND aksat.kastid = (
                         SELECT MIN(kastid)
                         FROM aksat AS a2
@@ -1122,6 +1217,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                 INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
                 INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
                 WHERE aksat.iscomplete = 0
+                $assignedPropertyFilterSql
                 AND aksat.kastdate > 0
                 AND aksat.kastdate < '" . time() . "'
                 ORDER BY aksat.idsubaqar";
@@ -1142,6 +1238,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                     INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar AND amlakdetails.idaqar = '" . intval($searchbyidaqar) . "'
                     INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
                     WHERE aksat.iscomplete = 0
+                    $assignedPropertyFilterSql
                     AND aksat.kastdate > 0
                     AND aksat.kastdate < '" . time() . "'
                     ORDER BY aksat.idsubaqar";
@@ -1163,6 +1260,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                     INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
                     INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
                     WHERE aksat.iscomplete = 0
+                    $assignedPropertyFilterSql
                     AND aksat.kastdate > 0
                     AND aksat.kastdate < '" . time() . "'
                     ORDER BY aksat.idsubaqar";
@@ -1185,6 +1283,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                     INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
                     INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
                     WHERE aksat.iscomplete = 0
+                    $assignedPropertyFilterSql
                     AND aksat.kastdate > 0
                     AND aksat.kastdate < '" . time() . "'
                     AND (mostagereen.mostagername LIKE '%" . mysql_real_escape_string($searchbyname) . "%'
@@ -1211,6 +1310,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                     INNER JOIN amlak ON amlakdetails.idaqar = amlak.idaqar AND amlak.ownerid = '" . intval(trim($searchbyowner)) . "'
                     INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
                     WHERE aksat.iscomplete = 0
+                    $assignedPropertyFilterSql
                     AND aksat.kastdate > 0
                     AND aksat.kastdate < '" . time() . "'
                     ORDER BY aksat.idsubaqar";
@@ -1297,6 +1397,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
     <?php
     }
     ?>
+    <?php } ?>
 </div>
 
 <!-- Context Menu (Hidden) -->
@@ -1311,8 +1412,14 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
     <a href='#' onclick="gotolink('editmostager.hnt?idsubaqar=' + document.getElementById('idtr').value); return false;">
         <i class="bi bi-person-badge me-2"></i>بيانات المستأجر
     </a>
-    <a href='#' onclick="gotolink('letter.hnt?idsubaqar=' + document.getElementById('idtr').value); return false;">
+    <div class="px-3 py-2 fw-bold text-muted">
         <i class="bi bi-envelope me-2"></i>خطاب تذكيري
+    </div>
+    <a href='#' class="ps-4" onclick="gotolink('letter.hnt?idsubaqar=' + document.getElementById('idtr').value); return false;">
+        عربي
+    </a>
+    <a href='#' class="ps-4" onclick="gotolink('letter.hnt?idsubaqar=' + document.getElementById('idtr').value + '&lang=en'); return false;">
+        English
     </a>
     <a href='#' onclick="gotolink('motab3a.hnt?idsubaqar=' + document.getElementById('idtr').value); return false;">
         <i class="bi bi-clipboard-check me-2"></i>تسجيل متابعة
