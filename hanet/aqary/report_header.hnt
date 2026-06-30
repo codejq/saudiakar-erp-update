@@ -85,7 +85,7 @@ if ($allprevilage && isset($_SESSION)) {
 }
 ?>
 <!DOCTYPE html>
-<html dir="rtl" lang="ar">
+<html dir="ltr" lang="ar">
 
 <head>
 	<meta charset="UTF-8">
@@ -384,44 +384,145 @@ if ($allprevilage && isset($_SESSION)) {
 			});
 		});
 
+		// مشاركة محتوى التقرير / Share the report content
+		// مناسب للخادم المحلي حيث لا يصلح مشاركة الرابط (داخلي/localhost)
+		var __shareReport = null;
+
+		function buildReportHtml() {
+			var titleInput = document.getElementById('pagetitle');
+			var pageTitle = (titleInput && titleInput.value) ? titleInput.value : (document.title || 'تقرير');
+
+			// محتوى التقرير (نفس المصدر المستخدم في إرسال البريد)
+			var reportContent = $("#main_report_data").html();
+			if (!reportContent) {
+				reportContent = document.body.innerHTML;
+			}
+
+			var html = '<!DOCTYPE html><html dir="rtl" lang="ar">' +
+				'<head><meta charset="UTF-8"><title>' + pageTitle + '</title></head>' +
+				'<body style="direction: rtl; font-family: Arial, sans-serif;">' +
+				reportContent +
+				'</body></html>';
+
+			return { title: pageTitle, html: html };
+		}
+
+		function reportFileName(report) {
+			var base = (report.title || 'report').replace(/[\\\/:*?"<>|]+/g, '_').trim();
+			return (base || 'report') + '.html';
+		}
+
+		// فتح التقرير في تبويب جديد للمعاينة/الطباعة/الحفظ
+		function shareOpenInTab() {
+			if (!__shareReport) return;
+			var blob = new Blob([__shareReport.html], { type: 'text/html;charset=utf-8' });
+			var url = URL.createObjectURL(blob);
+			window.open(url, '_blank');
+			setTimeout(function() { URL.revokeObjectURL(url); }, 10000);
+		}
+
+		// تنزيل ملف HTML ليتم إرفاقه يدويًا
+		function downloadReportHtml(report) {
+			report = report || __shareReport;
+			if (!report) return;
+			var blob = new Blob([report.html], { type: 'text/html;charset=utf-8' });
+			var a = document.createElement('a');
+			a.href = URL.createObjectURL(blob);
+			a.download = reportFileName(report);
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+			setTimeout(function() { URL.revokeObjectURL(a.href); }, 1000);
+		}
+
+		function shareCopyPlain(cb) {
+			var text = $("#main_report_data").text();
+			if (navigator.clipboard && navigator.clipboard.writeText) {
+				navigator.clipboard.writeText(text).then(cb).catch(function() {});
+			} else {
+				var ta = document.createElement('textarea');
+				ta.value = text;
+				document.body.appendChild(ta);
+				ta.select();
+				document.execCommand('copy');
+				document.body.removeChild(ta);
+				cb();
+			}
+		}
+
+		// نسخ محتوى التقرير (HTML غني مع نص بديل) إلى الحافظة
+		function shareCopyContent() {
+			var done = function() {
+				$('.sharemenu-copybtn').html("<i class='fas fa-check'></i> تم النسخ");
+			};
+			if (__shareReport && navigator.clipboard && window.ClipboardItem) {
+				try {
+					var data = {
+						'text/html': new Blob([__shareReport.html], { type: 'text/html' }),
+						'text/plain': new Blob([$("#main_report_data").text()], { type: 'text/plain' })
+					};
+					navigator.clipboard.write([new ClipboardItem(data)]).then(done).catch(function() {
+						shareCopyPlain(done);
+					});
+					return;
+				} catch (e) {
+					// المتصفح لا يدعم ClipboardItem -> نص عادي
+				}
+			}
+			shareCopyPlain(done);
+		}
+
+		// واتساب: ننسخ المحتوى ونفتح واتساب لِلصقه (لا يمكن إرفاق ملف عبر الرابط)
+		function shareViaWhatsapp() {
+			var title = __shareReport ? __shareReport.title : (document.title || '');
+			shareCopyPlain(function() {});
+			window.open('https://wa.me/?text=' + encodeURIComponent(title), '_blank');
+		}
+
+		// إرسال عبر البريد: إعادة استخدام تدفق البريد الحالي العامل
+		function shareViaEmail() {
+			$(".closealertbtn").click();
+			$(".sendmailbtn").click();
+		}
+
+		// قائمة المشاركة لسطح المكتب
+		function shareDesktopMenu() {
+			var btn = "display:flex;align-items:center;gap:10px;justify-content:flex-start;width:100%;text-align:right;";
+			var ico = "width:22px;text-align:center;";
+			var html =
+				"<div style='display:flex;flex-direction:column;gap:10px;'>" +
+					"<button type='button' class='button uifont16' onclick='shareOpenInTab();' style='" + btn + "'><i class='fas fa-external-link-alt' style='" + ico + "color:#06b6d4;'></i> فتح التقرير في تبويب جديد</button>" +
+					"<button type='button' class='button uifont16' onclick='downloadReportHtml();' style='" + btn + "'><i class='fas fa-download' style='" + ico + "color:#3b82f6;'></i> تنزيل ملف HTML</button>" +
+					"<button type='button' class='button uifont16 sharemenu-copybtn' onclick='shareCopyContent();' style='" + btn + "'><i class='fas fa-copy' style='" + ico + "color:#10b981;'></i> نسخ محتوى التقرير</button>" +
+					"<button type='button' class='button uifont16' onclick='shareViaWhatsapp();' style='" + btn + "'><i class='fab fa-whatsapp' style='" + ico + "color:#25D366;'></i> واتساب (نسخ ثم لصق)</button>" +
+					"<button type='button' class='button uifont16' onclick='shareViaEmail();' style='" + btn + "'><i class='fas fa-envelope' style='" + ico + "color:#f87171;'></i> إرسال عبر البريد</button>" +
+				"</div>";
+			alert(html);
+		}
+
 		$(function() {
 			$(".sharebtn").on("click", function(event) {
-				var sharebtn = $(this);
-				sharebtn.attr("src", "/aqary/admin/images/loadingsmall.gif");
-				var userid = getCookie('userid');
-				$.post("/aqary/social-media/createimage.php", {
-						twitText: $("#reportpagedata").html(),
-						tweettitle: ' بسم الله',
-						userid: userid,
-						mailreadydata: $("#smstxtbody").val()
-					})
-					.done(function(data) {
-						//console.log( "second success" );
-						//window.open(data);
-						alert("اختر موقع التواصل  لنشر المنشور اليه :" +
-							"<br> <a href='/aqary/social-media/process.php?image=" + data + "' style='margin:5px' target='_blank' ><i class='bluetext fa fa-twitter-square fa-3x'></i></a>" +
-							"<a href=# style='margin:5px' disabled title='هذه الخاصية في انتظار التفعيل من قبل موقع التواصل الاجتماعي' ><i class='bluetext fa fa-facebook-square fa-3x'></i></a>" +
-							"<a href=# style='margin:5px' disabled title='هذه الخاصية في انتظار التفعيل من قبل موقع التواصل الاجتماعي'><i class='bluetext fa fa-instagram fa-3x'></i></a>" +
-							"<a href=# style='margin:5px' disabled title='هذه الخاصية في انتظار التفعيل من قبل موقع التواصل الاجتماعي'><i class='bluetext fa fa-google-plus-square fa-3x'></i></a>" +
-							"<a href='/aqary/social-media/forcedownload.php?image=" + data +
-							"' style='margin:5px' ><i class='bluetext fa fa-download fa-3x'></i></a>" +
-							"<br><img src='" + data + "' onclick='window.open(this.src);' height='320'>"
+				event.preventDefault();
+				var report = buildReportHtml();
+				__shareReport = report;
+				var file = new File([report.html], reportFileName(report), { type: 'text/html' });
 
-
-						);
-						//alert(data.result);
-					})
-					//.fail(function(jqXHR, textStatus, errorThrown) { alert('request failed! ' + textStatus); })
-					.fail(function(data) {
-						//console.log( "error " );
-						//alert("error ");
-					})
-					.always(function() {
-						//console.log( "complete" );
-						sharebtn.attr("src", "/aqary/admin/images/sahre.png");
+				// مشاركة الملف عبر نافذة المشاركة الأصلية (الجوال/المتصفحات الداعمة لمشاركة الملفات)
+				if (navigator.canShare && navigator.canShare({ files: [file] })) {
+					navigator.share({
+						files: [file],
+						title: report.title,
+						text: report.title
+					}).catch(function(err) {
+						// تجاهل إلغاء المستخدم، واعرض القائمة لأي خطأ آخر
+						if (err && err.name === 'AbortError') return;
+						shareDesktopMenu();
 					});
+					return;
+				}
 
-
+				// سطح المكتب / HTTP: اعرض قائمة المشاركة بدل التنزيل التلقائي
+				shareDesktopMenu();
 			});
 		});
 
@@ -663,7 +764,7 @@ if (!isset($passcode)) {
 
 <body id="myP" contentEditable='false' topmargin="0"
 
-	onxcontextmenu="return false;" style="margin:0; ">
+	onxcontextmenu="return false;" style="margin:0; " dir="rtl">
 
 	<input type="hidden" name="mailto" id="mailto" value="">
 	<input type="hidden" name="mailbody" id="mailbody" value="">
