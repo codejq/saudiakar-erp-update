@@ -101,7 +101,41 @@ echo $h_date2." <br> الموافق  ".$h_date1;?>
 
 <!-#########################################################-->
 <?php
-$sql="SELECT   *  FROM  aksat where iscomplete=0 and ( kastdate>'".$endsearch."' and kastdate<'".$startsearch."') order by idsubaqar";
+// Resolve each due installment's tenant + unit with a fallback chain, all in ONE query
+// (the old code ran 2-3 sub-queries per row):
+//   1) direct unit link : aksat.idsubaqar -> amlakdetails (+ building + subtype + its tenant)
+//   2) contract link     : aksat.egar_id   -> egar (tenant = egar.mostagerid, location = egar.aqaraddress)
+// Most modern installments have idsubaqar=0 and only carry egar_id, so the amlakdetails-only
+// lookup left unit/tenant/building blank. Filtering (tenant-exists + property) is pushed into
+// SQL so the DB drops those rows instead of fetching all of them and discarding in PHP.
+$endsearch   = intval($endsearch);
+$startsearch = intval($startsearch);
+
+// Optional property filter in SQL (only unit-linked rows carry a building id)
+$propFilter = $searchbyidaqar ? " AND d.idaqar = '".intval($searchbyidaqar)."' " : "";
+
+$sql = "SELECT a.kastid, a.idsubaqar, a.egar_id, a.kastname, a.kastvalue, a.dof3at, a.kastdate,
+			d.idaqar        AS d_idaqar,
+			d.rakam         AS d_rakam,
+			d.mostagerid    AS d_mostagerid,
+			am.aqarname     AS d_aqarname,
+			st.aqarsubtypename AS d_subtypename,
+			e.mostagerid    AS e_mostagerid,
+			e.aqaraddress   AS e_addr,
+			md.mostagername AS d_name, md.mostagertel AS d_tel,
+			me.mostagername AS e_name, me.mostagertel AS e_tel
+		FROM aksat a
+		LEFT JOIN amlakdetails d ON d.idsubaqar = a.idsubaqar AND a.idsubaqar <> 0
+		LEFT JOIN amlak am       ON am.idaqar = d.idaqar AND d.idaqar <> 0
+		LEFT JOIN aqarsubtype st ON st.aqarsubtype = d.aqarsubtype
+		LEFT JOIN egar e         ON e.rakam3akdid = a.egar_id
+		LEFT JOIN mostagereen md ON md.mostagerid = d.mostagerid AND d.mostagerid <> 0
+		LEFT JOIN mostagereen me ON me.mostagerid = e.mostagerid AND e.mostagerid <> 0
+		WHERE a.iscomplete = 0
+		  AND a.kastdate > '".$endsearch."' AND a.kastdate < '".$startsearch."'
+		  AND (d.mostagerid <> 0 OR e.mostagerid <> 0)
+		  ".$propFilter."
+		ORDER BY d.idaqar DESC, a.idsubaqar DESC, a.egar_id DESC";
 
 $result=mysql_query($sql,$link);
 ?>
@@ -124,63 +158,56 @@ $result=mysql_query($sql,$link);
 <?php
 $counx=0;
 
-
-
 while($row=mysql_fetch_array($result)){
 
-if($searchbyidaqar){$critria=" and amlakdetails.idaqar='".$searchbyidaqar."' ";
-$sqcl="select idaqar from amlakdetails where idsubaqar='".$row['idsubaqar']."' ";
-$_tmp_aq2=mysql_fetch_array(mysql_query($sqcl));
-$idaqarcl=$_tmp_aq2 ? $_tmp_aq2['idaqar'] : 0;
+	// Effective tenant: unit's tenant first, else contract's tenant
+	$tenantId   = intval($row['d_mostagerid']) ?: intval($row['e_mostagerid']);
+	$tenantName = ($row['d_name'] !== null && $row['d_name'] !== '') ? $row['d_name'] : (string)$row['e_name'];
+	$tenantTel  = ($row['d_tel']  !== null && $row['d_tel']  !== '') ? $row['d_tel']  : (string)$row['e_tel'];
 
-if($idaqarcl!=$searchbyidaqar){continue;}
-}
+	// Safety net: skip if tenant record is missing (e.g. deleted tenant); SQL already
+	// dropped rows with no mostagerid on either the unit or the contract.
+	if(trim($tenantName) === ''){ continue; }
 
+	// Filter by tenant name / phone
+	if($searchbyname){
+		$searchbyname=trim($searchbyname);
+		if((!substr_count($tenantName,$searchbyname)) and (!substr_count($tenantTel,$searchbyname))){ continue; }
+	}
 
+	$mydatem=time();
+	if($row['kastdate'] <= $mydatem){ $egareded[]=$row['kastid']; }
+	elseif( ($row['kastdate']-(2592000)) <= $mydatem ){ $egarreq[]=$row['kastid']; }
 
-$mydatem=time();
+	$counx++;
 
-if($row['kastdate'] < $mydatem ||$row['kastdate']==$mydatem )
-{$egareded[]=$row['kastid'];}
-elseif( ($row['kastdate']-(2592000)) < $mydatem ||($row['kastdate']-(2592000))==$mydatem )
-{$egarreq[]=$row['kastid'];}
+	// Effective property: building name (unit-linked) else contract's text address
+	$propertyName = ($row['d_aqarname'] !== null && $row['d_aqarname'] !== '')
+		? $row['d_aqarname']
+		: (string)$row['e_addr'];
 
-$counx++;
-$sqlm="select mostagereen.mostagerid,mostagereen.mostagername,mostagereen.mostagertel
-,amlakdetails.rakam,amlakdetails.aqarsubtype
-from mostagereen, amlakdetails  where  amlakdetails.mostagerid=mostagereen.mostagerid and amlakdetails.idsubaqar='".$row['idsubaqar']."' ";
-$rowm=mysql_fetch_array(mysql_query($sqlm,$link));
-if (!$rowm) $rowm = ['mostagerid'=>0,'mostagername'=>'','mostagertel'=>'','rakam'=>'','aqarsubtype'=>''];
-if($searchbyname){
-$searchbyname=trim($searchbyname);
-if((!substr_count($rowm['mostagername'],$searchbyname )) and (!substr_count($rowm['mostagertel'],$searchbyname )) ){ continue;}
-
-}
-
+	// Effective unit: subtype + number (unit-linked) else no unit number for contract-only rows
+	if($row['d_rakam'] !== null && ($row['d_rakam'] !== '' || $row['d_subtypename'] !== null)){
+		$unitText = trim((string)$row['d_subtypename'])." رقم ".$row['d_rakam'];
+	} else {
+		$unitText = '—';
+	}
  ?>
 <tr align=center>
 
 <td style='border:1px solid #b2b2b2;'>
-<?php
-$sqcl="select idaqar from amlakdetails where idsubaqar='".$row['idsubaqar']."' ";
-$_tmp_aq=mysql_fetch_array(mysql_query($sqcl));
-$idaqarcl=$_tmp_aq ? $_tmp_aq['idaqar'] : 0;
-
-
-?>
-<a href="editmostager.hnt?mostagerid=<?=$rowm['mostagerid'];?>"  >
-<?=$rowm['mostagername'];?>
+<a href="editmostager.hnt?mostagerid=<?=intval($tenantId);?>"  >
+<?=htmlspecialchars($tenantName, ENT_QUOTES, 'UTF-8');?></a>
 <td style='border:1px solid #b2b2b2;'>
-<?=$rowm['mostagertel'];?>
+<?=htmlspecialchars($tenantTel, ENT_QUOTES, 'UTF-8');?>
 <td style='border:1px solid #b2b2b2;'>القسط رقم
-<?=$row['kastname'];?>
+<?=htmlspecialchars($row['kastname'], ENT_QUOTES, 'UTF-8');?>
 <td style='border:1px solid #b2b2b2;'>
-<?=displayaqarname($idaqarcl);?>
+<?=htmlspecialchars($propertyName, ENT_QUOTES, 'UTF-8');?>
 <td style='border:1px solid #b2b2b2;'>
-<?echo displaysubtype($rowm['aqarsubtype'])."رقم". $rowm['rakam'];?>
-
+<?=htmlspecialchars($unitText, ENT_QUOTES, 'UTF-8');?>
 <td style='border:1px solid #b2b2b2;'>
-<?=$row['kastvalue']-$row['dof3at'];?><?=$myomla;?>
+<?=($row['kastvalue']-$row['dof3at']);?><?=$myomla;?>
 <td style='border:1px solid #b2b2b2;'>
 <?php if($hnt_dll || $hnt_supper_dll ==5){echo date("d/m/Y",$row['kastdate']);}else{echo  ArabicTools::arabicDate('hj:d/m/Y', $row['kastdate']);}?>
 

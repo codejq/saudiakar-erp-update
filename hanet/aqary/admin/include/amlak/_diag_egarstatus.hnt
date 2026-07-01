@@ -1,0 +1,110 @@
+<?php
+/**
+ * Read-only diagnostic for the "due installments" (egarstatus) report.
+ * Purpose: find out why unit / tenant / building columns come back empty.
+ *
+ * Open in browser:
+ *   /aqary/admin/include/amlak/_diag_egarstatus.hnt
+ *
+ * SELECT-only. Deletes nothing. Safe to leave, but remove when done.
+ */
+
+include_once "../../../connectdb.hnt"; // provides $link (legacy) + $db (mysqli)
+header('Content-Type: text/html; charset=utf-8');
+
+function dq($sql)
+{
+	global $link;
+	return mysql_query($sql, $link);
+}
+function scalar($sql)
+{
+	$r = mysql_fetch_array(dq($sql));
+	return ($r && isset($r[0])) ? $r[0] : '0';
+}
+function h($v)
+{
+	return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+}
+?>
+<meta charset="utf-8">
+<style>
+	body { font-family: Consolas, monospace; direction: ltr; padding: 16px; font-size: 13px; }
+	h2 { font-family: Arial; }
+	table { border-collapse: collapse; margin: 10px 0 30px; }
+	td, th { border: 1px solid #bbb; padding: 3px 7px; white-space: nowrap; }
+	th { background: #eef; }
+	.bad { background: #ffe0e0; }
+	.ok { background: #e0ffe0; }
+	.num { text-align: right; }
+	.sum td { font-size: 15px; }
+</style>
+
+<h2>Diagnostic — egarstatus (due installments) linking</h2>
+
+<?php
+// ---- 1) Summary counts on aksat -----------------------------------------
+$total      = scalar("SELECT COUNT(*) FROM aksat WHERE iscomplete=0");
+$sub0       = scalar("SELECT COUNT(*) FROM aksat WHERE iscomplete=0 AND (idsubaqar=0 OR idsubaqar IS NULL)");
+$hasegar    = scalar("SELECT COUNT(*) FROM aksat WHERE iscomplete=0 AND egar_id>0");
+$noamlak    = scalar("SELECT COUNT(*) FROM aksat a WHERE a.iscomplete=0 AND NOT EXISTS (SELECT 1 FROM amlakdetails d WHERE d.idsubaqar=a.idsubaqar)");
+$amlaknoten = scalar("SELECT COUNT(*) FROM aksat a JOIN amlakdetails d ON d.idsubaqar=a.idsubaqar WHERE a.iscomplete=0 AND (d.mostagerid=0 OR d.mostagerid IS NULL)");
+$egarnoten  = scalar("SELECT COUNT(*) FROM aksat a JOIN egar e ON e.rakam3akdid=a.egar_id WHERE a.iscomplete=0 AND (e.mostagerid=0 OR e.mostagerid IS NULL)");
+?>
+<table class="sum">
+	<tr><td>aksat rows (iscomplete=0)</td><td class="num"><?= h($total) ?></td></tr>
+	<tr class="<?= $sub0 > 0 ? 'bad' : 'ok' ?>"><td>&nbsp;&nbsp;with idsubaqar = 0 / null (unit not set on installment)</td><td class="num"><?= h($sub0) ?></td></tr>
+	<tr><td>&nbsp;&nbsp;with egar_id &gt; 0 (linked to a contract)</td><td class="num"><?= h($hasegar) ?></td></tr>
+	<tr class="<?= $noamlak > 0 ? 'bad' : 'ok' ?>"><td>&nbsp;&nbsp;whose idsubaqar has NO amlakdetails match (row still shows, blank unit)</td><td class="num"><?= h($noamlak) ?></td></tr>
+	<tr class="<?= $amlaknoten > 0 ? 'bad' : 'ok' ?>"><td>&nbsp;&nbsp;matched amlakdetails but its mostagerid = 0 (no tenant on unit)</td><td class="num"><?= h($amlaknoten) ?></td></tr>
+	<tr><td>&nbsp;&nbsp;egar contract exists but its mostagerid = 0</td><td class="num"><?= h($egarnoten) ?></td></tr>
+</table>
+
+<h3>Sample rows (latest 60 due installments, all links shown)</h3>
+<p>Look for rows where <b>amlak.*</b> columns are empty/0 but <b>egar.*</b> columns are filled — that means the unit/tenant lives on the contract, not on amlakdetails.idsubaqar.</p>
+<table>
+	<tr>
+		<th>kastid</th><th>a.idsubaqar</th><th>a.egar_id</th><th>kastname</th><th>kastvalue</th>
+		<th>amlak.idaqar</th><th>amlak.rakam</th><th>amlak.aqarsub</th><th>amlak.mostagerid</th><th>tenant(amlak)</th>
+		<th>egar.id</th><th>egar.mostagerid</th><th>tenant(egar)</th><th>egar.aqaraddress</th>
+	</tr>
+<?php
+$sql = "SELECT a.kastid, a.idsubaqar, a.egar_id, a.kastname, a.kastvalue,
+			d.idaqar AS d_idaqar, d.rakam AS d_rakam, d.aqarsubtype AS d_aqarsub, d.mostagerid AS d_mostagerid,
+			md.mostagername AS d_tenant,
+			e.rakam3akdid AS e_id, e.mostagerid AS e_mostagerid, e.aqaraddress AS e_addr,
+			me.mostagername AS e_tenant
+		FROM aksat a
+		LEFT JOIN amlakdetails d ON d.idsubaqar = a.idsubaqar
+		LEFT JOIN mostagereen md ON md.mostagerid = d.mostagerid
+		LEFT JOIN egar e ON e.rakam3akdid = a.egar_id
+		LEFT JOIN mostagereen me ON me.mostagerid = e.mostagerid
+		WHERE a.iscomplete = 0
+		ORDER BY a.kastid DESC
+		LIMIT 60";
+$res = dq($sql);
+while ($r = mysql_fetch_array($res)) {
+	$unitBlank   = (empty($r['d_rakam']) && (int)$r['d_idaqar'] === 0);
+	$tenantBlank = (empty($r['d_tenant']));
+	$egarHasTenant = !empty($r['e_tenant']);
+	echo "<tr>";
+	echo "<td class='num'>" . h($r['kastid']) . "</td>";
+	echo "<td class='num'>" . h($r['idsubaqar']) . "</td>";
+	echo "<td class='num'>" . h($r['egar_id']) . "</td>";
+	echo "<td>" . h($r['kastname']) . "</td>";
+	echo "<td class='num'>" . h($r['kastvalue']) . "</td>";
+	echo "<td class='num " . ($unitBlank ? 'bad' : '') . "'>" . h($r['d_idaqar']) . "</td>";
+	echo "<td class='" . ($unitBlank ? 'bad' : '') . "'>" . h($r['d_rakam']) . "</td>";
+	echo "<td class='num'>" . h($r['d_aqarsub']) . "</td>";
+	echo "<td class='num'>" . h($r['d_mostagerid']) . "</td>";
+	echo "<td class='" . ($tenantBlank ? 'bad' : '') . "'>" . h($r['d_tenant']) . "</td>";
+	echo "<td class='num'>" . h($r['e_id']) . "</td>";
+	echo "<td class='num'>" . h($r['e_mostagerid']) . "</td>";
+	echo "<td class='" . ($egarHasTenant ? 'ok' : '') . "'>" . h($r['e_tenant']) . "</td>";
+	echo "<td>" . h($r['e_addr']) . "</td>";
+	echo "</tr>";
+}
+?>
+</table>
+
+<p style="font-family:Arial">Done. Copy this whole page (or screenshot) back to me — the red/green cells tell us which table actually holds the unit &amp; tenant for the broken rows.</p>
