@@ -1,0 +1,362 @@
+<?
+header('Access-Control-Allow-Origin: *');
+header('X-UA-Compatible:  IE=8, IE=9, IE=10, IE=11, IE=EDGE, chrome=1');
+
+$sc_title="حالة الإيجارات";
+$sc_id="39";
+//check if we are in the client computer dont run the script
+$server_name =@file_get_contents($_SERVER['DOCUMENT_ROOT'] . '/aqary/vbip.ip');
+if(!stripos($server_name , 'ocalhost') && !stripos($server_name , '27.0.0.1')){
+	echo "You are running in the client machine we will exit now ";
+	exit();
+}
+
+include_once"../../../nocash.hnt";
+$canscroll=1;
+include_once"../../../connectdb.hnt";
+$sql = "select userid,username,password  from user where groupid=1 limit 1 ";
+$row_user = mysql_fetch_array(mysql_query($sql));
+$lusername= $row_user['username'];
+$lpassword= $row_user['password'];
+require"../../../hjerymelady.ip";
+if(isset($_REQUEST['hnt_dll'])){$hnt_dll=$_REQUEST['hnt_dll'];}
+include_once"../../../colorvariable.hnt";
+include_once"../../../arabicDate.function.hnt";
+include_once"../../../data.hnt";
+include_once"../functions.hnt";
+require '../arabicTools.class.hnt';
+require '../uCal.class.hnt';
+$dcal = new uCal;
+include_once "amlakfunctions.hnt";
+
+// run the unsended bat files
+$there_is_unsend_files = false;
+foreach (glob($_SERVER['DOCUMENT_ROOT'] . '/aqary/message-queue/*.bat') as $filename) {
+    localExecInBackground("$filename");
+	$there_is_unsend_files = true;
+}
+
+if($there_is_unsend_files){
+ exit();
+}
+
+?>
+<html dir="rtl">
+<body>
+
+
+<?
+
+// get all gloabl var
+$result=mysql_query("select * from global ",$link);
+while($gl=mysql_fetch_array($result))
+{
+	$GLOBALS[$gl['variblename']]=$gl['valuribalevalue'];
+}
+
+// if the notification var is not initilized we will intilize them here
+if(!isset($email_to_recive_notifications)){
+	$sql=" insert into global (variblename ,valuribalevalue ) values
+			('email_to_recive_notifications' ,''),
+			('tel_to_recive_notifications' ,''),
+			('email_to_recive_rent_notifications' ,''),
+			('tel_to_recive_rent_notifications' ,''),
+			('notifi_for_rent_by_email' ,'1'),
+			('notifi_for_rent_by_sms' ,'0'),
+			('notifi_owner_for_collection_by_mail' ,'0'),
+			('notifi_owner_for_collection_by_sms' ,'0'),
+			('days_number_befor_notifi_for_rent_by_email' ,'15'),
+			('days_number_befor_notifi_for_rent_by_sms' ,'15'),
+			('days_number_befor_renotifi_for_rent_by_email' ,'10'),
+			('days_number_befor_renotifi_for_rent_by_sms' ,'10'),
+			('days_number_befor_notifi_collector_for_rent_by_email' ,'15'),
+			('days_number_befor_notifi_collector_for_rent_by_sms' ,'15'),
+			('days_number_befor_renotifi_collector_for_rent_by_email' ,'10'),
+			('days_number_befor_renotifi_collector_for_rent_by_sms' ,'10') ";
+	mysql_query($sql,$link);
+	$result=mysql_query("select * from global ",$link);
+	while($gl=mysql_fetch_array($result))
+	{
+		$GLOBALS[$gl['variblename']]=$gl['valuribalevalue'];
+	}
+}
+
+
+
+$max_notification_days = max ($days_number_befor_notifi_for_rent_by_email ,
+								$days_number_befor_notifi_for_rent_by_sms ,
+								$days_number_befor_renotifi_for_rent_by_email,
+								$days_number_befor_renotifi_for_rent_by_sms,
+								$days_number_befor_notifi_collector_for_rent_by_email,
+								$days_number_befor_notifi_collector_for_rent_by_sms,
+								$days_number_befor_renotifi_collector_for_rent_by_email,
+								$days_number_befor_renotifi_collector_for_rent_by_sms );
+
+
+// modifit aksat table and create the notofications columns
+mysql_query("ALTER TABLE aksat ADD last_notifi_rent_email INT(11) NOT NULL  DEFAULT 0,
+ADD last_notifi_rent_sms INT(11) NOT NULL  DEFAULT 0,
+ADD last_renotifi_rent_email INT(11) NOT NULL  DEFAULT 0,
+ADD last_renotifi_rent_sms INT(11) NOT NULL  DEFAULT 0,
+ADD last_notifi_collector_email INT(11) NOT NULL  DEFAULT 0,
+ADD last_notifi_collector_sms INT(11) NOT NULL  DEFAULT 0,
+ADD last_renotifi_collector_email INT(11) NOT NULL  DEFAULT 0,
+ADD last_renotifi_collector_sms INT(11) NOT NULL  DEFAULT 0");
+
+mysql_query("ALTER TABLE sanad ADD last_notifi_owner_for_collection_by_sms INT(11) NOT NULL  DEFAULT 0,
+ADD last_notifi_owner_for_collection_by_email INT(11) NOT NULL  DEFAULT 0,
+ADD last_notifi_manger_for_collection_by_email INT(11) NOT NULL  DEFAULT 0,
+ADD last_notifi_manger_for_collection_by_sms INT(11) NOT NULL  DEFAULT 0");
+
+//check if this the first time for sanad reset all sanads
+$sql = "select max(last_notifi_owner_for_collection_by_email) as dd from sanad  ";
+$rcount = mysql_fetch_array(mysql_query($sql));
+if($rcount['dd']<1){
+	mysql_query(" update sanad set last_notifi_owner_for_collection_by_sms =1 , last_notifi_owner_for_collection_by_email=1,
+		last_notifi_manger_for_collection_by_email=1,last_notifi_manger_for_collection_by_sms=1 ");
+}
+
+//notifiy office for collection by mail
+if($email_to_recive_notifications){
+	$sql="select * from sanad where last_notifi_manger_for_collection_by_email = 0 limit 5 ";
+	$rs=mysql_query($sql);
+	while($row=mysql_fetch_array($rs)){
+		$message_to=$email_to_recive_notifications;
+		$message_title="تحصيل جديد مبلغ : " . $row['depositeamount'];
+		$message_body="تحصيل جديد <br> سند رقم : $row['idsanad'] <br> المبلغ : $row['depositeamount'] <br> اسم المستأجر : $row['mostagername']
+					<br> البيان : $row['mybyan'] 	";
+		sendmessage($message_to , $message_title , $message_body);
+		mysql_query("update sanad set last_notifi_manger_for_collection_by_email = '".time()."'  where idsanad = $row['idsanad'] ");
+	}
+}
+
+//notifiy office for collection by sms
+if($tel_to_recive_notifications){
+	$sql="select * from sanad where last_notifi_manger_for_collection_by_sms = 0 limit 5 ";
+	$rs=mysql_query($sql);
+	while($row=mysql_fetch_array($rs)){
+		$message_to=$tel_to_recive_notifications;
+		$message_body="تحصيل مبلغ :  $row['depositeamount']
+						اسم المستأجر : $row['mostagername']	";
+		sendmessage($message_to , $message_title , $message_body);
+		mysql_query("update sanad set last_notifi_manger_for_collection_by_sms = '".time()."'  where idsanad = $row['idsanad'] ");
+	}
+}
+
+
+
+//notifiy owner for collection by mail
+if($notifi_owner_for_collection_by_mail){
+	$sql="select * from sanad where last_notifi_owner_for_collection_by_email = 0 limit 5 ";
+	$rs=mysql_query($sql);
+	while($row=mysql_fetch_array($rs)){
+		$owneremail = mysql_fetch_array(mysql_query("select email amlak where  idaqar='".$row['idaqar']."'"));
+		$message_to=$owneremail['email'];
+		$message_title="تحصيل جديد مبلغ : " . $row['depositeamount'];
+		$message_body="تحصيل جديد <br> سند رقم : $row['idsanad'] <br> المبلغ : $row['depositeamount'] <br> اسم المستأجر : $row['mostagername']
+					<br> البيان : $row['mybyan']	";
+		sendmessage($message_to , $message_title , $message_body);
+		mysql_query("update sanad set last_notifi_owner_for_collection_by_email = '".time()."'  where idsanad = $row['idsanad'] ");
+	}
+}
+
+//notifiy office for collection by sms
+if($notifi_owner_for_collection_by_sms){
+	$sql="select * from sanad where last_notifi_owner_for_collection_by_sms = 0 limit 5 ";
+	$rs=mysql_query($sql);
+	while($row=mysql_fetch_array($rs)){
+		$ownemobile = mysql_fetch_array(mysql_query("select mobile amlak where  idaqar='".$row['idaqar']."'"));
+		$message_to=$ownemobile['mobile'];
+		$message_to=$tel_to_recive_notifications;
+		$message_body="تحصيل مبلغ :  $row['depositeamount']
+						اسم المستأجر : $row['mostagername']	";
+		sendmessage($message_to , $message_title , $message_body);
+		mysql_query("update sanad set last_notifi_owner_for_collection_by_sms = '".time()."'  where idsanad = $row['idsanad'] ");
+	}
+}
+
+
+if($notifi_for_rent_by_email){
+	notifi_for_rent($days_number_befor_notifi_for_rent_by_email , "email" , 'last_notifi_rent_email');
+	notifi_for_rent($days_number_befor_renotifi_for_rent_by_email ,  "email" , 'last_renotifi_rent_email');
+}
+if($notifi_for_rent_by_sms){
+	notifi_for_rent($days_number_befor_notifi_for_rent_by_sms , "sms" , 'last_notifi_rent_sms');
+	notifi_for_rent($days_number_befor_renotifi_for_rent_by_sms , "sms" , 'last_renotifi_rent_sms');
+}
+
+if($email_to_recive_rent_notifications){
+	notifi_for_rent($days_number_befor_notifi_collector_for_rent_by_email , "email" , 'last_notifi_collector_email');
+	notifi_for_rent($days_number_befor_renotifi_collector_for_rent_by_email , "email" , 'last_renotifi_collector_email');
+}
+if($tel_to_recive_rent_notifications){
+	notifi_for_rent($days_number_befor_notifi_collector_for_rent_by_sms , "sms" , 'last_notifi_collector_sms');
+	notifi_for_rent($days_number_befor_renotifi_collector_for_rent_by_sms , "sms" , 'last_renotifi_collector_sms');
+}
+
+
+function notifi_for_rent($number_of_days , $message_type , $notifi_field_name ){
+	global $link,$dcal,$lusername,$lpassword;
+	$result=mysql_query("select * from global ",$link);
+	while($gl=mysql_fetch_array($result))
+	{
+		$GLOBALS[$gl['variblename']]=$gl['valuribalevalue'];
+	}
+
+
+	if(strpos($notifi_field_name , "ast_re")){
+		$frist_notifi_field_name =  str_replace("last_re","last_" ,$notifi_field_name);
+		$condition  = " and $frist_notifi_field_name > 0 and $notifi_field_name =0 " ;
+	}
+	else{
+		$condition  = " and  $notifi_field_name =0 " ;
+	}
+
+	$sql="SELECT  aksat.*  FROM  aksat,amlakdetails where aksat.iscomplete=0 	and aksat.idsubaqar=amlakdetails.idsubaqar
+			and aksat.kastdate<'".(time() + $number_of_days  * 86400 )."'
+			and aksat.kastdate > '".(time() - 60 * 86400 )."' $condition
+			order by aksat.idsubaqar  limit 1   ";
+	$result=mysql_query($sql,$link);
+
+	?>
+	<table border=0 bgcolor=#808080  cellspacing=1 width=98%>
+	<tr style='color:#ffffff' align=center>
+	<td>اسم المستأجر </td>
+	<td>هاتف</td>
+	<td>العقار</td>
+	<td>الوحدة</td>
+	<td>القسط المستحق </td>
+	<td>قيمة القسط </td>
+	<td>المدفوع</td>
+	<td>المتبقي</td>
+	<td>تاريخ الإستحقاق</td>
+	 </tr>
+	<?
+	$counx=0;
+    $local_address ="http://127.0.0.1:9009";
+	while($row=mysql_fetch_array($result)){
+
+
+
+
+	$mydatem=time();
+
+	if($row['kastdate'] < $mydatem ||$row['kastdate']==$mydatem )
+	{$egareded[]=$row['kastid'];}
+	elseif( ($row['kastdate']-(2592000)) < $mydatem ||($row['kastdate']-(2592000))==$mydatem )
+	{$egarreq[]=$row['kastid'];}
+
+	$sqlm="select mostagereen.mostagerid,mostagereen.mostagername,mostagereen.mostagertel,mostagereen.mostageremail
+	,amlakdetails.rakam,amlakdetails.aqarsubtype,amlakdetails.idaqar,amlakdetails.hnt_dll_type
+	from mostagereen, amlakdetails  where  amlakdetails.mostagerid=mostagereen.mostagerid and amlakdetails.idsubaqar='".$row['idsubaqar']."' ";
+	$rowm=mysql_fetch_array(mysql_query($sqlm,$link));
+
+	if($rowm['hnt_dll_type']==1 or $rowm['hnt_dll_type']==="0"){$hnt_dll=$rowm['hnt_dll_type']; }else	{$hnt_dll=$hnt_dll_defult;}
+	if($hnt_dll){
+		$collection_date =  date("d/m/Y",$row['kastdate']);
+	}
+	else
+	{
+		$dateo = $dcal->g2u(date("d",$row['kastdate']),date("m",$row['kastdate']),date("Y",$row['kastdate']));
+		$collection_date =  "$dateo['day']/$dateo['month']/$dateo['year']";
+	}
+
+
+	if($message_type == "sms"){
+		//$message_to = $rowm['mostagertel'];
+		$mailreadydata=file_get_contents(  $local_address."/aqary/admin/include/amlak/letter.hnt?mostagerid=$rowm['mostagerid']&idsubaqar=$row['idsubaqar']&hnt_dll=$hnt_dll&sendsms=1&username=$lusername&password=$lpassword");
+		$mailreadydata=explode("##@@##",$mailreadydata);
+		$message_to=$mailreadydata[1];
+		$message_body=$mailreadydata[2];
+	}
+	if($message_type == "email"){
+		//$message_to = $rowm['mostageremail'];
+		$mailreadydata=file_get_contents(  $local_address."/aqary/admin/include/amlak/letter.hnt?mostagerid=$rowm['mostagerid']&idsubaqar=$row['idsubaqar']&hnt_dll=$hnt_dll&sendmail=1&username=$lusername&password=$lpassword");
+		$mailreadydata=explode("##@@##",$mailreadydata);
+		$message_to=$mailreadydata[1];
+		$message_title=$mailreadydata[2];
+		$message_body=$mailreadydata[3];
+	}
+
+	if(stripos($notifi_field_name,"collector_")){
+		if($message_type == "sms"){
+			$message_to = $tel_to_recive_rent_notifications;
+			$message_body =   " يحل ايجار المستأجر : ".$rowm['mostagername']."\r\n هاتف : " .$rowm['mostagertel']
+								."\r\nفي تاريخ " .$collection_date . "\r\n المبلغ : " .($row['kastvalue']-$row['dof3at']);
+		}
+		if($message_type == "email"){
+			$message_to = $email_to_recive_rent_notifications;
+			$message_title = "تنبيه ايجار ".$rowm['mostagername']." هاتف : " .$rowm['mostagertel'] ;
+			$message_body =  " يحل ايجار المستأجر : ".$rowm['mostagername']."<br>\r\n هاتف : " .$rowm['mostagertel']
+								."<br>\r\nفي تاريخ " .$collection_date . "<br>\r\n المبلغ : " .($row['kastvalue']-$row['dof3at']);
+		}
+	}
+
+	sendmessage($message_to , $message_title , $message_body);
+
+	 ?>
+
+	<tr style='cursor:hand'   class='gridrow' id='row-<?=$row['idsubaqar'];?>_<?=$row['kastid'];?>'
+
+	onclick="showcontextlayer(this,'<?=$row['idsubaqar'];?>%26mostagerid=<?=$rowm['mostagerid'];?>%26hnt_dll=<?=$hnt_dll;?>');"
+	 align=center  bgcolor=#f2f2f2 onMouseOver=this.bgColor='#f2f2f2'; onMouseOut=this.bgColor='#f2f2f2';>
+
+
+	<td><?=$rowm['mostagername'];?></td>
+	<td><?=$rowm['mostagertel'];?><?=$rowm['mostageremail'];?></td>
+	<td><?=displayaqarname($rowm['idaqar']);?></td>
+	<td><?echo displaysubtype($rowm['aqarsubtype'])." رقم ". $rowm['rakam'];?></td>
+	<td>القسط رقم <?=$row['kastname'];?> </td>
+	<td><?=$row['kastvalue'];?> <?=$myomla;?></td>
+	<td><?=$row['dof3at'];?></td>
+	<td><?=$row['kastvalue']-$row['dof3at'];?></td>
+	<td>
+	<?
+	if($rowm['hnt_dll_type']==1 or $rowm['hnt_dll_type']==="0")
+	{$hnt_dll=$rowm['hnt_dll_type']; }else
+	{$hnt_dll=$hnt_dll_defult;}
+
+		if($hnt_dll){
+			echo date("d/m/Y",$row['kastdate']);
+		}
+		else
+		{
+			//echo  ArabicTools::arabicDate('hj:d/m/Y', $row['kastdate']);
+			$dateo = $dcal->g2u(date("d",$row['kastdate']),date("m",$row['kastdate']),date("Y",$row['kastdate']));
+			echo"$dateo['day']/$dateo['month']/$dateo['year']";
+		}
+	?>
+	</td></tr>
+
+
+
+	<?
+		mysql_query("update aksat set $notifi_field_name =".time()." where kastid = $row['kastid'] ");
+	}
+	?>
+	</table>
+
+
+
+<?
+}
+
+
+//mofaker notifications
+mysql_query("ALTER TABLE message ADD last_notifi INT(11)  NOT NULL  DEFAULT 0");
+$mydatem = time();
+
+$sql="select * from message where startdate <= '$mydatem' and enddate >= '$mydatem' and last_notifi <= ".(time() - 21600 )." limit 10";
+$result=mysql_query($sql,$link);
+$xcd=0;
+while($row=mysql_fetch_array($result))
+{
+	addnotifi($row['messagebody'],$row['userid'],$row['userid'], 'log',$link);
+	mysql_query("update message set last_notifi = '".time()."' where  messageid='".$row['messageid']."'  ");
+}
+
+
+
+
+
+?>
