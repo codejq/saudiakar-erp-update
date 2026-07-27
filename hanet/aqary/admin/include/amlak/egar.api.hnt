@@ -121,6 +121,22 @@ function createContract($data, $link, $dcal, $user_data) {
     $st_year0 = $parts_0[2] ?? date('Y');
 
     $hnt_dll = isset($data['hnt_dll']) ? intval($data['hnt_dll']) : 1;
+    if ($hnt_dll !== 0 && $hnt_dll !== 1) {
+        $response['message'] = 'نوع التقويم غير صحيح';
+        return $response;
+    }
+
+    $dateYears = array(intval($st_year), intval($st_year0), intval($st_yearx));
+    foreach ($dateYears as $dateYear) {
+        if (($hnt_dll === 0 && $dateYear >= 1900) || ($hnt_dll === 1 && $dateYear < 1900)) {
+            $response['message'] = 'تواريخ العقد لا تتطابق مع نوع التقويم المختار';
+            return $response;
+        }
+    }
+
+    // Preserve the day in the calendar selected by the user before converting
+    // Hijri input to the Gregorian timestamp stored in the database.
+    $fixed_payment_day = intval($st_date);
 
     // Convert Hijri to Gregorian if needed
     if ($hnt_dll == 0) {
@@ -144,9 +160,6 @@ function createContract($data, $link, $dcal, $user_data) {
     $startegar = mktime(0, 0, 0, $st_month, $st_date, $st_year);
     $end3aqd = mktime(12, 0, 0, $st_month0, $st_date0, $st_year0);
     $date3akd = mktime(0, 0, 0, $st_monthx, $st_datex, $st_yearx);
-
-    // Extract fixed payment day from start date
-    $fixed_payment_day = intval($st_date);
 
     // Validate fixed payment day for Hijri calendar only
     // Gregorian calendar allows any day (1-31)
@@ -327,11 +340,21 @@ function generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed
         $monthsToAdd = $duration * ($i - 1);
         $kastdate = $calendar->addMonths($startTimestamp, $monthsToAdd, $hnt_dll);
 
-        // Adjust to fixed payment day to ensure consistency across months
-        $currentDay = intval(date('j', $kastdate));
-        if ($currentDay != $fixed_payment_day) {
-            $dayDiff = $fixed_payment_day - $currentDay;
-            $kastdate = $kastdate + ($dayDiff * 24 * 60 * 60);
+        // CalendarManager already preserves the Hijri day. Gregorian dates can
+        // be adjusted directly to the configured payment day.
+        if ($hnt_dll === 1) {
+            $currentDay = intval(date('j', $kastdate));
+            if ($currentDay != $fixed_payment_day) {
+                $targetDay = min($fixed_payment_day, intval(date('t', $kastdate)));
+                $kastdate = mktime(
+                    0,
+                    0,
+                    0,
+                    intval(date('m', $kastdate)),
+                    $targetDay,
+                    intval(date('Y', $kastdate))
+                );
+            }
         }
 
         // Initialize installment variables

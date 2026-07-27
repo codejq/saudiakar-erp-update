@@ -1,0 +1,484 @@
+<?php
+/**
+ * CalendarManager Class
+ * Centralized calendar management for Hijri and Gregorian calendars
+ *
+ * Handles all date conversions, calculations, and formatting
+ * Supports dual calendar system (Hijri/Islamic and Gregorian)
+ *
+ * @version 1.0
+ * @date 2025-12-04
+ */
+
+require_once(__DIR__ . '/../arabicTools.class.hnt');
+require_once(__DIR__ . '/../uCal.class.hnt');
+
+class CalendarManager {
+    private $dcal;
+    private $arabicTools;
+
+    private $hijriMonthNames = [
+        1 => 'محرم',
+        2 => 'صفر',
+        3 => 'ربيع الأول',
+        4 => 'ربيع الثاني',
+        5 => 'جمادى الأولى',
+        6 => 'جمادى الآخرة',
+        7 => 'رجب',
+        8 => 'شعبان',
+        9 => 'رمضان',
+        10 => 'شوال',
+        11 => 'ذو القعدة',
+        12 => 'ذو الحجة'
+    ];
+
+    private $gregorianMonthNames = [
+        1 => 'يناير',
+        2 => 'فبراير',
+        3 => 'مارس',
+        4 => 'أبريل',
+        5 => 'مايو',
+        6 => 'يونيو',
+        7 => 'يوليو',
+        8 => 'أغسطس',
+        9 => 'سبتمبر',
+        10 => 'أكتوبر',
+        11 => 'نوفمبر',
+        12 => 'ديسمبر'
+    ];
+
+    private $arabicDayNames = [
+        'Sunday' => 'الأحد',
+        'Monday' => 'الإثنين',
+        'Tuesday' => 'الثلاثاء',
+        'Wednesday' => 'الأربعاء',
+        'Thursday' => 'الخميس',
+        'Friday' => 'الجمعة',
+        'Saturday' => 'السبت'
+    ];
+
+    /**
+     * Constructor
+     */
+    public function __construct() {
+        $this->dcal = new uCal();
+        $this->arabicTools = new ArabicTools('Hijri');
+    }
+
+    /**
+     * Convert date string to Unix timestamp
+     *
+     * @param string $dateString Format: "DD/MM/YYYY"
+     * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @return int Unix timestamp
+     */
+    public function dateToTimestamp($dateString, $calendarType) {
+        if (empty($dateString)) {
+            return 0;
+        }
+
+        $parts = explode('/', $dateString);
+        $day = intval($parts[0] ?? 0);
+        $month = intval($parts[1] ?? 0);
+        $year = intval($parts[2] ?? 0);
+
+        if ($calendarType == 0) {
+            // Hijri to Gregorian to timestamp
+            $gregorian = $this->dcal->u2g($day, $month, $year);
+            return mktime(0, 0, 0, $gregorian['month'], $gregorian['day'], $gregorian['year']);
+        } else {
+            // Gregorian to timestamp
+            return mktime(0, 0, 0, $month, $day, $year);
+        }
+    }
+
+    /**
+     * Normalize dates saved by the old Hijri implementation.
+     *
+     * Some older records saved the displayed Hijri date directly with
+     * mktime(), producing a negative timestamp whose rendered year is 14xx.
+     * Interpret that rendered value as Hijri once, then return the real Unix
+     * timestamp used by all current calendar calculations.
+     *
+     * @param int $timestamp Stored timestamp
+     * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @return int Normalized timestamp
+     */
+    public function normalizeLegacyTimestamp($timestamp, $calendarType) {
+        $timestamp = intval($timestamp);
+        if ($timestamp === 0 || intval($calendarType) !== 0) {
+            return $timestamp;
+        }
+
+        $renderedYear = intval(date('Y', $timestamp));
+        if ($renderedYear > 0 && $renderedYear < 1900) {
+            return $this->dateToTimestamp(date('d/m/Y', $timestamp), 0);
+        }
+
+        return $timestamp;
+    }
+
+    /**
+     * Convert Unix timestamp to date string
+     *
+     * @param int $timestamp Unix timestamp
+     * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @param string $format Date format (default: d/m/Y)
+     * @return string Formatted date
+     */
+    public function timestampToDate($timestamp, $calendarType, $format = 'd/m/Y') {
+        if ($timestamp == 0) {
+            return '';
+        }
+
+        if ($calendarType == 0) {
+            // Timestamp to Hijri
+            return $this->arabicTools->arabicDate('hj:' . $format, $timestamp);
+        } else {
+            // Timestamp to Gregorian
+            return date($format, $timestamp);
+        }
+    }
+
+    /**
+     * Add months to a timestamp (calendar-aware)
+     *
+     * @param int $timestamp Starting timestamp
+     * @param int $months Number of months to add (can be negative)
+     * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @return int New timestamp
+     */
+    public function addMonths($timestamp, $months, $calendarType) {
+        if ($calendarType == 0) {
+            // Hijri calculation
+            $hijriDate = $this->arabicTools->arabicDate('hj:d/m/Y', $timestamp);
+            $parts = explode('/', $hijriDate);
+            $day = intval($parts[0] ?? 0);
+            $month = intval($parts[1] ?? 0);
+            $year = intval($parts[2] ?? 0);
+
+            // Add months with proper year overflow handling
+            $newMonth = $month + $months;
+            $newYear = $year + floor(($newMonth - 1) / 12);
+            $newMonth = (($newMonth - 1) % 12) + 1;
+
+            // Handle negative months
+            if ($newMonth <= 0) {
+                $newMonth += 12;
+                $newYear--;
+            }
+
+            // Handle day overflow (Hijri months: 29-30 days)
+            $maxDays = $this->getHijriMonthDays($newMonth, $newYear);
+            if ($day > $maxDays) {
+                $day = $maxDays;
+            }
+
+            // Convert back to timestamp
+            $gregorian = $this->dcal->u2g($day, $newMonth, $newYear);
+            return mktime(0, 0, 0, $gregorian['month'], $gregorian['day'], $gregorian['year']);
+
+        } else {
+            // Gregorian calculation (PHP handles month overflow)
+            return strtotime("+$months months", $timestamp);
+        }
+    }
+
+    /**
+     * Calculate difference in months between two timestamps
+     *
+     * @param int $startTimestamp Start timestamp
+     * @param int $endTimestamp End timestamp
+     * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @return int Number of months (positive if end > start)
+     */
+    public function monthsDifference($startTimestamp, $endTimestamp, $calendarType) {
+        if ($calendarType == 0) {
+            // Hijri calculation
+            $startHijri = $this->arabicTools->arabicDate('hj:d/m/Y', $startTimestamp);
+            $endHijri = $this->arabicTools->arabicDate('hj:d/m/Y', $endTimestamp);
+
+            $startParts = explode('/', $startHijri);
+            $endParts = explode('/', $endHijri);
+
+            $startDay = intval($startParts[0] ?? 0);
+            $startMonth = intval($startParts[1] ?? 0);
+            $startYear = intval($startParts[2] ?? 0);
+            $endDay = intval($endParts[0] ?? 0);
+            $endMonth = intval($endParts[1] ?? 0);
+            $endYear = intval($endParts[2] ?? 0);
+
+            $months = (($endYear - $startYear) * 12) + ($endMonth - $startMonth);
+
+            // Adjust for day difference
+            if ($endDay < $startDay) {
+                $months--;
+            }
+
+            return $months;
+
+        } else {
+            // Gregorian calculation
+            $start = new DateTime();
+            $start->setTimestamp($startTimestamp);
+
+            $end = new DateTime();
+            $end->setTimestamp($endTimestamp);
+
+            $interval = $start->diff($end);
+            $months = ($interval->y * 12) + $interval->m;
+
+            // Adjust for negative differences
+            if ($interval->invert) {
+                $months = -$months;
+            }
+
+            return $months;
+        }
+    }
+
+    /**
+     * Get month name in Arabic
+     *
+     * @param int $month Month number (1-12)
+     * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @return string Month name in Arabic
+     */
+    public function getMonthName($month, $calendarType) {
+        $month = intval($month);
+
+        if ($calendarType == 0) {
+            return isset($this->hijriMonthNames[$month]) ? $this->hijriMonthNames[$month] : '';
+        } else {
+            return isset($this->gregorianMonthNames[$month]) ? $this->gregorianMonthNames[$month] : '';
+        }
+    }
+
+    /**
+     * Format date for display (Arabic format)
+     *
+     * @param int $timestamp Unix timestamp
+     * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @param bool $includeDayName Include day of week name
+     * @return string Formatted date string (e.g., "15 رمضان 1446 هـ")
+     */
+    public function formatDateForDisplay($timestamp, $calendarType, $includeDayName = false) {
+        if ($timestamp == 0) {
+            return '';
+        }
+
+        if ($calendarType == 0) {
+            // Hijri format: "15 رمضان 1446 هـ"
+            $hijriDate = $this->arabicTools->arabicDate('hj:d/m/Y', $timestamp);
+            $parts = explode('/', $hijriDate);
+            $day = intval($parts[0] ?? 0);
+            $month = intval($parts[1] ?? 0);
+            $year = intval($parts[2] ?? 0);
+
+            $monthName = $this->getMonthName($month, 0);
+            $formatted = "$day $monthName $year هـ";
+
+            if ($includeDayName) {
+                $dayName = $this->arabicDayNames[date('l', $timestamp)];
+                $formatted = "$dayName $formatted";
+            }
+
+            return $formatted;
+
+        } else {
+            // Gregorian format: "15 سبتمبر 2025 م"
+            $day = date('d', $timestamp);
+            $month = date('n', $timestamp);
+            $year = date('Y', $timestamp);
+
+            $monthName = $this->getMonthName($month, 1);
+            $formatted = "$day $monthName $year م";
+
+            if ($includeDayName) {
+                $dayName = $this->arabicDayNames[date('l', $timestamp)];
+                $formatted = "$dayName $formatted";
+            }
+
+            return $formatted;
+        }
+    }
+
+    /**
+     * Format date range for display (shows both dates)
+     *
+     * @param int $startTimestamp Start timestamp
+     * @param int $endTimestamp End timestamp
+     * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @return string Formatted range (e.g., "من 1 محرم 1446 هـ إلى 30 ذو الحجة 1446 هـ")
+     */
+    public function formatDateRange($startTimestamp, $endTimestamp, $calendarType) {
+        $startDate = $this->formatDateForDisplay($startTimestamp, $calendarType);
+        $endDate = $this->formatDateForDisplay($endTimestamp, $calendarType);
+
+        return "من $startDate إلى $endDate";
+    }
+
+    /**
+     * Format date range with both calendars
+     *
+     * @param int $startTimestamp Start timestamp
+     * @param int $endTimestamp End timestamp
+     * @param int $primaryCalendar 0=Hijri, 1=Gregorian (primary display)
+     * @return array ['primary' => string, 'secondary' => string, 'full' => string]
+     */
+    public function formatDateRangeBothCalendars($startTimestamp, $endTimestamp, $primaryCalendar) {
+        $startPrimary = $this->formatDateForDisplay($startTimestamp, $primaryCalendar);
+        $endPrimary = $this->formatDateForDisplay($endTimestamp, $primaryCalendar);
+
+        $secondaryCalendar = $primaryCalendar == 0 ? 1 : 0;
+        $startSecondary = $this->formatDateForDisplay($startTimestamp, $secondaryCalendar);
+        $endSecondary = $this->formatDateForDisplay($endTimestamp, $secondaryCalendar);
+
+        return [
+            'primary' => "من $startPrimary إلى $endPrimary",
+            'secondary' => "($startSecondary - $endSecondary)",
+            'full' => "من $startPrimary ($startSecondary) إلى $endPrimary ($endSecondary)"
+        ];
+    }
+
+    /**
+     * Validate date string format and values
+     *
+     * @param string $dateString Format: "DD/MM/YYYY"
+     * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @return bool True if valid
+     */
+    public function isValidDate($dateString, $calendarType) {
+        if (empty($dateString)) {
+            return false;
+        }
+
+        if (!preg_match('/^\d{1,2}\/\d{1,2}\/\d{4}$/', $dateString)) {
+            return false;
+        }
+
+        $parts = explode('/', $dateString);
+        $day = intval($parts[0] ?? 0);
+        $month = intval($parts[1] ?? 0);
+        $year = intval($parts[2] ?? 0);
+
+        if ($calendarType == 0) {
+            // Hijri validation
+            if ($month < 1 || $month > 12) {
+                return false;
+            }
+            if ($day < 1 || $day > 30) {
+                return false; // Hijri months: 29-30 days
+            }
+            if ($year < 1300 || $year > 1500) {
+                return false; // Reasonable range
+            }
+
+            // Check if day is valid for this specific month
+            $maxDays = $this->getHijriMonthDays($month, $year);
+            if ($day > $maxDays) {
+                return false;
+            }
+
+        } else {
+            // Gregorian validation
+            return checkdate($month, $day, $year);
+        }
+
+        return true;
+    }
+
+    /**
+     * Get number of days in a Hijri month
+     * Uses alternating pattern (odd months: 30 days, even months: 29 days)
+     * With special handling for Dhu al-Hijjah (month 12) leap years
+     *
+     * @param int $month Hijri month (1-12)
+     * @param int $year Hijri year
+     * @return int Number of days (29 or 30)
+     */
+    private function getHijriMonthDays($month, $year) {
+        // Last month (Dhu al-Hijjah) varies by year (leap year calculation)
+        if ($month == 12) {
+            // Hijri leap year calculation (11 leap years in 30-year cycle)
+            $isLeapYear = (($year * 11 + 14) % 30) < 11;
+            return $isLeapYear ? 30 : 29;
+        }
+
+        // Alternating pattern for other months
+        // Odd months (1, 3, 5, 7, 9, 11): 30 days
+        // Even months (2, 4, 6, 8, 10): 29 days
+        return ($month % 2 == 1) ? 30 : 29;
+    }
+
+    /**
+     * Calculate contract end date based on start date and duration
+     *
+     * @param int $startTimestamp Contract start timestamp
+     * @param int $durationMonths Duration in months
+     * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @return int End date timestamp
+     */
+    public function calculateEndDate($startTimestamp, $durationMonths, $calendarType) {
+        // Add months and subtract 1 day to get end of contract period
+        $endTimestamp = $this->addMonths($startTimestamp, $durationMonths, $calendarType);
+
+        // Subtract 1 day (contract ends day before next period starts)
+        $endTimestamp = strtotime('-1 day', $endTimestamp);
+
+        // Set to end of day
+        $endDate = getdate($endTimestamp);
+        return mktime(23, 59, 59, $endDate['mon'], $endDate['mday'], $endDate['year']);
+    }
+
+    /**
+     * Calculate installment due date
+     *
+     * @param int $startTimestamp Contract start timestamp
+     * @param int $paymentPeriod Payment period in months
+     * @param int $installmentNumber Installment number (1-based)
+     * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @return int Due date timestamp
+     */
+    public function calculateInstallmentDueDate($startTimestamp, $paymentPeriod, $installmentNumber, $calendarType) {
+        $monthsToAdd = $paymentPeriod * ($installmentNumber - 1);
+        return $this->addMonths($startTimestamp, $monthsToAdd, $calendarType);
+    }
+
+    /**
+     * Check if a date is within a range
+     *
+     * @param int $timestamp Timestamp to check
+     * @param int $startTimestamp Range start
+     * @param int $endTimestamp Range end
+     * @return bool True if timestamp is within range (inclusive)
+     */
+    public function isDateInRange($timestamp, $startTimestamp, $endTimestamp) {
+        return ($timestamp >= $startTimestamp && $timestamp <= $endTimestamp);
+    }
+
+    /**
+     * Get current date as timestamp
+     *
+     * @return int Current timestamp (start of day)
+     */
+    public function today() {
+        return mktime(0, 0, 0, date('n'), date('j'), date('Y'));
+    }
+
+    /**
+     * Convert between calendars (returns formatted date string)
+     *
+     * @param string $dateString Source date (DD/MM/YYYY)
+     * @param int $fromCalendar Source calendar type (0=Hijri, 1=Gregorian)
+     * @param int $toCalendar Target calendar type (0=Hijri, 1=Gregorian)
+     * @return string Converted date (DD/MM/YYYY)
+     */
+    public function convertDate($dateString, $fromCalendar, $toCalendar) {
+        // First convert to timestamp (universal)
+        $timestamp = $this->dateToTimestamp($dateString, $fromCalendar);
+
+        // Then convert to target calendar
+        return $this->timestampToDate($timestamp, $toCalendar, 'd/m/Y');
+    }
+}

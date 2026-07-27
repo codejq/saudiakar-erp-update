@@ -74,9 +74,11 @@ $report = [
     'contracts_needing_extension' => 0,
     'installments_added' => 0,
     'contracts_processed' => 0,
+    'calendar_flags_repaired' => 0,
     'errors' => [],
     'details' => []
 ];
+$processedContractIds = [];
 
 $now = time();
 $thresholdTimestamp = $now + ($thresholdDays * 24 * 60 * 60);
@@ -85,6 +87,8 @@ $thresholdTimestamp = $now + ($thresholdDays * 24 * 60 * 60);
 if ($debugParam) {
     goto debug_section;
 }
+
+$report['calendar_flags_repaired'] = repairLegacyHijriCalendarFlags($link, $report);
 
 // ============================================================================
 // SCENARIO 0: Find Contracts with NO Installments (New Contracts)
@@ -96,6 +100,7 @@ $sqlNoInstallmentsAtAll = "SELECT
             e.rakam3akdid,
             e.end3aqd,
             e.startegar,
+            e.calendar_type,
             e.installments_extended_to,
             e.fixed_payment_day,
             e.duration,
@@ -109,10 +114,12 @@ $sqlNoInstallmentsAtAll = "SELECT
             ad.hnt_dll_type,
             e.status,
             ad.idsubaqar,
-            COUNT(a.kastid) as total_installments
+            COUNT(a.kastid) as total_installments,
+            MAX(CAST(a.kastname AS UNSIGNED)) as last_installment_number
         FROM egar e
         LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
         LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+            AND a.idsubaqar = ad.idsubaqar
         WHERE e.end3aqd IS NOT NULL
         AND e.startegar IS NOT NULL AND e.startegar > 0
         AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
@@ -141,6 +148,7 @@ if (!$resultNoInstallmentsAtAll) {
         error_log("Processing contract {$contract['rakam3akdid']} (Unit {$contract['idsubaqar']}) - No installments scenario (Initial)");
 
         processContract($contract, $monthsToAdd, 'initial', $report, $link, $calendar, $dcal, $now, $maxHijriDay, $maxGregorianDay, $gracePeriod, $logActions);
+        $processedContractIds[intval($contract['rakam3akdid'])] = true;
     }
 }
 
@@ -153,6 +161,8 @@ if (!$resultNoInstallmentsAtAll) {
 $sqlNoInstallments = "SELECT
             e.rakam3akdid,
             e.end3aqd,
+            e.startegar,
+            e.calendar_type,
             e.installments_extended_to,
             e.fixed_payment_day,
             e.duration,
@@ -167,10 +177,12 @@ $sqlNoInstallments = "SELECT
             e.status,
             ad.idsubaqar,
             COUNT(a.kastid) as total_installments,
-            MAX(a.kastdate) as last_installment_date
+            MAX(a.kastdate) as last_installment_date,
+            MAX(CAST(a.kastname AS UNSIGNED)) as last_installment_number
         FROM egar e
         LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
         LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+            AND a.idsubaqar = ad.idsubaqar
         WHERE e.end3aqd IS NOT NULL
         AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
         GROUP BY e.rakam3akdid
@@ -195,6 +207,7 @@ if (!$resultNoInstallments) {
         error_log("Processing contract {$contract['rakam3akdid']} (Unit {$contract['idsubaqar']}) - All paid scenario");
 
         processContract($contract, $monthsToAdd, 'all_paid', $report, $link, $calendar, $dcal, $now, $maxHijriDay, $maxGregorianDay, $gracePeriod, $logActions);
+        $processedContractIds[intval($contract['rakam3akdid'])] = true;
     }
 }
 
@@ -205,6 +218,8 @@ if (!$resultNoInstallments) {
 $sqlNeedingExtension = "SELECT
             e.rakam3akdid,
             e.end3aqd,
+            e.startegar,
+            e.calendar_type,
             e.installments_extended_to,
             e.fixed_payment_day,
             e.duration,
@@ -219,15 +234,18 @@ $sqlNeedingExtension = "SELECT
             e.status,
             ad.idsubaqar,
             MAX(a.kastdate) as last_installment_date,
-            COUNT(a.kastid) as total_installments
+            COUNT(a.kastid) as total_installments,
+            MAX(CAST(a.kastname AS UNSIGNED)) as last_installment_number
         FROM egar e
         LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
         LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+            AND a.idsubaqar = ad.idsubaqar
         WHERE e.end3aqd IS NOT NULL
         AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
         GROUP BY e.rakam3akdid
         HAVING COUNT(a.kastid) > 0
         AND MAX(a.kastdate) IS NOT NULL
+        AND SUM(CASE WHEN a.iscomplete = 0 THEN 1 ELSE 0 END) = 0
         AND MAX(a.kastdate) <= {$thresholdTimestamp}
         ORDER BY MAX(a.kastdate) ASC
         LIMIT {$batchLimit}";
@@ -236,8 +254,11 @@ $resultNeedingExtension = mysql_query($sqlNeedingExtension, $link);
 
 if ($resultNeedingExtension) {
     while ($contract = mysql_fetch_assoc($resultNeedingExtension)) {
-        // Skip if already processed in scenario 1
-        if ($contract['total_installments'] == 0) {
+        // Do not process the same contract twice in one service run.
+        if (
+            $contract['total_installments'] == 0 ||
+            isset($processedContractIds[intval($contract['rakam3akdid'])])
+        ) {
             continue;
         }
 
@@ -255,11 +276,101 @@ if ($resultNeedingExtension) {
 // Process Contract Function
 // ============================================================================
 
+function repairLegacyHijriCalendarFlags($link, &$report) {
+    $candidateSql = "SELECT DISTINCT
+                            e.rakam3akdid,
+                            e.startegar
+                     FROM egar e
+                     INNER JOIN amlakdetails ad
+                         ON ad.rakam3akdid = e.rakam3akdid
+                     WHERE e.startegar < 0
+                     AND (
+                         COALESCE(e.calendar_type, 1) <> 0
+                         OR COALESCE(ad.hnt_dll_type, 1) <> 0
+                     )";
+    $candidateResult = mysql_query($candidateSql, $link);
+    if (!$candidateResult) {
+        $report['errors'][] = 'Could not inspect legacy Hijri calendar flags: ' . mysql_error($link);
+        return 0;
+    }
+
+    $contractIds = [];
+    while ($candidate = mysql_fetch_assoc($candidateResult)) {
+        $storedYear = intval(date('Y', intval($candidate['startegar'])));
+        if ($storedYear >= 1300 && $storedYear < 1900) {
+            $contractIds[] = intval($candidate['rakam3akdid']);
+        }
+    }
+
+    if (empty($contractIds)) {
+        return 0;
+    }
+
+    mysql_query('START TRANSACTION', $link);
+    try {
+        foreach ($contractIds as $contractId) {
+            $egarUpdate = mysql_query(
+                "UPDATE egar
+                 SET calendar_type = 0
+                 WHERE rakam3akdid = '{$contractId}'",
+                $link
+            );
+            if (!$egarUpdate) {
+                throw new Exception(
+                    "Contract {$contractId}: Could not repair egar.calendar_type: " .
+                    mysql_error($link)
+                );
+            }
+
+            $unitUpdate = mysql_query(
+                "UPDATE amlakdetails
+                 SET hnt_dll_type = 0
+                 WHERE rakam3akdid = '{$contractId}'",
+                $link
+            );
+            if (!$unitUpdate) {
+                throw new Exception(
+                    "Contract {$contractId}: Could not repair amlakdetails.hnt_dll_type: " .
+                    mysql_error($link)
+                );
+            }
+        }
+
+        mysql_query('COMMIT', $link);
+        $report['details'][] = 'Repaired legacy Hijri calendar flags for ' .
+            count($contractIds) . ' contract(s).';
+        return count($contractIds);
+    } catch (Exception $exception) {
+        mysql_query('ROLLBACK', $link);
+        $report['errors'][] = $exception->getMessage();
+        return 0;
+    }
+}
+
 function processContract($contract, $monthsToGenerate, $type, &$report, $link, $calendar, $dcal, $now, $maxHijriDay, $maxGregorianDay, $gracePeriod, $logActions) {
     $contractId = $contract['rakam3akdid'];
     $duration = intval($contract['duration']);
     $fixedPaymentDay = intval($contract['fixed_payment_day']);
-    $calendarType = intval($contract['hnt_dll_type']); // 0 = Hijri, 1 = Gregorian
+    // Prefer the calendar saved on the current contract. Fall back to the
+    // property setting for older contracts.
+    if (
+        isset($contract['calendar_type']) &&
+        ($contract['calendar_type'] === '0' || intval($contract['calendar_type']) === 1)
+    ) {
+        $calendarType = intval($contract['calendar_type']);
+    } else {
+        $calendarType = intval($contract['hnt_dll_type']);
+    }
+
+    // Some legacy Hijri contracts stored the displayed Hijri year directly as
+    // a timestamp year (for example 1447) while their calendar flag remained
+    // Gregorian. Detect that conflict without changing the database.
+    $storedStartYear = !empty($contract['startegar'])
+        ? intval(date('Y', intval($contract['startegar'])))
+        : 0;
+    if ($storedStartYear > 0 && $storedStartYear < 1900) {
+        $calendarType = 0;
+    }
     $idsubaqar = $contract['idsubaqar'];
     $contractEnd = $contract['end3aqd'];
 
@@ -282,7 +393,14 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
 
     // Determine start point for new installments
     // For 'all_paid' and 'extension' - start from last installment date
-    $lastInstallmentDate = $contract['last_installment_date'];
+    $lastInstallmentDate = $calendar->normalizeLegacyTimestamp(
+        intval($contract['last_installment_date']),
+        $calendarType
+    );
+    if ($lastInstallmentDate <= 0) {
+        $report['errors'][] = "Contract {$contractId}: Invalid last installment date.";
+        return;
+    }
 
     // Validate fixed payment day
     if ($calendarType == 0 && $fixedPaymentDay > $maxHijriDay) {
@@ -342,10 +460,11 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
     try {
         $installmentsAdded = 0;
         $newExtendedTo = $lastInstallmentDate;
-        $calendarTypeStr = $calendarType == 0 ? 'hijri' : 'gregorian';
-
         // Get base count for installment numbering
-        $baseInstallmentCount = intval($contract['total_installments']);
+        $baseInstallmentCount = intval($contract['last_installment_number'] ?? 0);
+        if ($baseInstallmentCount <= 0) {
+            $baseInstallmentCount = intval($contract['total_installments']);
+        }
 
         // Generate installments
         for ($i = 1; $i <= $numInstallments; $i++) {
@@ -353,7 +472,7 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
             $monthsFromStart = $duration * $i;
 
             // Use CalendarManager to add months correctly
-            $nextDate = $calendar->addMonths($lastInstallmentDate, $monthsFromStart, $calendarTypeStr);
+            $nextDate = $calendar->addMonths($lastInstallmentDate, $monthsFromStart, $calendarType);
 
             // Ensure we use the fixed payment day
             $nextDate = adjustToFixedDay($nextDate, $fixedPaymentDay, $calendarType, $dcal);
@@ -897,6 +1016,7 @@ if (isset($_GET['debug']) && $_GET['debug'] == '1') {
         FROM amlakdetails ad
         LEFT JOIN egar e ON e.rakam3akdid = ad.rakam3akdid
         LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+            AND a.idsubaqar = ad.idsubaqar
         WHERE ad.idsubaqar = {$checkUnit}
         GROUP BY ad.idsubaqar";
 
@@ -943,7 +1063,11 @@ if (isset($_GET['debug']) && $_GET['debug'] == '1') {
 
             // Show individual installments
             echo "<h4>Installments for this unit:</h4>";
-            $instSql = "SELECT kastid, kastname, kastdate, kastvalue, iscomplete, status FROM aksat WHERE egar_id = {$unitData['rakam3akdid']} ORDER BY kastdate ASC";
+            $instSql = "SELECT kastid, kastname, kastdate, kastvalue, iscomplete, status
+                        FROM aksat
+                        WHERE egar_id = {$unitData['rakam3akdid']}
+                        AND idsubaqar = {$unitData['idsubaqar']}
+                        ORDER BY kastdate ASC";
             $instResult = mysql_query($instSql, $link);
             if ($instResult && mysql_num_rows($instResult) > 0) {
                 echo "<table border='1' style='margin: 20px; border-collapse: collapse;'>";
@@ -984,6 +1108,7 @@ if (isset($_GET['debug']) && $_GET['debug'] == '1') {
     FROM egar e
     LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
     LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+        AND a.idsubaqar = ad.idsubaqar
     WHERE e.end3aqd IS NOT NULL
     AND e.startegar IS NOT NULL AND e.startegar > 0
     AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
@@ -1035,6 +1160,7 @@ if (isset($_GET['debug']) && $_GET['debug'] == '1') {
     FROM egar e
     LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
     LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+        AND a.idsubaqar = ad.idsubaqar
     WHERE e.end3aqd IS NOT NULL
     AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
     GROUP BY e.rakam3akdid
@@ -1084,6 +1210,7 @@ if (isset($_GET['debug']) && $_GET['debug'] == '1') {
     FROM egar e
     LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
     LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
+        AND a.idsubaqar = ad.idsubaqar
     WHERE e.end3aqd IS NOT NULL
     GROUP BY e.rakam3akdid
     HAVING COUNT(a.kastid) > 0

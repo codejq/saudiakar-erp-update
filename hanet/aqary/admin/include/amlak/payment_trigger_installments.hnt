@@ -1,0 +1,321 @@
+<?php
+/**
+ * Add the next installment immediately after every active installment for a
+ * contract has been paid. This is the synchronous payment-page counterpart to
+ * auto_add_installments.api.hnt.
+ */
+
+function checkAndAddInstallmentsAfterPayment($kastid, $link) {
+    if (!defined('AUTO_ADD_ON_LAST_PAYMENT')) {
+        require_once __DIR__ . '/auto_renewal_config.hnt';
+    }
+
+    if (!AUTO_ADD_ON_LAST_PAYMENT) {
+        return false;
+    }
+
+    $kastid = intval($kastid);
+    if ($kastid <= 0) {
+        return false;
+    }
+
+    $sql = "SELECT
+                a.egar_id,
+                a.idsubaqar,
+                e.duration,
+                e.calendar_type,
+                e.startegar,
+                e.fixed_payment_day,
+                e.installments_extended_to,
+                e.depositeamount,
+                e.secondsa3e,
+                e.water,
+                e.services,
+                e.secondsa3e_duration,
+                e.water_duration,
+                e.services_duration,
+                ad.hnt_dll_type
+            FROM aksat a
+            INNER JOIN egar e ON e.rakam3akdid = a.egar_id
+            INNER JOIN amlakdetails ad
+                ON ad.rakam3akdid = a.egar_id
+                AND ad.idsubaqar = a.idsubaqar
+            WHERE a.kastid = '{$kastid}'
+            AND a.idsubaqar > 0
+            LIMIT 1";
+
+    $result = mysql_query($sql, $link);
+    if (!$result || mysql_num_rows($result) == 0) {
+        return false;
+    }
+
+    $installment = mysql_fetch_assoc($result);
+    $contractId = intval($installment['egar_id']);
+    $idsubaqar = intval($installment['idsubaqar']);
+
+    // Deleted installments use a negative idsubaqar and must not affect either
+    // the remaining count, the last date, or the next installment number.
+    $checkSql = "SELECT
+                    SUM(CASE WHEN iscomplete = 0 THEN 1 ELSE 0 END) AS remaining_count,
+                    MAX(kastdate) AS last_date,
+                    MAX(CAST(kastname AS UNSIGNED)) AS last_installment_number
+                 FROM aksat
+                 WHERE egar_id = '{$contractId}'
+                 AND idsubaqar = '{$idsubaqar}'";
+    $checkResult = mysql_query($checkSql, $link);
+    if (!$checkResult) {
+        return false;
+    }
+
+    $checkData = mysql_fetch_assoc($checkResult);
+    if (intval($checkData['remaining_count']) > 0) {
+        return false;
+    }
+
+    $lastDate = intval($checkData['last_date']);
+    $duration = intval($installment['duration']);
+    if ($lastDate === 0 || $duration <= 0) {
+        return false;
+    }
+
+    // Keep the legacy hnt_dll convention. It is the runtime calendar value
+    // stored for the unit in amlakdetails.hnt_dll_type.
+    if (
+        isset($installment['hnt_dll_type']) &&
+        ($installment['hnt_dll_type'] === '0' || intval($installment['hnt_dll_type']) === 1)
+    ) {
+        $hnt_dll = intval($installment['hnt_dll_type']);
+    } else {
+        $hnt_dll = intval($installment['calendar_type']);
+    }
+
+    // Compatibility for legacy Hijri contracts whose saved timestamp renders
+    // as the original Hijri year.
+    $storedStartYear = !empty($installment['startegar'])
+        ? intval(date('Y', intval($installment['startegar'])))
+        : 0;
+    if ($storedStartYear > 0 && $storedStartYear < 1900) {
+        $hnt_dll = 0;
+    }
+
+    if (!class_exists('CalendarManager')) {
+        require_once __DIR__ . '/CalendarManager.class.hnt';
+    }
+    if (!class_exists('uCal')) {
+        require_once __DIR__ . '/../uCal.class.hnt';
+    }
+
+    $calendar = new CalendarManager();
+    $dcal = new uCal();
+    $lastDate = $calendar->normalizeLegacyTimestamp($lastDate, $hnt_dll);
+    if ($lastDate <= 0) {
+        return false;
+    }
+    $fixedPaymentDay = intval($installment['fixed_payment_day']);
+
+    if ($fixedPaymentDay <= 0) {
+        if ($hnt_dll === 0) {
+            $hijriLastDate = $dcal->g2u(
+                date('d', $lastDate),
+                date('m', $lastDate),
+                date('Y', $lastDate)
+            );
+            $fixedPaymentDay = intval($hijriLastDate['day']);
+        } else {
+            $fixedPaymentDay = intval(date('j', $lastDate));
+        }
+    }
+
+    // Paying every active installment generates a full year immediately. It
+    // must not wait for the daily service's 60-day threshold.
+    $numInstallments = max(1, intval(ceil(12 / $duration)));
+    $baseInstallmentNumber = intval($checkData['last_installment_number']);
+    $depositeamount = floatval($installment['depositeamount']);
+    $secondsa3e = floatval($installment['secondsa3e']);
+    $water = floatval($installment['water']);
+    $services = floatval($installment['services']);
+    $now = time();
+    $gracePeriod = defined('INSTALLMENT_GRACE_PERIOD_DAYS')
+        ? intval(INSTALLMENT_GRACE_PERIOD_DAYS)
+        : 5;
+    $newExtendedTo = $lastDate;
+
+    mysql_query("START TRANSACTION", $link);
+
+    try {
+        for ($i = 1; $i <= $numInstallments; $i++) {
+            $monthsFromLast = $duration * $i;
+            $nextDate = $calendar->addMonths($lastDate, $monthsFromLast, $hnt_dll);
+            $nextDate = adjustPaymentTriggerToFixedDay(
+                $nextDate,
+                $fixedPaymentDay,
+                $hnt_dll,
+                $dcal
+            );
+
+            $duplicateSql = "SELECT kastid
+                             FROM aksat
+                             WHERE egar_id = '{$contractId}'
+                             AND idsubaqar = '{$idsubaqar}'
+                             AND kastdate = '{$nextDate}'
+                             LIMIT 1";
+            $duplicateResult = mysql_query($duplicateSql, $link);
+            if ($duplicateResult && mysql_num_rows($duplicateResult) > 0) {
+                throw new Exception("Installment already exists for " . date('Y-m-d', $nextDate));
+            }
+
+            $installmentNumber = $baseInstallmentNumber + $i;
+            if ($installmentNumber <= 0) {
+                $installmentNumber = $i;
+            }
+
+            if (($duration * ($installmentNumber - 1)) % 12 == 0 && $installmentNumber > 1) {
+                $sa3eValue = $secondsa3e;
+                $waterValue = $water;
+                $servicesValue = $services;
+            } else {
+                $sa3eValue = intval($installment['secondsa3e_duration']) ? $secondsa3e : 0;
+                $waterValue = intval($installment['water_duration']) ? $water : 0;
+                $servicesValue = intval($installment['services_duration']) ? $services : 0;
+            }
+
+            $kastvalue = $depositeamount + $sa3eValue + $waterValue + $servicesValue;
+            $effectiveDueDate = $nextDate + ($gracePeriod * 24 * 60 * 60);
+            $installmentStatus = $nextDate < $now ? 'overdue' : 'pending';
+
+            $insertSql = "INSERT INTO aksat (
+                egar_id,
+                idsubaqar,
+                kastdate,
+                kastvalue,
+                water,
+                sa3ee,
+                services,
+                kastname,
+                iscomplete,
+                status,
+                amount_paid,
+                amount_remaining,
+                dof3at,
+                grace_period_days,
+                effective_due_date,
+                created_at,
+                updated_at
+            ) VALUES (
+                '{$contractId}',
+                '{$idsubaqar}',
+                '{$nextDate}',
+                '{$kastvalue}',
+                '{$waterValue}',
+                '{$sa3eValue}',
+                '{$servicesValue}',
+                '{$installmentNumber}',
+                0,
+                '{$installmentStatus}',
+                0,
+                '{$kastvalue}',
+                0,
+                '{$gracePeriod}',
+                '{$effectiveDueDate}',
+                '{$now}',
+                '{$now}'
+            )";
+
+            if (!mysql_query($insertSql, $link)) {
+                throw new Exception("Failed to insert installment: " . mysql_error($link));
+            }
+
+            $newExtendedTo = max($newExtendedTo, $nextDate);
+        }
+
+        $updateSql = "UPDATE egar
+                      SET installments_extended_to = '{$newExtendedTo}',
+                          updated_at = '{$now}'
+                      WHERE rakam3akdid = '{$contractId}'";
+        if (!mysql_query($updateSql, $link)) {
+            throw new Exception("Failed to update contract: " . mysql_error($link));
+        }
+
+        if (defined('LOG_AUTO_RENEWALS') && LOG_AUTO_RENEWALS) {
+            $changeDescription = mysql_real_escape_string(
+                "All active installments paid. Auto-generated {$numInstallments} installments for one year, extended to " .
+                date('Y-m-d', $newExtendedTo) . ". Contract end date unchanged.",
+                $link
+            );
+            $historyUserId = isset($_SESSION['userid']) ? intval($_SESSION['userid']) : 0;
+            $historySql = "INSERT INTO egar_history (
+                    egar_id,
+                    action_type,
+                    change_description,
+                    changed_by_userid,
+                    changed_at
+                ) VALUES (
+                    '{$contractId}',
+                    'installments_all_paid_renewal',
+                    '{$changeDescription}',
+                    '{$historyUserId}',
+                    '{$now}'
+                )";
+            mysql_query($historySql, $link);
+        }
+
+        mysql_query("COMMIT", $link);
+        return true;
+    } catch (Exception $exception) {
+        mysql_query("ROLLBACK", $link);
+        error_log("Payment trigger installment generation failed: " . $exception->getMessage());
+        return false;
+    }
+}
+
+function adjustPaymentTriggerToFixedDay($timestamp, $fixedDay, $hnt_dll, $dcal) {
+    $timestamp = intval($timestamp);
+    $fixedDay = intval($fixedDay);
+
+    if ($fixedDay <= 0) {
+        return $timestamp;
+    }
+
+    if (intval($hnt_dll) === 0) {
+        $hijriDate = $dcal->g2u(
+            date('d', $timestamp),
+            date('m', $timestamp),
+            date('Y', $timestamp)
+        );
+        $targetDay = min($fixedDay, 30);
+
+        while ($targetDay >= 1) {
+            try {
+                $gregorianDate = $dcal->u2g(
+                    $targetDay,
+                    intval($hijriDate['month']),
+                    intval($hijriDate['year'])
+                );
+                return mktime(
+                    0,
+                    0,
+                    0,
+                    intval($gregorianDate['month']),
+                    intval($gregorianDate['day']),
+                    intval($gregorianDate['year'])
+                );
+            } catch (Exception $exception) {
+                $targetDay--;
+            }
+        }
+
+        return $timestamp;
+    }
+
+    $targetDay = min($fixedDay, intval(date('t', $timestamp)));
+    return mktime(
+        0,
+        0,
+        0,
+        intval(date('m', $timestamp)),
+        $targetDay,
+        intval(date('Y', $timestamp))
+    );
+}
+
+?>
