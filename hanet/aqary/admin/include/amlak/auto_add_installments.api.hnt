@@ -350,7 +350,7 @@ function repairLegacyHijriCalendarFlags($link, &$report) {
 function processContract($contract, $monthsToGenerate, $type, &$report, $link, $calendar, $dcal, $now, $maxHijriDay, $maxGregorianDay, $gracePeriod, $logActions) {
     $contractId = $contract['rakam3akdid'];
     $duration = intval($contract['duration']);
-    $fixedPaymentDay = intval($contract['fixed_payment_day']);
+    $savedFixedPaymentDay = intval($contract['fixed_payment_day']);
     // Prefer the calendar saved on the current contract. Fall back to the
     // property setting for older contracts.
     if (
@@ -402,6 +402,12 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
         return;
     }
 
+    $fixedPaymentDay = $calendar->resolveFixedDay(
+        $lastInstallmentDate,
+        $savedFixedPaymentDay,
+        $calendarType
+    );
+
     // Validate fixed payment day
     if ($calendarType == 0 && $fixedPaymentDay > $maxHijriDay) {
         $report['errors'][] = "Contract {$contractId}: Hijri day {$fixedPaymentDay} exceeds maximum {$maxHijriDay}";
@@ -410,36 +416,6 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
     if ($calendarType == 1 && $fixedPaymentDay > $maxGregorianDay) {
         $report['errors'][] = "Contract {$contractId}: Gregorian day {$fixedPaymentDay} exceeds maximum {$maxGregorianDay}";
         return;
-    }
-
-    // If no fixed payment day, recover it from the contract start date. Do not
-    // learn it from a later installment because an older calculation may
-    // already have shifted that installment by one or two days.
-    if (!$fixedPaymentDay) {
-        $paymentDaySource = $calendar->normalizeLegacyTimestamp(
-            intval($contract['startegar']),
-            $calendarType
-        );
-        if ($paymentDaySource <= 0) {
-            $paymentDaySource = $lastInstallmentDate;
-        }
-        if ($calendarType == 0) {
-            $dateo = $dcal->g2u(
-                date("d", $paymentDaySource),
-                date("m", $paymentDaySource),
-                date("Y", $paymentDaySource)
-            );
-            $fixedPaymentDay = min($dateo['day'], $maxHijriDay);
-        } else {
-            $fixedPaymentDay = min(
-                intval(date('j', $paymentDaySource)),
-                $maxGregorianDay
-            );
-        }
-
-        // Update contract with fixed payment day
-        $updateDaySql = "UPDATE egar SET fixed_payment_day = '{$fixedPaymentDay}' WHERE rakam3akdid = '{$contractId}'";
-        mysql_query($updateDaySql, $link);
     }
 
     // Calculate number of installments to generate
@@ -485,15 +461,13 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
             // Calculate installment date
             $monthsFromStart = $duration * $i;
 
-            // Use CalendarManager to add months correctly
-            $nextDate = $calendar->addMonths($lastInstallmentDate, $monthsFromStart, $calendarType);
-
-            // The month comes from the frequency calculation; the day always
-            // comes from the contract's fixed payment day.
-            $nextDate = $calendar->setFixedDay(
-                $nextDate,
-                $fixedPaymentDay,
-                $calendarType
+            // Calculate the target month first, then replace its day with the
+            // reconciled payment day inside the shared calendar class.
+            $nextDate = $calendar->addMonths(
+                $lastInstallmentDate,
+                $monthsFromStart,
+                $calendarType,
+                $fixedPaymentDay
             );
 
             // Determine installment status
@@ -574,6 +548,7 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
         // NOTE: We do NOT update end3aqd - that stays fixed until user manually renews
         $updateSql = "UPDATE egar
                       SET installments_extended_to = '{$newExtendedTo}',
+                          fixed_payment_day = '{$fixedPaymentDay}',
                           updated_at = '{$now}'
                       WHERE rakam3akdid = '{$contractId}'";
 

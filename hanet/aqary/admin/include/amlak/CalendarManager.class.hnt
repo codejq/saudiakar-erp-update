@@ -146,9 +146,15 @@ class CalendarManager {
      * @param int $timestamp Starting timestamp
      * @param int $months Number of months to add (can be negative)
      * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @param int|null $fixedDay Optional payment day applied after calculating
+     * the target month
      * @return int New timestamp
      */
-    public function addMonths($timestamp, $months, $calendarType) {
+    public function addMonths($timestamp, $months, $calendarType, $fixedDay = null) {
+        $timestamp = intval($timestamp);
+        $months = intval($months);
+        $calendarType = intval($calendarType);
+
         if ($calendarType == 0) {
             // Hijri calculation
             $hijriDate = $this->arabicTools->arabicDate('hj:d/m/Y', $timestamp);
@@ -157,26 +163,28 @@ class CalendarManager {
             $month = intval($parts[1] ?? 0);
             $year = intval($parts[2] ?? 0);
 
-            // Add months with proper year overflow handling
-            $newMonth = $month + $months;
-            $newYear = $year + floor(($newMonth - 1) / 12);
-            $newMonth = (($newMonth - 1) % 12) + 1;
-
-            // Handle negative months
-            if ($newMonth <= 0) {
-                $newMonth += 12;
-                $newYear--;
+            // Use an absolute month index so positive and negative offsets use
+            // exactly the same overflow logic.
+            $totalMonths = ($year * 12) + ($month - 1) + $months;
+            $newYear = intval(floor($totalMonths / 12));
+            $newMonthIndex = $totalMonths % 12;
+            if ($newMonthIndex < 0) {
+                $newMonthIndex += 12;
             }
+            $newMonth = $newMonthIndex + 1;
 
-            // Handle day overflow (Hijri months: 29-30 days)
-            $maxDays = $this->getHijriMonthDays($newMonth, $newYear);
-            if ($day > $maxDays) {
-                $day = $maxDays;
-            }
-
-            // Convert back to timestamp
+            // Convert back using uCal's real Umm al-Qura month data. u2g()
+            // keeps the requested day and clamps day 30 to 29 only when the
+            // actual target month contains 29 days.
             $gregorian = $this->dcal->u2g($day, $newMonth, $newYear);
-            return mktime(0, 0, 0, $gregorian['month'], $gregorian['day'], $gregorian['year']);
+            $resultTimestamp = mktime(
+                0,
+                0,
+                0,
+                $gregorian['month'],
+                $gregorian['day'],
+                $gregorian['year']
+            );
 
         } else {
             // Gregorian calculation. Calculate the target year/month directly
@@ -194,8 +202,14 @@ class CalendarManager {
             $maxDay = intval(date('t', mktime(0, 0, 0, $newMonth, 1, $newYear)));
             $newDay = min($currentDay, $maxDay);
 
-            return mktime(0, 0, 0, $newMonth, $newDay, $newYear);
+            $resultTimestamp = mktime(0, 0, 0, $newMonth, $newDay, $newYear);
         }
+
+        if ($fixedDay !== null) {
+            return $this->setFixedDay($resultTimestamp, intval($fixedDay), $calendarType);
+        }
+
+        return $resultTimestamp;
     }
 
     /**
@@ -257,6 +271,58 @@ class CalendarManager {
             $targetDay,
             intval(date('Y', $timestamp))
         );
+    }
+
+    /**
+     * Reconcile a saved payment day with the latest installment.
+     *
+     * Older migrations populated fixed_payment_day from the first installment.
+     * If a user later changed the schedule, the latest installment is the new
+     * source of truth. The saved day is retained only for a genuine month-end
+     * fallback, such as day 30 appearing as day 29 in a short Hijri month.
+     *
+     * @param int $latestTimestamp Latest active installment timestamp
+     * @param int $savedFixedDay Value currently stored on the contract
+     * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @return int Effective fixed payment day
+     */
+    public function resolveFixedDay($latestTimestamp, $savedFixedDay, $calendarType) {
+        $latestTimestamp = intval($latestTimestamp);
+        $savedFixedDay = intval($savedFixedDay);
+        $calendarType = intval($calendarType);
+
+        if ($latestTimestamp === 0) {
+            return $savedFixedDay;
+        }
+
+        if ($calendarType === 0) {
+            $latestDate = $this->dcal->g2u(
+                date('d', $latestTimestamp),
+                date('m', $latestTimestamp),
+                date('Y', $latestTimestamp)
+            );
+            $latestDay = intval($latestDate['day']);
+            $monthLength = intval($latestDate['ml']);
+            $maximumCalendarDay = 30;
+        } else {
+            $latestDay = intval(date('j', $latestTimestamp));
+            $monthLength = intval(date('t', $latestTimestamp));
+            $maximumCalendarDay = 31;
+        }
+
+        if ($savedFixedDay <= 0 || $savedFixedDay > $maximumCalendarDay) {
+            return $latestDay;
+        }
+
+        if ($savedFixedDay === $latestDay) {
+            return $savedFixedDay;
+        }
+
+        if ($savedFixedDay > $monthLength && $latestDay === $monthLength) {
+            return $savedFixedDay;
+        }
+
+        return $latestDay;
     }
 
     /**
@@ -449,9 +515,14 @@ class CalendarManager {
                 return false; // Reasonable range
             }
 
-            // Check if day is valid for this specific month
-            $maxDays = $this->getHijriMonthDays($month, $year);
-            if ($day > $maxDays) {
+            // Day 30 is an accepted recurring month-end value. Conversion
+            // normalizes it to day 29 only for an actual 29-day month.
+            try {
+                $maxDays = $this->getHijriMonthDays($month, $year);
+            } catch (OutOfRangeException $exception) {
+                return false;
+            }
+            if ($day > $maxDays && !($day === 30 && $maxDays === 29)) {
                 return false;
             }
 
@@ -464,26 +535,15 @@ class CalendarManager {
     }
 
     /**
-     * Get number of days in a Hijri month
-     * Uses alternating pattern (odd months: 30 days, even months: 29 days)
-     * With special handling for Dhu al-Hijjah (month 12) leap years
+     * Get the Umm al-Qura number of days in a Hijri month.
      *
      * @param int $month Hijri month (1-12)
      * @param int $year Hijri year
      * @return int Number of days (29 or 30)
      */
     private function getHijriMonthDays($month, $year) {
-        // Last month (Dhu al-Hijjah) varies by year (leap year calculation)
-        if ($month == 12) {
-            // Hijri leap year calculation (11 leap years in 30-year cycle)
-            $isLeapYear = (($year * 11 + 14) % 30) < 11;
-            return $isLeapYear ? 30 : 29;
-        }
-
-        // Alternating pattern for other months
-        // Odd months (1, 3, 5, 7, 9, 11): 30 days
-        // Even months (2, 4, 6, 8, 10): 29 days
-        return ($month % 2 == 1) ? 30 : 29;
+        $monthData = $this->dcal->u2g(1, intval($month), intval($year));
+        return intval($monthData['ml']);
     }
 
     /**
@@ -513,11 +573,17 @@ class CalendarManager {
      * @param int $paymentPeriod Payment period in months
      * @param int $installmentNumber Installment number (1-based)
      * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @param int|null $fixedDay Optional fixed payment day
      * @return int Due date timestamp
      */
-    public function calculateInstallmentDueDate($startTimestamp, $paymentPeriod, $installmentNumber, $calendarType) {
+    public function calculateInstallmentDueDate($startTimestamp, $paymentPeriod, $installmentNumber, $calendarType, $fixedDay = null) {
         $monthsToAdd = $paymentPeriod * ($installmentNumber - 1);
-        return $this->addMonths($startTimestamp, $monthsToAdd, $calendarType);
+        return $this->addMonths(
+            $startTimestamp,
+            $monthsToAdd,
+            $calendarType,
+            $fixedDay
+        );
     }
 
     /**

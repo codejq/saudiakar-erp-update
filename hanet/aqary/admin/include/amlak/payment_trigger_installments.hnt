@@ -111,27 +111,12 @@ function checkAndAddInstallmentsAfterPayment($kastid, $link) {
     if ($lastDate <= 0) {
         return false;
     }
-    $fixedPaymentDay = intval($installment['fixed_payment_day']);
-
-    if ($fixedPaymentDay <= 0) {
-        $paymentDaySource = $calendar->normalizeLegacyTimestamp(
-            intval($installment['startegar']),
-            $hnt_dll
-        );
-        if ($paymentDaySource <= 0) {
-            $paymentDaySource = $lastDate;
-        }
-        if ($hnt_dll === 0) {
-            $hijriStartDate = $dcal->g2u(
-                date('d', $paymentDaySource),
-                date('m', $paymentDaySource),
-                date('Y', $paymentDaySource)
-            );
-            $fixedPaymentDay = intval($hijriStartDate['day']);
-        } else {
-            $fixedPaymentDay = intval(date('j', $paymentDaySource));
-        }
-    }
+    $savedFixedPaymentDay = intval($installment['fixed_payment_day']);
+    $fixedPaymentDay = $calendar->resolveFixedDay(
+        $lastDate,
+        $savedFixedPaymentDay,
+        $hnt_dll
+    );
 
     // Paying every active installment generates a full year immediately. It
     // must not wait for the daily service's 60-day threshold.
@@ -152,11 +137,11 @@ function checkAndAddInstallmentsAfterPayment($kastid, $link) {
     try {
         for ($i = 1; $i <= $numInstallments; $i++) {
             $monthsFromLast = $duration * $i;
-            $nextDate = $calendar->addMonths($lastDate, $monthsFromLast, $hnt_dll);
-            $nextDate = $calendar->setFixedDay(
-                $nextDate,
-                $fixedPaymentDay,
-                $hnt_dll
+            $nextDate = $calendar->addMonths(
+                $lastDate,
+                $monthsFromLast,
+                $hnt_dll,
+                $fixedPaymentDay
             );
 
             $duplicateSql = "SELECT kastid
@@ -236,6 +221,7 @@ function checkAndAddInstallmentsAfterPayment($kastid, $link) {
 
         $updateSql = "UPDATE egar
                       SET installments_extended_to = '{$newExtendedTo}',
+                          fixed_payment_day = '{$fixedPaymentDay}',
                           updated_at = '{$now}'
                       WHERE rakam3akdid = '{$contractId}'";
         if (!mysql_query($updateSql, $link)) {
