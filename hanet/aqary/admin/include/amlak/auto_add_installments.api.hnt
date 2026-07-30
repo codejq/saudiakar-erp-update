@@ -412,15 +412,29 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
         return;
     }
 
-    // If no fixed payment day, extract from start date
+    // If no fixed payment day, recover it from the contract start date. Do not
+    // learn it from a later installment because an older calculation may
+    // already have shifted that installment by one or two days.
     if (!$fixedPaymentDay) {
+        $paymentDaySource = $calendar->normalizeLegacyTimestamp(
+            intval($contract['startegar']),
+            $calendarType
+        );
+        if ($paymentDaySource <= 0) {
+            $paymentDaySource = $lastInstallmentDate;
+        }
         if ($calendarType == 0) {
-            // Hijri
-            $dateo = $dcal->g2u(date("d", $lastInstallmentDate), date("m", $lastInstallmentDate), date("Y", $lastInstallmentDate));
+            $dateo = $dcal->g2u(
+                date("d", $paymentDaySource),
+                date("m", $paymentDaySource),
+                date("Y", $paymentDaySource)
+            );
             $fixedPaymentDay = min($dateo['day'], $maxHijriDay);
         } else {
-            // Gregorian
-            $fixedPaymentDay = min(intval(date('j', $lastInstallmentDate)), $maxGregorianDay);
+            $fixedPaymentDay = min(
+                intval(date('j', $paymentDaySource)),
+                $maxGregorianDay
+            );
         }
 
         // Update contract with fixed payment day
@@ -474,8 +488,13 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
             // Use CalendarManager to add months correctly
             $nextDate = $calendar->addMonths($lastInstallmentDate, $monthsFromStart, $calendarType);
 
-            // Ensure we use the fixed payment day
-            $nextDate = adjustToFixedDay($nextDate, $fixedPaymentDay, $calendarType, $dcal);
+            // The month comes from the frequency calculation; the day always
+            // comes from the contract's fixed payment day.
+            $nextDate = $calendar->setFixedDay(
+                $nextDate,
+                $fixedPaymentDay,
+                $calendarType
+            );
 
             // Determine installment status
             $installmentStatus = $nextDate < $now ? 'overdue' : 'pending';
@@ -627,34 +646,6 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
         mysql_query("ROLLBACK", $link);
         $report['errors'][] = "Contract {$contractId}: " . $e->getMessage();
     }
-}
-
-// ============================================================================
-// Helper Function: Adjust Date to Fixed Day
-// ============================================================================
-
-function adjustToFixedDay($timestamp, $fixedDay, $calendarType, $dcal) {
-    if ($calendarType == 0) {
-        // Hijri calendar - need to be careful with day conversion
-        $dateo = $dcal->g2u(date("d", $timestamp), date("m", $timestamp), date("Y", $timestamp));
-        $currentDay = $dateo['day'];
-
-        if ($currentDay != $fixedDay) {
-            // Adjust within same month
-            $dayDiff = $fixedDay - $currentDay;
-            return $timestamp + ($dayDiff * 24 * 60 * 60);
-        }
-    } else {
-        // Gregorian calendar
-        $currentDay = intval(date('j', $timestamp));
-
-        if ($currentDay != $fixedDay) {
-            $dayDiff = $fixedDay - $currentDay;
-            return $timestamp + ($dayDiff * 24 * 60 * 60);
-        }
-    }
-
-    return $timestamp;
 }
 
 // ============================================================================

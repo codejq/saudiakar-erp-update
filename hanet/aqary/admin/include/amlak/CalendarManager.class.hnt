@@ -179,9 +179,84 @@ class CalendarManager {
             return mktime(0, 0, 0, $gregorian['month'], $gregorian['day'], $gregorian['year']);
 
         } else {
-            // Gregorian calculation (PHP handles month overflow)
-            return strtotime("+$months months", $timestamp);
+            // Gregorian calculation. Calculate the target year/month directly
+            // so dates such as January 31 do not overflow into March.
+            $currentYear = intval(date('Y', $timestamp));
+            $currentMonth = intval(date('n', $timestamp));
+            $currentDay = intval(date('j', $timestamp));
+            $totalMonths = ($currentYear * 12) + ($currentMonth - 1) + intval($months);
+            $newYear = intval(floor($totalMonths / 12));
+            $newMonthIndex = $totalMonths % 12;
+            if ($newMonthIndex < 0) {
+                $newMonthIndex += 12;
+            }
+            $newMonth = $newMonthIndex + 1;
+            $maxDay = intval(date('t', mktime(0, 0, 0, $newMonth, 1, $newYear)));
+            $newDay = min($currentDay, $maxDay);
+
+            return mktime(0, 0, 0, $newMonth, $newDay, $newYear);
         }
+    }
+
+    /**
+     * Replace the day without changing the calculated calendar month.
+     *
+     * The requested payment day remains constant. If that day does not exist
+     * in a particular month, use that month's final day only for that month.
+     *
+     * @param int $timestamp Timestamp already positioned in the target month
+     * @param int $fixedDay Contract payment day
+     * @param int $calendarType 0=Hijri, 1=Gregorian
+     * @return int Timestamp on the fixed payment day
+     */
+    public function setFixedDay($timestamp, $fixedDay, $calendarType) {
+        $timestamp = intval($timestamp);
+        $fixedDay = intval($fixedDay);
+        $calendarType = intval($calendarType);
+
+        if ($timestamp === 0 || $fixedDay <= 0) {
+            return $timestamp;
+        }
+
+        if ($calendarType === 0) {
+            if ($fixedDay > 30) {
+                throw new InvalidArgumentException("Invalid Hijri payment day: {$fixedDay}");
+            }
+
+            $hijriDate = $this->dcal->g2u(
+                date('d', $timestamp),
+                date('m', $timestamp),
+                date('Y', $timestamp)
+            );
+            $gregorianDate = $this->dcal->u2g(
+                $fixedDay,
+                intval($hijriDate['month']),
+                intval($hijriDate['year'])
+            );
+
+            return mktime(
+                0,
+                0,
+                0,
+                intval($gregorianDate['month']),
+                intval($gregorianDate['day']),
+                intval($gregorianDate['year'])
+            );
+        }
+
+        if ($fixedDay > 31) {
+            throw new InvalidArgumentException("Invalid Gregorian payment day: {$fixedDay}");
+        }
+
+        $targetDay = min($fixedDay, intval(date('t', $timestamp)));
+        return mktime(
+            0,
+            0,
+            0,
+            intval(date('m', $timestamp)),
+            $targetDay,
+            intval(date('Y', $timestamp))
+        );
     }
 
     /**

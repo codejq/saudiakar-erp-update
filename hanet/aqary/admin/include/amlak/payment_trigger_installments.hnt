@@ -114,15 +114,22 @@ function checkAndAddInstallmentsAfterPayment($kastid, $link) {
     $fixedPaymentDay = intval($installment['fixed_payment_day']);
 
     if ($fixedPaymentDay <= 0) {
+        $paymentDaySource = $calendar->normalizeLegacyTimestamp(
+            intval($installment['startegar']),
+            $hnt_dll
+        );
+        if ($paymentDaySource <= 0) {
+            $paymentDaySource = $lastDate;
+        }
         if ($hnt_dll === 0) {
-            $hijriLastDate = $dcal->g2u(
-                date('d', $lastDate),
-                date('m', $lastDate),
-                date('Y', $lastDate)
+            $hijriStartDate = $dcal->g2u(
+                date('d', $paymentDaySource),
+                date('m', $paymentDaySource),
+                date('Y', $paymentDaySource)
             );
-            $fixedPaymentDay = intval($hijriLastDate['day']);
+            $fixedPaymentDay = intval($hijriStartDate['day']);
         } else {
-            $fixedPaymentDay = intval(date('j', $lastDate));
+            $fixedPaymentDay = intval(date('j', $paymentDaySource));
         }
     }
 
@@ -146,11 +153,10 @@ function checkAndAddInstallmentsAfterPayment($kastid, $link) {
         for ($i = 1; $i <= $numInstallments; $i++) {
             $monthsFromLast = $duration * $i;
             $nextDate = $calendar->addMonths($lastDate, $monthsFromLast, $hnt_dll);
-            $nextDate = adjustPaymentTriggerToFixedDay(
+            $nextDate = $calendar->setFixedDay(
                 $nextDate,
                 $fixedPaymentDay,
-                $hnt_dll,
-                $dcal
+                $hnt_dll
             );
 
             $duplicateSql = "SELECT kastid
@@ -266,56 +272,6 @@ function checkAndAddInstallmentsAfterPayment($kastid, $link) {
         error_log("Payment trigger installment generation failed: " . $exception->getMessage());
         return false;
     }
-}
-
-function adjustPaymentTriggerToFixedDay($timestamp, $fixedDay, $hnt_dll, $dcal) {
-    $timestamp = intval($timestamp);
-    $fixedDay = intval($fixedDay);
-
-    if ($fixedDay <= 0) {
-        return $timestamp;
-    }
-
-    if (intval($hnt_dll) === 0) {
-        $hijriDate = $dcal->g2u(
-            date('d', $timestamp),
-            date('m', $timestamp),
-            date('Y', $timestamp)
-        );
-        $targetDay = min($fixedDay, 30);
-
-        while ($targetDay >= 1) {
-            try {
-                $gregorianDate = $dcal->u2g(
-                    $targetDay,
-                    intval($hijriDate['month']),
-                    intval($hijriDate['year'])
-                );
-                return mktime(
-                    0,
-                    0,
-                    0,
-                    intval($gregorianDate['month']),
-                    intval($gregorianDate['day']),
-                    intval($gregorianDate['year'])
-                );
-            } catch (Exception $exception) {
-                $targetDay--;
-            }
-        }
-
-        return $timestamp;
-    }
-
-    $targetDay = min($fixedDay, intval(date('t', $timestamp)));
-    return mktime(
-        0,
-        0,
-        0,
-        intval(date('m', $timestamp)),
-        $targetDay,
-        intval(date('Y', $timestamp))
-    );
 }
 
 ?>
