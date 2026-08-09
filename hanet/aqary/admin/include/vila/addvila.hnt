@@ -8,8 +8,16 @@ if (isset($_REQUEST['editid']) && $_REQUEST['editid']) {
     $sc_title = "تعديل بيانات الفيلا";
 }
 
-// Include database connection and authentication FIRST
-include_once "../../../reqloginajax.hnt";
+// Detect AJAX before loading authentication so JSON headers/session handling
+// are configured correctly.
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+if (!$is_ajax_request) {
+    include_once "../../../nocash.hnt";
+    include_once "../../../header.hnt";
+} else {
+    include_once "../../../reqloginajax.hnt";
+}
 
 // Extract POST variables
 extract($_REQUEST);
@@ -20,7 +28,8 @@ $deleteme = isset($deleteme) ? $deleteme : '';
 $action = isset($action) ? $action : '';
 $editid = isset($editid) ? intval($editid) : 0;
 $formuid = isset($formuid) ? $formuid : '';
-$statusx = isset($statusx) ? $statusx : '1';
+$statusx = isset($statusx) ? $statusx : '0';
+$custumerid = isset($custumerid) ? intval($custumerid) : 0;
 $s1 = isset($s1) ? $s1 : 0;
 $s2 = isset($s2) ? $s2 : 0;
 $s3 = isset($s3) ? $s3 : 0;
@@ -35,13 +44,18 @@ $s11 = isset($s11) ? $s11 : 0;
 $s12 = isset($s12) ? $s12 : 0;
 $s13 = isset($s13) ? $s13 : 0;
 
-// Check if this is an AJAX form submission - handle it BEFORE any HTML output
-$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
-
-// Only include headers if NOT an AJAX request
-if (!$is_ajax_request) {
-    include_once "../../../nocash.hnt";
-    include_once "../../../header.hnt";
+// header.hnt provides this value for normal pages; AJAX saves need the same
+// permission context without rendering the full page header.
+if (!isset($allprevilage)) {
+    $allprevilage_row = mysql_fetch_array(mysql_query(
+        "SELECT usergroups.allprevilage
+         FROM user
+         LEFT JOIN usergroups ON usergroups.groupid = user.groupid
+         WHERE user.userid = '" . intval($_SESSION['useridv']) . "'
+         LIMIT 1",
+        $link
+    ));
+    $allprevilage = is_array($allprevilage_row) ? intval($allprevilage_row['allprevilage'] ?? 0) : 0;
 }
 
 // Define application base path for URL generation
@@ -140,7 +154,7 @@ if (isset($_POST['formuid']) && $_POST['formuid']) {
 }
 
 // INSERT handler
-if ($action == 'insert' && !$_REQUEST['editid']) {
+if ($action == 'insert' && empty($_REQUEST['editid'])) {
 
     // Sanitize numeric fields (remove commas)
     $pricesom = str_replace(",", "", $pricesom);
@@ -161,13 +175,11 @@ if ($action == 'insert' && !$_REQUEST['editid']) {
     $price = str_replace(",", "", $price);
 
     // Handle broker (masder) - check if exists or create new
-    if ($masdername && !$masderid) {
+    if ($masdername && empty($masderid)) {
         $sqlmasder = "SELECT masderid FROM masder WHERE masdername='" . addslashes($masdername) . "'";
-        $masderid = mysql_query($sqlmasder, $link);
-        $masderid = mysql_fetch_array($masderid);
-        $masderid = $masderid['masderid'];
+        $duplicate_masder = mysql_fetch_array(mysql_query($sqlmasder, $link));
 
-        if ($masderid) {
+        if (is_array($duplicate_masder) && !empty($duplicate_masder['masderid'])) {
             if (!$is_ajax_request) {
                 echo "<script>alert('تلاحظ ان المصدر الذي تم اضافته مكرر قد يكون مجرد تشابه فى الاسماء ولكننا وددنا ان نلفت انتباهكم');</script>";
             }
@@ -180,14 +192,12 @@ if ($action == 'insert' && !$_REQUEST['editid']) {
             masderfax='" . addslashes($masderfax) . "',
             masderemail='" . addslashes($masderemail) . "',
             masderaddress='" . addslashes($masderaddress) . "',
-            addationalinfo='" . addslashes($addationalinfo) . "'";
+            addationalinfo='" . addslashes($addationalinfo) . "',
+            formuid='" . addslashes($_POST['formuid'] ?? '') . "',
+            userid='" . intval($_SESSION['useridv']) . "'";
 
         mysql_query($sqlmasder, $link);
-
-        $sqlmasder = "SELECT masderid FROM masder WHERE masdername='" . addslashes($masdername) . "'";
-        $masderid = mysql_query($sqlmasder, $link);
-        $masderid = mysql_fetch_array($masderid);
-        $masderid = $masderid['masderid'];
+        $masderid = mysql_insert_id($link);
     }
 
     // Get current date
@@ -360,8 +370,26 @@ if ($action == 'insert' && !$_REQUEST['editid']) {
         mapid='" . intval($mapid) . "',
         formuid='" . addslashes($_POST['formuid']) . "'";
 
-    mysql_query($sqlard, $link);
-    $mypicid = mysql_insert_id();
+    $insert_result = mysql_query($sqlard, $link);
+    $mypicid = $insert_result ? mysql_insert_id($link) : 0;
+
+    if (!$mypicid) {
+        error_log('addvila insert failed for user ' . intval($_SESSION['useridv']) . ': ' . mysql_error($link));
+
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'error' => 'تعذر حفظ بيانات الفيلا. يرجى المحاولة مرة أخرى'
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            exit();
+        }
+
+        echo "<div class='alert alert-danger'>تعذر حفظ بيانات الفيلا. يرجى المحاولة مرة أخرى</div>";
+        require('../../../foter.hnt');
+        exit();
+    }
+
     mysql_query("UPDATE maps SET realtyid='" . intval($mypicid) . "' WHERE id='" . intval($mapid) . "'", $link);
 
     // Handle file uploads (15 slots)
@@ -536,6 +564,7 @@ if (isset($_POST['editid']) && $_POST['editid']) {
     }
 
     // Prepare malek data SQL if has permission
+    $malekdatasql = '';
     if ((($custumerid == $_SESSION['useridv']) || $_SESSION['seeothermasder']) || $allprevilage) {
         $malekdatasql = ",malekbayan1='" . addslashes($malekbayan1) . "',
             malekbayan2='" . addslashes($malekbayan2) . "',
@@ -584,9 +613,11 @@ if (isset($_POST['editid']) && $_POST['editid']) {
                 addationalinfo='" . addslashes($addationalinfo) . "',
                 masderphone='" . addslashes($masderphone) . "',
                 masderemail='" . addslashes($masderemail) . "',
-                masderaddress='" . addslashes($masderaddress) . "'";
+                masderaddress='" . addslashes($masderaddress) . "',
+                formuid='" . addslashes($_POST['formuid'] ?? '') . "',
+                userid='" . intval($_SESSION['useridv']) . "'";
             mysql_query($sql, $link);
-            mysql_query("UPDATE vila SET masderid='" . mysql_insert_id() . "' WHERE vilaid='" . intval($vilaid) . "'");
+            $masderid = mysql_insert_id($link);
         }
     }
 
@@ -662,7 +693,6 @@ if (isset($_POST['editid']) && $_POST['editid']) {
         vilatype='" . addslashes($vilatype) . "',
         en_date='" . addslashes($en_date) . "',
         ghorfanum='" . intval($ghorfanum) . "',
-        custumerid='" . intval($_SESSION['useridv']) . "',
         dakhl='" . floatval($dakhl) . "',
         benamesaha='" . floatval($benamesaha) . "'
         $malekdatasql,
@@ -686,7 +716,24 @@ if (isset($_POST['editid']) && $_POST['editid']) {
         mapid='" . intval($mapid) . "',
         formuid='" . addslashes($_POST['formuid']) . "'
         WHERE vilaid='" . intval($vilaid) . "'";
-    mysql_query($sqlard, $link);
+    $update_result = mysql_query($sqlard, $link);
+
+    if (!$update_result) {
+        error_log('addvila update failed for villa ' . intval($vilaid) . ': ' . mysql_error($link));
+
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'error' => 'تعذر تحديث بيانات الفيلا. يرجى المحاولة مرة أخرى'
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            exit();
+        }
+
+        echo "<div class='alert alert-danger'>تعذر تحديث بيانات الفيلا. يرجى المحاولة مرة أخرى</div>";
+        require('../../../foter.hnt');
+        exit();
+    }
 
     $mypicid = $_POST['editid'];
 
@@ -1109,50 +1156,55 @@ function showBootstrapNotification(message, type = 'success', duration = 3000) {
 }
 
 // Initialize form values for edit mode
-<?php if ($_REQUEST['editid']): ?>
+<?php if (!empty($_REQUEST['editid'])):
+    $js_json_flags = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT;
+    $hedod = explode(';', (string) ($rowk['hedod'] ?? ''));
+?>
 $(document).ready(function() {
-    $('#country').val('<?= addslashes($country) ?>');
-    $('#cityname').val('<?= addslashes($cityname) ?>');
-    $('#mokhatatname').val('<?= addslashes($mokhatatname) ?>');
+    $('#country').val(<?= json_encode((string) ($country ?? ''), $js_json_flags) ?>);
+    $('#countryid').val(<?= json_encode((string) ($countryid ?? ''), $js_json_flags) ?>);
+    $('#cityname').val(<?= json_encode((string) ($cityname ?? ''), $js_json_flags) ?>);
+    $('#cityid').val(<?= json_encode((string) ($cityid ?? ''), $js_json_flags) ?>);
+    $('#mokhatatname').val(<?= json_encode((string) ($mokhatatname ?? ''), $js_json_flags) ?>);
+    $('#mokhatatid').val(<?= json_encode((string) ($mokhatatid ?? ''), $js_json_flags) ?>);
 
-    <?php
-    $rowk['hedod'] = str_replace("'", "\\'", $rowk['hedod']);
-    $rowk['hedod'] = str_replace("\n", "\\n", $rowk['hedod']);
-    $rowk['hedod'] = str_replace("\r", "", $rowk['hedod']);
-    $hedod = explode(";", $rowk['hedod']);
-    ?>
+    $('#hedod0').val(<?= json_encode((string) ($hedod[0] ?? ''), $js_json_flags) ?>);
+    $('#hedod1').val(<?= json_encode((string) ($hedod[1] ?? ''), $js_json_flags) ?>);
+    $('#hedod2').val(<?= json_encode((string) ($hedod[2] ?? ''), $js_json_flags) ?>);
+    $('#hedod3').val(<?= json_encode((string) ($hedod[3] ?? ''), $js_json_flags) ?>);
 
-    $('#hedod0').val('<?= $hedod[0] ?>');
-    $('#hedod1').val('<?= $hedod[1] ?>');
-    $('#hedod2').val('<?= $hedod[2] ?>');
-    $('#hedod3').val('<?= $hedod[3] ?>');
-    $('#khdmax').val('<?= htmlspecialchars($rowk['khdma'], ENT_QUOTES, 'UTF-8') ?>');
+    const savedService = <?= json_encode((string) ($rowk['khdma'] ?? ''), $js_json_flags) ?>;
+    const serviceSelect = $('#khdmax');
+    if (serviceSelect.length) {
+        let matchingService = null;
+        serviceSelect.find('option').each(function() {
+            if ($(this).val() === savedService || $(this).text() === savedService) {
+                matchingService = $(this).val();
+                return false;
+            }
+        });
+        serviceSelect.val(matchingService !== null ? matchingService : 'اخرى').trigger('change.select2');
+    }
+    $('#khdma').val(savedService);
 
     <?php
     if ($rowMaser) {
         foreach ($rowMaser as $key => $value) {
-            if (is_int($key)) {
-                continue;
-            }
-            $value = str_replace("'", "\\'", $value);
-            $value = str_replace("\n", "\\n", $value);
-            $value = str_replace("\r", "", $value);
-            echo "$('#$key').val('" . $value . "');";
+            if (is_int($key)) continue;
+            $selector = json_encode('#' . $key, $js_json_flags);
+            $encoded_value = json_encode((string) $value, $js_json_flags);
+            echo "$($selector).val($encoded_value).trigger('change.select2');";
         }
     }
 
     foreach ($rowk as $key => $value) {
-        if (is_int($key)) {
-            continue;
+        if (is_int($key)) continue;
+        $selector = json_encode('#' . $key, $js_json_flags);
+        $encoded_value = json_encode((string) $value, $js_json_flags);
+        echo "$($selector).val($encoded_value).trigger('change.select2');";
+        if ((string) $value === '0' || (string) $value === '1') {
+            echo "$($selector).prop('checked', " . ((string) $value === '1' ? 'true' : 'false') . ");";
         }
-        $value = str_replace("'", "\\'", $value);
-        $value = str_replace("\n", "\\n", $value);
-        $value = str_replace("\r", "", $value);
-        echo "$('#$key').val('" . $value . "');";
-        if ($value !== 0 && $value != 1) {
-            continue;
-        }
-        echo "$('#$key').prop('checked', $value);";
     }
     ?>
 });
@@ -1557,7 +1609,7 @@ function ValidateAndFormatNumber(input) {
                     $basicfields[40] = '<div class="col-md-6">
                         <label class="form-label">الخدمة المطلوبة:</label>
                         <div class="input-group">
-                            <select name="khdmax" class="form-select" id="khdmax" style="width:100px;" onchange="document.getElementById(\'khdma\').value=this.options[this.options.selectedIndex].text;">
+                            <select name="khdmax" class="form-select" id="khdmax" style="width:100px;" onchange="if (this.selectedIndex >= 0) { document.getElementById(\'khdma\').value=this.options[this.selectedIndex].text; }">
                                 <option>بيع</option>
                                 <option>شراء</option>
                                 <option>تأجير</option>

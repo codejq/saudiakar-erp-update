@@ -19,10 +19,8 @@ if (!$is_ajax_request) {
     include_once "../../../nocash.hnt";
     include_once "../../../header.hnt";
 } else {
-    // Always include authentication and database for AJAX
-    ob_start();
-    include_once "../../../connectdb.hnt";
-    ob_end_clean();
+    // Load the authenticated session and database connection for AJAX saves.
+    include_once "../../../reqloginajax.hnt";
 }
 
 // Define application base path for URL generation
@@ -130,7 +128,7 @@ if (isset($_POST['formuid']) && $_POST['formuid']) {
 }
 
 // INSERT Handler
-if (isset($action) && $action == 'insert' && !isset($_REQUEST['editid'])) {
+if (isset($action) && $action == 'insert' && empty($_REQUEST['editid'])) {
     // Handle broker (masder) - create if doesn't exist
     if (isset($masdername) && $masdername && !isset($masderid)) {
         $sqlmasder = "SELECT masderid FROM masder WHERE masdername='" . addslashes($masdername) . "'";
@@ -342,8 +340,25 @@ if (isset($action) && $action == 'insert' && !isset($_REQUEST['editid'])) {
     $sqlard = str_replace("'", " ", $sqlard);
     $sqlard = str_replace("\"", " ", $sqlard);
     $sqlard = str_replace("`", "'", $sqlard);
-    mysql_query($sqlard, $link);
-    $mypicid = mysql_insert_id();
+    $insert_result = mysql_query($sqlard, $link);
+    $mypicid = $insert_result ? mysql_insert_id($link) : 0;
+
+    if (!$mypicid) {
+        error_log('addemara insert failed for user ' . intval($_SESSION['useridv']) . ': ' . mysql_error($link));
+
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'error' => 'تعذر حفظ بيانات العمارة. يرجى المحاولة مرة أخرى'
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            exit();
+        }
+
+        echo "<div class='alert alert-danger'>تعذر حفظ بيانات العمارة. يرجى المحاولة مرة أخرى</div>";
+        require('../../../foter.hnt');
+        exit();
+    }
 
     // Update map with realtyid
     mysql_query("UPDATE maps SET realtyid='" . $mypicid . "' WHERE id='" . $mapid . "'", $link);
@@ -1022,43 +1037,46 @@ $(document).ready(function() {
 });
 <?php endif; ?>
 
-// AJAX Form Submission
-$('#buildingForm').on('submit', function(e) {
-    e.preventDefault();
+// AJAX Form Submission. The script is rendered before the form, so bind after
+// the document is ready instead of querying a form that does not exist yet.
+$(document).ready(function() {
+    $('#buildingForm').on('submit', function(e) {
+        e.preventDefault();
 
-    var formData = new FormData(this);
-    formData.append('ajax_submit', '1');
+        var formData = new FormData(this);
+        formData.append('ajax_submit', '1');
 
-    var submitBtn = $(this).find('button[type="submit"]');
-    var originalBtnText = submitBtn.html();
-    submitBtn.prop('disabled', true)
-             .html('<i class="bi bi-hourglass-split me-2"></i>جاري الحفظ...');
+        var submitBtn = $(this).find('button[type="submit"]');
+        var originalBtnText = submitBtn.html();
+        submitBtn.prop('disabled', true)
+                 .html('<i class="bi bi-hourglass-split me-2"></i>جاري الحفظ...');
 
-    showBootstrapNotification('جاري حفظ البيانات...', 'loading');
+        showBootstrapNotification('جاري حفظ البيانات...', 'loading');
 
-    $.ajax({
-        url: 'addemara.hnt',
-        type: 'POST',
-        data: formData,
-        processData: false,
-        contentType: false,
-        dataType: 'json',
-        success: function(response) {
-            submitBtn.prop('disabled', false).html(originalBtnText);
+        $.ajax({
+            url: 'addemara.hnt',
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            dataType: 'json',
+            success: function(response) {
+                submitBtn.prop('disabled', false).html(originalBtnText);
 
-            if (response.success) {
-                showBootstrapNotification(response.message, 'success', 2000);
-                setTimeout(function() {
-                    window.location.href = response.redirect_url || 'addemara.hnt';
-                }, 2000);
-            } else if (response.error) {
-                showBootstrapNotification(response.error, 'error', 5000);
+                if (response.success) {
+                    showBootstrapNotification(response.message, 'success', 2000);
+                    setTimeout(function() {
+                        window.location.href = response.redirect_url || 'addemara.hnt';
+                    }, 2000);
+                } else if (response.error) {
+                    showBootstrapNotification(response.error, 'error', 5000);
+                }
+            },
+            error: function(xhr, status, error) {
+                submitBtn.prop('disabled', false).html(originalBtnText);
+                showBootstrapNotification('حدث خطأ في الاتصال. يرجى المحاولة مرة أخرى', 'error', 5000);
             }
-        },
-        error: function(xhr, status, error) {
-            submitBtn.prop('disabled', false).html(originalBtnText);
-            showBootstrapNotification('حدث خطأ في الاتصال. يرجى المحاولة مرة أخرى', 'error', 5000);
-        }
+        });
     });
 });
 

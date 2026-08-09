@@ -131,14 +131,14 @@ if (isset($action) && $action == 'insert' && (empty($_REQUEST['editid']) || $_RE
     $meterprice = isset($meterprice) ? str_replace(",", "", $meterprice) : '';
     $meterpricehad = isset($meterpricehad) ? str_replace(",", "", $meterpricehad) : '';
 
-    // Handle broker (masder) - check if exists or create new
-    if (isset($masdername) && $masdername && !isset($masderid)) {
+    // Handle broker (masder) - a typed broker has an empty hidden masderid.
+    if (isset($masdername) && $masdername && empty($masderid)) {
         $sqlmasder = "SELECT masderid FROM masder WHERE masdername='" . addslashes($masdername) . "'";
         $masderid_check = mysql_query($sqlmasder, $link);
         $masderid_row = mysql_fetch_array($masderid_check);
-        $masderid = $masderid_row['masderid'] ?? null;
+        $duplicate_masderid = $masderid_row['masderid'] ?? null;
 
-        if ($masderid) {
+        if ($duplicate_masderid) {
             // Duplicate warning
             if (!$is_ajax_request) {
                 echo "<script>alert('تلاحظ أن المصدر الذي تم إضافته مكرر قد يكون مجرد تشابه في الأسماء ولكننا وددنا أن نلفت انتباهكم');</script>";
@@ -153,13 +153,11 @@ if (isset($action) && $action == 'insert' && (empty($_REQUEST['editid']) || $_RE
             masderfax = '" . addslashes($masderfax ?? '') . "',
             masderemail = '" . addslashes($masderemail ?? '') . "',
             masderaddress = '" . addslashes($masderaddress ?? '') . "',
-            addationalinfo = '" . addslashes($addationalinfo ?? '') . "'";
+            addationalinfo = '" . addslashes($addationalinfo ?? '') . "',
+            formuid = '" . addslashes($_POST['formuid'] ?? '') . "',
+            userid = '" . intval($_SESSION['useridv']) . "'";
         mysql_query($sqlmasder, $link);
-
-        $sqlmasder = "SELECT masderid FROM masder WHERE masdername='" . addslashes($masdername) . "'";
-        $masderid_result = mysql_query($sqlmasder, $link);
-        $masderid_row = mysql_fetch_array($masderid_result);
-        $masderid = $masderid_row['masderid'];
+        $masderid = mysql_insert_id();
     }
 
     $date = date("m/d/Y");
@@ -501,7 +499,7 @@ if (isset($_POST['editid']) && $_POST['editid']) {
             mysql_query($sql, $link);
         }
 
-        if (!isset($masderid) && isset($masdername) && $masdername && $masdername != "****************") {
+        if (empty($masderid) && isset($masdername) && $masdername && $masdername != "****************") {
             $sql = "INSERT INTO masder SET
                 masdername = '" . addslashes($masdername) . "',
                 masdertel = '" . addslashes($masdertel ?? '') . "',
@@ -509,9 +507,11 @@ if (isset($_POST['editid']) && $_POST['editid']) {
                 addationalinfo = '" . addslashes($addationalinfo ?? '') . "',
                 masderphone = '" . addslashes($masderphone ?? '') . "',
                 masderemail = '" . addslashes($masderemail ?? '') . "',
-                masderaddress = '" . addslashes($masderaddress ?? '') . "'";
+                masderaddress = '" . addslashes($masderaddress ?? '') . "',
+                formuid = '" . addslashes($_POST['formuid'] ?? '') . "',
+                userid = '" . intval($_SESSION['useridv']) . "'";
             mysql_query($sql, $link);
-            mysql_query("UPDATE arady SET masderid = '" . mysql_insert_id() . "' WHERE ardid = '" . intval($ardid) . "'", $link);
+            $masderid = mysql_insert_id();
         }
     }
 
@@ -865,8 +865,28 @@ $(document).ready(function() {
         $('#hedod3').val('<?= $hedod[3] ?? '' ?>');
         <?php } ?>
 
-        <?php if (isset($rowk['khdma'])) { ?>
-        $('#khdmax').val('<?= htmlspecialchars($rowk['khdma'], ENT_QUOTES, 'UTF-8') ?>').trigger('change');
+        <?php if (array_key_exists('khdma', $rowk)) {
+            $saved_service = json_encode(
+                (string) $rowk['khdma'],
+                JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+            );
+        ?>
+        // A saved custom service is not an option in the standard list. Calling
+        // the inline change handler with no selected option aborts all remaining
+        // edit-field initialization, so select "other" without firing that handler.
+        const savedService = <?= $saved_service ?>;
+        const serviceSelect = $('#khdmax');
+        if (serviceSelect.length) {
+            let matchingService = null;
+            serviceSelect.find('option').each(function() {
+                if ($(this).val() === savedService || $(this).text() === savedService) {
+                    matchingService = $(this).val();
+                    return false;
+                }
+            });
+            serviceSelect.val(matchingService !== null ? matchingService : 'اخرى').trigger('change.select2');
+        }
+        $('#khdma').val(savedService);
         <?php } ?>
 
         <?php
@@ -1311,7 +1331,7 @@ settitle('3030', " إضافة أرض جديدة   ");
                     <div class="col-md-6">
                         <label class="form-label">الخدمة المطلوبة</label>
                         <select class="form-select" name="khdmax" id="khdmax"
-                                onchange="document.getElementById(\'khdma\').value=this.options[this.options.selectedIndex].text;">
+                                onchange="if (this.selectedIndex >= 0) { document.getElementById(\'khdma\').value=this.options[this.selectedIndex].text; }">
                             <option>بيع</option>
                             <option>شراء</option>
                             <option>تأجير</option>
