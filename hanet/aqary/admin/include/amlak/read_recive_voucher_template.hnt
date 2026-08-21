@@ -178,8 +178,13 @@ else{
 
 if (isset($row['mostagerid']) && $row['mostagerid']) {
     $rsmostager = mysql_query("select * from mostagereen where mostagerid ='" . $row['mostagerid'] . "'", $link);
-    $rowmostager = mysql_fetch_array($rsmostager);
-    $mostagervatnumber = $rowmostager['mostagervatnumber'];
+    $rowmostager_temp = $rsmostager ? mysql_fetch_array($rsmostager) : false;
+    if ($rowmostager_temp) {
+        $rowmostager = $rowmostager_temp;
+        $mostagervatnumber = isset($rowmostager['mostagervatnumber'])
+            ? $rowmostager['mostagervatnumber']
+            : '';
+    }
 }
 
 
@@ -202,32 +207,82 @@ if ($row['payment_type'] == 3) {
     $isotherway = " <span style='color:red'>&#x221A;</span> ";
 }
 
-// Initialize variables
-$rowaqar = array('ownername' => '', 'owner_vat_number' => '', 'owneraddress' => '');
-$rowmostager = array('mostageraddress' => '');
+// Preserve any owner/tenant data loaded by the voucher variants above while
+// supplying defaults for historical or partially linked records.
+$rowaqar = isset($rowaqar) && is_array($rowaqar)
+    ? array_merge(array('ownername' => '', 'owner_vat_number' => '', 'owneraddress' => ''), $rowaqar)
+    : array('ownername' => '', 'owner_vat_number' => '', 'owneraddress' => '');
+$rowmostager = isset($rowmostager) && is_array($rowmostager)
+    ? array_merge(array('mostageraddress' => ''), $rowmostager)
+    : array('mostageraddress' => '');
 
 if (isset($row['kastid']) && $row['kastid']) {
 
-		$kastid = $row['kastid'];
-		$sql = "select * from amlakdetails where idsubaqar={$row['idsubaqar']} ";
-		$result = mysql_query($sql, $link);
-		$rowx = mysql_fetch_array($result);
-		$sql = "select * from egar where rakam3akdid='" . $rowx['rakam3akdid'] . "' ";
-		$result = mysql_query($sql, $link);
-		$rowegar = mysql_fetch_array($result);
+		$kastid = intval($row['kastid']);
+		$rowx = array();
+		$rowegar = array('vat_type' => 0);
+		$rowkDefaults = array(
+			'idsubaqar' => 0,
+			'egar_id' => 0,
+			'water' => 0,
+			'sa3ee' => 0,
+			'services' => 0,
+			'kastvalue' => 0,
+			'dof3at' => 0
+		);
 
-		// Get property owner details
-		if (isset($rowx['idaqar'])) {
-			$sql = "select * from amlak where idaqar ='" . intval($rowx['idaqar']) . "' ";
-			$rsaqar = mysql_query($sql, $link);
-			$rowaqar_temp = mysql_fetch_array($rsaqar);
-			if ($rowaqar_temp) {
-				$rowaqar = $rowaqar_temp;
+		// Load the installment first. Its egar_id remains usable for historical
+		// vouchers even when the unit was removed or its idsubaqar became zero.
+		$sql = "select * from aksat where kastid='" . $kastid . "' limit 1";
+		$rowkResult = mysql_query($sql, $link);
+		$rowkTemp = $rowkResult ? mysql_fetch_array($rowkResult) : false;
+		$rowk = $rowkTemp ? array_merge($rowkDefaults, $rowkTemp) : $rowkDefaults;
+
+		$idsubaqar = isset($row['idsubaqar']) ? intval($row['idsubaqar']) : 0;
+		if ($idsubaqar <= 0) {
+			$idsubaqar = intval($rowk['idsubaqar']);
+		}
+		if ($idsubaqar > 0) {
+			$sql = "select * from amlakdetails where idsubaqar='" . $idsubaqar . "' limit 1";
+			$result = mysql_query($sql, $link);
+			$rowxTemp = $result ? mysql_fetch_array($result) : false;
+			if ($rowxTemp) {
+				$rowx = $rowxTemp;
 			}
 		}
-		$sql = "select *  from aksat where kastid='" . $kastid . "' ";
-		$rowk = mysql_fetch_array(mysql_query($sql, $link));
-		$rentValue = $rowk['kastvalue'] - $rowk['water']- $rowk['sa3ee']- $rowk['services'];
+
+		$contractId = intval($rowk['egar_id']);
+		if ($contractId <= 0 && isset($rowx['rakam3akdid'])) {
+			$contractId = intval($rowx['rakam3akdid']);
+		}
+		if ($contractId > 0) {
+			$sql = "select * from egar where rakam3akdid='" . $contractId . "' limit 1";
+			$result = mysql_query($sql, $link);
+			$rowegarTemp = $result ? mysql_fetch_array($result) : false;
+			if ($rowegarTemp) {
+				$rowegar = array_merge($rowegar, $rowegarTemp);
+			}
+		}
+
+		// Get property owner details from the current unit when available, then
+		// fall back to the property saved directly on the voucher.
+		$ownerPropertyId = isset($rowx['idaqar']) ? intval($rowx['idaqar']) : 0;
+		if ($ownerPropertyId <= 0 && isset($row['idaqar'])) {
+			$ownerPropertyId = intval($row['idaqar']);
+		}
+		if ($ownerPropertyId > 0) {
+			$sql = "select * from amlak where idaqar ='" . $ownerPropertyId . "' limit 1";
+			$rsaqar = mysql_query($sql, $link);
+			$rowaqar_temp = $rsaqar ? mysql_fetch_array($rsaqar) : false;
+			if ($rowaqar_temp) {
+				$rowaqar = array_merge($rowaqar, $rowaqar_temp);
+			}
+		}
+
+		$rentValue = floatval($rowk['kastvalue'])
+			- floatval($rowk['water'])
+			- floatval($rowk['sa3ee'])
+			- floatval($rowk['services']);
 		$commesion_vat = 0;
 		$depositeamount_vat = 0;
 		if ($rowegar["vat_type"] == 1) {

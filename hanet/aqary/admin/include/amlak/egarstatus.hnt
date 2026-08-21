@@ -62,6 +62,27 @@ function prepareEgarStatusAssignedPropertyFilter($link)
     }
 }
 
+/**
+ * Prefer the unit/status index when it exists. Some long-running customer
+ * databases have very stale index cardinality, which otherwise makes MariaDB
+ * scan orphan installment rows before joining the small units table.
+ */
+function getEgarStatusAksatUnitIndexHint($link)
+{
+    static $hint = null;
+    if ($hint !== null) {
+        return $hint;
+    }
+
+    $hint = '';
+    $indexResult = mysql_query("SHOW INDEX FROM aksat WHERE Key_name = 'idx_idsubaqar_iscomplete'", $link);
+    if ($indexResult && mysql_num_rows($indexResult) > 0) {
+        $hint = ' FORCE INDEX (idx_idsubaqar_iscomplete)';
+    }
+
+    return $hint;
+}
+
 // Export handler - must run before header.hnt outputs HTML
 $exportType = isset($_GET['export']) ? trim($_GET['export']) : '';
 if (!in_array($exportType, ['csv', 'xls'], true)) {
@@ -70,32 +91,51 @@ if (!in_array($exportType, ['csv', 'xls'], true)) {
 if ($exportType !== '') {
     include_once  "../../../connectdb.hnt";
     prepareEgarStatusAssignedPropertyFilter($link);
-    $exp_base = "SELECT aksat.*,
+    $aksatUnitIndexHint = getEgarStatusAksatUnitIndexHint($link);
+    $exp_first_base = "SELECT aksat.*,
         egar.vat_type,
         mostagereen.mostagername, mostagereen.mostagertel,
         amlakdetails.rakam, amlakdetails.hnt_dll_type, amlakdetails.aqarsubtype, amlakdetails.idaqar,
         amlak.aqarname
-    FROM aksat
+    FROM amlakdetails
+    INNER JOIN aksat ON aksat.kastid = (
+        SELECT MIN(a2.kastid)
+        FROM aksat AS a2{$aksatUnitIndexHint}
+        WHERE a2.idsubaqar = amlakdetails.idsubaqar
+        AND a2.iscomplete = 0
+        AND a2.kastdate > 0
+    )
     LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
-    INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
     INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
     LEFT JOIN amlak ON amlakdetails.idaqar = amlak.idaqar
-    WHERE aksat.iscomplete = 0 AND aksat.kastdate > 0";
-    $exp_min = " AND aksat.kastid = (SELECT MIN(kastid) FROM aksat a2 WHERE a2.idsubaqar = aksat.idsubaqar AND a2.iscomplete = 0 AND a2.kastdate > 0)";
+    WHERE 1 = 1";
+
+    $exp_all_base = "SELECT aksat.*,
+        egar.vat_type,
+        mostagereen.mostagername, mostagereen.mostagertel,
+        amlakdetails.rakam, amlakdetails.hnt_dll_type, amlakdetails.aqarsubtype, amlakdetails.idaqar,
+        amlak.aqarname
+    FROM amlakdetails
+    STRAIGHT_JOIN aksat{$aksatUnitIndexHint}
+        ON aksat.idsubaqar = amlakdetails.idsubaqar AND aksat.iscomplete = 0
+    LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
+    INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
+    LEFT JOIN amlak ON amlakdetails.idaqar = amlak.idaqar
+    WHERE aksat.kastdate > 0";
 
     if ($isRestrictedAmlakUser && !$hasAssignedProperties) {
-        $exp_sql = $exp_base . " AND 1 = 0 ORDER BY aksat.kastdate";
+        $exp_sql = $exp_first_base . " AND 1 = 0 ORDER BY aksat.kastdate";
     } elseif (isset($searchbyidaqar) && $searchbyidaqar) {
-        $exp_sql = $exp_base . " AND amlakdetails.idaqar = '" . intval($searchbyidaqar) . "'" . $assignedPropertyFilterSql . $exp_min . " ORDER BY aksat.kastdate";
+        $exp_sql = $exp_first_base . " AND amlakdetails.idaqar = '" . intval($searchbyidaqar) . "'" . $assignedPropertyFilterSql . " ORDER BY aksat.kastdate";
     } elseif (isset($searchbyname) && $searchbyname) {
         $sn = mysql_real_escape_string(trim($searchbyname));
-        $exp_sql = $exp_base . $assignedPropertyFilterSql . " AND (mostagereen.mostagername LIKE '%{$sn}%' OR mostagereen.mostagertel LIKE '%{$sn}%' OR mostagereen.mostageridnumber LIKE '%{$sn}%')" . $exp_min . " ORDER BY aksat.kastdate";
+        $exp_sql = $exp_first_base . $assignedPropertyFilterSql . " AND (mostagereen.mostagername LIKE '%{$sn}%' OR mostagereen.mostagertel LIKE '%{$sn}%' OR mostagereen.mostageridnumber LIKE '%{$sn}%') ORDER BY aksat.kastdate";
     } elseif (isset($searchbyowner) && $searchbyowner) {
-        $exp_sql = $exp_base . $assignedPropertyFilterSql . " AND amlak.ownerid = '" . intval(trim($searchbyowner)) . "'" . $exp_min . " ORDER BY aksat.kastdate";
+        $exp_sql = $exp_first_base . $assignedPropertyFilterSql . " AND amlak.ownerid = '" . intval(trim($searchbyowner)) . "' ORDER BY aksat.kastdate";
     } elseif (isset($searchall) && $searchall) {
-        $exp_sql = $exp_base . $assignedPropertyFilterSql . " AND aksat.kastdate < '" . time() . "' ORDER BY aksat.idsubaqar";
+        $exp_sql = $exp_all_base . $assignedPropertyFilterSql . " AND aksat.kastdate < '" . time() . "' ORDER BY aksat.idsubaqar";
     } else {
-        $exp_sql = $exp_base . $assignedPropertyFilterSql . $exp_min . " ORDER BY aksat.kastdate LIMIT 1000";
+        $exp_sql = $exp_first_base . $assignedPropertyFilterSql . " ORDER BY aksat.kastdate LIMIT 1000";
     }
 
     $exp_result = mysql_query($exp_sql, $link);
@@ -154,6 +194,7 @@ if ($exportType !== '') {
 $canscroll = 1;
 include_once "../../../header.hnt";
 prepareEgarStatusAssignedPropertyFilter($link);
+$aksatUnitIndexHint = getEgarStatusAksatUnitIndexHint($link);
 
 // Process contract termination
 if (isset($endidsubaqar) && $endidsubaqar) {
@@ -849,19 +890,19 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
 
     // Pagination for main view
     if (!isset($searchbyidaqar) && !isset($searchbyname) && !isset($searchbyowner)) {
-        if ($isRestrictedAmlakUser) {
-            $sql = "SELECT MIN(aksat.kastid) AS dd
-                    FROM aksat
-                    INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
-                    WHERE aksat.iscomplete = 0
-                    AND aksat.kastdate > 0
-                    $assignedPropertyFilterSql
-                    GROUP BY aksat.idsubaqar";
-        } else {
-            $sql = "SELECT MIN(kastid) AS dd FROM aksat WHERE iscomplete = 0 GROUP BY idsubaqar";
-        }
-        $rownum = mysql_query($sql, $link);
-        $rownum = mysql_num_rows($rownum);
+        $sql = "SELECT COUNT(*) AS total
+                FROM amlakdetails
+                WHERE 1 = 1
+                $assignedPropertyFilterSql
+                AND (
+                    SELECT MIN(a2.kastid)
+                    FROM aksat AS a2{$aksatUnitIndexHint}
+                    WHERE a2.idsubaqar = amlakdetails.idsubaqar
+                    AND a2.iscomplete = 0
+                    AND a2.kastdate > 0
+                ) IS NOT NULL";
+        $rownumResult = mysql_fetch_array(mysql_query($sql, $link));
+        $rownum = intval($rownumResult['total'] ?? 0);
 
         if (!isset($rowperpage)) {
             $rowperpage = 50;
@@ -925,10 +966,39 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
         }
     }
 
-    // Build SQL query based on search criteria
-    // OPTIMIZED: Use correlated subquery (faster than derived table on MySQL 5.5)
+    // Drive the query from the small units table. On older customer databases,
+    // millions of orphan aksat rows can have idsubaqar=0; starting from aksat
+    // makes MariaDB scan those rows even though the join discards all of them.
     if (!isset($searchall)) {
-        // Base query with correlated subquery - avoids slow derived tables
+        $mainConditions = $assignedPropertyFilterSql;
+        $mainOwnerJoin = '';
+        $mainLimit = " LIMIT " . (isset($limit) ? $limit : 50);
+        $mainFirstDateCondition = ' AND a2.kastdate > 0';
+
+        if (isset($searchbyidaqar) && $searchbyidaqar) {
+            $mainConditions .= " AND amlakdetails.idaqar = '" . intval($searchbyidaqar) . "'";
+            $mainLimit = '';
+            $mainFirstDateCondition = '';
+        }
+
+        if (isset($searchbyname) && $searchbyname) {
+            $searchbyname = trim($searchbyname);
+            $escapedSearchName = mysql_real_escape_string($searchbyname);
+            $mainConditions .= " AND (mostagereen.mostagername LIKE '%{$escapedSearchName}%'
+                OR mostagereen.mostageridnumber LIKE '%{$escapedSearchName}%'
+                OR mostagereen.mostagertel LIKE '%{$escapedSearchName}%'
+                OR mostagereen.mostagergensia LIKE '%{$escapedSearchName}%')";
+            $mainLimit = '';
+            $mainFirstDateCondition = '';
+        }
+
+        if (isset($searchbyowner) && $searchbyowner) {
+            $mainOwnerJoin = " INNER JOIN amlak ON amlakdetails.idaqar = amlak.idaqar";
+            $mainConditions .= " AND amlak.ownerid = '" . intval(trim($searchbyowner)) . "'";
+            $mainLimit = '';
+            $mainFirstDateCondition = '';
+        }
+
         $sql = "SELECT
                     aksat.*,
                     egar.vat_type,
@@ -939,134 +1009,20 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                     amlakdetails.hnt_dll_type,
                     amlakdetails.aqarsubtype,
                     amlakdetails.idaqar
-                FROM aksat
-                LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
-                INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
-                INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
-                WHERE aksat.iscomplete = 0
-                AND aksat.kastdate > 0
-                AND aksat.kastid = (
-                    SELECT MIN(kastid)
-                    FROM aksat AS a2
-                    WHERE a2.idsubaqar = aksat.idsubaqar
+                FROM amlakdetails
+                INNER JOIN aksat ON aksat.kastid = (
+                    SELECT MIN(a2.kastid)
+                    FROM aksat AS a2{$aksatUnitIndexHint}
+                    WHERE a2.idsubaqar = amlakdetails.idsubaqar
                     AND a2.iscomplete = 0
-                    AND a2.kastdate > 0
+                    {$mainFirstDateCondition}
                 )
-                ORDER BY aksat.kastdate
-                LIMIT " . (isset($limit) ? $limit : 50);
-
-        if ($isRestrictedAmlakUser) {
-            $sql = "SELECT
-                        aksat.*,
-                        egar.vat_type,
-                        mostagereen.mostagerid,
-                        mostagereen.mostagername,
-                        mostagereen.mostagertel,
-                        amlakdetails.rakam,
-                        amlakdetails.hnt_dll_type,
-                        amlakdetails.aqarsubtype,
-                        amlakdetails.idaqar
-                    FROM aksat
-                    LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
-                    INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
-                    INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
-                    WHERE aksat.iscomplete = 0
-                    AND aksat.kastdate > 0
-                    $assignedPropertyFilterSql
-                    AND aksat.kastid = (
-                        SELECT MIN(kastid)
-                        FROM aksat AS a2
-                        WHERE a2.idsubaqar = aksat.idsubaqar
-                        AND a2.iscomplete = 0
-                        AND a2.kastdate > 0
-                    )
-                    ORDER BY aksat.kastdate
-                    LIMIT " . (isset($limit) ? $limit : 50);
-        }
-
-        if (isset($searchbyidaqar) && $searchbyidaqar) {
-            $sql = "SELECT
-                        aksat.*,
-                        egar.vat_type,
-                        mostagereen.mostagerid,
-                        mostagereen.mostagername,
-                        mostagereen.mostagertel,
-                        amlakdetails.rakam,
-                        amlakdetails.hnt_dll_type,
-                        amlakdetails.aqarsubtype,
-                        amlakdetails.idaqar
-                    FROM aksat
-                    LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
-                    INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar AND amlakdetails.idaqar = '" . intval($searchbyidaqar) . "'
-                    INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
-                    WHERE aksat.iscomplete = 0
-                    $assignedPropertyFilterSql
-                    AND aksat.kastid = (
-                        SELECT MIN(kastid)
-                        FROM aksat AS a2
-                        WHERE a2.idsubaqar = aksat.idsubaqar
-                        AND a2.iscomplete = 0
-                    )
-                    ORDER BY aksat.kastdate";
-        }
-
-        if (isset($searchbyname) && $searchbyname) {
-            $searchbyname = trim($searchbyname);
-            $sql = "SELECT
-                        aksat.*,
-                        egar.vat_type,
-                        mostagereen.mostagerid,
-                        mostagereen.mostagername,
-                        mostagereen.mostagertel,
-                        amlakdetails.rakam,
-                        amlakdetails.hnt_dll_type,
-                        amlakdetails.aqarsubtype,
-                        amlakdetails.idaqar
-                    FROM aksat
-                    LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
-                    INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
-                    INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
-                    WHERE aksat.iscomplete = 0
-                    $assignedPropertyFilterSql
-                    AND (mostagereen.mostagername LIKE '%" . mysql_real_escape_string($searchbyname) . "%'
-                         OR mostagereen.mostageridnumber LIKE '%" . mysql_real_escape_string($searchbyname) . "%'
-                         OR mostagereen.mostagertel LIKE '%" . mysql_real_escape_string($searchbyname) . "%'
-                         OR mostagereen.mostagergensia LIKE '%" . mysql_real_escape_string($searchbyname) . "%')
-                    AND aksat.kastid = (
-                        SELECT MIN(kastid)
-                        FROM aksat AS a2
-                        WHERE a2.idsubaqar = aksat.idsubaqar
-                        AND a2.iscomplete = 0
-                    )
-                    ORDER BY aksat.kastdate";
-        }
-
-        if (isset($searchbyowner) && $searchbyowner) {
-            $sql = "SELECT
-                        aksat.*,
-                        egar.vat_type,
-                        mostagereen.mostagerid,
-                        mostagereen.mostagername,
-                        mostagereen.mostagertel,
-                        amlakdetails.rakam,
-                        amlakdetails.hnt_dll_type,
-                        amlakdetails.aqarsubtype,
-                        amlakdetails.idaqar
-                    FROM aksat
-                    LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
-                    INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
-                    INNER JOIN amlak ON amlakdetails.idaqar = amlak.idaqar AND amlak.ownerid = '" . intval(trim($searchbyowner)) . "'
-                    INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
-                    WHERE aksat.iscomplete = 0
-                    $assignedPropertyFilterSql
-                    AND aksat.kastid = (
-                        SELECT MIN(kastid)
-                        FROM aksat AS a2
-                        WHERE a2.idsubaqar = aksat.idsubaqar
-                        AND a2.iscomplete = 0
-                    )
-                    ORDER BY aksat.kastdate";
-        }
+                LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
+                INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
+                {$mainOwnerJoin}
+                WHERE 1 = 1
+                {$mainConditions}
+                ORDER BY aksat.kastdate{$mainLimit}";
 
         // Performance measurement for MariaDB 10.3
         $query_start_time = microtime(true);
@@ -1201,7 +1157,30 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
         </div>
 
         <?php
-        // OPTIMIZED: Use JOINs to fetch all data in ONE query - no N+1
+        // Start with real units so orphan installments (idsubaqar=0) never enter
+        // the overdue scan. This preserves the result set while avoiding a scan
+        // of the full historical aksat table.
+        $overdueConditions = $assignedPropertyFilterSql;
+        $overdueOwnerJoin = '';
+
+        if (isset($searchbyidaqar) && $searchbyidaqar) {
+            $overdueConditions .= " AND amlakdetails.idaqar = '" . intval($searchbyidaqar) . "'";
+        }
+
+        if (isset($searchbyname) && $searchbyname) {
+            $searchbyname = trim($searchbyname);
+            $escapedSearchName = mysql_real_escape_string($searchbyname);
+            $overdueConditions .= " AND (mostagereen.mostagername LIKE '%{$escapedSearchName}%'
+                OR mostagereen.mostageridnumber LIKE '%{$escapedSearchName}%'
+                OR mostagereen.mostagertel LIKE '%{$escapedSearchName}%'
+                OR mostagereen.mostagergensia LIKE '%{$escapedSearchName}%')";
+        }
+
+        if (isset($searchbyowner) && $searchbyowner) {
+            $overdueOwnerJoin = " INNER JOIN amlak ON amlakdetails.idaqar = amlak.idaqar";
+            $overdueConditions .= " AND amlak.ownerid = '" . intval(trim($searchbyowner)) . "'";
+        }
+
         $sql = "SELECT
                     aksat.*,
                     egar.vat_type,
@@ -1212,109 +1191,16 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                     amlakdetails.hnt_dll_type,
                     amlakdetails.aqarsubtype,
                     amlakdetails.idaqar
-                FROM aksat
+                FROM amlakdetails
+                STRAIGHT_JOIN aksat{$aksatUnitIndexHint}
+                    ON aksat.idsubaqar = amlakdetails.idsubaqar AND aksat.iscomplete = 0
                 LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
-                INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
                 INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
-                WHERE aksat.iscomplete = 0
-                $assignedPropertyFilterSql
-                AND aksat.kastdate > 0
+                {$overdueOwnerJoin}
+                WHERE aksat.kastdate > 0
                 AND aksat.kastdate < '" . time() . "'
+                {$overdueConditions}
                 ORDER BY aksat.idsubaqar";
-
-        if (isset($searchbyidaqar) && $searchbyidaqar) {
-            $sql = "SELECT
-                        aksat.*,
-                        egar.vat_type,
-                        mostagereen.mostagerid,
-                        mostagereen.mostagername,
-                        mostagereen.mostagertel,
-                        amlakdetails.rakam,
-                        amlakdetails.hnt_dll_type,
-                        amlakdetails.aqarsubtype,
-                        amlakdetails.idaqar
-                    FROM aksat
-                    LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
-                    INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar AND amlakdetails.idaqar = '" . intval($searchbyidaqar) . "'
-                    INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
-                    WHERE aksat.iscomplete = 0
-                    $assignedPropertyFilterSql
-                    AND aksat.kastdate > 0
-                    AND aksat.kastdate < '" . time() . "'
-                    ORDER BY aksat.idsubaqar";
-        }
-
-        if (isset($searchall) && $searchall) {
-            $sql = "SELECT
-                        aksat.*,
-                        egar.vat_type,
-                        mostagereen.mostagerid,
-                        mostagereen.mostagername,
-                        mostagereen.mostagertel,
-                        amlakdetails.rakam,
-                        amlakdetails.hnt_dll_type,
-                        amlakdetails.aqarsubtype,
-                        amlakdetails.idaqar
-                    FROM aksat
-                    LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
-                    INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
-                    INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
-                    WHERE aksat.iscomplete = 0
-                    $assignedPropertyFilterSql
-                    AND aksat.kastdate > 0
-                    AND aksat.kastdate < '" . time() . "'
-                    ORDER BY aksat.idsubaqar";
-        }
-
-        if (isset($searchbyname) && $searchbyname) {
-            $searchbyname = trim($searchbyname);
-            $sql = "SELECT
-                        aksat.*,
-                        egar.vat_type,
-                        mostagereen.mostagerid,
-                        mostagereen.mostagername,
-                        mostagereen.mostagertel,
-                        amlakdetails.rakam,
-                        amlakdetails.hnt_dll_type,
-                        amlakdetails.aqarsubtype,
-                        amlakdetails.idaqar
-                    FROM aksat
-                    LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
-                    INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
-                    INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
-                    WHERE aksat.iscomplete = 0
-                    $assignedPropertyFilterSql
-                    AND aksat.kastdate > 0
-                    AND aksat.kastdate < '" . time() . "'
-                    AND (mostagereen.mostagername LIKE '%" . mysql_real_escape_string($searchbyname) . "%'
-                         OR mostagereen.mostageridnumber LIKE '%" . mysql_real_escape_string($searchbyname) . "%'
-                         OR mostagereen.mostagertel LIKE '%" . mysql_real_escape_string($searchbyname) . "%'
-                         OR mostagereen.mostagergensia LIKE '%" . mysql_real_escape_string($searchbyname) . "%')
-                    ORDER BY aksat.idsubaqar";
-        }
-
-        if (isset($searchbyowner) && $searchbyowner) {
-            $sql = "SELECT
-                        aksat.*,
-                        egar.vat_type,
-                        mostagereen.mostagerid,
-                        mostagereen.mostagername,
-                        mostagereen.mostagertel,
-                        amlakdetails.rakam,
-                        amlakdetails.hnt_dll_type,
-                        amlakdetails.aqarsubtype,
-                        amlakdetails.idaqar
-                    FROM aksat
-                    LEFT JOIN egar ON aksat.egar_id = egar.rakam3akdid
-                    INNER JOIN amlakdetails ON aksat.idsubaqar = amlakdetails.idsubaqar
-                    INNER JOIN amlak ON amlakdetails.idaqar = amlak.idaqar AND amlak.ownerid = '" . intval(trim($searchbyowner)) . "'
-                    INNER JOIN mostagereen ON amlakdetails.mostagerid = mostagereen.mostagerid
-                    WHERE aksat.iscomplete = 0
-                    $assignedPropertyFilterSql
-                    AND aksat.kastdate > 0
-                    AND aksat.kastdate < '" . time() . "'
-                    ORDER BY aksat.idsubaqar";
-        }
 
         // Performance measurement for MariaDB 10.3
         $overdue_query_start_time = microtime(true);

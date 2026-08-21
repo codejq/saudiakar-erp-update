@@ -75,6 +75,8 @@ $report = [
     'installments_added' => 0,
     'contracts_processed' => 0,
     'calendar_flags_repaired' => 0,
+    'orphan_installments_deleted' => 0,
+    'orphan_cleanup_remaining' => false,
     'errors' => [],
     'details' => []
 ];
@@ -89,6 +91,12 @@ if ($debugParam) {
 }
 
 $report['calendar_flags_repaired'] = repairLegacyHijriCalendarFlags($link, $report);
+$orphanCleanup =  cleanupOrphanInstallments($link, 50000);
+$report['orphan_installments_deleted'] = $orphanCleanup['deleted'];
+$report['orphan_cleanup_remaining'] = $orphanCleanup['remaining'];
+if (!empty($orphanCleanup['error'])) {
+    $report['errors'][] = $orphanCleanup['error'];
+}
 
 // ============================================================================
 // SCENARIO 0: Find Contracts with NO Installments (New Contracts)
@@ -117,13 +125,15 @@ $sqlNoInstallmentsAtAll = "SELECT
             COUNT(a.kastid) as total_installments,
             MAX(CAST(a.kastname AS UNSIGNED)) as last_installment_number
         FROM egar e
-        LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
+        INNER JOIN amlakdetails ad
+            ON ad.rakam3akdid = e.rakam3akdid
+            AND ad.idsubaqar > 0
         LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
             AND a.idsubaqar = ad.idsubaqar
         WHERE e.end3aqd IS NOT NULL
         AND e.startegar IS NOT NULL AND e.startegar > 0
         AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
-        GROUP BY e.rakam3akdid
+        GROUP BY e.rakam3akdid, ad.idsubaqar
         HAVING COUNT(a.kastid) = 0
         ORDER BY e.rakam3akdid ASC
         LIMIT {$batchLimit}";
@@ -180,12 +190,14 @@ $sqlNoInstallments = "SELECT
             MAX(a.kastdate) as last_installment_date,
             MAX(CAST(a.kastname AS UNSIGNED)) as last_installment_number
         FROM egar e
-        LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
+        INNER JOIN amlakdetails ad
+            ON ad.rakam3akdid = e.rakam3akdid
+            AND ad.idsubaqar > 0
         LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
             AND a.idsubaqar = ad.idsubaqar
         WHERE e.end3aqd IS NOT NULL
         AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
-        GROUP BY e.rakam3akdid
+        GROUP BY e.rakam3akdid, ad.idsubaqar
         HAVING COUNT(a.kastid) > 0
         AND COUNT(a.kastid) = SUM(CASE WHEN a.iscomplete = 1 THEN 1 ELSE 0 END)
         ORDER BY e.rakam3akdid ASC
@@ -237,12 +249,14 @@ $sqlNeedingExtension = "SELECT
             COUNT(a.kastid) as total_installments,
             MAX(CAST(a.kastname AS UNSIGNED)) as last_installment_number
         FROM egar e
-        LEFT JOIN amlakdetails ad ON ad.rakam3akdid = e.rakam3akdid
+        INNER JOIN amlakdetails ad
+            ON ad.rakam3akdid = e.rakam3akdid
+            AND ad.idsubaqar > 0
         LEFT JOIN aksat a ON a.egar_id = e.rakam3akdid
             AND a.idsubaqar = ad.idsubaqar
         WHERE e.end3aqd IS NOT NULL
         AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
-        GROUP BY e.rakam3akdid
+        GROUP BY e.rakam3akdid, ad.idsubaqar
         HAVING COUNT(a.kastid) > 0
         AND MAX(a.kastdate) IS NOT NULL
         AND SUM(CASE WHEN a.iscomplete = 0 THEN 1 ELSE 0 END) = 0
@@ -275,6 +289,49 @@ if ($resultNeedingExtension) {
 // ============================================================================
 // Process Contract Function
 // ============================================================================
+
+/**
+ * Remove a small batch of installments whose unit link is missing.
+ * The cleanup is intentionally generic and operates on the database currently
+ * selected on $link, including customer database suffixes.
+ */
+function cleanupOrphanInstallments($link, $limit = 50000) {
+    $result = [
+        'deleted' => 0,
+        'remaining' => false,
+        'error' => ''
+    ];
+    $limit = max(1, min(50000, intval($limit)));
+
+    mysql_query('START TRANSACTION', $link);
+    try {
+        // Abort before PHP's 30-second web timeout so a slow cleanup cannot
+        // remain active in MariaDB after the request has ended.
+        $deleteSql = "SET STATEMENT max_statement_time=20 FOR
+                      DELETE FROM aksat
+                      WHERE idsubaqar IS NULL OR idsubaqar = 0
+
+                      LIMIT {$limit}";
+        if (!mysql_query($deleteSql, $link)) {
+            throw new Exception('Could not delete orphan installments: ' . mysql_error($link));
+        }
+        $result['deleted'] = max(0, intval(mysql_affected_rows($link)));
+        mysql_query('COMMIT', $link);
+    } catch (Exception $exception) {
+        mysql_query('ROLLBACK', $link);
+        $result['error'] = $exception->getMessage();
+        return $result;
+    }
+
+    $remainingSql = "SELECT 1
+                     FROM aksat
+                     WHERE idsubaqar IS NULL OR idsubaqar = 0
+                     LIMIT 1";
+    $remainingResult = mysql_query($remainingSql, $link);
+    $result['remaining'] = $remainingResult && mysql_num_rows($remainingResult) > 0;
+
+    return $result;
+}
 
 function repairLegacyHijriCalendarFlags($link, &$report) {
     $candidateSql = "SELECT DISTINCT
@@ -348,7 +405,7 @@ function repairLegacyHijriCalendarFlags($link, &$report) {
 }
 
 function processContract($contract, $monthsToGenerate, $type, &$report, $link, $calendar, $dcal, $now, $maxHijriDay, $maxGregorianDay, $gracePeriod, $logActions) {
-    $contractId = $contract['rakam3akdid'];
+    $contractId = intval($contract['rakam3akdid']);
     $duration = intval($contract['duration']);
     $savedFixedPaymentDay = intval($contract['fixed_payment_day']);
     // Prefer the calendar saved on the current contract. Fall back to the
@@ -371,8 +428,16 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
     if ($storedStartYear > 0 && $storedStartYear < 1900) {
         $calendarType = 0;
     }
-    $idsubaqar = $contract['idsubaqar'];
+    $idsubaqar = intval($contract['idsubaqar']);
     $contractEnd = $contract['end3aqd'];
+
+    // Never generate installments without a real current unit. idsubaqar=0 is
+    // an orphan/missing link, while negative values are intentionally retained
+    // by the application as deleted installment history.
+    if ($contractId <= 0 || $idsubaqar <= 0) {
+        $report['errors'][] = "Contract {$contractId}: Missing active unit link; installment generation skipped.";
+        return;
+    }
 
     // Validate duration to prevent division by zero
     if ($duration <= 0) {
@@ -448,6 +513,23 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
     mysql_query("START TRANSACTION", $link);
 
     try {
+        // Revalidate and lock the contract/unit relationship after starting the
+        // transaction. This closes the race between the candidate SELECT above
+        // and another request changing the rental or generating installments.
+        $guardSql = "SELECT e.rakam3akdid
+                     FROM egar e
+                     INNER JOIN amlakdetails ad
+                        ON ad.rakam3akdid = e.rakam3akdid
+                        AND ad.idsubaqar = '{$idsubaqar}'
+                        AND ad.idsubaqar > 0
+                     WHERE e.rakam3akdid = '{$contractId}'
+                     LIMIT 1
+                     FOR UPDATE";
+        $guardResult = mysql_query($guardSql, $link);
+        if (!$guardResult || mysql_num_rows($guardResult) !== 1) {
+            throw new Exception('Active contract-to-unit link is missing; no installments were generated.');
+        }
+
         $installmentsAdded = 0;
         $newExtendedTo = $lastInstallmentDate;
         // Get base count for installment numbering
@@ -497,6 +579,23 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
 
             $kastvalue = floatval($depositeamount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
 
+            // Idempotency guard: a repeated or concurrent service run must not
+            // insert the same due date for the same contract and active unit.
+            $duplicateSql = "SELECT kastid
+                             FROM aksat
+                             WHERE egar_id = '{$contractId}'
+                             AND idsubaqar = '{$idsubaqar}'
+                             AND kastdate = '{$nextDate}'
+                             LIMIT 1";
+            $duplicateResult = mysql_query($duplicateSql, $link);
+            if (!$duplicateResult) {
+                throw new Exception('Could not verify whether the installment already exists: ' . mysql_error($link));
+            }
+            if (mysql_num_rows($duplicateResult) > 0) {
+                $newExtendedTo = max($newExtendedTo, $nextDate);
+                continue;
+            }
+
             // Insert installment
             $insertSql = "INSERT INTO aksat (
                 egar_id,
@@ -542,6 +641,14 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
 
             $installmentsAdded++;
             $newExtendedTo = max($newExtendedTo, $nextDate);
+        }
+
+        // A second process may have selected this contract before the first
+        // process committed. The duplicate checks above then correctly skip
+        // every date; do not create a misleading zero-installment history row.
+        if ($installmentsAdded === 0) {
+            mysql_query("COMMIT", $link);
+            return;
         }
 
         // Update contract's installments_extended_to field
@@ -642,7 +749,10 @@ function outputReport($report) {
         echo "- With all installments paid: " . $report['contracts_with_no_installments'] . "\n";
         echo "- Needing extension: " . $report['contracts_needing_extension'] . "\n";
         echo "Contracts Processed: " . $report['contracts_processed'] . "\n";
-        echo "Installments Added: " . $report['installments_added'] . "\n\n";
+        echo "Installments Added: " . $report['installments_added'] . "\n";
+        echo "Orphan Installments Deleted: " . $report['orphan_installments_deleted'] . "\n";
+        echo "Orphan Cleanup Remaining: " . ($report['orphan_cleanup_remaining'] ? 'yes' : 'no') . "\n";
+        echo "\n";
 
         if (!empty($report['errors'])) {
             echo "Errors (" . count($report['errors']) . "):\n";
@@ -894,6 +1004,10 @@ function outputReport($report) {
             <div class="metric" style="background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%); color: #333;">
                 <div class="metric-value"><?= $report['installments_added'] ?></div>
                 <div class="metric-label">قسط تم إضافته</div>
+            </div>
+            <div class="metric info">
+                <div class="metric-value"><?= $report['orphan_installments_deleted'] ?></div>
+                <div class="metric-label">قسط بدون وحدة تم حذفه</div>
             </div>
         </div>
 
