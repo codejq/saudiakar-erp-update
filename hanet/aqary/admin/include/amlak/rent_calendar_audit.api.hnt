@@ -1,0 +1,91 @@
+<?php
+/**
+ * Authenticated runner for the rent calendar consistency audit.
+ */
+
+$is_ajax_request = true;
+include_once '../../../reqloginajax.hnt';
+
+if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+    sendResponse(false, 'يجب إرسال طلب الفحص بطريقة صحيحة.', array(), 405);
+}
+
+$postedToken = (string)($_POST['csrf_token'] ?? '');
+$sessionToken = (string)($_SESSION['rent_calendar_audit_csrf'] ?? '');
+if ($sessionToken === '' || !hash_equals($sessionToken, $postedToken)) {
+    sendResponse(false, 'تعذر التحقق من طلب فحص الإيجارات.', array(), 403);
+}
+
+$mode = isset($_POST['mode']) ? trim((string)$_POST['mode']) : 'manual';
+if ($mode !== 'automatic' && $mode !== 'manual') {
+    sendResponse(false, 'نوع تشغيل الفحص غير صالح.', array(), 400);
+}
+
+$userId = intval($_SESSION['useridv'] ?? 0);
+$userData = $userId > 0 ? getUserData($userId, $link) : null;
+$requiredScreenId = $mode === 'automatic' ? 36 : 39;
+$groupId = intval($userData['groupid'] ?? 0);
+if (!$userData
+    || !checkScreenPermission($requiredScreenId, $groupId, $link)) {
+    sendResponse(false, 'ليس لديك الصلاحية لتشغيل فحص الإيجارات.', array(), 403);
+}
+
+require_once 'RentCalendarAudit.class.hnt';
+
+if ($mode === 'automatic' && RentCalendarAudit::hasAutomaticMarker()) {
+    sendResponse(true, 'سبق تنفيذ فحص اتساق تواريخ الإيجارات على هذه النسخة.', array(
+        'already_completed' => true,
+        'report' => null,
+    ));
+}
+
+$lock = RentCalendarAudit::acquireLock();
+if ($lock === false) {
+    sendResponse(false, 'فحص الإيجارات يعمل حالياً في نافذة أخرى. يرجى الانتظار.', array(
+        'busy' => true,
+    ), 409);
+}
+
+set_time_limit(0);
+ignore_user_abort(true);
+
+try {
+    // Check again after acquiring the lock to close the concurrent first-run gap.
+    if ($mode === 'automatic' && RentCalendarAudit::hasAutomaticMarker()) {
+        RentCalendarAudit::releaseLock($lock);
+        sendResponse(true, 'سبق تنفيذ فحص اتساق تواريخ الإيجارات على هذه النسخة.', array(
+            'already_completed' => true,
+            'report' => null,
+        ));
+    }
+
+    $audit = new RentCalendarAudit($link, true);
+    $result = $audit->run();
+    $hasFindings = intval($result['summary']['conflicting_contracts']) > 0
+        || intval($result['summary']['errors']) > 0;
+    $shouldSaveReport = $hasFindings || $mode === 'manual';
+    $reportFilename = $shouldSaveReport ? RentCalendarAudit::saveReport($result) : false;
+
+    if ($shouldSaveReport && $reportFilename === false) {
+        throw new RuntimeException('Could not save the rent calendar audit report');
+    }
+
+    if ($mode === 'automatic' && !RentCalendarAudit::writeAutomaticMarker($result, $reportFilename)) {
+        throw new RuntimeException('Could not save the rent calendar audit completion marker');
+    }
+
+    RentCalendarAudit::releaseLock($lock);
+    $lock = null;
+
+    sendResponse(true, $reportFilename
+        ? 'اكتمل فحص الإيجارات وحُفظ التقرير.'
+        : 'اكتمل الفحص ولم توجد عقود بتقويم متعارض.', array(
+        'already_completed' => false,
+        'report' => $reportFilename ?: null,
+        'summary' => $result['summary'],
+    ));
+} catch (Throwable $exception) {
+    error_log('Rent calendar audit runner: ' . $exception->getMessage());
+    RentCalendarAudit::releaseLock($lock);
+    sendResponse(false, 'تعذر إكمال فحص الإيجارات. تم تسجيل التفاصيل للمراجعة.', array(), 500);
+}

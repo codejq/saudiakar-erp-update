@@ -1,0 +1,222 @@
+<?php
+$sc_title = 'فحص اتساق تقويم الإيجارات';
+$sc_id = '39';
+include_once '../../../nocash.hnt';
+include_once '../../../reqlogin.hnt';
+require_once 'RentCalendarAudit.class.hnt';
+
+function rentAuditHasScreenAccess($link, $screenId)
+{
+    $userId = intval($_SESSION['useridv'] ?? 0);
+    if ($userId <= 0) {
+        return false;
+    }
+    $user = mysql_fetch_assoc(mysql_query("SELECT groupid FROM user WHERE userid = {$userId} LIMIT 1", $link));
+    if (!$user) {
+        return false;
+    }
+    $groupId = intval($user['groupid']);
+    $groupQuery = mysql_query("SELECT allprevilage FROM usergroups WHERE groupid = {$groupId} LIMIT 1", $link);
+    $group = $groupQuery ? mysql_fetch_assoc($groupQuery) : false;
+    if ($group && !empty($group['allprevilage'])) {
+        return true;
+    }
+    $permission = mysql_query(
+        "SELECT screenid FROM ugroupscreen WHERE screenid = " . intval($screenId) . " AND groupid = {$groupId} LIMIT 1",
+        $link
+    );
+    return $permission && mysql_num_rows($permission) > 0;
+}
+
+if (!rentAuditHasScreenAccess($link, 39)) {
+    http_response_code(403);
+    exit('ليس لديك الصلاحية للدخول إلى هذه الشاشة.');
+}
+
+$action = isset($_REQUEST['action']) ? trim((string)$_REQUEST['action']) : '';
+$reportName = isset($_REQUEST['report']) ? basename((string)$_REQUEST['report']) : '';
+
+if ($action === 'raw') {
+    $reportPath = RentCalendarAudit::reportPath($reportName);
+    if (!$reportPath || !is_file($reportPath)) {
+        http_response_code(404);
+        exit('التقرير غير موجود.');
+    }
+    header('Content-Type: text/html; charset=UTF-8');
+    header('Content-Disposition: inline; filename="' . $reportName . '"');
+    header('X-Content-Type-Options: nosniff');
+    readfile($reportPath);
+    exit;
+}
+
+$viewReportPath = false;
+if ($action === 'view') {
+    $viewReportPath = RentCalendarAudit::reportPath($reportName);
+    if (!$viewReportPath || !is_file($viewReportPath)) {
+        http_response_code(404);
+        exit('التقرير غير موجود.');
+    }
+}
+
+if ($action === 'delete' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    $postedToken = (string)($_POST['csrf_token'] ?? '');
+    $sessionToken = (string)($_SESSION['rent_calendar_audit_csrf'] ?? '');
+    if ($sessionToken === '' || !hash_equals($sessionToken, $postedToken)) {
+        http_response_code(403);
+        exit('تعذر التحقق من طلب حذف التقرير.');
+    }
+    $reportPath = RentCalendarAudit::reportPath($reportName);
+    if ($reportPath && is_file($reportPath)) {
+        @unlink($reportPath);
+    }
+    header('Location: rent_calendar_audit.hnt?deleted=1');
+    exit;
+}
+
+if (empty($_SESSION['rent_calendar_audit_csrf'])) {
+    try {
+        $_SESSION['rent_calendar_audit_csrf'] = bin2hex(random_bytes(24));
+    } catch (Throwable $exception) {
+        $_SESSION['rent_calendar_audit_csrf'] = hash('sha256', session_id() . microtime(true));
+    }
+}
+
+$reports = RentCalendarAudit::listReports();
+$runRequested = isset($_GET['run']) && $_GET['run'] === '1';
+$canscroll = 1;
+include_once '../../../header.hnt';
+?>
+
+<?php if ($viewReportPath) { ?>
+<div class="container-fluid py-3" dir="rtl">
+    <div class="card border-0 shadow-sm mb-3">
+        <div class="card-header text-white d-flex flex-wrap align-items-center justify-content-between gap-2"
+             style="background:linear-gradient(135deg,#0f9d58,#087f5b)">
+            <h4 class="mb-0"><i class="bi bi-file-earmark-text me-2"></i>تقرير فحص اتساق تقويم الإيجارات</h4>
+            <a href="egarstatus.hnt" class="btn btn-light">
+                <i class="bi bi-arrow-return-right me-1"></i>العودة إلى حالة الإيجارات
+            </a>
+        </div>
+    </div>
+    <iframe
+        src="rent_calendar_audit.hnt?action=raw&amp;report=<?= rawurlencode($reportName) ?>"
+        title="تقرير فحص اتساق تقويم الإيجارات"
+        style="display:block;width:100%;height:calc(100vh - 190px);min-height:650px;border:0;border-radius:12px;background:#fff;box-shadow:0 .125rem .5rem rgba(0,0,0,.12);"
+    ></iframe>
+</div>
+<?php require '../../../foter.hnt'; exit; } ?>
+
+<div class="container py-4" dir="rtl">
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header text-white d-flex flex-wrap align-items-center justify-content-between gap-2"
+             style="background:linear-gradient(135deg,#0f9d58,#087f5b)">
+            <div>
+                <h4 class="mb-1"><i class="bi bi-calendar2-check me-2"></i>فحص اتساق تقويم الإيجارات</h4>
+                <small>توحيد أعلام التقويم وفحص أيام الأقساط والفجوات بأمان</small>
+            </div>
+            <a href="egarstatus.hnt" class="btn btn-light btn-sm"><i class="bi bi-arrow-return-right me-1"></i>حالة الإيجارات</a>
+        </div>
+        <div class="card-body">
+            <div class="alert alert-info mb-3">
+                الأقساط المدفوعة أو المرتبطة بسندات لا يتم تعديلها. تُصلح تواريخ الأقساط غير المدفوعة فقط داخل الشهر نفسه، وتُسجل الفجوات للمراجعة.
+            </div>
+            <button type="button" id="run-rent-audit" class="btn btn-success btn-lg">
+                <i class="bi bi-play-circle me-2"></i>تشغيل فحص الإيجارات الآن
+            </button>
+            <div id="audit-progress" class="alert alert-warning mt-3 d-none" role="status">
+                <span class="spinner-border spinner-border-sm me-2"></span>
+                جاري فحص اتساق تواريخ الإيجارات، يرجى الانتظار ولا تغلق الصفحة...
+            </div>
+            <div id="audit-result" class="mt-3"></div>
+        </div>
+    </div>
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-header bg-light d-flex align-items-center justify-content-between">
+            <h5 class="mb-0"><i class="bi bi-file-earmark-text me-2"></i>التقارير المحفوظة</h5>
+            <span class="badge text-bg-secondary"><?= count($reports) ?></span>
+        </div>
+        <div class="card-body">
+            <?php if (isset($_GET['deleted'])) { ?>
+                <div class="alert alert-success">تم حذف التقرير.</div>
+            <?php } ?>
+            <?php if (empty($reports)) { ?>
+                <p class="text-muted mb-0">لا توجد تقارير محفوظة.</p>
+            <?php } else { ?>
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle">
+                        <thead><tr><th>تاريخ التقرير</th><th>الحجم</th><th class="text-end">الإجراءات</th></tr></thead>
+                        <tbody>
+                        <?php foreach ($reports as $savedReport) { ?>
+                            <tr>
+                                <td><?= htmlspecialchars(date('Y-m-d H:i:s', $savedReport['modified_at']), ENT_QUOTES, 'UTF-8') ?></td>
+                                <td><?= number_format($savedReport['size'] / 1024, 1) ?> KB</td>
+                                <td class="text-end">
+                                    <a class="btn btn-outline-primary btn-sm" target="_blank"
+                                       href="rent_calendar_audit.hnt?action=view&amp;report=<?= rawurlencode($savedReport['name']) ?>">
+                                        <i class="bi bi-eye me-1"></i>عرض التقرير
+                                    </a>
+                                    <form method="post" action="rent_calendar_audit.hnt" class="d-inline"
+                                          onsubmit="return confirm('هل تريد حذف هذا التقرير؟');">
+                                        <input type="hidden" name="action" value="delete">
+                                        <input type="hidden" name="report" value="<?= htmlspecialchars($savedReport['name'], ENT_QUOTES, 'UTF-8') ?>">
+                                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($_SESSION['rent_calendar_audit_csrf'], ENT_QUOTES, 'UTF-8') ?>">
+                                        <button class="btn btn-outline-danger btn-sm" type="submit"><i class="bi bi-trash me-1"></i>حذف</button>
+                                    </form>
+                                </td>
+                            </tr>
+                        <?php } ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php } ?>
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+    const button = document.getElementById('run-rent-audit');
+    const progress = document.getElementById('audit-progress');
+    const result = document.getElementById('audit-result');
+    button.addEventListener('click', async function () {
+        button.disabled = true;
+        progress.classList.remove('d-none');
+        result.innerHTML = '';
+        try {
+            const response = await fetch('rent_calendar_audit.api.hnt', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
+                body: 'mode=manual&csrf_token=<?= rawurlencode($_SESSION['rent_calendar_audit_csrf']) ?>'
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success) {
+                throw new Error(data.message || 'تعذر تشغيل الفحص.');
+            }
+            if (data.report) {
+                window.location.href = 'rent_calendar_audit.hnt?action=view&report=' + encodeURIComponent(data.report);
+                return;
+            }
+            result.innerHTML = '<div class="alert alert-success">' + escapeAuditHtml(data.message) + '</div>';
+        } catch (error) {
+            result.innerHTML = '<div class="alert alert-danger">' + escapeAuditHtml(error.message || 'تعذر تشغيل الفحص.') + '</div>';
+        } finally {
+            progress.classList.add('d-none');
+            button.disabled = false;
+        }
+    });
+
+    function escapeAuditHtml(value) {
+        const div = document.createElement('div');
+        div.textContent = value;
+        return div.innerHTML;
+    }
+
+    <?php if ($runRequested) { ?>
+    window.setTimeout(function () { button.click(); }, 100);
+    <?php } ?>
+})();
+</script>
+
+<?php require '../../../foter.hnt'; ?>

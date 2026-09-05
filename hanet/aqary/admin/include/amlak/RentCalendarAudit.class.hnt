@@ -1,0 +1,970 @@
+<?php
+/**
+ * Audits contracts whose calendar flags disagree and safely repairs unpaid
+ * installment day drift. Reports are kept outside the database.
+ */
+
+require_once __DIR__ . '/CalendarManager.class.hnt';
+
+class RentCalendarAudit
+{
+    const AUTOMATIC_MARKER_VERSION = 'v1';
+
+    private $link;
+    private $calendar;
+    private $applyChanges;
+    private $availableTables = array();
+
+    public function __construct($link, $applyChanges = true)
+    {
+        $this->link = $link;
+        $this->calendar = new CalendarManager();
+        $this->applyChanges = (bool)$applyChanges;
+    }
+
+    public static function baseDirectory()
+    {
+        // Reports contain tenant details. storage/protected is denied by the
+        // web server; authenticated PHP is the only way to view them.
+        return storage_path('protected' . DIRECTORY_SEPARATOR . 'rent-calendar-audit' . DIRECTORY_SEPARATOR);
+    }
+
+    public static function reportsDirectory()
+    {
+        return self::baseDirectory() . 'reports' . DIRECTORY_SEPARATOR;
+    }
+
+    public static function automaticMarkerPath()
+    {
+        return self::baseDirectory() . 'automatic-' . self::AUTOMATIC_MARKER_VERSION . '.done.json';
+    }
+
+    public static function ensureStorage()
+    {
+        return ensure_dir(self::baseDirectory()) && ensure_dir(self::reportsDirectory());
+    }
+
+    public static function hasAutomaticMarker()
+    {
+        return is_file(self::automaticMarkerPath());
+    }
+
+    public static function acquireLock()
+    {
+        if (!self::ensureStorage()) {
+            return false;
+        }
+
+        $handle = @fopen(self::baseDirectory() . 'audit.lock', 'c+');
+        if (!$handle || !@flock($handle, LOCK_EX | LOCK_NB)) {
+            if ($handle) {
+                @fclose($handle);
+            }
+            return false;
+        }
+
+        @ftruncate($handle, 0);
+        @fwrite($handle, json_encode(array(
+            'started_at' => date('c'),
+            'pid' => function_exists('getmypid') ? getmypid() : null,
+        ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        @fflush($handle);
+
+        return $handle;
+    }
+
+    public static function releaseLock($handle)
+    {
+        if (is_resource($handle)) {
+            @flock($handle, LOCK_UN);
+            @fclose($handle);
+        }
+    }
+
+    public static function validReportFilename($filename)
+    {
+        return is_string($filename)
+            && preg_match('/^rent_calendar_audit_\d{8}_\d{6}_[a-f0-9]{8}\.html$/', $filename) === 1;
+    }
+
+    public static function reportPath($filename)
+    {
+        if (!self::validReportFilename($filename)) {
+            return false;
+        }
+
+        return self::reportsDirectory() . $filename;
+    }
+
+    public static function listReports()
+    {
+        if (!self::ensureStorage()) {
+            return array();
+        }
+
+        $reports = array();
+        foreach ((array)glob(self::reportsDirectory() . 'rent_calendar_audit_*.html') as $path) {
+            $name = basename($path);
+            if (!self::validReportFilename($name) || !is_file($path)) {
+                continue;
+            }
+            $reports[] = array(
+                'name' => $name,
+                'modified_at' => intval(@filemtime($path)),
+                'size' => intval(@filesize($path)),
+            );
+        }
+
+        usort($reports, function ($left, $right) {
+            return $right['modified_at'] <=> $left['modified_at'];
+        });
+
+        return $reports;
+    }
+
+    public static function saveReport(array $result)
+    {
+        if (!self::ensureStorage()) {
+            return false;
+        }
+
+        try {
+            $suffix = bin2hex(random_bytes(4));
+        } catch (Throwable $exception) {
+            $suffix = substr(md5(uniqid('', true)), 0, 8);
+        }
+
+        $filename = 'rent_calendar_audit_' . date('Ymd_His') . '_' . $suffix . '.html';
+        $path = self::reportPath($filename);
+        $temporaryPath = $path . '.tmp';
+        $html = self::renderReportHtml($result);
+
+        if (@file_put_contents($temporaryPath, $html, LOCK_EX) === false) {
+            return false;
+        }
+        if (!@rename($temporaryPath, $path)) {
+            @unlink($temporaryPath);
+            return false;
+        }
+
+        return $filename;
+    }
+
+    public static function writeAutomaticMarker(array $result, $reportFilename)
+    {
+        if (!self::ensureStorage()) {
+            return false;
+        }
+
+        $data = array(
+            'version' => self::AUTOMATIC_MARKER_VERSION,
+            'completed_at' => date('c'),
+            'report' => $reportFilename ?: null,
+            'summary' => $result['summary'],
+        );
+        $path = self::automaticMarkerPath();
+        $temporaryPath = $path . '.tmp';
+        if (@file_put_contents(
+            $temporaryPath,
+            json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT),
+            LOCK_EX
+        ) === false) {
+            return false;
+        }
+        if (!@rename($temporaryPath, $path)) {
+            @unlink($temporaryPath);
+            return false;
+        }
+
+        return true;
+    }
+
+    public function run()
+    {
+        $startedAt = time();
+        $result = array(
+            'started_at' => $startedAt,
+            'finished_at' => null,
+            'apply_changes' => $this->applyChanges,
+            'summary' => array(
+                'conflicting_contracts' => 0,
+                'contracts_repaired' => 0,
+                'contracts_not_repaired' => 0,
+                'installments_checked' => 0,
+                'unpaid_dates_updated' => 0,
+                'unpaid_duplicates_deleted' => 0,
+                'paid_or_protected_issues' => 0,
+                'schedule_gaps' => 0,
+                'errors' => 0,
+            ),
+            'contracts' => array(),
+            'errors' => array(),
+        );
+
+        $contracts = $this->loadConflictingContracts();
+        if ($contracts === false) {
+            $result['errors'][] = 'تعذر قراءة العقود التي تحتوي على اختلاف في التقويم.';
+            $result['summary']['errors']++;
+            $result['finished_at'] = time();
+            return $result;
+        }
+
+        $result['summary']['conflicting_contracts'] = count($contracts);
+        foreach ($contracts as $contract) {
+            try {
+                $contractResult = $this->inspectContract($contract);
+                $result['contracts'][] = $contractResult;
+                $result['summary']['installments_checked'] += $contractResult['installments_checked'];
+                $result['summary']['paid_or_protected_issues'] += $contractResult['protected_issues'];
+                $result['summary']['schedule_gaps'] += $contractResult['schedule_gaps'];
+
+                if ($contractResult['can_repair']) {
+                    $applied = $this->applyContractRepairs($contractResult);
+                    if ($applied['success']) {
+                        $result['summary']['contracts_repaired']++;
+                        $result['summary']['unpaid_dates_updated'] += $applied['updated'];
+                        $result['summary']['unpaid_duplicates_deleted'] += $applied['deleted'];
+                    } else {
+                        $result['summary']['contracts_not_repaired']++;
+                        $result['summary']['errors']++;
+                        $result['errors'][] = 'تعذر إصلاح العقد رقم ' . intval($contract['rakam3akdid']) . '.';
+                    }
+                } else {
+                    $result['summary']['contracts_not_repaired']++;
+                }
+            } catch (Throwable $exception) {
+                error_log('Rent calendar audit contract ' . intval($contract['rakam3akdid']) . ': ' . $exception->getMessage());
+                $result['summary']['contracts_not_repaired']++;
+                $result['summary']['errors']++;
+                $result['errors'][] = 'تعذر فحص العقد رقم ' . intval($contract['rakam3akdid']) . '.';
+            }
+        }
+
+        $result['finished_at'] = time();
+        return $result;
+    }
+
+    private function loadConflictingContracts()
+    {
+        $sql = "SELECT
+                    ad.idsubaqar,
+                    ad.rakam3akdid,
+                    ad.hnt_dll_type,
+                    ad.rakam AS unit_number,
+                    ad.aqarsubtype,
+                    e.calendar_type,
+                    e.startegar,
+                    e.duration,
+                    e.fixed_payment_day,
+                    e.status AS contract_status,
+                    m.mostagername,
+                    p.aqarname
+                FROM amlakdetails ad
+                INNER JOIN egar e ON e.rakam3akdid = ad.rakam3akdid
+                LEFT JOIN mostagereen m ON m.mostagerid = e.mostagerid
+                LEFT JOIN amlak p ON p.idaqar = ad.idaqar
+                WHERE ad.idsubaqar > 0
+                  AND ad.rakam3akdid > 0
+                  AND (e.status IS NULL OR e.status IN ('active', 'active_arrears', 'expiring_soon', 'expired'))
+                  AND (
+                        e.calendar_type IS NULL
+                        OR e.calendar_type NOT IN (0, 1)
+                        OR ad.hnt_dll_type IS NULL
+                        OR ad.hnt_dll_type NOT IN ('0', '1')
+                        OR CAST(e.calendar_type AS CHAR) <> CAST(ad.hnt_dll_type AS CHAR)
+                  )
+                ORDER BY ad.idsubaqar";
+
+        $query = mysql_query($sql, $this->link);
+        if (!$query) {
+            error_log('Rent calendar audit contract query: ' . mysql_error($this->link));
+            return false;
+        }
+
+        $rows = array();
+        while ($row = mysql_fetch_assoc($query)) {
+            $rows[] = $row;
+        }
+        return $rows;
+    }
+
+    private function inspectContract(array $contract)
+    {
+        $unitId = intval($contract['idsubaqar']);
+        $contractId = intval($contract['rakam3akdid']);
+        $calendarDecision = $this->decideCalendar($contract);
+        $calendarType = $calendarDecision['calendar_type'];
+
+        $contractResult = array(
+            'contract' => $contract,
+            'calendar_type' => $calendarType,
+            'calendar_label' => $calendarType === 0 ? 'هجري' : ($calendarType === 1 ? 'ميلادي' : 'غير محدد'),
+            'display_start_date' => $calendarDecision['display_date'],
+            'decision_reason' => $calendarDecision['reason'],
+            'can_repair' => $calendarDecision['certain'],
+            'fixed_day' => 0,
+            'fixed_day_source' => '',
+            'installments_checked' => 0,
+            'protected_issues' => 0,
+            'schedule_gaps' => 0,
+            'issues' => array(),
+            'repair_groups' => array(),
+            'invalid_delete_items' => array(),
+        );
+
+        if (!$calendarDecision['certain']) {
+            $contractResult['issues'][] = array(
+                'type' => 'calendar',
+                'level' => 'danger',
+                'message' => 'تعذر تحديد التقويم من تاريخ بداية الإيجار؛ لم يتم تعديل العقد.',
+            );
+            return $contractResult;
+        }
+
+        $installments = $this->loadInstallments($unitId, $contractId);
+        if ($installments === false) {
+            $contractResult['can_repair'] = false;
+            $contractResult['issues'][] = array(
+                'type' => 'database',
+                'level' => 'danger',
+                'message' => 'تعذر قراءة أقساط العقد؛ لم يتم تعديل العقد.',
+            );
+            return $contractResult;
+        }
+
+        $contractResult['installments_checked'] = count($installments);
+        $fixedDay = intval($contract['fixed_payment_day']);
+        $maximumDay = $calendarType === 0 ? 30 : 31;
+        if ($fixedDay > 0 && $fixedDay <= $maximumDay) {
+            $contractResult['fixed_day'] = $fixedDay;
+            $contractResult['fixed_day_source'] = 'اليوم الثابت المحفوظ في العقد';
+        } else {
+            $fixedDay = $this->inferFixedDay($installments, $calendarType);
+            $contractResult['fixed_day'] = $fixedDay;
+            $contractResult['fixed_day_source'] = $fixedDay > 0 ? 'أقدم قسط صالح' : 'غير متاح';
+            if ($fixedDay <= 0) {
+                $contractResult['can_repair'] = false;
+                $contractResult['issues'][] = array(
+                    'type' => 'fixed_day',
+                    'level' => 'danger',
+                    'message' => 'لا يوجد يوم دفع ثابت صالح يمكن الاعتماد عليه؛ لم يتم تعديل العقد.',
+                );
+                return $contractResult;
+            }
+        }
+
+        $prepared = array();
+        $invalidCandidates = array();
+        foreach ($installments as $installment) {
+            $timestamp = intval($installment['kastdate']);
+            if ($timestamp === 0) {
+                $contractResult['issues'][] = array(
+                    'type' => 'invalid_date',
+                    'level' => 'danger',
+                    'installment_id' => intval($installment['kastid']),
+                    'installment_name' => $installment['kastname'],
+                    'message' => 'القسط لا يحتوي على تاريخ صالح.',
+                );
+                continue;
+            }
+
+            try {
+                $parts = $this->dateParts($timestamp, $calendarType);
+                $normalizedTimestamp = $parts['timestamp'];
+                $expectedTimestamp = $this->calendar->setFixedDay($normalizedTimestamp, $fixedDay, $calendarType);
+                $expectedParts = $this->dateParts($expectedTimestamp, $calendarType);
+                $protectedReason = $this->installmentProtectionReason($installment);
+                $prepared[] = array(
+                    'row' => $installment,
+                    'parts' => $parts,
+                    'expected_parts' => $expectedParts,
+                    'expected_timestamp' => $expectedTimestamp,
+                    'wrong_day' => intval($parts['day']) !== intval($expectedParts['day']),
+                    'protected_reason' => $protectedReason,
+                );
+            } catch (Throwable $exception) {
+                error_log('Rent calendar audit installment ' . intval($installment['kastid']) . ': ' . $exception->getMessage());
+                $protectionReason = $this->installmentProtectionReason($installment);
+                $contractResult['issues'][] = array(
+                    'type' => 'invalid_date',
+                    'level' => $protectionReason === '' ? 'warning' : 'danger',
+                    'installment_id' => intval($installment['kastid']),
+                    'installment_name' => $installment['kastname'],
+                    'message' => $protectionReason === ''
+                        ? 'تعذر تفسير تاريخ القسط غير المدفوع وسيتم حذفه كي يعيد المجدول إنشاءه بصورة صحيحة.'
+                        : 'تعذر تفسير تاريخ قسط محمي. تم تسجيله للمراجعة فقط: ' . $protectionReason,
+                );
+                if ($protectionReason === '') {
+                    $invalidCandidates[] = array(
+                        'row' => $installment,
+                        'issue_index' => count($contractResult['issues']) - 1,
+                    );
+                } else {
+                    $contractResult['protected_issues']++;
+                }
+            }
+        }
+
+        $candidateIds = array();
+        foreach ($prepared as $item) {
+            if ($item['wrong_day'] && $item['protected_reason'] === '') {
+                $candidateIds[] = intval($item['row']['kastid']);
+            }
+        }
+        foreach ($invalidCandidates as $item) {
+            $candidateIds[] = intval($item['row']['kastid']);
+        }
+        $referencedIds = $this->loadReferencedInstallmentIds($candidateIds);
+
+        foreach ($invalidCandidates as $item) {
+            $installmentId = intval($item['row']['kastid']);
+            if (isset($referencedIds[$installmentId])) {
+                $contractResult['issues'][$item['issue_index']]['level'] = 'danger';
+                $contractResult['issues'][$item['issue_index']]['message'] =
+                    'تعذر تفسير تاريخ قسط مرتبط. تم تسجيله للمراجعة فقط: ' . $referencedIds[$installmentId];
+                $contractResult['protected_issues']++;
+                continue;
+            }
+            $contractResult['invalid_delete_items'][] = $item;
+        }
+
+        $groups = array();
+        foreach ($prepared as $item) {
+            $monthKey = $item['parts']['year'] . '-' . str_pad($item['parts']['month'], 2, '0', STR_PAD_LEFT);
+            if (!isset($groups[$monthKey])) {
+                $groups[$monthKey] = array('correct' => array(), 'repairable' => array(), 'protected' => array());
+            }
+
+            if (!$item['wrong_day']) {
+                $groups[$monthKey]['correct'][] = $item;
+                continue;
+            }
+
+            $installmentId = intval($item['row']['kastid']);
+            $reason = $item['protected_reason'];
+            if (isset($referencedIds[$installmentId])) {
+                $reason = $referencedIds[$installmentId];
+            }
+
+            $issue = array(
+                'type' => 'wrong_day',
+                'level' => $reason === '' ? 'warning' : 'danger',
+                'installment_id' => $installmentId,
+                'installment_name' => $item['row']['kastname'],
+                'old_date' => $item['parts']['display'],
+                'expected_date' => $item['expected_parts']['display'],
+                'message' => $reason === ''
+                    ? 'يوم القسط غير مطابق ليوم الدفع الثابت وسيتم إصلاحه.'
+                    : 'يوم قسط مدفوع أو محمي غير مطابق. تم تسجيله للمراجعة فقط: ' . $reason,
+            );
+            $contractResult['issues'][] = $issue;
+
+            if ($reason === '') {
+                $item['issue_index'] = count($contractResult['issues']) - 1;
+                $groups[$monthKey]['repairable'][] = $item;
+            } else {
+                $contractResult['protected_issues']++;
+                $groups[$monthKey]['protected'][] = $item;
+            }
+        }
+
+        foreach ($groups as $monthKey => $group) {
+            if (empty($group['repairable'])) {
+                continue;
+            }
+            $contractResult['repair_groups'][] = array(
+                'month_key' => $monthKey,
+                'has_correct' => !empty($group['correct']),
+                'items' => $group['repairable'],
+            );
+        }
+
+        $duration = intval($contract['duration']);
+        if ($duration <= 0) {
+            $contractResult['issues'][] = array(
+                'type' => 'duration',
+                'level' => 'danger',
+                'message' => 'مدة القسط في العقد غير صالحة؛ تعذر فحص الدفعات المتخطاة.',
+            );
+        } else {
+            $this->appendScheduleGapIssues($prepared, $duration, $contractResult);
+        }
+
+        return $contractResult;
+    }
+
+    private function decideCalendar(array $contract)
+    {
+        $timestamp = intval($contract['startegar']);
+        if ($timestamp === 0) {
+            return array(
+                'calendar_type' => null,
+                'display_date' => '',
+                'certain' => false,
+                'reason' => 'تاريخ بداية الإيجار فارغ.',
+            );
+        }
+
+        $unitValue = (string)$contract['hnt_dll_type'];
+        if ($unitValue === '0' || $unitValue === '1') {
+            $displayCalendar = intval($unitValue);
+            $source = 'تقويم الوحدة المستخدم في شاشة تعديل الأقساط';
+        } else {
+            // This is exactly how editaksat.hnt behaves: header.hnt loads the
+            // system default, and only a valid unit value overrides it.
+            $displayCalendar = $this->systemDefaultCalendarType();
+            $source = 'تقويم النظام الافتراضي لأن تقويم الوحدة غير صالح';
+        }
+
+        try {
+            if ($displayCalendar === 0) {
+                $normalized = $this->calendar->normalizeLegacyTimestamp($timestamp, 0);
+                $displayDate = $this->calendar->timestampToDate($normalized, 0);
+            } else {
+                $displayDate = date('d/m/Y', $timestamp);
+            }
+            $parts = explode('/', $displayDate);
+            $year = intval($parts[2] ?? 0);
+            if ($year <= 0) {
+                throw new RuntimeException('Missing displayed year');
+            }
+
+            return array(
+                'calendar_type' => $year > 1500 ? 1 : 0,
+                'display_date' => $displayDate,
+                'certain' => true,
+                'reason' => $source . '؛ سنة العرض ' . $year . ($year > 1500 ? ' ميلادية.' : ' هجرية.'),
+            );
+        } catch (Throwable $exception) {
+            error_log('Rent calendar audit calendar decision contract ' . intval($contract['rakam3akdid']) . ': ' . $exception->getMessage());
+            return array(
+                'calendar_type' => null,
+                'display_date' => '',
+                'certain' => false,
+                'reason' => 'تعذر عرض تاريخ بداية الإيجار.',
+            );
+        }
+    }
+
+    private function systemDefaultCalendarType()
+    {
+        $hnt_dll = 1;
+        $configurationPath = dirname(__DIR__, 3) . DIRECTORY_SEPARATOR . 'hjerymelady.ip';
+        if (is_file($configurationPath)) {
+            include $configurationPath;
+        }
+        return ((string)$hnt_dll === '0') ? 0 : 1;
+    }
+
+    private function loadInstallments($unitId, $contractId)
+    {
+        $sql = "SELECT kastid, idsubaqar, egar_id, kastname, kastdate,
+                       iscomplete, status, dof3at, amount_paid, paid_date,
+                       grace_period_days, effective_due_date
+                FROM aksat
+                WHERE idsubaqar = " . intval($unitId) . "
+                  AND egar_id = " . intval($contractId) . "
+                  AND idsubaqar > 0
+                ORDER BY kastdate, kastid";
+        $query = mysql_query($sql, $this->link);
+        if (!$query) {
+            error_log('Rent calendar audit installments query: ' . mysql_error($this->link));
+            return false;
+        }
+
+        $rows = array();
+        while ($row = mysql_fetch_assoc($query)) {
+            $rows[] = $row;
+        }
+        return $rows;
+    }
+
+    private function dateParts($timestamp, $calendarType)
+    {
+        $timestamp = intval($timestamp);
+        if ($calendarType === 0) {
+            $timestamp = $this->calendar->normalizeLegacyTimestamp($timestamp, 0);
+            $display = $this->calendar->timestampToDate($timestamp, 0);
+            $parts = explode('/', $display);
+            $day = intval($parts[0] ?? 0);
+            $month = intval($parts[1] ?? 0);
+            $year = intval($parts[2] ?? 0);
+        } else {
+            $day = intval(date('j', $timestamp));
+            $month = intval(date('n', $timestamp));
+            $year = intval(date('Y', $timestamp));
+            $display = sprintf('%02d/%02d/%04d', $day, $month, $year);
+        }
+
+        if ($day <= 0 || $month <= 0 || $month > 12 || $year <= 0) {
+            throw new RuntimeException('Invalid calendar date');
+        }
+
+        return array(
+            'timestamp' => $timestamp,
+            'day' => $day,
+            'month' => $month,
+            'year' => $year,
+            'month_index' => ($year * 12) + ($month - 1),
+            'display' => $display,
+        );
+    }
+
+    private function inferFixedDay(array $installments, $calendarType)
+    {
+        foreach ($installments as $installment) {
+            if (intval($installment['kastdate']) === 0) {
+                continue;
+            }
+            try {
+                $parts = $this->dateParts($installment['kastdate'], $calendarType);
+                $maximumDay = $calendarType === 0 ? 30 : 31;
+                if ($parts['day'] > 0 && $parts['day'] <= $maximumDay) {
+                    return intval($parts['day']);
+                }
+            } catch (Throwable $exception) {
+                continue;
+            }
+        }
+        return 0;
+    }
+
+    private function installmentProtectionReason(array $installment)
+    {
+        if (intval($installment['iscomplete']) === 1) {
+            return 'القسط مكتمل';
+        }
+        $status = strtolower(trim((string)$installment['status']));
+        if (in_array($status, array('paid', 'partial', 'cancelled', 'waived'), true)) {
+            return 'حالة القسط ' . $status;
+        }
+        if (floatval($installment['dof3at']) > 0 || floatval($installment['amount_paid']) > 0) {
+            return 'يوجد مبلغ مدفوع';
+        }
+        if (intval($installment['paid_date']) > 0) {
+            return 'يوجد تاريخ دفع';
+        }
+        return '';
+    }
+
+    private function loadReferencedInstallmentIds(array $ids)
+    {
+        $references = array();
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        if (empty($ids)) {
+            return $references;
+        }
+
+        $idList = implode(',', $ids);
+        $sources = array(
+            array('table' => 'sanad', 'column' => 'kastid', 'label' => 'مرتبط بسند قبض', 'quoted' => true),
+            array('table' => 'eradat', 'column' => 'kastid', 'label' => 'مرتبط بإيراد', 'quoted' => false),
+            array('table' => 'aksat_payment_history', 'column' => 'kastid', 'label' => 'مرتبط بسجل دفعات', 'quoted' => false),
+        );
+
+        foreach ($sources as $source) {
+            if (!$this->tableExists($source['table'])) {
+                continue;
+            }
+            $whereValues = $source['quoted']
+                ? "'" . implode("','", $ids) . "'"
+                : $idList;
+            $sql = "SELECT DISTINCT `" . $source['column'] . "` AS kastid
+                    FROM `" . $source['table'] . "`
+                    WHERE `" . $source['column'] . "` IN (" . $whereValues . ")";
+            $query = mysql_query($sql, $this->link);
+            if (!$query) {
+                error_log('Rent calendar audit reference query ' . $source['table'] . ': ' . mysql_error($this->link));
+                foreach ($ids as $id) {
+                    $references[$id] = 'تعذر التحقق من الارتباطات؛ تم منع التعديل احتياطياً';
+                }
+                continue;
+            }
+            while ($row = mysql_fetch_assoc($query)) {
+                $id = intval($row['kastid']);
+                if ($id > 0) {
+                    $references[$id] = $source['label'];
+                }
+            }
+        }
+
+        return $references;
+    }
+
+    private function tableExists($table)
+    {
+        if (array_key_exists($table, $this->availableTables)) {
+            return $this->availableTables[$table];
+        }
+        $escaped = mysql_real_escape_string($table, $this->link);
+        $query = mysql_query("SHOW TABLES LIKE '" . $escaped . "'", $this->link);
+        $exists = $query && mysql_num_rows($query) > 0;
+        $this->availableTables[$table] = $exists;
+        return $exists;
+    }
+
+    private function appendScheduleGapIssues(array $prepared, $duration, array &$contractResult)
+    {
+        usort($prepared, function ($left, $right) {
+            if ($left['parts']['month_index'] === $right['parts']['month_index']) {
+                return intval($left['row']['kastid']) <=> intval($right['row']['kastid']);
+            }
+            return $left['parts']['month_index'] <=> $right['parts']['month_index'];
+        });
+
+        $previous = null;
+        foreach ($prepared as $item) {
+            if ($previous === null) {
+                $previous = $item;
+                continue;
+            }
+            $difference = intval($item['parts']['month_index']) - intval($previous['parts']['month_index']);
+            if ($difference !== $duration) {
+                $message = '';
+                if ($difference === 0) {
+                    $message = 'يوجد أكثر من قسط في الشهر نفسه.';
+                } elseif ($difference > $duration && $difference % $duration === 0) {
+                    $missing = intval($difference / $duration) - 1;
+                    $message = 'يوجد ' . $missing . ' قسط/دفعة متخطاة بين التاريخين.';
+                } else {
+                    $message = 'الفاصل بين القسطين ' . $difference . ' شهر، بينما مدة الدفع المحددة ' . $duration . ' شهر.';
+                }
+                $contractResult['schedule_gaps']++;
+                $contractResult['issues'][] = array(
+                    'type' => 'schedule_gap',
+                    'level' => 'danger',
+                    'installment_id' => intval($item['row']['kastid']),
+                    'installment_name' => $item['row']['kastname'],
+                    'old_date' => $previous['parts']['display'],
+                    'expected_date' => $item['parts']['display'],
+                    'message' => $message . ' تم التسجيل للمراجعة ولم تتم إضافة قسط تلقائياً.',
+                );
+            }
+            $previous = $item;
+        }
+    }
+
+    private function applyContractRepairs(array &$contractResult)
+    {
+        if (!$this->applyChanges) {
+            foreach ($contractResult['repair_groups'] as $group) {
+                foreach ($group['items'] as $item) {
+                    $contractResult['issues'][$item['issue_index']]['action'] = $group['has_correct'] ? 'سيُحذف كقسط مكرر' : 'سيتم تحديث التاريخ';
+                }
+            }
+            foreach ($contractResult['invalid_delete_items'] as $item) {
+                $contractResult['issues'][$item['issue_index']]['action'] = 'سيُحذف ليعيد المجدول إنشاءه';
+            }
+            return array('success' => true, 'updated' => 0, 'deleted' => 0);
+        }
+
+        $contract = $contractResult['contract'];
+        $contractId = intval($contract['rakam3akdid']);
+        $unitId = intval($contract['idsubaqar']);
+        $calendarType = intval($contractResult['calendar_type']);
+        $fixedDay = intval($contractResult['fixed_day']);
+        $updated = 0;
+        $deleted = 0;
+
+        if (!mysql_query('START TRANSACTION', $this->link)) {
+            error_log('Rent calendar audit could not start transaction: ' . mysql_error($this->link));
+            return array('success' => false, 'updated' => 0, 'deleted' => 0);
+        }
+
+        try {
+            $contractUpdate = mysql_query(
+                "UPDATE egar
+                 SET calendar_type = {$calendarType}, fixed_payment_day = {$fixedDay}
+                 WHERE rakam3akdid = {$contractId}",
+                $this->link
+            );
+            $unitUpdate = mysql_query(
+                "UPDATE amlakdetails
+                 SET hnt_dll_type = '{$calendarType}'
+                 WHERE idsubaqar = {$unitId} AND rakam3akdid = {$contractId}",
+                $this->link
+            );
+            if (!$contractUpdate || !$unitUpdate) {
+                throw new RuntimeException(mysql_error($this->link));
+            }
+
+            foreach ($contractResult['invalid_delete_items'] as $item) {
+                $installmentId = intval($item['row']['kastid']);
+                $query = mysql_query(
+                    "DELETE FROM aksat
+                     WHERE kastid = {$installmentId}
+                       AND idsubaqar = {$unitId}
+                       AND egar_id = {$contractId}
+                       AND COALESCE(iscomplete, 0) = 0
+                       AND COALESCE(dof3at, 0) = 0
+                       AND COALESCE(amount_paid, 0) = 0
+                       AND COALESCE(paid_date, 0) = 0
+                       AND (status IS NULL OR status NOT IN ('paid', 'partial', 'cancelled', 'waived'))
+                     LIMIT 1",
+                    $this->link
+                );
+                if (!$query || mysql_affected_rows($this->link) !== 1) {
+                    throw new RuntimeException($query ? 'Installment changed while audit was running' : mysql_error($this->link));
+                }
+                $deleted++;
+                $contractResult['issues'][$item['issue_index']]['action'] = 'تم حذف القسط غير المدفوع ذي التاريخ غير الصالح';
+            }
+
+            foreach ($contractResult['repair_groups'] as $group) {
+                $hasCorrect = $group['has_correct'];
+                foreach ($group['items'] as $position => $item) {
+                    $installment = $item['row'];
+                    $installmentId = intval($installment['kastid']);
+                    $shouldDelete = $hasCorrect || $position > 0;
+
+                    if ($shouldDelete) {
+                        $query = mysql_query(
+                            "DELETE FROM aksat
+                             WHERE kastid = {$installmentId}
+                               AND idsubaqar = {$unitId}
+                               AND egar_id = {$contractId}
+                               AND COALESCE(iscomplete, 0) = 0
+                               AND COALESCE(dof3at, 0) = 0
+                               AND COALESCE(amount_paid, 0) = 0
+                               AND COALESCE(paid_date, 0) = 0
+                               AND (status IS NULL OR status NOT IN ('paid', 'partial', 'cancelled', 'waived'))
+                             LIMIT 1",
+                            $this->link
+                        );
+                        if (!$query) {
+                            throw new RuntimeException(mysql_error($this->link));
+                        }
+                        if (mysql_affected_rows($this->link) !== 1) {
+                            throw new RuntimeException('Installment changed while audit was running');
+                        }
+                        $deleted++;
+                        $contractResult['issues'][$item['issue_index']]['action'] = 'تم حذف القسط غير المدفوع المكرر';
+                        continue;
+                    }
+
+                    $newTimestamp = intval($item['expected_timestamp']);
+                    $graceDays = max(0, intval($installment['grace_period_days']));
+                    $oldTimestamp = intval($installment['kastdate']);
+                    $oldEffectiveDueDate = intval($installment['effective_due_date']);
+                    $effectiveDueDate = $oldEffectiveDueDate > 0 && $oldTimestamp !== 0
+                        ? $newTimestamp + ($oldEffectiveDueDate - $oldTimestamp)
+                        : $newTimestamp + ($graceDays * 86400);
+                    $query = mysql_query(
+                        "UPDATE aksat
+                         SET kastdate = {$newTimestamp},
+                             effective_due_date = {$effectiveDueDate},
+                             updated_at = " . time() . "
+                         WHERE kastid = {$installmentId}
+                           AND idsubaqar = {$unitId}
+                           AND egar_id = {$contractId}
+                           AND COALESCE(iscomplete, 0) = 0
+                           AND COALESCE(dof3at, 0) = 0
+                           AND COALESCE(amount_paid, 0) = 0
+                           AND COALESCE(paid_date, 0) = 0
+                           AND (status IS NULL OR status NOT IN ('paid', 'partial', 'cancelled', 'waived'))
+                         LIMIT 1",
+                        $this->link
+                    );
+                    if (!$query) {
+                        throw new RuntimeException(mysql_error($this->link));
+                    }
+                    if (mysql_affected_rows($this->link) !== 1) {
+                        throw new RuntimeException('Installment changed while audit was running');
+                    }
+                    $updated++;
+                    $hasCorrect = true;
+                    $contractResult['issues'][$item['issue_index']]['action'] = 'تم تحديث تاريخ القسط غير المدفوع';
+                }
+            }
+
+            if (!mysql_query('COMMIT', $this->link)) {
+                throw new RuntimeException(mysql_error($this->link));
+            }
+            return array('success' => true, 'updated' => $updated, 'deleted' => $deleted);
+        } catch (Throwable $exception) {
+            mysql_query('ROLLBACK', $this->link);
+            error_log('Rent calendar audit repair contract ' . $contractId . ': ' . $exception->getMessage());
+            return array('success' => false, 'updated' => 0, 'deleted' => 0);
+        }
+    }
+
+    private static function escape($value)
+    {
+        return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+    }
+
+    private static function renderReportHtml(array $result)
+    {
+        $summary = $result['summary'];
+        $generatedAt = date('Y-m-d H:i:s', intval($result['finished_at'] ?: time()));
+        $html = '<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">';
+        $html .= '<meta name="viewport" content="width=device-width,initial-scale=1">';
+        $html .= '<title>تقرير فحص تقويم الإيجارات</title><style>';
+        $html .= 'body{font-family:Tahoma,Arial,sans-serif;background:#f4f7f9;color:#172033;margin:0;padding:24px}';
+        $html .= '.wrap{max-width:1400px;margin:auto}.card{background:#fff;border:1px solid #dce3e8;border-radius:12px;padding:18px;margin-bottom:18px}';
+        $html .= '.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}.stat{background:#eef8f1;border-radius:9px;padding:12px}';
+        $html .= 'table{width:100%;border-collapse:collapse;margin-top:12px}th,td{border:1px solid #dce3e8;padding:8px;text-align:right;vertical-align:top}th{background:#edf2f5}';
+        $html .= '.danger{color:#a11212}.warning{color:#8a5a00}.ok{color:#08752a}.muted{color:#667085}.actions a{color:#0563c1}';
+        $html .= '</style></head><body><div class="wrap">';
+        $html .= '<div class="card"><h1>تقرير فحص اتساق تقويم الإيجارات</h1><p class="muted">وقت الإنشاء: ' . self::escape($generatedAt) . '</p>';
+        $html .= '<div class="summary">';
+        $labels = array(
+            'conflicting_contracts' => 'العقود المتعارضة',
+            'contracts_repaired' => 'العقود التي تم إصلاحها',
+            'contracts_not_repaired' => 'تحتاج مراجعة',
+            'installments_checked' => 'الأقساط المفحوصة',
+            'unpaid_dates_updated' => 'تواريخ غير مدفوعة عُدلت',
+            'unpaid_duplicates_deleted' => 'أقساط مكررة حُذفت',
+            'paid_or_protected_issues' => 'مشكلات محمية/مدفوعة',
+            'schedule_gaps' => 'فجوات الجدول',
+            'errors' => 'الأخطاء',
+        );
+        foreach ($labels as $key => $label) {
+            $html .= '<div class="stat"><strong>' . self::escape($label) . '</strong><br>' . intval($summary[$key]) . '</div>';
+        }
+        $html .= '</div></div>';
+
+        foreach ($result['contracts'] as $contractResult) {
+            $contract = $contractResult['contract'];
+            $editUrl = '/aqary/admin/include/amlak/editaksat.hnt?idsubaqar=' . intval($contract['idsubaqar']);
+            $html .= '<section class="card"><h2>المستأجر: ' . self::escape($contract['mostagername'] ?: 'غير محدد') . '</h2>';
+            $html .= '<p>العقار: ' . self::escape($contract['aqarname']) . ' — الوحدة: ' . self::escape($contract['unit_number']) . '</p>';
+            $html .= '<p>رقم الوحدة <strong>' . intval($contract['idsubaqar']) . '</strong> — رقم العقد <strong>' . intval($contract['rakam3akdid']) . '</strong></p>';
+            $html .= '<p>قبل الفحص: تقويم العقد <strong>' . self::escape($contract['calendar_type']) . '</strong>، تقويم الوحدة <strong>' . self::escape($contract['hnt_dll_type']) . '</strong>. القرار: <strong>' . self::escape($contractResult['calendar_label']) . '</strong>.</p>';
+            $html .= '<p>بداية الإيجار المعروضة: ' . self::escape($contractResult['display_start_date']) . ' — يوم الدفع: ' . intval($contractResult['fixed_day']) . ' (' . self::escape($contractResult['fixed_day_source']) . ')</p>';
+            $html .= '<p class="muted">' . self::escape($contractResult['decision_reason']) . '</p>';
+            $html .= '<p class="actions"><a href="' . self::escape($editUrl) . '" target="_blank">فتح العقد ومراجعة الأقساط</a></p>';
+
+            if (empty($contractResult['issues'])) {
+                $html .= '<p class="ok">لم توجد مشكلة في أيام الأقساط أو تسلسلها.</p>';
+            } else {
+                $html .= '<table><thead><tr><th>النوع</th><th>القسط</th><th>التاريخ الحالي</th><th>التاريخ المتوقع</th><th>النتيجة</th></tr></thead><tbody>';
+                foreach ($contractResult['issues'] as $issue) {
+                    $class = ($issue['level'] ?? '') === 'danger' ? 'danger' : 'warning';
+                    $installment = isset($issue['installment_id'])
+                        ? '#' . intval($issue['installment_id']) . ' / ' . self::escape($issue['installment_name'] ?? '')
+                        : '-';
+                    $resultText = ($issue['message'] ?? '') . (isset($issue['action']) ? ' — ' . $issue['action'] : '');
+                    $html .= '<tr class="' . $class . '"><td>' . self::escape($issue['type'] ?? '') . '</td><td>' . $installment . '</td><td>' . self::escape($issue['old_date'] ?? '-') . '</td><td>' . self::escape($issue['expected_date'] ?? '-') . '</td><td>' . self::escape($resultText) . '</td></tr>';
+                }
+                $html .= '</tbody></table>';
+            }
+            $html .= '</section>';
+        }
+
+        if (empty($result['contracts']) && empty($result['errors'])) {
+            $html .= '<section class="card ok"><h2>النتيجة سليمة</h2><p>لم توجد عقود تحتوي على تعارض بين تقويم العقد وتقويم الوحدة وقت تشغيل الفحص.</p></section>';
+        }
+
+        if (!empty($result['errors'])) {
+            $html .= '<section class="card danger"><h2>أخطاء تحتاج مراجعة</h2><ul>';
+            foreach ($result['errors'] as $error) {
+                $html .= '<li>' . self::escape($error) . '</li>';
+            }
+            $html .= '</ul></section>';
+        }
+
+        $html .= '</div></body></html>';
+        return $html;
+    }
+}

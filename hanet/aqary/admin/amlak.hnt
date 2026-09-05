@@ -4,6 +4,15 @@ $sc_id="36";
 include_once"../nocash.hnt";
 $showdhmltazkeer=1;
 include_once"../header.hnt";
+require_once __DIR__ . "/include/amlak/RentCalendarAudit.class.hnt";
+$runAutomaticRentCalendarAudit = !RentCalendarAudit::hasAutomaticMarker();
+if ($runAutomaticRentCalendarAudit && empty($_SESSION['rent_calendar_audit_csrf'])) {
+	try {
+		$_SESSION['rent_calendar_audit_csrf'] = bin2hex(random_bytes(24));
+	} catch (Throwable $exception) {
+		$_SESSION['rent_calendar_audit_csrf'] = hash('sha256', session_id() . microtime(true));
+	}
+}
 @mysql_query("ALTER TABLE sanadsarf ADD bankid int(11) NOT NULL DEFAULT 0", $link);
 @mysql_query("ALTER TABLE sanadsarf ADD money_source int(11) NOT NULL DEFAULT 0", $link);
 @mysql_query("ALTER TABLE sanadsarf ADD money_received_date int(11) NOT NULL DEFAULT 0", $link);
@@ -11,6 +20,52 @@ include_once"../header.hnt";
 @mysql_query("UPDATE sanadsarf SET money_received_date = sanadate WHERE money_received_date = 0", $link);
 @mysql_query("UPDATE sanadsarf SET money_actual_date = sanadate WHERE money_actual_date = 0", $link);
 ?>
+
+<?php if ($runAutomaticRentCalendarAudit) { ?>
+<div id="rent-calendar-audit-overlay" dir="rtl"
+	style="position:fixed;inset:0;z-index:10000;background:rgba(15,23,42,.72);display:flex;align-items:center;justify-content:center;padding:20px;">
+	<div class="card border-0 shadow-lg text-center" style="width:min(680px,100%);">
+		<div class="card-body p-5">
+			<div id="rent-calendar-audit-spinner" class="spinner-border text-success mb-4" style="width:3rem;height:3rem" role="status"></div>
+			<h3 class="mb-3">جاري فحص اتساق تواريخ الإيجارات</h3>
+			<p class="text-muted mb-0" id="rent-calendar-audit-message">يرجى الانتظار ولا تغلق الصفحة حتى يكتمل الفحص.</p>
+			<button type="button" id="rent-calendar-audit-close" class="btn btn-secondary mt-4 d-none">متابعة إلى إدارة الأملاك</button>
+		</div>
+	</div>
+</div>
+
+<script>
+(async function () {
+	const overlay = document.getElementById('rent-calendar-audit-overlay');
+	const message = document.getElementById('rent-calendar-audit-message');
+	const spinner = document.getElementById('rent-calendar-audit-spinner');
+	const closeButton = document.getElementById('rent-calendar-audit-close');
+
+	try {
+		const response = await fetch('/aqary/admin/include/amlak/rent_calendar_audit.api.hnt', {
+			method: 'POST',
+			credentials: 'same-origin',
+			headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
+			body: 'mode=automatic&csrf_token=<?= rawurlencode($_SESSION['rent_calendar_audit_csrf']) ?>'
+		});
+		const data = await response.json();
+		if (!response.ok && !data.busy) {
+			throw new Error(data.message || 'تعذر تشغيل الفحص.');
+		}
+		message.textContent = data.message || 'اكتمل الفحص.';
+		window.setTimeout(function () { overlay.remove(); }, data.busy ? 1800 : 900);
+	} catch (error) {
+		spinner.classList.add('d-none');
+		message.classList.remove('text-muted');
+		message.classList.add('text-danger');
+		message.textContent = (error && error.message) ? error.message : 'تعذر تشغيل الفحص الآن.';
+		closeButton.classList.remove('d-none');
+	}
+
+	closeButton.addEventListener('click', function () { overlay.remove(); });
+})();
+</script>
+<?php } ?>
 
 
 <style>
