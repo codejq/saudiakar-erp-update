@@ -32,6 +32,22 @@ include_once "amlakfunctions.hnt";
 // run the unsended bat files
 $there_is_unsend_files = false;
 foreach (glob($_SERVER['DOCUMENT_ROOT'] . '/aqary/message-queue/*.bat') as $filename) {
+	if(preg_match('/^installment-(\d+)-/i', basename($filename), $queue_match)){
+		$queued_installment_id = intval($queue_match[1]);
+		$guard_result = mysql_query("SELECT iscomplete FROM aksat WHERE kastid='" . $queued_installment_id . "' LIMIT 1", $link);
+		$guard_row = $guard_result ? mysql_fetch_array($guard_result) : false;
+		if(!$guard_result){
+			// Keep the queued reminder for a later retry if its status cannot be checked.
+			continue;
+		}
+		if(!is_array($guard_row) || intval($guard_row['iscomplete']) !== 0){
+			@unlink($filename);
+			if(substr($filename, -10) === '.email.bat'){
+				@unlink(substr($filename, 0, -10));
+			}
+			continue;
+		}
+	}
     localExecInBackground("$filename");
 	$there_is_unsend_files = true;
 }
@@ -123,10 +139,10 @@ if($email_to_recive_notifications){
 	while($row=mysql_fetch_array($rs)){
 		$message_to=$email_to_recive_notifications;
 		$message_title="تحصيل جديد مبلغ : " . $row['depositeamount'];
-		$message_body="تحصيل جديد <br> سند رقم : $row['idsanad'] <br> المبلغ : $row['depositeamount'] <br> اسم المستأجر : $row['mostagername']
-					<br> البيان : $row['mybyan'] 	";
+		$message_body="تحصيل جديد <br> سند رقم : {$row['idsanad']} <br> المبلغ : {$row['depositeamount']} <br> اسم المستأجر : {$row['mostagername']}
+					<br> البيان : {$row['mybyan']} 	";
 		sendmessage($message_to , $message_title , $message_body);
-		mysql_query("update sanad set last_notifi_manger_for_collection_by_email = '".time()."'  where idsanad = $row['idsanad'] ");
+		mysql_query("update sanad set last_notifi_manger_for_collection_by_email = '".time()."'  where idsanad = {$row['idsanad']} ");
 	}
 }
 
@@ -136,10 +152,10 @@ if($tel_to_recive_notifications){
 	$rs=mysql_query($sql);
 	while($row=mysql_fetch_array($rs)){
 		$message_to=$tel_to_recive_notifications;
-		$message_body="تحصيل مبلغ :  $row['depositeamount']
-						اسم المستأجر : $row['mostagername']	";
+		$message_body="تحصيل مبلغ :  {$row['depositeamount']}
+						اسم المستأجر : {$row['mostagername']}	";
 		sendmessage($message_to , $message_title , $message_body);
-		mysql_query("update sanad set last_notifi_manger_for_collection_by_sms = '".time()."'  where idsanad = $row['idsanad'] ");
+		mysql_query("update sanad set last_notifi_manger_for_collection_by_sms = '".time()."'  where idsanad = {$row['idsanad']} ");
 	}
 }
 
@@ -153,10 +169,10 @@ if($notifi_owner_for_collection_by_mail){
 		$owneremail = mysql_fetch_array(mysql_query("select email amlak where  idaqar='".$row['idaqar']."'"));
 		$message_to=$owneremail['email'];
 		$message_title="تحصيل جديد مبلغ : " . $row['depositeamount'];
-		$message_body="تحصيل جديد <br> سند رقم : $row['idsanad'] <br> المبلغ : $row['depositeamount'] <br> اسم المستأجر : $row['mostagername']
-					<br> البيان : $row['mybyan']	";
+		$message_body="تحصيل جديد <br> سند رقم : {$row['idsanad']} <br> المبلغ : {$row['depositeamount']} <br> اسم المستأجر : {$row['mostagername']}
+					<br> البيان : {$row['mybyan']}	";
 		sendmessage($message_to , $message_title , $message_body);
-		mysql_query("update sanad set last_notifi_owner_for_collection_by_email = '".time()."'  where idsanad = $row['idsanad'] ");
+		mysql_query("update sanad set last_notifi_owner_for_collection_by_email = '".time()."'  where idsanad = {$row['idsanad']} ");
 	}
 }
 
@@ -168,10 +184,10 @@ if($notifi_owner_for_collection_by_sms){
 		$ownemobile = mysql_fetch_array(mysql_query("select mobile amlak where  idaqar='".$row['idaqar']."'"));
 		$message_to=$ownemobile['mobile'];
 		$message_to=$tel_to_recive_notifications;
-		$message_body="تحصيل مبلغ :  $row['depositeamount']
-						اسم المستأجر : $row['mostagername']	";
+		$message_body="تحصيل مبلغ :  {$row['depositeamount']}
+						اسم المستأجر : {$row['mostagername']}	";
 		sendmessage($message_to , $message_title , $message_body);
-		mysql_query("update sanad set last_notifi_owner_for_collection_by_sms = '".time()."'  where idsanad = $row['idsanad'] ");
+		mysql_query("update sanad set last_notifi_owner_for_collection_by_sms = '".time()."'  where idsanad = {$row['idsanad']} ");
 	}
 }
 
@@ -235,6 +251,13 @@ function notifi_for_rent($number_of_days , $message_type , $notifi_field_name ){
 	$counx=0;
     $local_address ="http://127.0.0.1:9009";
 	while($row=mysql_fetch_array($result)){
+	$message_to = '';
+	$message_title = '';
+	$message_body = '';
+	$installment_id = intval($row['kastid']);
+	if(!hntInstallmentCanReceiveReminder($installment_id, $link)){
+		continue;
+	}
 
 
 
@@ -258,21 +281,49 @@ function notifi_for_rent($number_of_days , $message_type , $notifi_field_name ){
 	else
 	{
 		$dateo = $dcal->g2u(date("d",$row['kastdate']),date("m",$row['kastdate']),date("Y",$row['kastdate']));
-		$collection_date =  "$dateo['day']/$dateo['month']/$dateo['year']";
+		$collection_date = $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'];
 	}
 
 
 	if($message_type == "sms"){
 		//$message_to = $rowm['mostagertel'];
-		$mailreadydata=file_get_contents(  $local_address."/aqary/admin/include/amlak/letter.hnt?mostagerid=$rowm['mostagerid']&idsubaqar=$row['idsubaqar']&hnt_dll=$hnt_dll&sendsms=1&username=$lusername&password=$lpassword");
+		$mailreadydata=@file_get_contents($local_address . "/aqary/admin/include/amlak/letter.hnt?" . http_build_query(array(
+			'mostagerid' => intval($rowm['mostagerid']),
+			'idsubaqar' => intval($row['idsubaqar']),
+			'kastid' => $installment_id,
+			'hnt_dll' => intval($hnt_dll),
+			'sendsms' => 1,
+			'username' => $lusername,
+			'password' => $lpassword
+		)));
+		if($mailreadydata === false || $mailreadydata === ''){
+			continue;
+		}
 		$mailreadydata=explode("##@@##",$mailreadydata);
+		if(count($mailreadydata) < 3 || trim($mailreadydata[1]) === '' || trim($mailreadydata[2]) === ''){
+			continue;
+		}
 		$message_to=$mailreadydata[1];
 		$message_body=$mailreadydata[2];
 	}
 	if($message_type == "email"){
 		//$message_to = $rowm['mostageremail'];
-		$mailreadydata=file_get_contents(  $local_address."/aqary/admin/include/amlak/letter.hnt?mostagerid=$rowm['mostagerid']&idsubaqar=$row['idsubaqar']&hnt_dll=$hnt_dll&sendmail=1&username=$lusername&password=$lpassword");
+		$mailreadydata=@file_get_contents($local_address . "/aqary/admin/include/amlak/letter.hnt?" . http_build_query(array(
+			'mostagerid' => intval($rowm['mostagerid']),
+			'idsubaqar' => intval($row['idsubaqar']),
+			'kastid' => $installment_id,
+			'hnt_dll' => intval($hnt_dll),
+			'sendmail' => 1,
+			'username' => $lusername,
+			'password' => $lpassword
+		)));
+		if($mailreadydata === false || $mailreadydata === ''){
+			continue;
+		}
 		$mailreadydata=explode("##@@##",$mailreadydata);
+		if(count($mailreadydata) < 4 || trim($mailreadydata[1]) === '' || trim($mailreadydata[2]) === '' || trim($mailreadydata[3]) === ''){
+			continue;
+		}
 		$message_to=$mailreadydata[1];
 		$message_title=$mailreadydata[2];
 		$message_body=$mailreadydata[3];
@@ -292,7 +343,12 @@ function notifi_for_rent($number_of_days , $message_type , $notifi_field_name ){
 		}
 	}
 
-	sendmessage($message_to , $message_title , $message_body);
+	if(!hntInstallmentCanReceiveReminder($installment_id, $link)){
+		continue;
+	}
+	if(!sendmessage($message_to , $message_title , $message_body, $installment_id)){
+		continue;
+	}
 
 	 ?>
 
@@ -323,7 +379,7 @@ function notifi_for_rent($number_of_days , $message_type , $notifi_field_name ){
 		{
 			//echo  ArabicTools::arabicDate('hj:d/m/Y', $row['kastdate']);
 			$dateo = $dcal->g2u(date("d",$row['kastdate']),date("m",$row['kastdate']),date("Y",$row['kastdate']));
-			echo"$dateo['day']/$dateo['month']/$dateo['year']";
+			echo $dateo['day'] . "/" . $dateo['month'] . "/" . $dateo['year'];
 		}
 	?>
 	</td></tr>
@@ -331,7 +387,7 @@ function notifi_for_rent($number_of_days , $message_type , $notifi_field_name ){
 
 
 	<?
-		mysql_query("update aksat set $notifi_field_name =".time()." where kastid = $row['kastid'] ");
+		mysql_query("update aksat set $notifi_field_name =".time()." where kastid = $installment_id and iscomplete=0 ");
 	}
 	?>
 	</table>

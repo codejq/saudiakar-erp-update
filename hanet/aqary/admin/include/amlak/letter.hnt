@@ -16,6 +16,7 @@ $sendmail = isset($sendmail) ? intval($sendmail) : 0;
 $sendsms = isset($sendsms) ? intval($sendsms) : 0;
 $hnt_dll = isset($hnt_dll) ? intval($hnt_dll) : 0;
 $smstemplate = isset($smstemplate) ? trim($smstemplate) : '';
+$kastid = isset($kastid) ? intval($kastid) : 0;
 $letterlang = (isset($lang) && strtolower(trim($lang)) == 'en') ? 'en' : 'ar';
 $hnt_dll_type = 0;
 $sanaddata = array();
@@ -57,10 +58,19 @@ if (!$row) {
     );
 }
 
-// Get installment data
-$sql = "SELECT min(kastdate) as dd, aksat.* FROM aksat where iscomplete=0 and idsubaqar='" . intval($idsubaqar) . "' GROUP BY idsubaqar order by kastdate";
+// Get the exact unpaid installment for automatic reminders. Manual letters use
+// the earliest unpaid installment for the selected contract.
+if ($kastid > 0) {
+    $sql = "SELECT * FROM aksat WHERE kastid='" . intval($kastid) . "' AND idsubaqar='" . intval($idsubaqar) . "' AND iscomplete=0 LIMIT 1";
+} else {
+    $sql = "SELECT * FROM aksat WHERE iscomplete=0 AND idsubaqar='" . intval($idsubaqar) . "' ORDER BY kastdate, kastid LIMIT 1";
+}
 $rowk = mysql_fetch_array(mysql_query($sql, $link));
 if (!$rowk) {
+    if ($sendmail == 1 || $sendsms == 1) {
+        // Never create a reminder when the selected installment is already paid.
+        exit();
+    }
     $rowk = array(
         'kastdate' => time(),
         'kastvalue' => 0

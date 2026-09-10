@@ -217,7 +217,25 @@ function localExecInBackground($cmd) {
     }
 }
 
-function  sendmessage($message_to , $message_title , $message_body){
+function hntInstallmentCanReceiveReminder($installment_id, $link){
+	$installment_id = intval($installment_id);
+	if($installment_id < 1 || !$link){
+		return false;
+	}
+
+	$guard_result = mysql_query("SELECT iscomplete FROM aksat WHERE kastid='" . $installment_id . "' LIMIT 1", $link);
+	$guard_row = $guard_result ? mysql_fetch_array($guard_result) : false;
+
+	return is_array($guard_row) && intval($guard_row['iscomplete']) === 0;
+}
+
+function  sendmessage($message_to , $message_title , $message_body, $notification_installment_id = 0){
+	global $link;
+	$notification_installment_id = intval($notification_installment_id);
+	if($notification_installment_id > 0 && !hntInstallmentCanReceiveReminder($notification_installment_id, $link)){
+		return false;
+	}
+
 	$bat_check_internet ="
 		chcp 1256
 		@echo off
@@ -242,6 +260,7 @@ function  sendmessage($message_to , $message_title , $message_body){
 	if(!is_dir($path)){
 		@mkdir($path);
 	}
+	$queue_prefix = $notification_installment_id > 0 ? "installment-" . $notification_installment_id . "-" : "";
 	if(strpos($message_to,'@')){
 		//send mail
 		$mailsettings=@file_get_contents($_SERVER['DOCUMENT_ROOT'] . '/aqary/mailsettings.cfg');
@@ -260,7 +279,7 @@ function  sendmessage($message_to , $message_title , $message_body){
 		$mailsendername1=$mailsendername;
 		$mailsendername="=?$charset?B?".base64_encode($mailsendername)."?=\n";
 		$charset='windows-1256';
-		$filemailbody = $path.rand(1111,9999)."-".rand(2222,8888)."-".time().".msg.html";
+		$filemailbody = $path.$queue_prefix.rand(1111,9999)."-".rand(2222,8888)."-".time().".msg.html";
 		file_put_contents($filemailbody, $message_body);
 		$message_to = str_replace(array('-',"\r\n",';',' '),",",$message_to);
 		$message_to = explode(",",$message_to);
@@ -291,13 +310,18 @@ function  sendmessage($message_to , $message_title , $message_body){
 						 del /F /Q  \"$dos_file_name\"
 						:END
 						");
+		if($notification_installment_id > 0 && !hntInstallmentCanReceiveReminder($notification_installment_id, $link)){
+			@unlink($filemailbody.".email.bat");
+			@unlink($filemailbody);
+			return false;
+		}
 		localExecInBackground($filemailbody.".email.bat");
-		return ;
+		return true;
 
 	}
 	else{
 		if(!$message_to){
-			return;
+			return false;
 		}
 		//send sms
 		$message_body = urlencode(str_replace("\r\n","",$message_body));
@@ -309,7 +333,7 @@ function  sendmessage($message_to , $message_title , $message_body){
 
 		$mailreadydata = implode('?', explode('&', $mailreadydata[1], 2));
 		$mailreadydata = str_replace("??","?",$mailreadydata);
-		$filemailbody = $path.rand(1111,9999)."-".rand(2222,8888)."-".time().".sms.bat";
+		$filemailbody = $path.$queue_prefix.rand(1111,9999)."-".rand(2222,8888)."-".time().".sms.bat";
 		$command_data = " \"{$_SERVER['DOCUMENT_ROOT']}/aqary/tools/aria2/aria2c.exe\" \"" . $mailreadydata .'"';
 		$command_data = str_replace(array("\r\n","\r","\n"),'',$command_data);
 		$command_data = str_replace("^0^","?",$command_data);
@@ -320,8 +344,12 @@ function  sendmessage($message_to , $message_title , $message_body){
 						 del /F /Q  \"$dos_file_name\"
 						:END
 						");
+		if($notification_installment_id > 0 && !hntInstallmentCanReceiveReminder($notification_installment_id, $link)){
+			@unlink($filemailbody);
+			return false;
+		}
 		localExecInBackground($filemailbody);
-		return ;
+		return true;
 
 	}
 
