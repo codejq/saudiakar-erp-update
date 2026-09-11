@@ -96,30 +96,6 @@ if (isset($rowperpage) && $rowperpage) {
     mysql_query($dql, $link);
 }
 
-// Handle delete operation
-if (isset($_REQUEST['deleterecord']) && $_REQUEST['deleterecord']) {
-    $delete_id = intval($_REQUEST['deleterecord']);
-    $sql = "DELETE FROM " . $dep_data['dep_table_name'] . " WHERE id = '" . $delete_id . "' LIMIT 1";
-    $delete_result = mysql_query($sql, $link);
-
-    // Return JSON response for AJAX requests
-    if ($is_ajax_request) {
-        header('Content-Type: application/json; charset=utf-8');
-        if ($delete_result) {
-            echo json_encode([
-                'success' => true,
-                'message' => 'تم الحذف بنجاح'
-            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        } else {
-            echo json_encode([
-                'success' => false,
-                'error' => 'فشل في حذف السجل'
-            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        }
-        exit();
-    }
-}
-
 // Get user report settings
 $custsql = "SELECT custumreport.*, userreport.rowperpage
             FROM `custumreport`, `userreport`
@@ -451,9 +427,49 @@ $result = mysql_query($sql, $link);
     // Execute query
     $sql = "SELECT " . $custmsql . " FROM " . $dep_data['dep_table_name'] . " $sqlwhere ORDER BY $myorderby LIMIT $limit";
     $result = mysql_query($sql, $link);
+    $m_error = mysql_error();
+
+    // Map displayed report labels back to explicitly editable department columns.
+    $department_inline_fields = array();
+    $department_selects_all_fields = (bool)preg_match(
+        '/(?:^|,)\s*(?:`?[A-Za-z0-9_]+`?\s*\.\s*)?\*\s*(?=,|$)/u',
+        $custmsql
+    );
+    $department_fields_result = mysql_query(
+        "SELECT fld_name, fld_en_name, fld_values, fld_type
+         FROM department_field WHERE dep_id='" . intval($dep_id_safe) . "'",
+        $link
+    );
+    while ($department_field = mysql_fetch_array($department_fields_result)) {
+        $department_column = trim((string)$department_field['fld_en_name']);
+        $department_type = intval($department_field['fld_type']);
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $department_column) || in_array($department_type, array(0, 4, 6, 7), true)) {
+            continue;
+        }
+        $department_options = array();
+        if ($department_type === 3) {
+            $department_options = array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', (string)$department_field['fld_values']))));
+        } elseif ($department_type === 5) {
+            $department_options = array('', 'نعم', 'on');
+        }
+        $department_meta = array(
+            'field' => $department_column,
+            'editor' => in_array($department_type, array(3, 5), true) ? 'select' : 'text',
+            'bulk' => in_array($department_type, array(3, 5), true) ? '1' : '0',
+            'options' => $department_options,
+        );
+        $department_label = (string)$department_field['fld_name'];
+        $direct_field_pattern = '/(?:^|,)\s*(?:`?[A-Za-z0-9_]+`?\s*\.\s*)?`?'
+            . preg_quote($department_column, '/')
+            . '`?(?:\s+AS\s+[\'"`]?' . preg_quote($department_label, '/') . '[\'"`]?)?\s*(?=,|$)/iu';
+        if ($department_selects_all_fields || preg_match($direct_field_pattern, $custmsql)) {
+            $department_inline_fields[$department_label] = $department_meta;
+            $department_inline_fields[$department_column] = $department_meta;
+        }
+    }
+    $bulk_enabled = empty($_REQUEST['showreport']);
 
     // Handle missing column errors by auto-creating them
-    $m_error = mysql_error();
     if ($m_error && strrpos($m_error, 'column') && strrpos($m_error, ' in')) {
         $column_name = substr($m_error, strrpos($m_error, 'column') + 8, strrpos($m_error, ' in') - 9 - strrpos($m_error, 'column'));
         $sql = "ALTER TABLE " . $dep_data['dep_table_name'] . " ADD `$column_name` TEXT NOT NULL";
@@ -466,7 +482,7 @@ $result = mysql_query($sql, $link);
     <div class="card shadow-sm border-0">
         <div class="card-body p-0">
             <div class="table-responsive">
-                <table class="table table-sm mb-0 align-middle" id="myTable">
+                <table class="table table-sm mb-0 align-middle" id="myTable"<?= $bulk_enabled ? ' data-aqary-bulk data-resource="department" data-dep-id="' . intval($dep_id_safe) . '" data-screen="26"' : '' ?>>
                     <?php
                     $i = 0;
                     $j = 0;
@@ -487,8 +503,7 @@ $result = mysql_query($sql, $link);
                                         <i class='bi bi-pencil'></i>
                                      </button>";
 
-                        $delete_btn = "<button type='button' class='btn btn-sm btn-outline-danger policy_{$sc_id}_deleetes'
-                                               onclick=\"deleteRecord(" . intval($row['رقم']) . ", this);\"
+                        $delete_btn = "<button type='button' class='btn btn-sm btn-outline-danger aqary-delete policy_{$sc_id}_deleetes'
                                                title='حذف'>
                                           <i class='bi bi-trash'></i>
                                        </button>";
@@ -496,6 +511,9 @@ $result = mysql_query($sql, $link);
                         // Render table header on first iteration
                         if ($i == 0) {
                             echo "<thead><tr class='text-center'>";
+                            if ($bulk_enabled) {
+                                echo "<th class='py-3 border-0 screenonly' style='width:45px'><input type='checkbox' class='form-check-input aqary-select-all' aria-label='تحديد كل السجلات الظاهرة'></th>";
+                            }
                             echo "<th class='py-3 border-0'>م</th>";
                             $rowmun = count($row);
                             $rowfotter = $row;
@@ -517,8 +535,12 @@ $result = mysql_query($sql, $link);
 
                         // Render table row
                         $j = 0;
-                        echo "<tr class='gridrow{$noclickaction}' id='row-" . intval($row['رقم']) . "' style='cursor:pointer;'>";
+                        echo "<tr class='gridrow{$noclickaction}' id='row-" . intval($row['رقم']) . "' data-record-id='" . intval($row['رقم']) . "' style='cursor:pointer;'>";
+                        if ($bulk_enabled) {
+                            echo "<td align='center' class='screenonly'><input type='checkbox' class='form-check-input aqary-row-select' value='" . intval($row['رقم']) . "' aria-label='تحديد السجل'></td>";
+                        }
                         echo "<td align='center'>" . $counx . "</td>";
+                        $row_keys = array_keys($row);
                         foreach ($row as $k => $v) {
                             if (in_array($k, $sumfields)) {
                                 $sumf[$k] = ($sumf[$k] ?? 0) + floatval($v);
@@ -530,7 +552,16 @@ $result = mysql_query($sql, $link);
                                         $v = "<a href='" . htmlspecialchars($v, ENT_QUOTES, 'UTF-8') . "' target='_blank' class='btn btn-sm btn-link'><i class='bi bi-file-earmark me-1'></i>ملف</a>";
                                     }
                                 }
-                                echo "<td align='center'>" . $v . "</td>";
+                                $cell_attributes = '';
+                                $display_key = isset($row_keys[$j + 1]) ? (string)$row_keys[$j + 1] : (string)$k;
+                                if ($bulk_enabled && isset($department_inline_fields[$display_key]) && strpos((string)$v, '<a ') === false) {
+                                    $field_meta = $department_inline_fields[$display_key];
+                                    $cell_attributes = " tabindex='0' data-inline-field='" . htmlspecialchars($field_meta['field'], ENT_QUOTES, 'UTF-8') . "' data-editor='" . $field_meta['editor'] . "' data-bulk-safe='" . $field_meta['bulk'] . "' data-value='" . htmlspecialchars(strip_tags((string)$v), ENT_QUOTES, 'UTF-8') . "'";
+                                    if ($field_meta['editor'] === 'select') {
+                                        $cell_attributes .= " data-options='" . htmlspecialchars(json_encode($field_meta['options'], JSON_UNESCAPED_UNICODE), ENT_QUOTES, 'UTF-8') . "'";
+                                    }
+                                }
+                                echo "<td align='center'" . $cell_attributes . ">" . $v . "</td>";
                             }
                             $j++;
                         }
@@ -554,7 +585,7 @@ $result = mysql_query($sql, $link);
                         echo "</tr>";
 
                         // Hidden row for expanded details
-                        echo "<tr class='screenonly' style='border:0px;display:none;background-color:#fefefe' id='grid-" . intval($row['رقم']) . "'>
+                        echo "<tr class='screenonly' data-parent-record-id='" . intval($row['رقم']) . "' style='border:0px;display:none;background-color:#fefefe' id='grid-" . intval($row['رقم']) . "'>
                                 <td colspan='50'>
                                     <div style='display:none' id='gridcontrol-" . intval($row['رقم']) . "'></div>
                                 </td>
@@ -570,6 +601,9 @@ $result = mysql_query($sql, $link);
                         $j = 0;
                         $ok = 0;
                         echo "<tfoot><tr style='background: linear-gradient(135deg, #d1fae5 0%, #cffafe 100%); font-weight: 600; color: #0a7047;'>";
+                        if ($bulk_enabled) {
+                            echo "<td class='screenonly'>&nbsp;</td>";
+                        }
                         echo "<td>&nbsp;</td>";
                         foreach ($rowfotter as $k => $v) {
                             if ($j % 2) {
@@ -595,6 +629,10 @@ $result = mysql_query($sql, $link);
 
 <!-- Toast Container -->
 <div class="toast-container-custom" id="toastContainer"></div>
+
+<?php if ($bulk_enabled) { ?>
+<script src="/aqary/js/bulk-inline-table.js"></script>
+<?php } ?>
 
 <!-- Modern JavaScript with jQuery -->
 <script type="text/javascript">
@@ -660,67 +698,6 @@ const ToastNotification = {
 document.addEventListener('DOMContentLoaded', () => {
     ToastNotification.init();
 });
-
-/**
- * Delete record with enhanced UX
- */
-function deleteRecord(recordId, buttonElement) {
-    confirm('هل أنت متأكد من حذف هذا السجل؟', 'تأكيد الحذف', () => {
-        const originalHtml = buttonElement.innerHTML;
-        buttonElement.disabled = true;
-        buttonElement.innerHTML = '<i class="bi bi-hourglass-split"></i>';
-
-        const loadingToast = ToastNotification.show('جاري الحذف...', 'loading');
-
-        fetch(`dep_showwall.hnt?dep_id=<?= intval($_REQUEST['dep_id']) ?>&deleterecord=${recordId}&ajax=1`, {
-            method: 'GET',
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest'
-            }
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (loadingToast) loadingToast.hide();
-
-            if (data.success) {
-                ToastNotification.show(data.message || 'تم الحذف بنجاح', 'success', 2000);
-
-                const row = document.getElementById(`row-${recordId}`);
-                const gridRow = document.getElementById(`grid-${recordId}`);
-
-                if (row) {
-                    row.style.transition = 'all 0.3s ease';
-                    row.style.opacity = '0';
-                    row.style.transform = 'translateX(20px)';
-
-                    setTimeout(() => {
-                        row.remove();
-                        if (gridRow) gridRow.remove();
-
-                        const remainingRows = document.querySelectorAll('tr[id^="row-"]').length;
-                        if (remainingRows === 0) {
-                            setTimeout(() => window.location.reload(), 1000);
-                        }
-                    }, 300);
-                }
-            } else {
-                ToastNotification.show(data.error || 'فشل في حذف السجل', 'error', 5000);
-                buttonElement.disabled = false;
-                buttonElement.innerHTML = originalHtml;
-            }
-        })
-        .catch(error => {
-            if (loadingToast) loadingToast.hide();
-            buttonElement.disabled = false;
-            buttonElement.innerHTML = originalHtml;
-
-            ToastNotification.show('حدث خطأ في الاتصال', 'error', 5000);
-            console.error('Delete error:', error);
-        });
-    });
-
-    return false;
-}
 
 /**
  * Order/sort table by column

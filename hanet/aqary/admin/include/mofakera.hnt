@@ -78,22 +78,6 @@ if (!isset($hnt_dll) || !$hnt_dll) {
     $currentdate = "{$dateo['day']}/{$dateo['month']}/{$dateo['year']}";
 }
 
-// Handle delete request
-if (isset($dmid) && $dmid) {
-    $sql = "DELETE FROM message WHERE messageid = '" . intval($dmid) . "' AND userid = '" . intval($_SESSION['useridv']) . "' LIMIT 1";
-    mysql_query($sql, $link);
-
-    if ($is_ajax_request) {
-        ob_clean(); // Clear any buffered output
-        header('Content-Type: application/json; charset=utf-8');
-        echo json_encode([
-            'success' => true,
-            'message' => 'تم حذف التذكير بنجاح'
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        exit;
-    }
-}
-
 // Handle form submission (Add new reminder)
 if (isset($messagebody) && $messagebody) {
     try {
@@ -601,9 +585,12 @@ $default_minute = intval(date('i', $default_time));
         </div>
         <div class="card-body p-0">
             <div class="reminder-table">
-                <table class="table table-hover mb-0" id="remindersTable">
+                <table class="table table-hover mb-0" id="remindersTable" data-aqary-bulk data-resource="message" data-screen="71">
                     <thead>
                         <tr>
+                            <th class="text-center screenonly" style="width:45px">
+                                <input type="checkbox" class="form-check-input aqary-select-all" aria-label="تحديد كل التذكيرات الظاهرة">
+                            </th>
                             <th width="40%">الرسالة</th>
                             <th class="text-center">الساعة</th>
                             <th class="text-center">بداية التذكير</th>
@@ -618,7 +605,7 @@ $default_minute = intval(date('i', $default_time));
                         $result = mysql_query($sql, $link);
 
                         if (mysql_num_rows($result) == 0) {
-                            echo '<tr><td colspan="6" class="text-center text-muted py-5">
+                            echo '<tr><td colspan="7" class="text-center text-muted py-5">
                                     <i class="bi bi-inbox display-4 d-block mb-3"></i>
                                     لا توجد تذكيرات حالياً
                                   </td></tr>';
@@ -652,14 +639,15 @@ $default_minute = intval(date('i', $default_time));
                                 $notifications = '<span class="text-muted">-</span>';
                             }
 
-                            echo '<tr id="reminder-row-' . $row['messageid'] . '">';
-                            echo '<td>' . nl2br(htmlspecialchars($row['messagebody'], ENT_QUOTES, 'UTF-8')) . '</td>';
+                            echo '<tr id="reminder-row-' . $row['messageid'] . '" data-record-id="' . intval($row['messageid']) . '">';
+                            echo '<td class="text-center screenonly"><input type="checkbox" class="form-check-input aqary-row-select" value="' . intval($row['messageid']) . '" aria-label="تحديد التذكير"></td>';
+                            echo '<td tabindex="0" data-inline-field="messagebody" data-editor="text" data-bulk-safe="0" data-value="' . htmlspecialchars($row['messagebody'], ENT_QUOTES, 'UTF-8') . '">' . nl2br(htmlspecialchars($row['messagebody'], ENT_QUOTES, 'UTF-8')) . '</td>';
                             echo '<td class="text-center">' . htmlspecialchars($remtime, ENT_QUOTES, 'UTF-8') . '</td>';
                             echo '<td class="text-center">' . htmlspecialchars($remdate, ENT_QUOTES, 'UTF-8') . '</td>';
                             echo '<td class="text-center">' . htmlspecialchars($remdate_end, ENT_QUOTES, 'UTF-8') . '</td>';
                             echo '<td class="text-center">' . $notifications . '</td>';
                             echo '<td class="text-center">';
-                            echo '<button type="button" class="btn btn-sm btn-outline-danger delete-reminder" data-id="' . $row['messageid'] . '">';
+                            echo '<button type="button" class="btn btn-sm btn-outline-danger aqary-delete policy_' . intval($sc_id) . '_deleetes" data-id="' . intval($row['messageid']) . '">';
                             echo '<i class="bi bi-trash me-1"></i>حذف';
                             echo '</button>';
                             echo '</td>';
@@ -672,6 +660,8 @@ $default_minute = intval(date('i', $default_time));
         </div>
     </div>
 </div>
+
+<script src="/aqary/js/bulk-inline-table.js"></script>
 
 <!-- Loading Overlay -->
 <div id="loadingOverlay" class="loading-overlay">
@@ -820,49 +810,6 @@ $(document).ready(function() {
         });
     });
 
-    // Handle delete reminder
-    $(document).on('click', '.delete-reminder', function() {
-        var reminderId = $(this).data('id');
-        var rowElement = $('#reminder-row-' + reminderId);
-
-        confirm('هل أنت متأكد من حذف هذا التذكير؟', 'تأكيد الحذف', function() {
-            $.ajax({
-                url: 'mofakera.hnt',
-                type: 'POST',
-                data: {
-                    dmid: reminderId,
-                    ajax_submit: 1
-                },
-                dataType: 'json',
-                success: function(response) {
-                    if (response && response.success) {
-                        showBootstrapNotification('تم حذف التذكير بنجاح', 'success', 3000);
-
-                        // Fade out and remove the row
-                        rowElement.fadeOut(400, function() {
-                            $(this).remove();
-
-                            // Check if table is empty
-                            if ($('#remindersTable tbody tr').length === 0) {
-                                var emptyRow = '<tr><td colspan="6" class="text-center text-muted py-5">' +
-                                              '<i class="bi bi-inbox display-4 d-block mb-3"></i>' +
-                                              'لا توجد تذكيرات حالياً</td></tr>';
-                                $('#remindersTable tbody').html(emptyRow);
-                            }
-                        });
-                    } else {
-                        showBootstrapNotification('تم حذف التذكير', 'success', 3000);
-                        rowElement.fadeOut(400, function() {
-                            $(this).remove();
-                        });
-                    }
-                },
-                error: function() {
-                    showBootstrapNotification('حدث خطأ أثناء الحذف', 'error', 3000);
-                }
-            });
-        });
-    });
 });
 </script>
 

@@ -1,0 +1,404 @@
+<?php
+/**
+ * Shared, policy-driven endpoint for Aqary bulk selection and inline editing.
+ * Every resource and field is allowlisted below. Do not accept table or column
+ * names directly from the browser.
+ */
+$is_ajax_request = true;
+$sc_id = 0;
+include_once __DIR__ . '/../../reqloginajax.hnt';
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    sendResponse(false, 'طريقة الطلب غير مسموحة', [], 405);
+}
+
+$userId = intval($_SESSION['useridv'] ?? 0);
+if ($userId < 1) {
+    sendResponse(false, 'انتهت جلسة المستخدم', [], 401);
+}
+
+$postedToken = (string)($_POST['csrf_token'] ?? '');
+$sessionToken = (string)($_SESSION['bulk_inline_csrf'] ?? '');
+if ($postedToken === '' || $sessionToken === '' || !hash_equals($sessionToken, $postedToken)) {
+    sendResponse(false, 'تعذر التحقق من الطلب. حدّث الصفحة ثم حاول مرة أخرى', [], 419);
+}
+
+$resource = (string)($_POST['resource'] ?? '');
+$action = (string)($_POST['action'] ?? '');
+$field = (string)($_POST['field'] ?? '');
+$rawValue = (string)($_POST['value'] ?? '');
+$departmentId = intval($_POST['dep_id'] ?? 0);
+$recordIds = $_POST['record_ids'] ?? [];
+if (!is_array($recordIds)) {
+    $recordIds = [];
+}
+$recordIds = array_values(array_unique(array_filter(
+    array_map('intval', $recordIds),
+    static function ($id) {
+        return $id > 0;
+    }
+)));
+
+if (!in_array($action, ['inline_update', 'delete'], true)) {
+    sendResponse(false, 'العملية المطلوبة غير معروفة', [], 400);
+}
+if (!$recordIds || count($recordIds) > 100) {
+    sendResponse(false, 'يجب اختيار من سجل واحد إلى 100 سجل', [], 422);
+}
+
+$policies = [
+    'arady' => [
+        'table' => 'arady', 'key' => 'ardid', 'screen' => 4,
+        'owner' => 'custummerid', 'soft_delete' => true,
+        'fields' => [
+            'block' => ['type' => 'text', 'max' => 40, 'bulk' => false],
+            'ardrakam' => ['type' => 'text', 'max' => 25, 'bulk' => false],
+            'hay' => ['type' => 'text', 'max' => 250, 'bulk' => true],
+            'note' => ['type' => 'text', 'max' => 10000, 'bulk' => false],
+            'mesaha' => ['type' => 'decimal', 'min' => 0, 'bulk' => false],
+            'al3ard' => ['type' => 'text', 'max' => 40, 'bulk' => false],
+            'tol' => ['type' => 'text', 'max' => 40, 'bulk' => false],
+            'price' => ['type' => 'integer', 'min' => 0, 'bulk' => false],
+            'pricesom' => ['type' => 'integer', 'min' => 0, 'bulk' => false],
+        ],
+    ],
+    'emara' => [
+        'table' => 'emara', 'key' => 'emaraid', 'screen' => 16,
+        'owner' => 'custumerid', 'soft_delete' => true,
+        'fields' => [
+            'emararakam' => ['type' => 'text', 'max' => 25, 'bulk' => false],
+            'wehdatnum' => ['type' => 'integer', 'min' => 0, 'bulk' => false],
+            'adwarnum' => ['type' => 'integer', 'min' => 0, 'bulk' => false],
+            'mesaha' => ['type' => 'decimal', 'min' => 0, 'bulk' => false],
+            'hay' => ['type' => 'text', 'max' => 70, 'bulk' => true],
+            'block' => ['type' => 'text', 'max' => 70, 'bulk' => true],
+            'address' => ['type' => 'text', 'max' => 250, 'bulk' => false],
+            'note' => ['type' => 'text', 'max' => 10000, 'bulk' => false],
+            'price' => ['type' => 'decimal', 'min' => 0, 'bulk' => false],
+            'pricesom' => ['type' => 'decimal', 'min' => 0, 'bulk' => false],
+            'som' => ['type' => 'text', 'max' => 20, 'bulk' => false],
+        ],
+    ],
+    'vila' => [
+        'table' => 'vila', 'key' => 'vilaid', 'screen' => 27,
+        'owner' => 'custumerid', 'soft_delete' => true,
+        'fields' => [
+            'vilarakam' => ['type' => 'text', 'max' => 25, 'bulk' => false],
+            'wehdatnum' => ['type' => 'integer', 'min' => 0, 'bulk' => false],
+            'adwarnum' => ['type' => 'integer', 'min' => 0, 'bulk' => false],
+            'mesaha' => ['type' => 'decimal', 'min' => 0, 'bulk' => false],
+            'hay' => ['type' => 'text', 'max' => 70, 'bulk' => true],
+            'block' => ['type' => 'text', 'max' => 70, 'bulk' => true],
+            'address' => ['type' => 'text', 'max' => 250, 'bulk' => false],
+            'note' => ['type' => 'text', 'max' => 10000, 'bulk' => false],
+            'price' => ['type' => 'integer', 'min' => 0, 'bulk' => false],
+            'pricesom' => ['type' => 'integer', 'min' => 0, 'bulk' => false],
+            'som' => ['type' => 'text', 'max' => 20, 'bulk' => false],
+        ],
+    ],
+    'message' => [
+        'table' => 'message', 'key' => 'messageid', 'screen' => 71,
+        'owner' => 'userid', 'soft_delete' => false,
+        'fields' => [
+            'messagebody' => ['type' => 'text', 'max' => 10000, 'required' => true, 'bulk' => false],
+        ],
+    ],
+    'masder' => [
+        'table' => 'masder', 'key' => 'masderid', 'screen' => 67,
+        'owner' => null, 'soft_delete' => false, 'special_scope' => 'masder',
+        'fields' => [
+            'masdername' => ['type' => 'text', 'max' => 150, 'required' => true, 'bulk' => false],
+            'masdertel' => ['type' => 'text', 'max' => 25, 'bulk' => false],
+            'masderphone' => ['type' => 'text', 'max' => 245, 'bulk' => false],
+            'masderfax' => ['type' => 'text', 'max' => 25, 'bulk' => false],
+            'masderemail' => ['type' => 'email', 'max' => 30, 'bulk' => false],
+            'masderaddress' => ['type' => 'text', 'max' => 250, 'bulk' => false],
+            'mtype' => ['type' => 'text', 'max' => 200, 'bulk' => true],
+        ],
+    ],
+    'requestaqar' => [
+        'table' => 'requestaqar', 'key' => 'requestid', 'screen' => 79,
+        'owner' => 'userid', 'soft_delete' => false,
+        'fields' => [
+            'requestername' => ['type' => 'text', 'max' => 240, 'required' => true, 'bulk' => false],
+            'mobile' => ['type' => 'text', 'max' => 200, 'bulk' => false],
+            'phone' => ['type' => 'text', 'max' => 100, 'bulk' => false],
+            'description' => ['type' => 'text', 'max' => 10000, 'bulk' => false],
+        ],
+    ],
+];
+
+if ($resource === 'department') {
+    $depResult = mysql_query(
+        "SELECT dep_table_name FROM departments_name WHERE dep_id='" . $departmentId . "' AND (dep_isdeleted='' OR dep_isdeleted='0' OR dep_isdeleted IS NULL) LIMIT 1",
+        $link
+    );
+    $depRow = $depResult ? mysql_fetch_array($depResult) : false;
+    $depTable = is_array($depRow) ? (string)$depRow['dep_table_name'] : '';
+    if ($departmentId < 1 || !preg_match('/^[A-Za-z0-9_]+$/', $depTable)) {
+        sendResponse(false, 'القسم المطلوب غير صالح', [], 404);
+    }
+
+    $dynamicFields = [];
+    $fieldResult = mysql_query(
+        "SELECT fld_name, fld_en_name, fld_required, fld_values, fld_type
+         FROM department_field WHERE dep_id='" . $departmentId . "'",
+        $link
+    );
+    while ($fieldResult && $fieldRow = mysql_fetch_array($fieldResult)) {
+        $column = trim((string)$fieldRow['fld_en_name']);
+        $type = intval($fieldRow['fld_type']);
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $column) || in_array($type, [0, 4, 6, 7], true)) {
+            continue;
+        }
+        $dynamicPolicy = [
+            'column' => $column,
+            'type' => $type === 3 || $type === 5 ? 'enum' : 'text',
+            'max' => $type === 2 ? 10000 : 245,
+            'required' => !empty($fieldRow['fld_required']),
+            'bulk' => in_array($type, [3, 5], true),
+            'label' => (string)$fieldRow['fld_name'],
+        ];
+        if ($type === 3) {
+            $dynamicPolicy['values'] = array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', (string)$fieldRow['fld_values']))));
+        } elseif ($type === 5) {
+            $dynamicPolicy['values'] = ['', 'نعم', 'on'];
+        }
+        $dynamicFields[$column] = $dynamicPolicy;
+    }
+
+    $policies['department'] = [
+        'table' => $depTable, 'key' => 'id', 'screen' => 26,
+        'owner' => null, 'soft_delete' => false,
+        'fields' => $dynamicFields,
+    ];
+}
+
+if (!isset($policies[$resource])) {
+    sendResponse(false, 'نوع السجل غير مدعوم', [], 404);
+}
+$policy = $policies[$resource];
+
+$userResult = mysql_query(
+    "SELECT u.groupid, u.seeothermasder, g.allprevilage
+     FROM user u LEFT JOIN usergroups g ON g.groupid=u.groupid
+     WHERE u.userid='" . $userId . "' LIMIT 1",
+    $link
+);
+$userRow = $userResult ? mysql_fetch_array($userResult) : false;
+if (!is_array($userRow)) {
+    sendResponse(false, 'تعذر التحقق من صلاحيات المستخدم', [], 403);
+}
+$groupId = intval($userRow['groupid']);
+$allPrivilege = !empty($userRow['allprevilage']);
+$canSeeOthers = $allPrivilege || !empty($userRow['seeothermasder']) || !empty($_SESSION['seeothermasder']);
+$permissionColumn = $action === 'delete' ? 'deleetes' : 'edits';
+$globalPermission = $action === 'delete' ? !empty($_SESSION['candeletev']) : !empty($_SESSION['caneditv']);
+if (!$allPrivilege && (!$globalPermission || !checkScreenPermission(intval($policy['screen']), $groupId, $link))) {
+    sendResponse(false, 'ليس لديك صلاحية تنفيذ هذه العملية', [], 403);
+}
+$operationAllowed = $allPrivilege;
+if (!$operationAllowed) {
+    $permissionResult = mysql_query(
+        "SELECT `$permissionColumn` AS allowed FROM ugroupscreen
+         WHERE screenid='" . intval($policy['screen']) . "' AND groupid='" . $groupId . "' LIMIT 1",
+        $link
+    );
+    $permissionRow = $permissionResult ? mysql_fetch_array($permissionResult) : false;
+    $operationAllowed = is_array($permissionRow) && !empty($permissionRow['allowed']);
+}
+if (!$operationAllowed) {
+    sendResponse(false, 'ليس لديك صلاحية تنفيذ هذه العملية', [], 403);
+}
+
+function aqaryBulkTextLength($value)
+{
+    return function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
+}
+
+function aqaryBulkNormalize($rawValue, array $fieldPolicy)
+{
+    $value = trim((string)$rawValue);
+    if (!empty($fieldPolicy['required']) && $value === '') {
+        throw new InvalidArgumentException('هذا الحقل مطلوب');
+    }
+
+    $type = (string)($fieldPolicy['type'] ?? 'text');
+    if ($type === 'integer') {
+        if (!preg_match('/^-?\d+$/', $value)) {
+            throw new InvalidArgumentException('يجب إدخال رقم صحيح');
+        }
+        $value = (string)intval($value);
+    } elseif ($type === 'decimal') {
+        $value = str_replace(',', '.', $value);
+        if ($value === '' || !is_numeric($value) || !is_finite((float)$value)) {
+            throw new InvalidArgumentException('يجب إدخال رقم صالح');
+        }
+        $value = rtrim(rtrim(number_format((float)$value, 4, '.', ''), '0'), '.');
+        if ($value === '-0') {
+            $value = '0';
+        }
+    } elseif ($type === 'email' && $value !== '' && !filter_var($value, FILTER_VALIDATE_EMAIL)) {
+        throw new InvalidArgumentException('عنوان البريد الإلكتروني غير صالح');
+    } elseif ($type === 'enum' && !in_array($value, (array)($fieldPolicy['values'] ?? []), true)) {
+        throw new InvalidArgumentException('القيمة المختارة غير مسموحة');
+    }
+
+    if (isset($fieldPolicy['min']) && is_numeric($value) && (float)$value < (float)$fieldPolicy['min']) {
+        throw new InvalidArgumentException('القيمة أقل من الحد المسموح');
+    }
+    if (isset($fieldPolicy['max']) && aqaryBulkTextLength($value) > intval($fieldPolicy['max'])) {
+        throw new InvalidArgumentException('القيمة أطول من الحد المسموح');
+    }
+    return $value;
+}
+
+function aqaryBulkRecordAccessible($resource, array $policy, $recordId, $userId, $canSeeOthers, $link)
+{
+    $table = $policy['table'];
+    $key = $policy['key'];
+    $sql = "SELECT * FROM `$table` WHERE `$key`='" . intval($recordId) . "' LIMIT 1";
+    $result = mysql_query($sql, $link);
+    $record = $result ? mysql_fetch_array($result) : false;
+    if (!is_array($record)) {
+        return false;
+    }
+
+    if (!empty($policy['owner']) && !$canSeeOthers && intval($record[$policy['owner']] ?? 0) !== intval($userId)) {
+        return false;
+    }
+
+    if (($policy['special_scope'] ?? '') === 'masder' && !$canSeeOthers) {
+        $manager = mysql_fetch_array(mysql_query('SELECT MIN(userid) AS manager_id FROM user', $link));
+        if (intval($manager['manager_id'] ?? 0) !== intval($userId)) {
+            $id = intval($recordId);
+            $scopeSql = "SELECT 1 FROM arady WHERE masderid='$id' AND custummerid='" . intval($userId) . "'
+                         UNION ALL SELECT 1 FROM emara WHERE masderid='$id' AND custumerid='" . intval($userId) . "'
+                         UNION ALL SELECT 1 FROM vila WHERE masderid='$id' AND custumerid='" . intval($userId) . "' LIMIT 1";
+            $scopeResult = mysql_query($scopeSql, $link);
+            if (!$scopeResult || mysql_num_rows($scopeResult) < 1) {
+                return false;
+            }
+        }
+    }
+    return $record;
+}
+
+$updatedIds = [];
+$deletedIds = [];
+$skipped = [];
+
+try {
+    mysqli_begin_transaction($link);
+
+    if ($action === 'inline_update') {
+        if (!isset($policy['fields'][$field])) {
+            throw new InvalidArgumentException('الحقل المطلوب غير قابل للتعديل');
+        }
+        $fieldPolicy = $policy['fields'][$field];
+        if (count($recordIds) > 1 && empty($fieldPolicy['bulk'])) {
+            throw new InvalidArgumentException('هذا الحقل يقبل تعديل سجل واحد فقط');
+        }
+        $value = aqaryBulkNormalize($rawValue, $fieldPolicy);
+        $column = (string)($fieldPolicy['column'] ?? $field);
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $column)) {
+            throw new RuntimeException('Invalid server field policy');
+        }
+
+        foreach ($recordIds as $recordId) {
+            $record = aqaryBulkRecordAccessible($resource, $policy, $recordId, $userId, $canSeeOthers, $link);
+            if (!$record || (!empty($policy['soft_delete']) && (string)($record['statusx'] ?? '') === '3')) {
+                $skipped[] = ['id' => $recordId, 'code' => 'unavailable', 'message' => 'السجل غير متاح للتعديل'];
+                continue;
+            }
+            $statement = mysqli_prepare($link, "UPDATE `{$policy['table']}` SET `$column`=? WHERE `{$policy['key']}`=? LIMIT 1");
+            if (!$statement) {
+                throw new RuntimeException('Could not prepare update');
+            }
+            mysqli_stmt_bind_param($statement, 'si', $value, $recordId);
+            if (!mysqli_stmt_execute($statement)) {
+                mysqli_stmt_close($statement);
+                throw new RuntimeException('Could not update record');
+            }
+            mysqli_stmt_close($statement);
+            $updatedIds[] = $recordId;
+        }
+    } else {
+        foreach ($recordIds as $recordId) {
+            $record = aqaryBulkRecordAccessible($resource, $policy, $recordId, $userId, $canSeeOthers, $link);
+            if (!$record) {
+                $skipped[] = ['id' => $recordId, 'code' => 'unavailable', 'message' => 'السجل غير متاح للحذف'];
+                continue;
+            }
+
+            if (!empty($policy['soft_delete'])) {
+                $status = (string)($record['statusx'] ?? '');
+                if (in_array($status, ['1', '2'], true)) {
+                    $skipped[] = ['id' => $recordId, 'code' => 'protected', 'message' => 'لا يمكن حذف سجل محجوز أو مباع'];
+                    continue;
+                }
+                if ($status === '3') {
+                    $skipped[] = ['id' => $recordId, 'code' => 'already_deleted', 'message' => 'السجل محذوف مسبقاً'];
+                    continue;
+                }
+                $deleteSql = "UPDATE `{$policy['table']}` SET statusx='3' WHERE `{$policy['key']}`='" . intval($recordId) . "' LIMIT 1";
+            } else {
+                if ($resource === 'masder') {
+                    $id = intval($recordId);
+                    $usedSql = "SELECT 1 FROM arady WHERE masderid='$id'
+                                UNION ALL SELECT 1 FROM emara WHERE masderid='$id'
+                                UNION ALL SELECT 1 FROM vila WHERE masderid='$id' LIMIT 1";
+                    $usedResult = mysql_query($usedSql, $link);
+                    if ($usedResult && mysql_num_rows($usedResult) > 0) {
+                        $skipped[] = ['id' => $recordId, 'code' => 'referenced', 'message' => 'الوسيط مرتبط بعقار ولا يمكن حذفه'];
+                        continue;
+                    }
+                }
+                $deleteSql = "DELETE FROM `{$policy['table']}` WHERE `{$policy['key']}`='" . intval($recordId) . "' LIMIT 1";
+            }
+
+            if (!mysql_query($deleteSql, $link)) {
+                throw new RuntimeException('Could not delete record');
+            }
+            $deletedIds[] = $recordId;
+        }
+    }
+
+    mysqli_commit($link);
+} catch (InvalidArgumentException $e) {
+    mysqli_rollback($link);
+    sendResponse(false, $e->getMessage(), [], 422);
+} catch (Throwable $e) {
+    mysqli_rollback($link);
+    error_log('Aqary bulk inline operation failed: ' . $e->getMessage());
+    sendResponse(false, 'تعذر تنفيذ العملية حالياً', [], 500);
+}
+
+error_log('Aqary bulk inline audit: ' . json_encode([
+    'user_id' => $userId,
+    'resource' => $resource,
+    'action' => $action,
+    'field' => $action === 'inline_update' ? $field : null,
+    'requested_ids' => $recordIds,
+    'changed_ids' => $action === 'inline_update' ? $updatedIds : $deletedIds,
+    'skipped_ids' => array_map(static function ($item) {
+        return intval($item['id'] ?? 0);
+    }, $skipped),
+], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+
+if ($action === 'inline_update') {
+    sendResponse(true, $skipped ? 'تم تحديث بعض السجلات' : 'تم الحفظ بنجاح', [
+        'updated_count' => count($updatedIds),
+        'updated_ids' => $updatedIds,
+        'field' => $field,
+        'value' => $value,
+        'display' => $value === '' ? '—' : $value,
+        'skipped' => $skipped,
+    ]);
+}
+
+sendResponse(true, $skipped ? 'تم حذف السجلات المتاحة فقط' : 'تم الحذف بنجاح', [
+    'deleted_count' => count($deletedIds),
+    'deleted_ids' => $deletedIds,
+    'skipped' => $skipped,
+]);

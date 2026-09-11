@@ -192,38 +192,6 @@ $requestid="";
 }
 
 
-if(isset($deletereq) && $deletereq)
-{
-$sql="delete from requestaqar where requestid='".$deletereq."'";
-mysql_query($sql,$link);
-
-// Build redirect URL with existing search parameters
-$redirectUrl = "request.hnt?";
-$params = array();
-if(isset($search) && $search) {
-    $params[] = "search=" . urlencode($search);
-}
-if(isset($searchbytype) && $searchbytype) {
-    $params[] = "searchbytype=" . urlencode($searchbytype);
-}
-$redirectUrl .= implode("&", $params);
-
-echo "<script>
-    if(typeof alert === 'function') {
-        alert('تم حذف الطلب بنجاح', 'نجح', function() {
-            window.location.href = '" . $redirectUrl . "';
-        });
-    } else {
-        alert('تم حذف الطلب بنجاح');
-        window.location.href = '" . $redirectUrl . "';
-    }
-</script>";
-
-
-}
-
-
-
 if(isset($requestid) && $requestid)
 {
 	$sql="select * from requestaqar where requestid='".$requestid."' limit 1  ";
@@ -603,9 +571,12 @@ if(isset($requestid) && $requestid)
             </h5>
         </div>
         <div class="table-responsive">
-            <table class="table table-hover table-striped mb-0">
+            <table class="table table-hover table-striped mb-0" data-aqary-bulk data-resource="requestaqar" data-screen="79">
                 <thead style="background-color: #f8f9fa; border-top: 1px solid #dee2e6;">
                     <tr>
+                        <th class="text-center screenonly" style="width:45px">
+                            <input type="checkbox" class="form-check-input aqary-select-all" aria-label="تحديد كل الطلبات المتاحة">
+                        </th>
                         <th class="text-center">صاحب الطلب</th>
                         <th class="text-center">جوال</th>
                         <th class="text-center">هاتف</th>
@@ -623,14 +594,15 @@ if(isset($requestid) && $requestid)
                     $counx = 0;
 
                     if (mysql_num_rows($result) == 0) {
-                        echo "<tr><td colspan='8' class='text-center py-4'>";
+                        echo "<tr><td colspan='9' class='text-center py-4'>";
                         echo "<i class='bi bi-inbox' style='font-size: 2rem; color: #ccc;'></i><br>";
                         echo "<span class='text-muted'>لا توجد طلبات</span></td></tr>";
                     }
 
                     while ($row = mysql_fetch_array($result)) {
+                        $canManageRequest = ($row['userid'] == $_SESSION['useridv']) || !empty($_SESSION['seeothermasder']) || !empty($allprevilage);
                         // Permission-based masking
-                        if (!(($row['userid'] == $_SESSION['useridv']) or $_SESSION['seeothermasder'] or $allprevilage)) {
+                        if (!$canManageRequest) {
                             $row['phone'] = "********";
                             $row['mobile'] = "********";
                             $row['requestername'] = "********";
@@ -639,17 +611,20 @@ if(isset($requestid) && $requestid)
                         $counx++;
                         $rowClass = is_int($counx / 2) ? 'table-light' : '';
                     ?>
-                    <tr class="<?= $rowClass ?>">
-                        <td>
+                    <tr class="<?= $rowClass ?>" data-record-id="<?= intval($row['requestid']) ?>">
+                        <td class="text-center screenonly">
+                            <input type="checkbox" class="form-check-input aqary-row-select" value="<?= intval($row['requestid']) ?>" aria-label="تحديد الطلب" <?= $canManageRequest ? '' : 'disabled' ?>>
+                        </td>
+                        <td <?= $canManageRequest ? 'tabindex="0" data-inline-field="requestername" data-editor="text" data-bulk-safe="0"' : '' ?>>
                             <strong><?= htmlspecialchars($row['requestername'], ENT_QUOTES, 'UTF-8') ?></strong>
                         </td>
-                        <td style="direction: ltr;">
+                        <td style="direction: ltr;" <?= $canManageRequest ? 'tabindex="0" data-inline-field="mobile" data-editor="text" data-bulk-safe="0"' : '' ?>>
                             <?= htmlspecialchars($row['mobile'], ENT_QUOTES, 'UTF-8') ?>
                         </td>
-                        <td style="direction: ltr;">
+                        <td style="direction: ltr;" <?= $canManageRequest ? 'tabindex="0" data-inline-field="phone" data-editor="text" data-bulk-safe="0"' : '' ?>>
                             <?= htmlspecialchars($row['phone'], ENT_QUOTES, 'UTF-8') ?>
                         </td>
-                        <td>
+                        <td <?= $canManageRequest ? 'tabindex="0" data-inline-field="description" data-editor="text" data-bulk-safe="0" data-value="' . htmlspecialchars($row['description'], ENT_QUOTES, 'UTF-8') . '"' : '' ?>>
                             <small><?= htmlspecialchars(substr($row['description'], 0, 50), ENT_QUOTES, 'UTF-8') ?>...</small>
                         </td>
                         <td>
@@ -694,11 +669,9 @@ if(isset($requestid) && $requestid)
                                    class="btn btn-sm btn-warning <?= "policy_".$sc_id."_edits" ?>" title="تعديل">
                                     <i class="bi bi-pencil-square"></i>
                                 </a>
-                                <a href="javascript:void(0);"
-                                   class="btn btn-sm btn-danger <?= "policy_".$sc_id."_deleetes" ?>"
-                                   onclick="confirm('هل ترغب بالفعل في حذف هذا الطلب؟', 'تأكيد الحذف', function() { window.location.href = 'request.hnt?deletereq=<?= $row['requestid'] ?>&search=<?= isset($search) ? $search : '' ?>&searchbytype=<?= isset($searchbytype) ? $searchbytype : '' ?>'; });" title="حذف">
+                                <button type="button" class="btn btn-sm btn-danger aqary-delete <?= "policy_".$sc_id."_deleetes" ?>" title="حذف" <?= $canManageRequest ? '' : 'disabled' ?>>
                                     <i class="bi bi-trash"></i>
-                                </a>
+                                </button>
                             </div>
                         </td>
                     </tr>
@@ -708,6 +681,8 @@ if(isset($requestid) && $requestid)
         </div>
     </div>
 </div>
+
+<script src="/aqary/js/bulk-inline-table.js"></script>
 
 <iframe style="display:none;" name="req" src="request.hnt"></iframe>
 
