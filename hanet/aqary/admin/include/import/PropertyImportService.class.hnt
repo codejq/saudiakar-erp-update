@@ -1,0 +1,912 @@
+<?php
+
+class PropertyImportService
+{
+    private $link;
+    private string $entity;
+    private int $departmentId;
+    private array $config;
+    private array $columns = [];
+    private array $fields = [];
+
+    public function __construct($link, string $entity, int $departmentId = 0)
+    {
+        $this->link = $link;
+        $this->entity = $entity;
+        $this->departmentId = $departmentId;
+        $this->config = $this->buildConfig();
+        $this->columns = $this->loadColumns($this->config['table']);
+        $this->fields = $this->buildFields();
+    }
+
+    public function getConfig(): array
+    {
+        return $this->config;
+    }
+
+    public function getFields(): array
+    {
+        return $this->fields;
+    }
+
+    public function prepareRows(array $rawRows): array
+    {
+        $headerIndex = $this->detectHeaderRow($rawRows);
+        $sourceHeaders = $rawRows[$headerIndex] ?? [];
+        $width = count($sourceHeaders);
+        if ($width < 1) {
+            throw new RuntimeException('تعذر تحديد صف عناوين الأعمدة في الملف.');
+        }
+
+        $headers = [];
+        $usedHeaders = [];
+        for ($index = 0; $index < $width; $index++) {
+            $header = trim((string)($sourceHeaders[$index] ?? ''));
+            if ($header === '') {
+                $header = 'العمود ' . ($index + 1);
+            }
+            $baseHeader = $header;
+            $suffix = 2;
+            while (isset($usedHeaders[$header])) {
+                $header = $baseHeader . ' (' . $suffix . ')';
+                $suffix++;
+            }
+            $usedHeaders[$header] = true;
+            $headers[] = $header;
+        }
+
+        $rows = [];
+        for ($index = $headerIndex + 1, $count = count($rawRows); $index < $count; $index++) {
+            $sourceRow = $rawRows[$index];
+            $row = [];
+            $hasValue = false;
+            for ($column = 0; $column < $width; $column++) {
+                $value = trim((string)($sourceRow[$column] ?? ''));
+                $row[] = $value;
+                if ($value !== '') {
+                    $hasValue = true;
+                }
+            }
+            if ($hasValue) {
+                $rows[] = ['excel_row' => $index + 1, 'values' => $row];
+            }
+        }
+
+        if (!$rows) {
+            throw new RuntimeException('لا توجد صفوف بيانات بعد صف العناوين.');
+        }
+
+        return [
+            'headers' => $headers,
+            'rows' => $rows,
+            'header_row' => $headerIndex + 1,
+            'auto_mapping' => $this->autoMap($headers),
+        ];
+    }
+
+    public function import(array $staged, array $submittedMapping, int $userId, bool $skipDuplicates): array
+    {
+        if ($userId < 1) {
+            throw new RuntimeException('انتهت جلسة المستخدم. سجل الدخول مرة أخرى.');
+        }
+
+        $headers = is_array($staged['headers'] ?? null) ? $staged['headers'] : [];
+        $rows = is_array($staged['rows'] ?? null) ? $staged['rows'] : [];
+        if (!$headers || !$rows) {
+            throw new RuntimeException('بيانات ملف الاستيراد غير متاحة أو انتهت صلاحيتها.');
+        }
+
+        $allowedTargets = array_fill_keys(array_keys($this->fields), true);
+        $mapping = [];
+        $usedTargets = [];
+        foreach ($headers as $index => $header) {
+            $target = trim((string)($submittedMapping[$index] ?? ''));
+            if ($target === '') {
+                continue;
+            }
+            if (!isset($allowedTargets[$target])) {
+                throw new RuntimeException('تم اختيار حقل غير مسموح به في خريطة الاستيراد.');
+            }
+            if (isset($usedTargets[$target])) {
+                throw new RuntimeException('لا يمكن ربط أكثر من عمود Excel بالحقل نفسه: ' . $this->fields[$target]['label']);
+            }
+            $usedTargets[$target] = true;
+            $mapping[intval($index)] = $target;
+        }
+
+        $meaningfulMappings = array_filter(
+            $mapping,
+            static fn($target) => $target !== '__city_name'
+        );
+        if (!$mapping || !$meaningfulMappings) {
+            throw new RuntimeException('اختر حقلاً واحداً على الأقل لاستيراده.');
+        }
+
+        $writableColumns = array_keys($this->columns);
+        $primaryKey = $this->config['primary_key'];
+        $writableColumns = array_values(array_filter(
+            $writableColumns,
+            fn($column) => $column !== $primaryKey && stripos($this->columns[$column]['Extra'], 'auto_increment') === false
+        ));
+
+        if (!$writableColumns) {
+            throw new RuntimeException('لا توجد حقول قابلة للاستيراد في الجدول المحدد.');
+        }
+
+        $quotedColumns = implode(', ', array_map(fn($column) => '`' . $column . '`', $writableColumns));
+        $placeholders = implode(', ', array_fill(0, count($writableColumns), '?'));
+        $insertSql = 'INSERT INTO `' . $this->config['table'] . '` (' . $quotedColumns . ') VALUES (' . $placeholders . ')';
+        $insertStatement = mysqli_prepare($this->link, $insertSql);
+        if (!$insertStatement) {
+            throw new RuntimeException('تعذر تجهيز عملية الاستيراد.');
+        }
+
+        $lookups = $this->loadLookups();
+        $duplicateStatement = $this->prepareDuplicateStatement($skipDuplicates);
+        $summary = [
+            'total' => count($rows),
+            'inserted' => 0,
+            'skipped' => 0,
+            'failed' => 0,
+            'errors' => [],
+        ];
+
+        mysqli_begin_transaction($this->link);
+        try {
+            foreach ($rows as $rowPosition => $rowData) {
+                $excelRow = intval($rowData['excel_row'] ?? ($rowPosition + 2));
+                $values = is_array($rowData['values'] ?? null) ? $rowData['values'] : [];
+
+                try {
+                    $mapped = [];
+                    foreach ($mapping as $columnIndex => $target) {
+                        $mapped[$target] = trim((string)($values[$columnIndex] ?? ''));
+                    }
+
+                    if (!$this->mappedRowHasValue($mapped)) {
+                        $summary['skipped']++;
+                        continue;
+                    }
+
+                    $this->resolveVirtualFields($mapped, $lookups, $excelRow);
+                    $record = $this->defaultRecord($writableColumns, $userId, $rowPosition);
+                    foreach ($mapped as $target => $value) {
+                        if (str_starts_with($target, '__') || !array_key_exists($target, $record) || $value === '') {
+                            continue;
+                        }
+                        $record[$target] = $this->normalizeValue($target, $value, $excelRow);
+                    }
+
+                    if ($skipDuplicates && $duplicateStatement && $this->isDuplicate($duplicateStatement, $record)) {
+                        $summary['skipped']++;
+                        continue;
+                    }
+
+                    $insertValues = [];
+                    foreach ($writableColumns as $column) {
+                        $insertValues[] = (string)($record[$column] ?? '');
+                    }
+                    if (!mysqli_stmt_execute($insertStatement, $insertValues)) {
+                        throw new RuntimeException('تعذر حفظ السجل.');
+                    }
+                    $summary['inserted']++;
+                } catch (Throwable $rowError) {
+                    $summary['failed']++;
+                    if (count($summary['errors']) < 100) {
+                        $summary['errors'][] = [
+                            'row' => $excelRow,
+                            'message' => $rowError->getMessage(),
+                        ];
+                    }
+                }
+            }
+
+            mysqli_commit($this->link);
+        } catch (Throwable $error) {
+            mysqli_rollback($this->link);
+            throw $error;
+        } finally {
+            mysqli_stmt_close($insertStatement);
+            if ($duplicateStatement) {
+                mysqli_stmt_close($duplicateStatement);
+            }
+        }
+
+        return $summary;
+    }
+
+    private function buildConfig(): array
+    {
+        $configs = [
+            'arady' => [
+                'title' => 'استيراد الأراضي',
+                'table' => 'arady',
+                'primary_key' => 'ardid',
+                'number_field' => 'ardrakam',
+                'screen_id' => 3,
+                'back_url' => '/aqary/admin/include/updateard.hnt',
+                'back_label' => 'العودة إلى الأراضي',
+            ],
+            'emara' => [
+                'title' => 'استيراد العمائر',
+                'table' => 'emara',
+                'primary_key' => 'emaraid',
+                'number_field' => 'emararakam',
+                'screen_id' => 15,
+                'back_url' => '/aqary/admin/include/emara/updatemara.hnt',
+                'back_label' => 'العودة إلى العمائر',
+            ],
+            'vila' => [
+                'title' => 'استيراد الفلل',
+                'table' => 'vila',
+                'primary_key' => 'vilaid',
+                'number_field' => 'vilarakam',
+                'screen_id' => 26,
+                'back_url' => '/aqary/admin/include/vila/updatvila.hnt',
+                'back_label' => 'العودة إلى الفلل',
+            ],
+        ];
+
+        if (isset($configs[$this->entity])) {
+            return $configs[$this->entity] + ['entity' => $this->entity, 'department_id' => 0];
+        }
+
+        if ($this->entity !== 'generic' || $this->departmentId < 1) {
+            throw new RuntimeException('نوع الاستيراد غير صالح.');
+        }
+
+        $departmentResult = mysql_query(
+            "SELECT dep_id, dep_name, dep_table_name FROM departments_name
+             WHERE dep_id='" . $this->departmentId . "'
+               AND (dep_isdeleted='' OR dep_isdeleted='0' OR dep_isdeleted IS NULL)
+             LIMIT 1",
+            $this->link
+        );
+        $department = $departmentResult ? mysql_fetch_array($departmentResult) : false;
+        if (!$department || !preg_match('/^[A-Za-z0-9_]+$/', (string)$department['dep_table_name'])) {
+            throw new RuntimeException('القسم العام المطلوب غير موجود أو غير صالح للاستيراد.');
+        }
+
+        return [
+            'entity' => 'generic',
+            'department_id' => $this->departmentId,
+            'title' => 'استيراد قسم ' . $department['dep_name'],
+            'table' => $department['dep_table_name'],
+            'primary_key' => 'id',
+            'number_field' => '',
+            'screen_id' => 26,
+            'back_url' => '/aqary/admin/include/geniric_departments/dep_showwall.hnt?dep_id=' . $this->departmentId,
+            'back_label' => 'العودة إلى القسم',
+        ];
+    }
+
+    private function loadColumns(string $table): array
+    {
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
+            throw new RuntimeException('اسم جدول الاستيراد غير صالح.');
+        }
+        $result = mysql_query('SHOW FULL COLUMNS FROM `' . $table . '`', $this->link);
+        if (!$result) {
+            throw new RuntimeException('تعذر قراءة حقول جدول الاستيراد.');
+        }
+        $columns = [];
+        while ($column = mysql_fetch_array($result)) {
+            $columns[$column['Field']] = $column;
+        }
+        return $columns;
+    }
+
+    private function buildFields(): array
+    {
+        $labels = $this->standardLabels();
+        if (in_array($this->entity, ['emara', 'vila'], true)) {
+            $labels['block'] = [
+                'label' => 'الشارع الرئيسي',
+                'aliases' => ['شارع رئيسي', 'main street'],
+            ];
+            $labels['share3'] = [
+                'label' => 'الشارع الفرعي',
+                'aliases' => ['شارع فرعي', 'secondary street', 'sub street'],
+            ];
+        }
+        $genericLabels = [];
+        if ($this->entity === 'generic') {
+            $fieldResult = mysql_query(
+                "SELECT fld_name, fld_en_name, fld_type FROM department_field
+                 WHERE dep_id='" . $this->departmentId . "'
+                   AND (fld_isactive='' OR fld_isactive='1' OR fld_isactive IS NULL)
+                 ORDER BY fld_id",
+                $this->link
+            );
+            while ($fieldResult && ($field = mysql_fetch_array($fieldResult))) {
+                $column = (string)$field['fld_en_name'];
+                $fieldType = intval($field['fld_type']);
+                if (isset($this->columns[$column]) && !in_array($fieldType, [0, 6, 7], true)) {
+                    $genericLabels[$column] = [
+                        'label' => trim((string)$field['fld_name']) ?: $column,
+                        'aliases' => [$column, trim((string)$field['fld_name'])],
+                        'kind' => $fieldType === 5 ? 'boolean' : 'string',
+                    ];
+                }
+            }
+        }
+
+        $excluded = [
+            $this->config['primary_key'], 'custummerid', 'custumerid', 'formuid',
+            'mapid', 'malekid', 'oldmalekid', 'polypath', 'ploypath', 'googlexyz',
+            'statusx', 'reversedby', 'reversedfor', 'soldto',
+        ];
+        $fields = [];
+        foreach ($this->columns as $column => $metadata) {
+            if (in_array($column, $excluded, true)) {
+                continue;
+            }
+            if ($this->entity === 'generic' && !isset($genericLabels[$column]) && $column !== 'masderid') {
+                continue;
+            }
+            $definition = $genericLabels[$column] ?? $labels[$column] ?? [];
+            $label = $definition['label'] ?? $column;
+            $aliases = array_values(array_unique(array_filter(array_merge(
+                [$column, $label],
+                $definition['aliases'] ?? []
+            ))));
+            $fields[$column] = [
+                'label' => $label,
+                'aliases' => $aliases,
+                'kind' => $definition['kind'] ?? $this->kindFromSqlType((string)$metadata['Type'], $column),
+                'type' => (string)$metadata['Type'],
+            ];
+        }
+
+        if ($this->entity !== 'generic' && isset($this->columns['mokhatatid'])) {
+            $fields = [
+                '__city_name' => [
+                    'label' => 'اسم المدينة (للتعرف على المخطط)',
+                    'aliases' => ['المدينة', 'اسم المدينة', 'city', 'city name', 'cityname'],
+                    'kind' => 'lookup',
+                    'type' => 'virtual',
+                ],
+                '__mokhatat_name' => [
+                    'label' => 'اسم أو رقم المخطط',
+                    'aliases' => ['المخطط', 'اسم المخطط', 'رقم المخطط', 'mokhatat', 'plan', 'plan name'],
+                    'kind' => 'lookup',
+                    'type' => 'virtual',
+                ],
+            ] + $fields;
+        }
+
+        if (isset($this->columns['masderid'])) {
+            $fields = [
+                '__masder_name' => [
+                    'label' => 'اسم المصدر أو الوسيط',
+                    'aliases' => ['المصدر', 'اسم المصدر', 'الوسيط', 'اسم الوسيط', 'source', 'broker'],
+                    'kind' => 'lookup',
+                    'type' => 'virtual',
+                ],
+            ] + $fields;
+        }
+
+        if ($this->entity !== 'generic' && isset($this->columns['hedod'])) {
+            $fields = [
+                '__hedod_north' => [
+                    'label' => 'الحد الشمالي',
+                    'aliases' => ['حد شمالي', 'الشمالي', 'north boundary'],
+                    'kind' => 'virtual',
+                    'type' => 'virtual',
+                ],
+                '__hedod_south' => [
+                    'label' => 'الحد الجنوبي',
+                    'aliases' => ['حد جنوبي', 'الجنوبي', 'south boundary'],
+                    'kind' => 'virtual',
+                    'type' => 'virtual',
+                ],
+                '__hedod_east' => [
+                    'label' => 'الحد الشرقي',
+                    'aliases' => ['حد شرقي', 'الشرقي', 'east boundary'],
+                    'kind' => 'virtual',
+                    'type' => 'virtual',
+                ],
+                '__hedod_west' => [
+                    'label' => 'الحد الغربي',
+                    'aliases' => ['حد غربي', 'الغربي', 'west boundary'],
+                    'kind' => 'virtual',
+                    'type' => 'virtual',
+                ],
+            ] + $fields;
+        }
+
+        return $fields;
+    }
+
+    private function standardLabels(): array
+    {
+        $labels = [
+            'mokhatatid' => ['label' => 'معرّف المخطط (رقم النظام)', 'aliases' => ['mokhatatid', 'plan id'], 'kind' => 'integer'],
+            'block' => ['label' => 'رقم البلك', 'aliases' => ['البلك', 'رقم البلك', 'block']],
+            'ardrakam' => ['label' => 'رقم الأرض', 'aliases' => ['رقم الارض', 'رقم القطعة', 'رقم العقار', 'land number', 'plot number', 'property number']],
+            'emararakam' => ['label' => 'رقم العمارة', 'aliases' => ['رقم العقار', 'building number']],
+            'vilarakam' => ['label' => 'رقم الفيلا', 'aliases' => ['رقم العقار', 'villa number']],
+            'hedod' => ['label' => 'الحدود', 'aliases' => ['حدود العقار', 'boundaries']],
+            'price' => ['label' => 'سعر الحد', 'aliases' => ['السعر', 'سعر البيع', 'price'], 'kind' => 'decimal'],
+            'pricesom' => ['label' => 'سعر السوم', 'aliases' => ['السوم', 'offer price'], 'kind' => 'decimal'],
+            'som' => ['label' => 'حالة السوم', 'aliases' => ['som']],
+            'masderid' => ['label' => 'معرّف المصدر (رقم النظام)', 'aliases' => ['masderid', 'source id'], 'kind' => 'integer'],
+            'ardtype' => ['label' => 'نوع الأرض', 'aliases' => ['نوع الارض', 'land type']],
+            'emaratype' => ['label' => 'نوع العمارة', 'aliases' => ['نوع العقار', 'building type']],
+            'vilatype' => ['label' => 'نوع الفيلا', 'aliases' => ['نوع العقار', 'villa type']],
+            'st_date' => ['label' => 'تاريخ الإدخال', 'aliases' => ['التاريخ', 'تاريخ الاضافة', 'date'], 'kind' => 'date'],
+            'en_date' => ['label' => 'رقم اللوحة', 'aliases' => ['اللوحة', 'رقم اللوحه', 'board number'], 'kind' => 'integer'],
+            'hay' => ['label' => 'الحي', 'aliases' => ['اسم الحي', 'district', 'neighborhood']],
+            'note' => ['label' => 'ملاحظات', 'aliases' => ['ملاحظة', 'الوصف', 'notes', 'description']],
+            'mobasher' => ['label' => 'مباشر', 'aliases' => ['مباشر ام لا', 'direct'], 'kind' => 'boolean'],
+            'mesaha' => ['label' => 'المساحة', 'aliases' => ['مساحة العقار', 'area'], 'kind' => 'decimal'],
+            'al3ard' => ['label' => 'العرض', 'aliases' => ['عرض العقار', 'width']],
+            'tol' => ['label' => 'الطول', 'aliases' => ['طول العقار', 'length']],
+            'meterprice' => ['label' => 'سعر المتر', 'aliases' => ['meter price'], 'kind' => 'decimal'],
+            'meterpricehad' => ['label' => 'حد سعر المتر', 'aliases' => ['meter price limit'], 'kind' => 'decimal'],
+            'share3' => ['label' => 'الشارع الرئيسي', 'aliases' => ['شارع رئيسي', 'main street']],
+            'share3f' => ['label' => 'الشارع الفرعي', 'aliases' => ['شارع فرعي', 'sub street']],
+            'khdma' => ['label' => 'الخدمة المطلوبة', 'aliases' => ['الخدمة', 'service']],
+            'tamweelmethod' => ['label' => 'طريقة التمويل', 'aliases' => ['financing method']],
+            'daf3method' => ['label' => 'طريقة الدفع', 'aliases' => ['payment method']],
+            'khazina' => ['label' => 'الخزينة', 'aliases' => ['خزينة']],
+            'dorg' => ['label' => 'الدرج', 'aliases' => ['درج']],
+            'raf' => ['label' => 'الرف', 'aliases' => ['رف']],
+            'paperfile' => ['label' => 'الملف الورقي', 'aliases' => ['رقم الملف', 'paper file']],
+            'Longitude' => ['label' => 'خط الطول', 'aliases' => ['longitude', 'lng'], 'kind' => 'decimal'],
+            'Latitude' => ['label' => 'خط العرض', 'aliases' => ['latitude', 'lat'], 'kind' => 'decimal'],
+            'wehdatnum' => ['label' => 'عدد الوحدات', 'aliases' => ['الوحدات', 'units'], 'kind' => 'integer'],
+            'adwarnum' => ['label' => 'عدد الأدوار', 'aliases' => ['الادوار', 'floors'], 'kind' => 'integer'],
+            'hamamatnum' => ['label' => 'عدد الحمامات', 'aliases' => ['الحمامات', 'bathrooms'], 'kind' => 'integer'],
+            'matbakhnum' => ['label' => 'عدد المطابخ', 'aliases' => ['المطابخ', 'kitchens'], 'kind' => 'integer'],
+            'ghorfanum' => ['label' => 'عدد الغرف', 'aliases' => ['الغرف', 'rooms'], 'kind' => 'integer'],
+            'nomghorf' => ['label' => 'عدد غرف النوم', 'aliases' => ['غرف النوم', 'bedrooms'], 'kind' => 'integer'],
+            'salatnumber' => ['label' => 'عدد الصالات', 'aliases' => ['الصالات', 'halls'], 'kind' => 'integer'],
+            'address' => ['label' => 'العنوان', 'aliases' => ['عنوان العقار', 'address']],
+            'aqarage' => ['label' => 'عمر العقار', 'aliases' => ['العمر', 'property age'], 'kind' => 'integer'],
+            'madakhel' => ['label' => 'عدد المداخل', 'aliases' => ['المداخل', 'entrances'], 'kind' => 'integer'],
+            'dakhl' => ['label' => 'الدخل', 'aliases' => ['الدخل السنوي', 'income'], 'kind' => 'decimal'],
+            'benamesaha' => ['label' => 'مساحة البناء', 'aliases' => ['المساحة المبنية', 'building area'], 'kind' => 'decimal'],
+            'kabou' => ['label' => 'قبو', 'aliases' => ['يوجد قبو', 'basement'], 'kind' => 'boolean'],
+            'moager' => ['label' => 'مؤجر', 'aliases' => ['حالة التأجير', 'rented'], 'kind' => 'boolean'],
+            'emaradat' => ['label' => 'تاريخ العرض', 'aliases' => ['تاريخ عرض العقار', 'listing date']],
+            'modat3aked' => ['label' => 'مدة العقد', 'aliases' => ['contract duration']],
+            'egarshaga' => ['label' => 'إيجار الشقة', 'aliases' => ['ايجار الشقة'], 'kind' => 'decimal'],
+            'egarma3rad' => ['label' => 'إيجار المعرض', 'aliases' => ['ايجار المعرض'], 'kind' => 'decimal'],
+            'secretinfo' => ['label' => 'بيانات سرية', 'aliases' => ['معلومات سرية']],
+        ];
+
+        $serviceLabels = [
+            1 => 'مياه', 2 => 'كهرباء', 3 => 'سفلت', 4 => 'مدارس', 5 => 'مستشفى',
+            6 => 'تطل على ساحة', 7 => 'جوار مسجد', 8 => 'جوار شركات', 9 => 'جوار مزرعة',
+            10 => 'هاتف', 11 => 'البيع بالقطعة', 12 => 'البيع بالمتر المربع',
+            13 => 'على الشور', 14 => 'قابل للتفاوض',
+        ];
+        for ($number = 1; $number <= 23; $number++) {
+            $field = 's' . $number;
+            $label = $serviceLabels[$number] ?? ('خاصية ' . $number);
+            $labels[$field] = ['label' => $label, 'aliases' => [$field, $label], 'kind' => 'boolean'];
+        }
+
+        for ($number = 1; $number <= 10; $number++) {
+            $ownerLabels = [1 => 'اسم المالك', 2 => 'جوال المالك', 3 => 'عنوان المالك', 4 => 'رقم الصك', 5 => 'هاتف منزل المالك', 6 => 'هاتف عمل المالك', 7 => 'صندوق بريد المالك', 8 => 'بريد المالك الإلكتروني', 9 => 'جهة عمل المالك', 10 => 'ملاحظات المالك'];
+            $labels['malekbayan' . $number] = ['label' => $ownerLabels[$number], 'aliases' => ['malekbayan' . $number, $ownerLabels[$number]]];
+            $labels['oldmalekbayan' . $number] = ['label' => $ownerLabels[$number] . ' السابق', 'aliases' => ['oldmalekbayan' . $number, $ownerLabels[$number] . ' السابق']];
+        }
+        return $labels;
+    }
+
+    private function detectHeaderRow(array $rows): int
+    {
+        $aliasIndex = $this->aliasIndex();
+        $bestIndex = 0;
+        $bestScore = -1;
+        $limit = min(20, count($rows));
+        for ($index = 0; $index < $limit; $index++) {
+            $matches = [];
+            $nonEmpty = 0;
+            foreach ($rows[$index] as $value) {
+                $normalized = self::normalizeLabel((string)$value);
+                if ($normalized === '') {
+                    continue;
+                }
+                $nonEmpty++;
+                if (isset($aliasIndex[$normalized])) {
+                    $matches[$aliasIndex[$normalized]] = true;
+                }
+            }
+            $score = (count($matches) * 100) + $nonEmpty;
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $bestIndex = $index;
+            }
+        }
+        return $bestIndex;
+    }
+
+    private function autoMap(array $headers): array
+    {
+        $aliasIndex = $this->aliasIndex();
+        $mapping = [];
+        $used = [];
+        foreach ($headers as $index => $header) {
+            $normalized = self::normalizeLabel((string)$header);
+            $target = $aliasIndex[$normalized] ?? '';
+            if ($target !== '' && !isset($used[$target])) {
+                $mapping[$index] = $target;
+                $used[$target] = true;
+            } else {
+                $mapping[$index] = '';
+            }
+        }
+        return $mapping;
+    }
+
+    private function aliasIndex(): array
+    {
+        $index = [];
+        foreach ($this->fields as $field => $definition) {
+            foreach ($definition['aliases'] as $alias) {
+                $normalized = self::normalizeLabel((string)$alias);
+                if ($normalized !== '' && !isset($index[$normalized])) {
+                    $index[$normalized] = $field;
+                }
+            }
+        }
+        return $index;
+    }
+
+    private static function normalizeLabel(string $value): string
+    {
+        $value = mb_strtolower(trim($value), 'UTF-8');
+        $value = strtr($value, [
+            'أ' => 'ا', 'إ' => 'ا', 'آ' => 'ا', 'ى' => 'ي', 'ة' => 'ه', 'ؤ' => 'و', 'ئ' => 'ي',
+            '٠' => '0', '١' => '1', '٢' => '2', '٣' => '3', '٤' => '4',
+            '٥' => '5', '٦' => '6', '٧' => '7', '٨' => '8', '٩' => '9',
+        ]);
+        $value = preg_replace('/[\x{0640}\x{064B}-\x{065F}\x{0670}]/u', '', $value) ?? $value;
+        return preg_replace('/[^\p{L}\p{N}]+/u', '', $value) ?? '';
+    }
+
+    private function loadLookups(): array
+    {
+        $lookups = [
+            'cities' => [],
+            'plans' => [],
+            'plan_ids' => [],
+            'sources' => [],
+            'source_ids' => [],
+        ];
+        if ($this->entity !== 'generic' && isset($this->columns['mokhatatid'])) {
+            $result = mysql_query(
+                'SELECT m.mokhatatid, m.mokhatatname, m.cityid, c.cityname
+                 FROM mokhatat m LEFT JOIN city c ON c.cityid=m.cityid',
+                $this->link
+            );
+            while ($result && ($row = mysql_fetch_array($result))) {
+                $cityKey = self::normalizeLabel((string)$row['cityname']);
+                if ($cityKey !== '') {
+                    $lookups['cities'][$cityKey][] = intval($row['cityid']);
+                }
+                $lookups['plan_ids'][intval($row['mokhatatid'])] = intval($row['cityid']);
+                $planKey = self::normalizeLabel((string)$row['mokhatatname']);
+                if ($planKey !== '') {
+                    $lookups['plans'][$planKey][] = [
+                        'id' => intval($row['mokhatatid']),
+                        'city_id' => intval($row['cityid']),
+                    ];
+                }
+            }
+        }
+
+        if (isset($this->columns['masderid'])) {
+            $result = mysql_query('SELECT masderid, masdername FROM masder', $this->link);
+            while ($result && ($row = mysql_fetch_array($result))) {
+                $lookups['source_ids'][intval($row['masderid'])] = true;
+                $key = self::normalizeLabel((string)$row['masdername']);
+                if ($key !== '') {
+                    $lookups['sources'][$key][] = intval($row['masderid']);
+                }
+            }
+        }
+        return $lookups;
+    }
+
+    private function resolveVirtualFields(array &$mapped, array $lookups, int $excelRow): void
+    {
+        $boundaryFields = ['__hedod_north', '__hedod_south', '__hedod_east', '__hedod_west'];
+        $hasSeparateBoundary = false;
+        foreach ($boundaryFields as $boundaryField) {
+            if (isset($mapped[$boundaryField]) && trim($mapped[$boundaryField]) !== '') {
+                $hasSeparateBoundary = true;
+                break;
+            }
+        }
+        if ($hasSeparateBoundary) {
+            $boundaries = array_pad(explode(';', (string)($mapped['hedod'] ?? ''), 4), 4, '');
+            foreach ($boundaryFields as $index => $boundaryField) {
+                if (isset($mapped[$boundaryField]) && trim($mapped[$boundaryField]) !== '') {
+                    $boundaries[$index] = trim($mapped[$boundaryField]);
+                }
+            }
+            $mapped['hedod'] = implode(';', array_slice($boundaries, 0, 4));
+        }
+
+        if (isset($mapped['__masder_name']) && trim($mapped['__masder_name']) !== '') {
+            $key = self::normalizeLabel($mapped['__masder_name']);
+            $matches = array_values(array_unique($lookups['sources'][$key] ?? []));
+            if (count($matches) === 1) {
+                $mapped['masderid'] = (string)$matches[0];
+            } elseif (!$matches) {
+                throw new RuntimeException('المصدر أو الوسيط غير موجود: ' . $mapped['__masder_name']);
+            } else {
+                throw new RuntimeException('اسم المصدر أو الوسيط مكرر: ' . $mapped['__masder_name']);
+            }
+        } elseif (isset($mapped['masderid']) && trim($mapped['masderid']) !== '') {
+            $sourceNumber = self::normalizeNumber($mapped['masderid']);
+            if (!is_numeric($sourceNumber) || (float)$sourceNumber != (int)$sourceNumber) {
+                throw new RuntimeException('معرّف المصدر غير صالح: ' . $mapped['masderid']);
+            }
+            $sourceId = intval($sourceNumber);
+            if ($sourceId !== 0 && !isset($lookups['source_ids'][$sourceId])) {
+                throw new RuntimeException('معرّف المصدر غير موجود: ' . $sourceId);
+            }
+        }
+
+        $planValue = trim((string)($mapped['__mokhatat_name'] ?? ''));
+        $explicitPlan = trim((string)($mapped['mokhatatid'] ?? ''));
+        $cityValue = trim((string)($mapped['__city_name'] ?? ''));
+        $cityIds = [];
+        if ($cityValue !== '') {
+            $cityKey = self::normalizeLabel($cityValue);
+            $cityIds = array_values(array_unique($lookups['cities'][$cityKey] ?? []));
+            if (!$cityIds) {
+                throw new RuntimeException('المدينة غير موجودة: ' . $cityValue);
+            }
+        }
+
+        if ($planValue === '' && $explicitPlan !== '') {
+            $planNumber = self::normalizeNumber($explicitPlan);
+            if (is_numeric($planNumber) && (float)$planNumber == (int)$planNumber) {
+                $planId = intval($planNumber);
+                if ($planId !== 0 && !isset($lookups['plan_ids'][$planId])) {
+                    throw new RuntimeException('معرّف المخطط غير موجود: ' . $planId);
+                }
+                if ($planId !== 0 && $cityIds && !in_array(intval($lookups['plan_ids'][$planId]), $cityIds, true)) {
+                    throw new RuntimeException('المخطط المحدد لا يتبع المدينة المحددة.');
+                }
+                $mapped['mokhatatid'] = (string)$planId;
+                return;
+            }
+            $planValue = $explicitPlan;
+        }
+        if ($planValue === '') {
+            return;
+        }
+
+        $planKey = self::normalizeLabel($planValue);
+        $candidates = $lookups['plans'][$planKey] ?? [];
+        if ($cityIds) {
+            $candidates = array_values(array_filter(
+                $candidates,
+                static fn($candidate) => in_array(intval($candidate['city_id']), $cityIds, true)
+            ));
+        }
+
+        if (count($candidates) === 1) {
+            $mapped['mokhatatid'] = (string)$candidates[0]['id'];
+            return;
+        }
+        if (!$candidates) {
+            throw new RuntimeException('المخطط غير موجود' . ($cityValue !== '' ? ' في المدينة المحددة' : '') . ': ' . $planValue);
+        }
+        throw new RuntimeException('اسم المخطط مكرر؛ اربط عمود المدينة أيضاً: ' . $planValue);
+    }
+
+    private function defaultRecord(array $columns, int $userId, int $rowPosition): array
+    {
+        $record = [];
+        foreach ($columns as $column) {
+            $metadata = $this->columns[$column];
+            if ($metadata['Default'] !== null) {
+                $record[$column] = (string)$metadata['Default'];
+            } else {
+                $record[$column] = $this->isNumericSqlType((string)$metadata['Type']) ? '0' : '';
+            }
+        }
+
+        foreach (['custummerid', 'custumerid'] as $userColumn) {
+            if (array_key_exists($userColumn, $record)) {
+                $record[$userColumn] = (string)$userId;
+            }
+        }
+        if (array_key_exists('st_date', $record)) {
+            $record['st_date'] = (string)time();
+        }
+        if (array_key_exists('enbleslideshow', $record)) {
+            $record['enbleslideshow'] = '1';
+        }
+        if (array_key_exists('formuid', $record)) {
+            $record['formuid'] = sprintf('%010d%s%04d', random_int(0, 9999999999), (string)time(), $rowPosition % 10000);
+        }
+        return $record;
+    }
+
+    private function normalizeValue(string $field, string $value, int $excelRow): string
+    {
+        $definition = $this->fields[$field] ?? null;
+        $kind = $definition['kind'] ?? 'string';
+        if ($value === '') {
+            return in_array($kind, ['integer', 'decimal', 'boolean', 'date'], true) ? '0' : '';
+        }
+
+        if ($kind === 'boolean') {
+            $normalized = self::normalizeLabel($value);
+            $falseValues = array_map([self::class, 'normalizeLabel'], [
+                '0', 'لا', 'no', 'false', 'خطأ', 'غير متوفر', 'لا يوجد', 'غير مباشر', 'وسيط', 'غير مباشر (وسيط)',
+            ]);
+            $trueValues = array_map([self::class, 'normalizeLabel'], [
+                '1', 'نعم', 'yes', 'true', 'صح', 'متوفر', 'يوجد', 'مباشر', 'من المالك مباشر', 'x', '✓',
+            ]);
+            if (in_array($normalized, $falseValues, true)) {
+                return '0';
+            }
+            if (in_array($normalized, $trueValues, true)) {
+                return '1';
+            }
+            throw new RuntimeException('قيمة نعم/لا غير صالحة في ' . $definition['label'] . ': ' . $value);
+        }
+        if ($field === 'ardtype') {
+            $normalized = self::normalizeLabel($value);
+            $landTypes = [
+                'استثماريه' => '1', 'استثماري' => '1',
+                'سكنيه' => '2', 'سكني' => '2',
+                'تجاريه' => '3', 'تجاري' => '3',
+                'ارضخام' => '4', 'خام' => '4',
+                'اخري' => '5',
+            ];
+            if (isset($landTypes[$normalized])) {
+                return $landTypes[$normalized];
+            }
+            $number = self::normalizeNumber($value);
+            if (in_array($number, ['1', '2', '3', '4', '5'], true)) {
+                return $number;
+            }
+            throw new RuntimeException('نوع أرض غير صالح: ' . $value);
+        }
+        if ($kind === 'integer') {
+            $number = self::normalizeNumber($value);
+            if (!is_numeric($number)) {
+                throw new RuntimeException('قيمة رقمية غير صالحة في ' . $definition['label'] . ': ' . $value);
+            }
+            return (string)intval(round((float)$number));
+        }
+        if ($kind === 'decimal') {
+            $number = self::normalizeNumber($value);
+            if (!is_numeric($number)) {
+                throw new RuntimeException('قيمة رقمية غير صالحة في ' . $definition['label'] . ': ' . $value);
+            }
+            return (string)(float)$number;
+        }
+        if ($kind === 'date') {
+            return (string)$this->normalizeDate($value, $definition['label']);
+        }
+
+        $maxLength = $this->varcharLength((string)($this->columns[$field]['Type'] ?? ''));
+        if ($maxLength > 0 && mb_strlen($value, 'UTF-8') > $maxLength) {
+            throw new RuntimeException('القيمة أطول من المسموح في ' . $definition['label'] . ' (الحد ' . $maxLength . ' حرفاً).');
+        }
+        return $value;
+    }
+
+    private function normalizeDate(string $value, string $label): int
+    {
+        $numeric = self::normalizeNumber($value);
+        if (is_numeric($numeric)) {
+            $number = (float)$numeric;
+            if ($number >= 20000 && $number <= 100000) {
+                return (int)round(($number - 25569) * 86400);
+            }
+            if ($number > 100000000) {
+                return (int)$number;
+            }
+        }
+
+        $value = str_replace(['.', '\\'], ['/', '/'], trim($value));
+        foreach (['d/m/Y', 'd-m-Y', 'Y/m/d', 'Y-m-d', 'm/d/Y'] as $format) {
+            $date = DateTime::createFromFormat('!' . $format, $value);
+            $errors = DateTime::getLastErrors();
+            if ($date && ($errors === false || ($errors['warning_count'] === 0 && $errors['error_count'] === 0))) {
+                return $date->getTimestamp();
+            }
+        }
+        throw new RuntimeException('تاريخ غير صالح في ' . $label . ': ' . $value);
+    }
+
+    private static function normalizeNumber(string $value): string
+    {
+        $value = strtr(mb_strtolower(trim($value), 'UTF-8'), [
+            '٠' => '0', '١' => '1', '٢' => '2', '٣' => '3', '٤' => '4',
+            '٥' => '5', '٦' => '6', '٧' => '7', '٨' => '8', '٩' => '9',
+            '٫' => '.', '٬' => '', ',' => '', '−' => '-',
+        ]);
+        $value = preg_replace('/(?:ر\.?\s*س\.?|ريال(?:اً)?|sar)/iu', '', $value) ?? $value;
+        $value = preg_replace('/[\s\x{00A0}]+/u', '', $value) ?? $value;
+        if (preg_match('/^\((.+)\)$/', $value, $matches)) {
+            $value = '-' . $matches[1];
+        }
+        return preg_match('/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/', $value) ? $value : '';
+    }
+
+    private function prepareDuplicateStatement(bool $skipDuplicates)
+    {
+        $numberField = $this->config['number_field'];
+        if (!$skipDuplicates || $numberField === '' || !isset($this->columns[$numberField])) {
+            return null;
+        }
+        $sql = 'SELECT `' . $this->config['primary_key'] . '` FROM `' . $this->config['table'] . '` WHERE `' . $numberField . '`=?';
+        if (isset($this->columns['mokhatatid'])) {
+            $sql .= ' AND `mokhatatid`=?';
+        }
+        $sql .= ' LIMIT 1';
+        $statement = mysqli_prepare($this->link, $sql);
+        if (!$statement) {
+            throw new RuntimeException('تعذر تجهيز فحص السجلات المكررة.');
+        }
+        return $statement;
+    }
+
+    private function isDuplicate($statement, array $record): bool
+    {
+        $numberField = $this->config['number_field'];
+        $number = trim((string)($record[$numberField] ?? ''));
+        if ($number === '') {
+            return false;
+        }
+        $params = [$number];
+        if (isset($this->columns['mokhatatid'])) {
+            $params[] = (string)intval($record['mokhatatid'] ?? 0);
+        }
+        if (!mysqli_stmt_execute($statement, $params)) {
+            throw new RuntimeException('تعذر فحص السجلات المكررة.');
+        }
+        mysqli_stmt_store_result($statement);
+        $isDuplicate = mysqli_stmt_num_rows($statement) > 0;
+        mysqli_stmt_free_result($statement);
+        return $isDuplicate;
+    }
+
+    private function mappedRowHasValue(array $mapped): bool
+    {
+        foreach ($mapped as $value) {
+            if (trim((string)$value) !== '') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function kindFromSqlType(string $type, string $column): string
+    {
+        if (preg_match('/^tinyint\(1\)/i', $type) || preg_match('/^s\d+$/', $column)) {
+            return 'boolean';
+        }
+        if (preg_match('/^(tinyint|smallint|mediumint|int|bigint)/i', $type)) {
+            return in_array($column, ['st_date', 'en_date'], true) ? 'date' : 'integer';
+        }
+        if (preg_match('/^(decimal|double|float)/i', $type)) {
+            return 'decimal';
+        }
+        return 'string';
+    }
+
+    private function isNumericSqlType(string $type): bool
+    {
+        return (bool)preg_match('/^(tinyint|smallint|mediumint|int|bigint|decimal|double|float|bit)/i', $type);
+    }
+
+    private function varcharLength(string $type): int
+    {
+        return preg_match('/^(?:var)?char\((\d+)\)/i', $type, $matches) ? intval($matches[1]) : 0;
+    }
+}

@@ -1,0 +1,405 @@
+<?php
+
+$aqaryRoot = dirname(__DIR__, 3);
+$importEntity = isset($importEntity) ? (string)$importEntity : '';
+$importDepartmentId = isset($importDepartmentId) ? intval($importDepartmentId) : 0;
+
+$pageDefinitions = [
+    'arady' => ['title' => 'استيراد الأراضي', 'screen' => 3],
+    'emara' => ['title' => 'استيراد العمائر', 'screen' => 15],
+    'vila' => ['title' => 'استيراد الفلل', 'screen' => 26],
+    'generic' => ['title' => 'استيراد قسم عام', 'screen' => 26],
+];
+if (!isset($pageDefinitions[$importEntity])) {
+    http_response_code(404);
+    exit('نوع الاستيراد غير صالح.');
+}
+
+$sc_title = $pageDefinitions[$importEntity]['title'];
+$sc_id = (string)$pageDefinitions[$importEntity]['screen'];
+include_once $aqaryRoot . '/nocash.hnt';
+include_once $aqaryRoot . '/header.hnt';
+
+require_once __DIR__ . '/ExcelTableReader.class.hnt';
+require_once __DIR__ . '/PropertyImportService.class.hnt';
+
+function property_import_stage_directory(): string
+{
+    $directory = storage_path('app/tmp/property-import');
+    ensure_dir($directory);
+    return rtrim($directory, '/\\') . DIRECTORY_SEPARATOR;
+}
+
+function property_import_cleanup_stages(string $directory): void
+{
+    $cutoff = time() - 7200;
+    foreach (glob($directory . '*.json') ?: [] as $path) {
+        if (is_file($path) && filemtime($path) < $cutoff) {
+            @unlink($path);
+        }
+    }
+}
+
+function property_import_stage_path(string $token, int $userId): string
+{
+    if (!preg_match('/^[a-f0-9]{32}$/', $token)) {
+        throw new RuntimeException('رمز ملف الاستيراد غير صالح.');
+    }
+    return property_import_stage_directory() . $userId . '-' . $token . '.json';
+}
+
+function property_import_escape($value): string
+{
+    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+}
+
+$userId = intval($_SESSION['useridv'] ?? 0);
+$canImport = $userId > 0
+    && intval($_SESSION['canaddv'] ?? 0) !== 0
+    && empty($exitscreen);
+$service = null;
+$config = null;
+$fields = [];
+$staged = null;
+$stageToken = '';
+$resultSummary = null;
+$pageError = '';
+$processingStagePath = '';
+$originalStagePath = '';
+$importCompleted = false;
+
+try {
+    if ($importEntity === 'generic' && $importDepartmentId < 1) {
+        $config = [
+            'title' => 'استيراد قسم عام',
+            'back_url' => '/aqary/admin/index.hnt',
+            'back_label' => 'العودة إلى الأقسام',
+        ];
+    } else {
+        $service = new PropertyImportService($link, $importEntity, $importDepartmentId);
+        $config = $service->getConfig();
+        $fields = $service->getFields();
+        $sc_title = $config['title'];
+    }
+
+    if (!$canImport) {
+        throw new RuntimeException('ليس لديك صلاحية إضافة سجلات جديدة.');
+    }
+
+    if (!isset($_SESSION['property_import_csrf']) || !is_string($_SESSION['property_import_csrf'])) {
+        $_SESSION['property_import_csrf'] = bin2hex(random_bytes(24));
+    }
+
+    $action = (string)($_POST['import_action'] ?? '');
+    if ($action === 'upload') {
+        @set_time_limit(300);
+        $csrf = (string)($_POST['csrf_token'] ?? '');
+        if (!hash_equals((string)$_SESSION['property_import_csrf'], $csrf)) {
+            throw new RuntimeException('انتهت صلاحية نموذج الاستيراد. أعد فتح الصفحة.');
+        }
+        if (!$service) {
+            throw new RuntimeException('اختر القسم العام قبل رفع الملف.');
+        }
+        if (!isset($_FILES['excel_file']) || !is_array($_FILES['excel_file'])) {
+            throw new RuntimeException('اختر ملف Excel أولاً.');
+        }
+        $file = $_FILES['excel_file'];
+        if (intval($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            throw new RuntimeException('فشل رفع ملف Excel. تأكد من حجم الملف ثم حاول مرة أخرى.');
+        }
+        if (intval($file['size'] ?? 0) < 1 || intval($file['size']) > 10 * 1024 * 1024) {
+            throw new RuntimeException('حجم ملف Excel يجب ألا يتجاوز 10 ميجابايت.');
+        }
+        $extension = strtolower(pathinfo((string)$file['name'], PATHINFO_EXTENSION));
+        if (!in_array($extension, ['xlsx', 'xls'], true)) {
+            throw new RuntimeException('الامتداد غير مسموح. استخدم XLSX أو XLS.');
+        }
+        if (!is_uploaded_file((string)$file['tmp_name'])) {
+            throw new RuntimeException('ملف الرفع غير صالح.');
+        }
+
+        $rawRows = ExcelTableReader::read((string)$file['tmp_name'], (string)$file['name']);
+        $prepared = $service->prepareRows($rawRows);
+        $stageToken = bin2hex(random_bytes(16));
+        $staged = [
+            'version' => 1,
+            'created_at' => time(),
+            'user_id' => $userId,
+            'entity' => $importEntity,
+            'department_id' => $importDepartmentId,
+            'file_name' => basename((string)$file['name']),
+            'headers' => $prepared['headers'],
+            'rows' => $prepared['rows'],
+            'header_row' => $prepared['header_row'],
+            'auto_mapping' => $prepared['auto_mapping'],
+        ];
+
+        $stageDirectory = property_import_stage_directory();
+        property_import_cleanup_stages($stageDirectory);
+        $encodedStage = json_encode($staged, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($encodedStage === false || file_put_contents(property_import_stage_path($stageToken, $userId), $encodedStage, LOCK_EX) === false) {
+            throw new RuntimeException('تعذر حفظ معاينة الاستيراد مؤقتاً.');
+        }
+    } elseif ($action === 'import') {
+        @set_time_limit(300);
+        if (!$service) {
+            throw new RuntimeException('اختر القسم العام قبل الاستيراد.');
+        }
+        $csrf = (string)($_POST['csrf_token'] ?? '');
+        if (!hash_equals((string)$_SESSION['property_import_csrf'], $csrf)) {
+            throw new RuntimeException('انتهت صلاحية نموذج الاستيراد. أعد رفع الملف.');
+        }
+        $stageToken = (string)($_POST['stage_token'] ?? '');
+        $stagePath = property_import_stage_path($stageToken, $userId);
+        $processingPath = substr($stagePath, 0, -5) . '.processing.json';
+        if (!is_file($stagePath) && is_file($processingPath)) {
+            if (filemtime($processingPath) >= time() - 600) {
+                throw new RuntimeException('تتم معالجة هذا الملف حالياً. لا تعد إرسال النموذج.');
+            }
+            @rename($processingPath, $stagePath);
+        }
+        if (!is_file($stagePath) || filemtime($stagePath) < time() - 7200) {
+            throw new RuntimeException('انتهت صلاحية ملف الاستيراد المؤقت. أعد رفعه.');
+        }
+        if ((string)($_POST['mapping_reviewed'] ?? '') !== '1') {
+            throw new RuntimeException('يجب تأكيد مراجعة مطابقة الحقول قبل الاستيراد.');
+        }
+        if (!@rename($stagePath, $processingPath)) {
+            throw new RuntimeException('بدأت معالجة الملف في طلب آخر. انتظر نتيجة الاستيراد.');
+        }
+        $processingStagePath = $processingPath;
+        $originalStagePath = $stagePath;
+        $staged = json_decode((string)file_get_contents($processingStagePath), true);
+        if (!is_array($staged)
+            || intval($staged['user_id'] ?? 0) !== $userId
+            || (string)($staged['entity'] ?? '') !== $importEntity
+            || intval($staged['department_id'] ?? 0) !== $importDepartmentId) {
+            throw new RuntimeException('ملف الاستيراد المؤقت لا يخص هذه الصفحة أو هذا المستخدم.');
+        }
+
+        $mapping = is_array($_POST['mapping'] ?? null) ? $_POST['mapping'] : [];
+        $skipDuplicates = isset($_POST['skip_duplicates']) && $_POST['skip_duplicates'] === '1';
+        $resultSummary = $service->import($staged, $mapping, $userId, $skipDuplicates);
+        $importCompleted = true;
+        $donePath = substr($stagePath, 0, -5) . '.done.json';
+        if (!@rename($processingStagePath, $donePath)) {
+            @unlink($processingStagePath);
+        }
+        $processingStagePath = '';
+        $originalStagePath = '';
+        $staged = null;
+        $stageToken = '';
+    }
+} catch (Throwable $error) {
+    if (!$importCompleted && $processingStagePath !== '' && is_file($processingStagePath) && $originalStagePath !== '') {
+        @rename($processingStagePath, $originalStagePath);
+    }
+    $pageError = $error->getMessage();
+    error_log('Property Excel import [' . $importEntity . '] user ' . $userId . ': ' . $error->getMessage());
+}
+
+$departments = [];
+if ($importEntity === 'generic' && $importDepartmentId < 1) {
+    $departmentResult = mysql_query(
+        "SELECT dep_id, dep_name FROM departments_name
+         WHERE dep_isactive='1' AND (dep_isdeleted='' OR dep_isdeleted='0' OR dep_isdeleted IS NULL)
+         ORDER BY dep_order, dep_name",
+        $link
+    );
+    while ($departmentResult && ($department = mysql_fetch_array($departmentResult))) {
+        $departments[] = $department;
+    }
+}
+
+$selfUrl = '/aqary/admin/' . basename((string)($_SERVER['SCRIPT_NAME'] ?? ''));
+if ($importEntity === 'generic' && $importDepartmentId > 0) {
+    $selfUrl .= '?dep_id=' . $importDepartmentId;
+}
+?>
+
+<style>
+.property-import-page { direction: rtl; max-width: 1500px; margin: 1.5rem auto; }
+.property-import-hero { background: linear-gradient(135deg, #159447, #087f8c); color: #fff; border-radius: 14px; }
+.property-import-step { border-inline-start: 4px solid #159447; }
+.property-import-map-table th { white-space: nowrap; }
+.property-import-sample { min-width: 180px; max-width: 320px; white-space: normal; word-break: break-word; }
+.property-import-map-select { min-width: 260px; }
+.property-import-nav .btn { min-width: 155px; }
+</style>
+
+<main class="property-import-page container-fluid px-3 px-lg-4">
+    <section class="property-import-hero p-4 shadow-sm mb-4">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
+            <div>
+                <h2 class="mb-2"><i class="bi bi-file-earmark-excel ms-2"></i><?= property_import_escape($config['title'] ?? $sc_title) ?></h2>
+                <div>ارفع ملف Excel، راجع المطابقة التلقائية، ثم نفّذ الاستيراد دون الحاجة إلى قالب ثابت.</div>
+            </div>
+            <a class="btn btn-light" href="<?= property_import_escape($config['back_url'] ?? '/aqary/admin/index.hnt') ?>">
+                <i class="bi bi-arrow-right ms-1"></i><?= property_import_escape($config['back_label'] ?? 'رجوع') ?>
+            </a>
+        </div>
+    </section>
+
+    <nav class="property-import-nav d-flex flex-wrap gap-2 mb-4" aria-label="صفحات الاستيراد">
+        <a class="btn <?= $importEntity === 'arady' ? 'btn-success' : 'btn-outline-success' ?>" href="/aqary/admin/import_arady.hnt">الأراضي</a>
+        <a class="btn <?= $importEntity === 'emara' ? 'btn-success' : 'btn-outline-success' ?>" href="/aqary/admin/import_emara.hnt">العمائر</a>
+        <a class="btn <?= $importEntity === 'vila' ? 'btn-success' : 'btn-outline-success' ?>" href="/aqary/admin/import_vila.hnt">الفلل</a>
+        <a class="btn <?= $importEntity === 'generic' ? 'btn-success' : 'btn-outline-success' ?>" href="/aqary/admin/import_generic_department.hnt">الأقسام العامة</a>
+    </nav>
+
+    <?php if ($pageError !== '') { ?>
+        <div class="alert alert-danger shadow-sm"><i class="bi bi-exclamation-triangle-fill ms-2"></i><?= property_import_escape($pageError) ?></div>
+    <?php } ?>
+
+    <?php if ($resultSummary) { ?>
+        <section class="card border-0 shadow-sm mb-4 property-import-step">
+            <div class="card-body p-4">
+                <h4 class="text-success mb-3"><i class="bi bi-check-circle-fill ms-2"></i>اكتملت عملية الاستيراد</h4>
+                <div class="row g-3 text-center">
+                    <div class="col-6 col-lg-3"><div class="border rounded p-3"><strong class="d-block fs-3"><?= intval($resultSummary['total']) ?></strong>إجمالي الصفوف</div></div>
+                    <div class="col-6 col-lg-3"><div class="border border-success rounded p-3"><strong class="d-block fs-3 text-success"><?= intval($resultSummary['inserted']) ?></strong>تم استيرادها</div></div>
+                    <div class="col-6 col-lg-3"><div class="border border-warning rounded p-3"><strong class="d-block fs-3 text-warning"><?= intval($resultSummary['skipped']) ?></strong>تم تجاوزها</div></div>
+                    <div class="col-6 col-lg-3"><div class="border border-danger rounded p-3"><strong class="d-block fs-3 text-danger"><?= intval($resultSummary['failed']) ?></strong>فشلت</div></div>
+                </div>
+                <?php if ($resultSummary['errors']) { ?>
+                    <div class="table-responsive mt-4">
+                        <table class="table table-sm table-bordered align-middle">
+                            <thead class="table-danger"><tr><th>صف Excel</th><th>سبب عدم الاستيراد</th></tr></thead>
+                            <tbody>
+                            <?php foreach ($resultSummary['errors'] as $rowError) { ?>
+                                <tr><td><?= intval($rowError['row']) ?></td><td><?= property_import_escape($rowError['message']) ?></td></tr>
+                            <?php } ?>
+                            </tbody>
+                        </table>
+                    </div>
+                    <?php if (intval($resultSummary['failed']) > count($resultSummary['errors'])) { ?>
+                        <div class="text-muted">تم عرض أول 100 خطأ فقط.</div>
+                    <?php } ?>
+                <?php } ?>
+            </div>
+        </section>
+    <?php } ?>
+
+    <?php if (!$canImport) { ?>
+        <!-- The permission error above is the complete response for this user. -->
+    <?php } elseif ($importEntity === 'generic' && $importDepartmentId < 1) { ?>
+        <section class="card border-0 shadow-sm property-import-step">
+            <div class="card-body p-4">
+                <h4 class="mb-3">1. اختر القسم العام</h4>
+                <?php if (!$departments) { ?>
+                    <div class="alert alert-warning mb-0">لا توجد أقسام عامة نشطة.</div>
+                <?php } else { ?>
+                    <form method="get" action="/aqary/admin/import_generic_department.hnt" class="row g-3 align-items-end">
+                        <div class="col-md-8">
+                            <label class="form-label fw-bold" for="dep_id">القسم</label>
+                            <select class="form-select" id="dep_id" name="dep_id" required>
+                                <option value="">اختر القسم...</option>
+                                <?php foreach ($departments as $department) { ?>
+                                    <option value="<?= intval($department['dep_id']) ?>"><?= property_import_escape($department['dep_name']) ?></option>
+                                <?php } ?>
+                            </select>
+                        </div>
+                        <div class="col-md-4"><button class="btn btn-success w-100" type="submit">متابعة <i class="bi bi-arrow-left me-1"></i></button></div>
+                    </form>
+                <?php } ?>
+            </div>
+        </section>
+    <?php } elseif (!$service) { ?>
+        <!-- The configuration error above must be corrected before an upload is accepted. -->
+    <?php } elseif (!$staged) { ?>
+        <section class="card border-0 shadow-sm property-import-step">
+            <div class="card-body p-4">
+                <h4 class="mb-3">1. ارفع ملف Excel</h4>
+                <form method="post" enctype="multipart/form-data" action="<?= property_import_escape($selfUrl) ?>" class="row g-3 align-items-end">
+                    <input type="hidden" name="import_action" value="upload">
+                    <input type="hidden" name="csrf_token" value="<?= property_import_escape($_SESSION['property_import_csrf']) ?>">
+                    <div class="col-lg-9">
+                        <label class="form-label fw-bold" for="excel_file">ملف البيانات</label>
+                        <input class="form-control form-control-lg" type="file" id="excel_file" name="excel_file" accept=".xlsx,.xls" required>
+                        <div class="form-text">الحد الأقصى 10 ميجابايت و5000 صف. تُقرأ ورقة العمل الأولى. ملفات XLS الثنائية القديمة يجب حفظها بصيغة XLSX.</div>
+                    </div>
+                    <div class="col-lg-3"><button class="btn btn-success btn-lg w-100" type="submit"><i class="bi bi-cloud-arrow-up ms-2"></i>قراءة الملف</button></div>
+                </form>
+            </div>
+        </section>
+    <?php } else { ?>
+        <section class="card border-0 shadow-sm property-import-step mb-4">
+            <div class="card-body p-4">
+                <div class="d-flex flex-wrap justify-content-between gap-2 mb-3">
+                    <div>
+                        <h4 class="mb-1">2. طابق أعمدة Excel مع حقول البرنامج</h4>
+                        <div class="text-muted">
+                            الملف: <strong><?= property_import_escape($staged['file_name']) ?></strong> —
+                            صف العناوين المكتشف: <strong><?= intval($staged['header_row']) ?></strong> —
+                            صفوف البيانات: <strong><?= count($staged['rows']) ?></strong>
+                        </div>
+                    </div>
+                    <a class="btn btn-outline-secondary align-self-start" href="<?= property_import_escape($selfUrl) ?>">اختيار ملف آخر</a>
+                </div>
+
+                <form method="post" action="<?= property_import_escape($selfUrl) ?>">
+                    <input type="hidden" name="import_action" value="import">
+                    <input type="hidden" name="stage_token" value="<?= property_import_escape($stageToken) ?>">
+                    <input type="hidden" name="csrf_token" value="<?= property_import_escape($_SESSION['property_import_csrf']) ?>">
+                    <div class="table-responsive">
+                        <table class="table table-striped table-bordered align-middle property-import-map-table">
+                            <thead class="table-light"><tr><th>#</th><th>عمود Excel</th><th>أمثلة من الملف</th><th>حقل البرنامج</th></tr></thead>
+                            <tbody>
+                            <?php foreach ($staged['headers'] as $index => $header) {
+                                $samples = [];
+                                foreach (array_slice($staged['rows'], 0, 3) as $sampleRow) {
+                                    $sample = trim((string)($sampleRow['values'][$index] ?? ''));
+                                    if ($sample !== '') {
+                                        $samples[] = $sample;
+                                    }
+                                }
+                                $autoTarget = (string)($staged['auto_mapping'][$index] ?? '');
+                            ?>
+                                <tr>
+                                    <td><?= $index + 1 ?></td>
+                                    <td><strong><?= property_import_escape($header) ?></strong></td>
+                                    <td class="property-import-sample text-muted"><?= property_import_escape(implode(' | ', array_unique($samples))) ?></td>
+                                    <td>
+                                        <select class="form-select property-import-map-select" name="mapping[<?= intval($index) ?>]">
+                                            <option value="">تجاهل هذا العمود</option>
+                                            <?php foreach ($fields as $fieldName => $definition) { ?>
+                                                <option value="<?= property_import_escape($fieldName) ?>" <?= $autoTarget === $fieldName ? 'selected' : '' ?>>
+                                                    <?= property_import_escape($definition['label']) ?><?= str_starts_with($fieldName, '__') ? '' : ' — ' . property_import_escape($fieldName) ?>
+                                                </option>
+                                            <?php } ?>
+                                        </select>
+                                    </td>
+                                </tr>
+                            <?php } ?>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="row g-3 align-items-center mt-2">
+                        <?php if (($config['number_field'] ?? '') !== '') { ?>
+                            <div class="col-lg-6">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" role="switch" id="skip_duplicates" name="skip_duplicates" value="1" checked>
+                                    <label class="form-check-label" for="skip_duplicates">تجاوز السجل إذا كان رقم العقار والمخطط موجودين مسبقاً</label>
+                                </div>
+                            </div>
+                        <?php } ?>
+                        <div class="col-lg-6">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="mapping_reviewed" name="mapping_reviewed" value="1" required>
+                                <label class="form-check-label fw-bold" for="mapping_reviewed">راجعت المطابقة وأوافق على إضافة السجلات إلى البرنامج</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="alert alert-info mt-3 mb-3">
+                        <i class="bi bi-info-circle-fill ms-2"></i>
+                        أسماء المدن والمخططات والمصادر يجب أن تكون موجودة مسبقاً. السجلات غير المطابقة لن تُضاف وستظهر في تقرير الأخطاء.
+                    </div>
+                    <button class="btn btn-success btn-lg px-5" type="submit"><i class="bi bi-database-add ms-2"></i>بدء الاستيراد</button>
+                </form>
+            </div>
+        </section>
+    <?php } ?>
+</main>
+
+<?php require $aqaryRoot . '/foter.hnt'; ?>
