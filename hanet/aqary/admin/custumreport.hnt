@@ -1,0 +1,553 @@
+<?php
+// Force no cache - prevent browser from showing old version
+header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+header("Cache-Control: post-check=0, pre-check=0", false);
+header("Pragma: no-cache");
+
+// Extract POST variables early for processing
+extract($_REQUEST);
+
+// Initialize variables to prevent undefined warnings
+$viewreport = isset($viewreport) ? $viewreport : '';
+
+// Check if this is an AJAX form submission - handle it BEFORE any HTML output
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+
+// Set page variables
+$sc_title = "إنشاء تقرير مخصص";
+$sc_id = "83";
+
+// Only include headers if NOT an AJAX request
+if (!$is_ajax_request) {
+    include_once "../nocash.hnt";
+    include_once "../header.hnt";
+} else {
+    // Always include authentication and database for AJAX
+    include_once "../reqloginajax.hnt";
+}
+
+// Handle report creation/update
+if (isset($sqlfeilds) && $sqlfeilds) {
+    mysql_query("ALTER TABLE `custumreport` ADD `sumfields` VARCHAR(1000), CHANGE `reportdefault` `reportdefault` VARCHAR(1002)");
+
+    $sqlfeilds = addslashes($sqlfeilds);
+    $reportname = isset($reportname) ? addslashes($reportname) : '';
+    $reportorderby = isset($reportorderby) ? addslashes($reportorderby) : '';
+    $reportdaesc = isset($reportdaesc) ? addslashes($reportdaesc) : '';
+    $sumfields = isset($_POST['sumfields']) ? addslashes($_POST['sumfields']) : '';
+    $reporttype = isset($reporttype) ? addslashes($reporttype) : '';
+    $editreportid = isset($_POST['editreportid']) ? intval($_POST['editreportid']) : 0;
+
+    // Check if updating existing report
+    if ($editreportid > 0) {
+        $sql = "UPDATE custumreport SET
+               reportname='" . $reportname . "',
+               sqlfeilds='" . $sqlfeilds . "',
+               reportorderby='" . $reportorderby . "',
+               reportdaesc='" . $reportdaesc . "',
+               sumfields='" . $sumfields . "',
+               reporttype='" . $reporttype . "'
+               WHERE id='" . $editreportid . "' LIMIT 1";
+        $success_message = 'تم تحديث التقرير بنجاح';
+    } else {
+        $sql = "INSERT INTO custumreport SET
+               reportname='" . $reportname . "',
+               sqlfeilds='" . $sqlfeilds . "',
+               reportorderby='" . $reportorderby . "',
+               reportdaesc='" . $reportdaesc . "',
+               userid='" . intval($_SESSION['useridv']) . "',
+               sumfields='" . $sumfields . "',
+               reporttype='" . $reporttype . "'";
+        $success_message = 'تم إنشاء التقرير بنجاح';
+    }
+
+    if (mysql_query($sql, $link)) {
+        // Handle AJAX response
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(array(
+                'success' => true,
+                'message' => $success_message,
+                'redirect_url' => 'custumreport.hnt?viewreport=' . urlencode($reporttype)
+            ), JSON_UNESCAPED_UNICODE);
+            exit;
+        } else {
+            echo "<div class='alert alert-success alert-dismissible fade show' role='alert'>
+                    <i class='bi bi-check-circle me-2'></i>" . $success_message . "
+                    <button type='button' class='btn-close' data-bs-dismiss='alert'></button>
+                  </div>";
+        }
+    }
+}
+
+// Handle report deletion
+if (isset($deletereport) && $deletereport) {
+    $sql = "DELETE FROM custumreport WHERE id='" . intval($deletereport) . "'";
+    if (mysql_query($sql, $link)) {
+        // Handle AJAX response
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(array(
+                'success' => true,
+                'message' => 'تم حذف التقرير',
+                'redirect_url' => 'custumreport.hnt?viewreport=' . urlencode($viewreport)
+            ), JSON_UNESCAPED_UNICODE);
+            exit;
+        } else {
+            echo "<div class='alert alert-info alert-dismissible fade show' role='alert'>
+                    <i class='bi bi-trash me-2'></i>تم حذف التقرير
+                    <button type='button' class='btn-close' data-bs-dismiss='alert'></button>
+                  </div>";
+        }
+    }
+}
+?>
+
+
+<script type="text/javascript">
+/** Modern Report Builder JavaScript
+ * Replaces legacy 2001 code with ES6+ syntax
+ */
+
+// Add option to select element
+function addOption(select, text, value) {
+    const option = new Option(text, value);
+    select.options[select.length] = option;
+}
+
+// Delete option from select element
+function deleteOption(select, index) {
+    if (select.length > 0) {
+        select.options[index] = null;
+    }
+}
+
+// Move selected options between two select elements
+function moveOptions(selectFrom, selectTo) {
+    const selectedOptions = [];
+
+    // Collect selected options in reverse order
+    for (let i = selectFrom.length - 1; i >= 0; i--) {
+        if (selectFrom.options[i].selected) {
+            selectedOptions.push({
+                text: selectFrom.options[i].text,
+                value: selectFrom.options[i].value
+            });
+            deleteOption(selectFrom, i);
+        }
+    }
+
+    // Add options to target select in reverse order (maintains original order)
+    for (let i = selectedOptions.length - 1; i >= 0; i--) {
+        addOption(selectTo, selectedOptions[i].text, selectedOptions[i].value);
+    }
+}
+
+// Convert select options to SQL field string
+function warivaluetotxt(selectElement, txtInput, txtFields) {
+    let sqlFields = '';
+    let fieldNames = '';
+
+    for (let i = 0; i < selectElement.length; i++) {
+        const separator = i > 0 ? ', ' : '';
+        const option = selectElement.options[i];
+
+        sqlFields += separator + option.value + " as '" + option.text + "'";
+        fieldNames += separator + option.value;
+    }
+
+    txtInput.value = sqlFields;
+
+    if (txtFields) {
+        txtFields.value = fieldNames;
+    }
+
+    return false;
+}
+
+// AJAX form submission - following maktab.hnt pattern
+function submitReportForm(formElement) {
+    const formData = new FormData(formElement);
+    formData.append('ajax_submit', '1'); // Mark as AJAX request
+
+    // Show loading indicator
+    const submitBtn = formElement.querySelector('input[type="submit"], button[type="submit"]');
+    const originalBtnText = submitBtn ? submitBtn.value || submitBtn.innerHTML : '';
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.value = 'جاري الحفظ...';
+    }
+
+    fetch('custumreport.hnt', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Show success notification
+            if (typeof showBootstrapNotification === 'function') {
+                showBootstrapNotification(data.message, 'success', 3000);
+            } else {
+                alert(data.message);
+            }
+
+            // Redirect if URL provided
+            if (data.redirect_url) {
+                setTimeout(() => {
+                    window.location.href = data.redirect_url;
+                }, 1500);
+            }
+        } else {
+            // Show error
+            if (typeof showBootstrapNotification === 'function') {
+                showBootstrapNotification(data.error || 'حدث خطأ', 'error', 5000);
+            } else {
+                alert(data.error || 'حدث خطأ');
+            }
+
+            // Re-enable submit button
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.value = originalBtnText;
+            }
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        if (typeof showBootstrapNotification === 'function') {
+            showBootstrapNotification('حدث خطأ أثناء حفظ التقرير', 'error', 5000);
+        } else {
+            alert('حدث خطأ أثناء حفظ التقرير');
+        }
+
+        // Re-enable submit button
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.value = originalBtnText;
+        }
+    });
+
+    return false;
+}
+
+// Attach AJAX submission to all report forms on page load
+$(document).ready(function() {
+    // The report builder uses native multiple selects as two movable field
+    // lists. Global Select2 initialization hides that list and prevents the
+    // move buttons from reflecting all available fields.
+    $('form.report-form select[multiple]').each(function() {
+        const $select = $(this);
+        if ($select.hasClass('select2-hidden-accessible')) {
+            $select.select2('destroy');
+        }
+    });
+
+    // Attach to all forms with class 'report-form'
+    $('form.report-form').on('submit', function(e) {
+        e.preventDefault();
+        submitReportForm(this);
+        return false;
+    });
+
+    // Also attach to legacy forms without class
+    $('form[action="custumreport.hnt"]').addClass('report-form').on('submit', function(e) {
+        e.preventDefault();
+        submitReportForm(this);
+        return false;
+    });
+});
+</script>
+
+<style>
+/* Modern Report Builder Styling - Following PROJECT_GUIDE */
+.report-form {
+    background: #ffffff;
+    border-radius: 8px;
+    padding: 2rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.report-form .form-label {
+    font-weight: 600;
+    color: #495057;
+    margin-bottom: 0.5rem;
+}
+
+.report-form input[type="text"],
+.report-form select {
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    padding: 0.5rem;
+    transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+.report-form input[type="text"]:focus,
+.report-form select:focus {
+    border-color: #189c2aff;
+    outline: 0;
+    box-shadow: 0 0 0 0.2rem rgba(24, 156, 42, 0.25);
+}
+
+/* Select boxes styling */
+select[multiple].form-select {
+    min-height: 250px;
+    font-size: 0.95rem;
+}
+
+/* Button hover effects */
+.btn {
+    transition: all 0.2s ease-in-out;
+}
+
+.btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+}
+
+.btn-submit-report {
+    background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+    color: white;
+    border: none;
+    padding: 0.75rem 2rem;
+    border-radius: 4px;
+    font-size: 1.1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.btn-submit-report:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 12px rgba(0,0,0,0.2);
+}
+
+.btn-submit-report:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+}
+
+/* Responsive adjustments */
+@media (max-width: 992px) {
+    .field-selector-container {
+        flex-direction: column;
+    }
+
+    .field-selector {
+        max-width: 100%;
+        width: 100%;
+    }
+
+    .field-selector-buttons {
+        flex-direction: row;
+        padding-top: 0;
+    }
+}
+
+/* Ensure proper RTL layout */
+[dir="rtl"] .field-selector-container {
+    direction: rtl;
+}
+</style>
+
+<?php
+$viewreport = isset($_REQUEST['viewreport']) ? $_REQUEST['viewreport'] : '';
+
+// Get department data
+$sql = "SELECT dep_id, dep_name, dep_image, dep_table_name FROM departments_name
+        WHERE dep_isdeleted='' ORDER BY dep_order";
+$result = mysql_query($sql, $link);
+$selectdata = '';
+$sel1 = $sel2 = $sel3 = '';
+
+while ($row = mysql_fetch_array($result)) {
+    $sel = '';
+    if ($viewreport == $row['dep_id']) {
+        $dep_name = $row['dep_name'];
+        $dep_image = $row['dep_image'];
+        $dep_table_name = $row['dep_table_name'];
+        $sel = ' selected';
+    }
+    $selectdata .= "<option" . $sel . " value='" . htmlspecialchars($row['dep_id'], ENT_QUOTES, 'UTF-8') . "'>" . htmlspecialchars($row['dep_name'], ENT_QUOTES, 'UTF-8') . "</option>";
+}
+
+// Set selected for standard report types
+if ($viewreport == "arady") {
+    $sel1 = ' selected';
+}
+if ($viewreport == "emara") {
+    $sel2 = ' selected';
+}
+if ($viewreport == "vila") {
+    $sel3 = ' selected';
+}
+?>
+
+<!-- Report Type Selector -->
+<div class="container-fluid" dir="rtl">
+    <div class="card mb-4 shadow-sm border-0">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-file-earmark-text me-2"></i>
+                <?= $sc_title ?>
+            </h4>
+        </div>
+        <div class="card-body">
+            <div class="row align-items-center">
+                <div class="col-auto">
+                    <label class="form-label mb-0 me-2 fw-bold">نوع التقرير:</label>
+                </div>
+                <div class="col-auto">
+                    <select class="form-select form-select-lg"
+                            onchange="window.location.href='custumreport.hnt?viewreport='+ this.value;"
+                            style="min-width: 250px;">
+                        <option value="">اختر نوع التقرير...</option>
+                        <option value="arady"<?= $sel1 ?>>اراضي</option>
+                        <option value="emara"<?= $sel2 ?>>عمائر</option>
+                        <option value="vila"<?= $sel3 ?>>فلل</option>
+                        <?= $selectdata ?>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<?php
+
+// Initialize $disp array to prevent undefined variable warnings
+$disp = array(0 => '', 1 => '', 2 => '', 3 => '');
+
+switch ($viewreport) {
+	case "":
+		break;
+	case "arady":
+		$disp[0] = "1";
+		break;
+	case "emara":
+		$disp[1] = "1";
+		break;
+	case "vila":
+		$disp[2] = "1";
+		break;
+	default:
+		$disp[3] = "1";
+		break;
+}
+
+?>
+<!-- Report Form Container -->
+<div class="container-fluid" dir="rtl">
+	<?php
+	//################## arady #######################//
+	if ($disp[0]) {
+		// Load report data if editing
+		$edit_report = array();
+		$is_editing = false;
+		if (isset($_GET['editreport']) && $_GET['editreport']) {
+			$editid = intval($_GET['editreport']);
+			$sql = "SELECT * FROM custumreport WHERE id='" . $editid . "' LIMIT 1";
+			$result = mysql_query($sql, $link);
+			if ($row = mysql_fetch_array($result)) {
+				$edit_report = $row;
+				$is_editing = true;
+			}
+		}
+
+		$report_name = $is_editing ? $edit_report['reportname'] : 'تقرير أراضي جديد';
+		$report_orderby = $is_editing ? $edit_report['reportorderby'] : '';
+		$report_daesc = $is_editing ? $edit_report['reportdaesc'] : 'desc';
+		$selected_fields = $is_editing ? explode(',', $edit_report['sqlfeilds']) : array();
+
+		include 'custumreport_arady.inc.php';
+	}
+	//#################### end arady ########################
+
+	//################## emara #######################//
+	if ($disp[1]) {
+		// Load report data if editing
+		$edit_report_emara = array();
+		$is_editing_emara = false;
+		if (isset($_GET['editreport']) && $_GET['editreport']) {
+			$editid_emara = intval($_GET['editreport']);
+			$sql_emara = "SELECT * FROM custumreport WHERE id='" . $editid_emara . "' AND reporttype='emara' LIMIT 1";
+			$result_emara = mysql_query($sql_emara, $link);
+			if ($row_emara = mysql_fetch_array($result_emara)) {
+				$edit_report_emara = $row_emara;
+				$is_editing_emara = true;
+			}
+		}
+
+		$report_name_emara = $is_editing_emara ? $edit_report_emara['reportname'] : 'تقرير عمائر جديد';
+		$report_orderby_emara = $is_editing_emara ? $edit_report_emara['reportorderby'] : '';
+		$report_daesc_emara = $is_editing_emara ? $edit_report_emara['reportdaesc'] : 'desc';
+		$selected_fields_emara = $is_editing_emara ? explode(',', $edit_report_emara['sqlfeilds']) : array();
+
+		include 'custumreport_emara.inc.php';
+	}
+	//#################### end ######################//
+
+	//################## vila  #######################//
+	if ($disp[2]) {
+		// Load report data if editing
+		$edit_report_vila = array();
+		$is_editing_vila = false;
+		if (isset($_GET['editreport']) && $_GET['editreport']) {
+			$editid_vila = intval($_GET['editreport']);
+			$sql_vila = "SELECT * FROM custumreport WHERE id='" . $editid_vila . "' AND reporttype='vila' LIMIT 1";
+			$result_vila = mysql_query($sql_vila, $link);
+			if ($row_vila = mysql_fetch_array($result_vila)) {
+				$edit_report_vila = $row_vila;
+				$is_editing_vila = true;
+			}
+		}
+
+		$report_name_vila = $is_editing_vila ? $edit_report_vila['reportname'] : 'تقرير فلل وقصور جديد';
+		$report_orderby_vila = $is_editing_vila ? $edit_report_vila['reportorderby'] : '';
+		$report_daesc_vila = $is_editing_vila ? $edit_report_vila['reportdaesc'] : 'desc';
+		$selected_fields_vila = $is_editing_vila ? explode(',', $edit_report_vila['sqlfeilds']) : array();
+
+		include 'custumreport_vila.inc.php';
+	}
+	//###################### end ######################//
+
+	?>
+
+
+	<?php
+	//################## other / custom #######################//
+	if ($disp[3]) {
+		// Load report data if editing
+		$edit_report_custom = array();
+		$is_editing_custom = false;
+		$sumfields_custom = '';
+		if (isset($_GET['editreport']) && $_GET['editreport']) {
+			$editid_custom = intval($_GET['editreport']);
+			$sql_custom = "SELECT * FROM custumreport WHERE id='" . $editid_custom . "' AND reporttype='" . mysql_real_escape_string($viewreport) . "' LIMIT 1";
+			$result_custom = mysql_query($sql_custom, $link);
+			if ($row_custom = mysql_fetch_array($result_custom)) {
+				$edit_report_custom = $row_custom;
+				$is_editing_custom = true;
+				$sumfields_custom = isset($row_custom['sumfields']) ? $row_custom['sumfields'] : '';
+			}
+		}
+
+		$report_name_custom = $is_editing_custom ? $edit_report_custom['reportname'] : 'تقرير ' . (isset($dep_name) ? $dep_name : 'مخصص') . '  جديد';
+		$report_orderby_custom = $is_editing_custom ? $edit_report_custom['reportorderby'] : '';
+		$report_daesc_custom = $is_editing_custom ? $edit_report_custom['reportdaesc'] : 'desc';
+		$selected_fields_custom = $is_editing_custom ? explode(',', $edit_report_custom['sqlfeilds']) : array();
+
+		include 'custumreport_custom.inc.php';
+	}
+	//#################### end custom ########################
+	?>
+
+
+
+
+	<?php
+	//#################### Close all sections ########################
+	?>
+</div>
+<!-- End container-fluid -->

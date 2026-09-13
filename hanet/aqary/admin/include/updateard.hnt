@@ -490,7 +490,9 @@ $urltarget_report = "$urlh/admin/include/updateard_report.hnt?page=" . (isset($p
         $custfiled_sql = "ardid as 'الرقم بالبرنامج', mokhatatid as 'المخطط', block as 'البلك', ardrakam as 'رقم القطعة', hedod as 'الحدود', price as 'السعر حد', pricesom as 'السعر سوم', som as 'سوم', ardtype as 'نوع الارض', hay as 'الحي', mesaha as 'المساحة', al3ard as 'العرض', tol as 'الطول', s1 as 'مياه', s2 as 'كهرباء', s11 as 'البيع بالقطعة', s12 as 'البيع بالمتر المربع', malekbayan4 as 'رقم الصك', note as 'ملاحظات', statusx as 'الحالة'";
     }
 
-    $custfiled_sql = str_replace("mokhatatid", "arady.mokhatatid", $custfiled_sql);
+    // Qualify only a standalone field. Custom calculated fields may already use
+    // qualified mokhatat/arady columns (for example, the city-name lookup).
+    $custfiled_sql = preg_replace('/(?<![A-Za-z0-9_.])mokhatatid(?![A-Za-z0-9_])/', 'arady.mokhatatid', $custfiled_sql);
 
     $sql = "SELECT ardid, $custfiled_sql FROM arady $showmasdersql ORDER BY $myorderby LIMIT $limit ";
     $result = mysql_query($sql, $link);
@@ -556,27 +558,30 @@ $urltarget_report = "$urlh/admin/include/updateard_report.hnt?page=" . (isset($p
                                 }
                             }
 
-                            // Get mokhatat name with link
-                            if (isset($row['المخطط']) && $row['المخطط']) {
-                                $sqlk = "SELECT mokhatatname FROM mokhatat WHERE mokhatatid='" . addslashes($row['المخطط']) . "'";
+                            // Get mokhatat name with link. Keep the legacy alias
+                            // working while also supporting the clearer report label.
+                            $mokhatatField = isset($row['رقم المخطط']) ? 'رقم المخطط' : 'المخطط';
+                            if (isset($row[$mokhatatField]) && $row[$mokhatatField]) {
+                                $mokhatatId = $row[$mokhatatField];
+                                $sqlk = "SELECT mokhatatname FROM mokhatat WHERE mokhatatid='" . addslashes($mokhatatId) . "'";
                                 $resk = mysql_query($sqlk, $link);
                                 $resk = mysql_fetch_array($resk);
                                 if(!isset($resk['mokhatatname']) || !$resk['mokhatatname']){
                                     $resk['mokhatatname'] = "";
                                 }
-                                $mokhatatpicp_path = upload_path('mokhatat.images', $row['المخطط'] . ".pdf");
-                                $mokhatatpicj_path = upload_path('mokhatat.images', $row['المخطط'] . ".jpg");
+                                $mokhatatpicp_path = upload_path('mokhatat.images', $mokhatatId . ".pdf");
+                                $mokhatatpicj_path = upload_path('mokhatat.images', $mokhatatId . ".jpg");
                                 $moklink = "";
 
                                 if (file_exists($mokhatatpicp_path)) {
-                                    $mokhatatpicp_url = upload_url('mokhatat.images', $row['المخطط'] . ".pdf");
+                                    $mokhatatpicp_url = upload_url('mokhatat.images', $mokhatatId . ".pdf");
                                     $moklink = "<a href='#' onclick=\"showModalDialog('../picview.hnt?myx=" . urlencode($mokhatatpicp_url) . "&hex=embed%20', 'معاينة', 'resizable: yes; help: no; status:no; scroll: no;'); return false;\">";
                                 } elseif (file_exists($mokhatatpicj_path)) {
-                                    $mokhatatpicj_url = upload_url('mokhatat.images', $row['المخطط'] . ".jpg");
+                                    $mokhatatpicj_url = upload_url('mokhatat.images', $mokhatatId . ".jpg");
                                     $moklink = "<a href='#' onclick=\"showModalDialog('../picview.hnt?myx=" . urlencode($mokhatatpicj_url) . "', 'معاينة', 'resizable: yes; help: no; status:no; scroll: no;'); return false;\">";
                                 }
 
-                                $row['المخطط'] = $moklink . $resk['mokhatatname'] . "</a>";
+                                $row[$mokhatatField] = $moklink . $resk['mokhatatname'] . ($moklink ? "</a>" : "");
                             }
 
                             // Format date

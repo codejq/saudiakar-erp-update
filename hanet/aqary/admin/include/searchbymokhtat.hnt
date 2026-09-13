@@ -7,8 +7,9 @@
 $sc_title = "بحث بالموقع";
 $sc_id = "13";
 
-// Check if this is an AJAX form submission
-$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1';
+// Check if this is an AJAX form submission or a city-plan lookup.
+$is_plan_lookup = isset($_GET['load_mokhatat']) && $_GET['load_mokhatat'] == '1';
+$is_ajax_request = (isset($_POST['ajax_submit']) && $_POST['ajax_submit'] == '1') || $is_plan_lookup;
 
 // Only include headers if NOT an AJAX request
 if (!$is_ajax_request) {
@@ -17,6 +18,31 @@ if (!$is_ajax_request) {
 } else {
     // For AJAX requests, include authentication
     include_once "../../reqloginajax.hnt";
+}
+
+// Return plans for the selected city without rendering the page.
+if ($is_plan_lookup) {
+    $cityId = intval($_GET['cityid'] ?? 0);
+    if ($cityId < 1) {
+        sendResponse(false, 'رقم المدينة غير صالح', ['plans' => []], 422);
+    }
+
+    $plans = [];
+    $plansResult = mysql_query(
+        "SELECT mokhatatid, mokhatatname FROM mokhatat WHERE cityid='" . $cityId . "' ORDER BY BINARY mokhatatname",
+        $link
+    );
+    if (!$plansResult) {
+        error_log('Could not load mokhatat for city ' . $cityId . ': ' . mysql_error());
+        sendResponse(false, 'تعذر تحميل المخططات', ['plans' => []], 500);
+    }
+    while ($plan = mysql_fetch_array($plansResult)) {
+        $plans[] = [
+            'mokhatatid' => intval($plan['mokhatatid']),
+            'mokhatatname' => (string)$plan['mokhatatname'],
+        ];
+    }
+    sendResponse(true, 'تم تحميل المخططات', ['plans' => $plans]);
 }
 
 
@@ -60,6 +86,36 @@ if ($is_ajax_request) {
 
 // Only render HTML if NOT an AJAX request
 if (!$is_ajax_request) {
+    // Load the city/plan relationship with the page. This avoids a second AJAX
+    // request that can be polluted by authentication output or PHP warnings on
+    // customer installations and leave the plan selector empty.
+    $plansByCity = [];
+    $allPlansResult = mysql_query(
+        "SELECT cityid, mokhatatid, mokhatatname FROM mokhatat ORDER BY cityid, BINARY mokhatatname",
+        $link
+    );
+    if ($allPlansResult) {
+        while ($plan = mysql_fetch_array($allPlansResult)) {
+            $planCityId = (string)intval($plan['cityid']);
+            if (!isset($plansByCity[$planCityId])) {
+                $plansByCity[$planCityId] = [];
+            }
+            $plansByCity[$planCityId][] = [
+                'mokhatatid' => intval($plan['mokhatatid']),
+                'mokhatatname' => trim((string)$plan['mokhatatname']),
+            ];
+        }
+    }
+
+    $plansJsonFlags = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES |
+        JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT;
+    if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) {
+        $plansJsonFlags |= JSON_INVALID_UTF8_SUBSTITUTE;
+    }
+    $plansByCityJson = json_encode($plansByCity, $plansJsonFlags);
+    if ($plansByCityJson === false) {
+        $plansByCityJson = '{}';
+    }
 ?>
 
 <style>
@@ -513,33 +569,38 @@ document.addEventListener('DOMContentLoaded', function() {
     // Plan search form - load plans when city changes
     const cityPlanSelect = document.getElementById('cityid_plan');
     const mokhatatSelect = document.getElementById('mokhatatid');
+    const plansByCity = <?= $plansByCityJson ?>;
 
-    cityPlanSelect.addEventListener('change', function() {
-        const cityid = this.value;
-        if (!cityid) {
-            mokhatatSelect.innerHTML = '<option value="">اختر المدينة أولاً</option>';
-            return;
-        }
+    function fillMokhatatForCity(cityid) {
+        const plans = plansByCity[String(cityid)] || [];
+        const $mokhatatSelect = $(mokhatatSelect);
+        $mokhatatSelect.empty().append(new Option(
+            plans.length ? 'اختر اسم المخطط' : 'لا توجد مخططات لهذه المدينة',
+            ''
+        ));
 
-        // Load plans for selected city
-        mokhatatSelect.innerHTML = '<option value="">جاري التحميل...</option>';
+        plans.forEach(plan => {
+            $mokhatatSelect.append(new Option(plan.mokhatatname, plan.mokhatatid));
+        });
 
-        fetch(`get_mokhatat.php?cityid=${cityid}`)
-            .then(response => response.json())
-            .then(data => {
-                mokhatatSelect.innerHTML = '<option value="">اختر اسم المخطط</option>';
-                data.forEach(plan => {
-                    const option = document.createElement('option');
-                    option.value = plan.mokhatatid;
-                    option.textContent = plan.mokhatatname;
-                    mokhatatSelect.appendChild(option);
-                });
-            })
-            .catch(error => {
-                console.error('Error loading plans:', error);
-                mokhatatSelect.innerHTML = '<option value="">خطأ في التحميل</option>';
-            });
-    });
+        // Notify Select2 that its underlying options have changed.
+        $mokhatatSelect.val(null).trigger('change');
+    }
+
+    if (cityPlanSelect && mokhatatSelect) {
+        // Select2 emits its selection through jQuery's change event.
+        $(cityPlanSelect).on('change.searchMokhatat', function() {
+            if (!this.value) {
+                $(mokhatatSelect)
+                    .empty()
+                    .append(new Option('اختر المدينة أولاً', ''))
+                    .val(null)
+                    .trigger('change');
+                return;
+            }
+            fillMokhatatForCity(this.value);
+        });
+    }
 
     setupFormAjax('planSearchForm', 'searchBtn1');
 
