@@ -40,6 +40,54 @@
         }
     }
 
+    function hasSelect2() {
+        return !!(window.jQuery && window.jQuery.fn && typeof window.jQuery.fn.select2 === 'function');
+    }
+
+    function destroyEditorWidgets(editor) {
+        if (!editor || !editor.widgets || !hasSelect2()) {
+            return;
+        }
+        editor.widgets.forEach(function (input) {
+            var $input = window.jQuery(input);
+            if ($input.hasClass('select2-hidden-accessible')) {
+                $input.select2('destroy');
+            }
+        });
+        editor.widgets = [];
+    }
+
+    function fillSelect(select, options, selectedValue, placeholder) {
+        select.textContent = '';
+        var empty = document.createElement('option');
+        empty.value = '';
+        empty.textContent = placeholder || 'اختر';
+        select.appendChild(empty);
+        (options || []).forEach(function (option) {
+            var item = document.createElement('option');
+            item.value = String(option.value == null ? '' : option.value);
+            item.textContent = String(option.label == null ? item.value : option.label);
+            select.appendChild(item);
+        });
+        select.value = String(selectedValue == null ? '' : selectedValue);
+    }
+
+    function enableSelect2(editor, select, options) {
+        if (!hasSelect2()) {
+            return;
+        }
+        window.jQuery(select).select2(Object.assign({
+            width: '100%',
+            dir: 'rtl',
+            theme: 'bootstrap-5',
+            language: {
+                noResults: function () { return 'لا توجد نتائج'; },
+                searching: function () { return 'جاري البحث...'; }
+            }
+        }, options || {}));
+        editor.widgets.push(select);
+    }
+
     function rowId(row) {
         return parseInt(row && row.dataset.recordId ? row.dataset.recordId : '0', 10) || 0;
     }
@@ -154,6 +202,7 @@
         }
         var editor = activeEditor;
         activeEditor = null;
+        destroyEditorWidgets(editor);
         if (editor.cell.isConnected) {
             editor.cell.innerHTML = editor.originalHtml;
             editor.cell.dataset.value = editor.originalValue;
@@ -177,20 +226,24 @@
             ids = selected;
         }
         editor.saving = true;
-        editor.input.disabled = true;
+        (editor.inputs || [editor.input]).forEach(function (input) { input.disabled = true; });
 
         request(editor.table, 'inline_update', ids, {
             field: editor.cell.dataset.inlineField,
             value: value
         }).then(function (payload) {
             var confirmed = (payload.updated_ids || []).map(Number);
+            destroyEditorWidgets(editor);
             editor.table.querySelectorAll('[data-inline-field]').forEach(function (cell) {
                 if (cell.dataset.inlineField !== editor.cell.dataset.inlineField) {
                     return;
                 }
                 var id = rowId(cell.closest('tr[data-record-id]'));
                 if (confirmed.indexOf(id) !== -1) {
-                    renderValue(cell, String(payload.value == null ? '' : payload.value), String(payload.display == null ? payload.value : payload.display));
+                    var display = cell.dataset.displayMode === 'city' && payload.city_display != null
+                        ? payload.city_display
+                        : (payload.display == null ? payload.value : payload.display);
+                    renderValue(cell, String(payload.value == null ? '' : payload.value), String(display == null ? '' : display));
                 }
             });
             if (confirmed.indexOf(editor.recordId) === -1 && editor.cell.isConnected) {
@@ -203,9 +256,154 @@
             notify(resultMessage(payload), payload.skipped && payload.skipped.length ? 'warning' : 'success');
         }).catch(function (error) {
             editor.saving = false;
-            editor.input.disabled = false;
+            (editor.inputs || [editor.input]).forEach(function (input) { input.disabled = false; });
             editor.input.focus();
             notify(error.message || 'تعذر حفظ التعديل', 'error');
+        });
+    }
+
+    function activateEditor(cell, table, recordId, value, input, inputs) {
+        activeEditor = {
+            cell: cell,
+            table: table,
+            recordId: recordId,
+            originalHtml: cell.innerHTML,
+            originalValue: value,
+            input: input,
+            inputs: inputs || [input],
+            widgets: [],
+            saving: false
+        };
+        cell.classList.add('aqary-cell-editing');
+        cell.textContent = '';
+        return activeEditor;
+    }
+
+    function openLocationEditor(cell, table, recordId, value) {
+        var wrapper = document.createElement('div');
+        wrapper.className = 'aqary-location-editor d-grid gap-1';
+        var city = document.createElement('select');
+        var plan = document.createElement('select');
+        city.className = 'form-select form-select-sm';
+        plan.className = 'form-select form-select-sm';
+        fillSelect(city, [], '', 'جارٍ تحميل المدن...');
+        fillSelect(plan, [], '', 'اختر المخطط');
+        city.disabled = true;
+        plan.disabled = true;
+        wrapper.appendChild(city);
+        wrapper.appendChild(plan);
+
+        var editor = activateEditor(cell, table, recordId, value, plan, [city, plan]);
+        cell.appendChild(wrapper);
+
+        request(table, 'lookup_options', [], {
+            field: 'mokhatatid',
+            value: value,
+            lookup_kind: 'location'
+        }).then(function (payload) {
+            if (activeEditor !== editor) {
+                return;
+            }
+            fillSelect(city, payload.cities || [], payload.current_city_id || '', 'اختر المدينة');
+            fillSelect(plan, payload.plans || [], value, 'اختر المخطط');
+            city.disabled = false;
+            plan.disabled = !city.value;
+            enableSelect2(editor, city, { placeholder: 'اختر المدينة' });
+            enableSelect2(editor, plan, { placeholder: 'اختر المخطط' });
+            city.focus();
+        }).catch(function (error) {
+            if (activeEditor === editor) {
+                notify(error.message || 'تعذر تحميل المدن والمخططات', 'error');
+                cancelEditor();
+            }
+        });
+
+        city.addEventListener('change', function () {
+            if (activeEditor !== editor || !city.value) {
+                return;
+            }
+            plan.disabled = true;
+            request(table, 'lookup_options', [], {
+                field: 'mokhatatid',
+                value: value,
+                lookup_kind: 'plans',
+                parent_id: city.value
+            }).then(function (payload) {
+                if (activeEditor !== editor) {
+                    return;
+                }
+                if (hasSelect2() && window.jQuery(plan).hasClass('select2-hidden-accessible')) {
+                    window.jQuery(plan).select2('destroy');
+                    editor.widgets = editor.widgets.filter(function (item) { return item !== plan; });
+                }
+                fillSelect(plan, payload.options || [], '', 'اختر المخطط');
+                plan.disabled = false;
+                enableSelect2(editor, plan, { placeholder: 'اختر المخطط' });
+                plan.focus();
+            }).catch(function (error) {
+                plan.disabled = false;
+                notify(error.message || 'تعذر تحميل المخططات', 'error');
+            });
+        });
+        plan.addEventListener('change', function () {
+            if (activeEditor === editor && plan.value) {
+                saveEditor(editor, plan.value);
+            }
+        });
+        wrapper.addEventListener('keydown', function (event) {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                cancelEditor();
+            }
+        });
+    }
+
+    function openLookupTextEditor(cell, table, recordId, value) {
+        var select = document.createElement('select');
+        select.className = 'form-select form-select-sm';
+        fillSelect(select, value ? [{ value: value, label: value }] : [], value, 'جارٍ تحميل الخيارات...');
+        select.disabled = true;
+        var editor = activateEditor(cell, table, recordId, value, select, [select]);
+        cell.appendChild(select);
+
+        request(table, 'lookup_options', [], {
+            field: cell.dataset.inlineField,
+            value: value
+        }).then(function (payload) {
+            if (activeEditor !== editor) {
+                return;
+            }
+            var options = payload.options || [];
+            if (value && !options.some(function (option) { return String(option.value) === value; })) {
+                options.unshift({ value: value, label: value });
+            }
+            fillSelect(select, options, value, 'اختر أو اكتب قيمة جديدة');
+            select.disabled = false;
+            if (hasSelect2()) {
+                enableSelect2(editor, select, {
+                    tags: true,
+                    allowClear: true,
+                    placeholder: 'اختر أو اكتب قيمة جديدة'
+                });
+            }
+            select.focus();
+        }).catch(function (error) {
+            if (activeEditor === editor) {
+                notify(error.message || 'تعذر تحميل خيارات الحقل', 'error');
+                cancelEditor();
+            }
+        });
+
+        select.addEventListener('change', function () {
+            if (activeEditor === editor && !select.disabled) {
+                saveEditor(editor, select.value);
+            }
+        });
+        select.addEventListener('keydown', function (event) {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                cancelEditor();
+            }
         });
     }
 
@@ -221,6 +419,14 @@
         var value = cell.hasAttribute('data-value') ? cell.dataset.value : cell.textContent.trim();
         if (value === '--' || value === '—') {
             value = '';
+        }
+        if (type === 'location') {
+            openLocationEditor(cell, table, id, value);
+            return;
+        }
+        if (type === 'lookup-text') {
+            openLookupTextEditor(cell, table, id, value);
+            return;
         }
         var input;
         if (type === 'select') {
@@ -255,17 +461,7 @@
             }
         }
 
-        activeEditor = {
-            cell: cell,
-            table: table,
-            recordId: id,
-            originalHtml: cell.innerHTML,
-            originalValue: value,
-            input: input,
-            saving: false
-        };
-        cell.classList.add('aqary-cell-editing');
-        cell.textContent = '';
+        activeEditor = activateEditor(cell, table, id, value, input, [input]);
         cell.appendChild(input);
         input.focus();
         if (typeof input.select === 'function' && type !== 'select') {
@@ -414,7 +610,8 @@
     }
 
     document.addEventListener('pointerdown', function (event) {
-        if (activeEditor && !activeEditor.cell.contains(event.target) && !activeEditor.saving) {
+        var inSelect2 = event.target.closest && event.target.closest('.select2-container, .select2-dropdown');
+        if (activeEditor && !activeEditor.cell.contains(event.target) && !inSelect2 && !activeEditor.saving) {
             cancelEditor();
         }
     }, true);
@@ -423,7 +620,8 @@
     style.textContent =
         '[data-aqary-bulk] [data-inline-field]{cursor:pointer;position:relative}' +
         '[data-aqary-bulk] [data-inline-field]:hover{box-shadow:inset 0 0 0 1px #198754;background:#f2fff7}' +
-        '[data-aqary-bulk] .aqary-cell-editing{min-width:135px;padding:4px}' +
+        '[data-aqary-bulk] .aqary-cell-editing{min-width:180px;padding:4px}' +
+        '[data-aqary-bulk] .aqary-location-editor{min-width:260px}' +
         '[data-aqary-bulk] tr.aqary-row-selected>td{background:#eaf7ef!important}' +
         '[data-aqary-bulk] tr.aqary-row-selected{box-shadow:inset -4px 0 #198754}' +
         '.aqary-selection-status{border-right:3px solid #198754;padding:.35rem .65rem;background:#f8f9fa}';

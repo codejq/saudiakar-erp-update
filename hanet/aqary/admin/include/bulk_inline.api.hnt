@@ -39,10 +39,10 @@ $recordIds = array_values(array_unique(array_filter(
     }
 )));
 
-if (!in_array($action, ['inline_update', 'delete'], true)) {
+if (!in_array($action, ['inline_update', 'delete', 'lookup_options'], true)) {
     sendResponse(false, 'العملية المطلوبة غير معروفة', [], 400);
 }
-if (!$recordIds || count($recordIds) > 100) {
+if ($action !== 'lookup_options' && (!$recordIds || count($recordIds) > 100)) {
     sendResponse(false, 'يجب اختيار من سجل واحد إلى 100 سجل', [], 422);
 }
 
@@ -51,7 +51,10 @@ $policies = [
         'table' => 'arady', 'key' => 'ardid', 'screen' => 4,
         'owner' => 'custummerid', 'soft_delete' => true,
         'fields' => [
+            'mokhatatid' => ['type' => 'lookup_plan', 'bulk' => true],
             'block' => ['type' => 'text', 'max' => 40, 'bulk' => false],
+            'share3' => ['type' => 'lookup_text', 'max' => 245, 'bulk' => true],
+            'share3f' => ['type' => 'lookup_text', 'max' => 245, 'bulk' => true],
             'ardrakam' => ['type' => 'text', 'max' => 25, 'bulk' => false],
             'hay' => ['type' => 'text', 'max' => 250, 'bulk' => true],
             'note' => ['type' => 'text', 'max' => 10000, 'bulk' => false],
@@ -66,12 +69,14 @@ $policies = [
         'table' => 'emara', 'key' => 'emaraid', 'screen' => 16,
         'owner' => 'custumerid', 'soft_delete' => true,
         'fields' => [
+            'mokhatatid' => ['type' => 'lookup_plan', 'bulk' => true],
             'emararakam' => ['type' => 'text', 'max' => 25, 'bulk' => false],
             'wehdatnum' => ['type' => 'integer', 'min' => 0, 'bulk' => false],
             'adwarnum' => ['type' => 'integer', 'min' => 0, 'bulk' => false],
             'mesaha' => ['type' => 'decimal', 'min' => 0, 'bulk' => false],
             'hay' => ['type' => 'text', 'max' => 70, 'bulk' => true],
-            'block' => ['type' => 'text', 'max' => 70, 'bulk' => true],
+            'block' => ['type' => 'lookup_text', 'max' => 70, 'bulk' => true],
+            'share3' => ['type' => 'lookup_text', 'max' => 245, 'bulk' => true],
             'address' => ['type' => 'text', 'max' => 250, 'bulk' => false],
             'note' => ['type' => 'text', 'max' => 10000, 'bulk' => false],
             'price' => ['type' => 'decimal', 'min' => 0, 'bulk' => false],
@@ -83,12 +88,14 @@ $policies = [
         'table' => 'vila', 'key' => 'vilaid', 'screen' => 27,
         'owner' => 'custumerid', 'soft_delete' => true,
         'fields' => [
+            'mokhatatid' => ['type' => 'lookup_plan', 'bulk' => true],
             'vilarakam' => ['type' => 'text', 'max' => 25, 'bulk' => false],
             'wehdatnum' => ['type' => 'integer', 'min' => 0, 'bulk' => false],
             'adwarnum' => ['type' => 'integer', 'min' => 0, 'bulk' => false],
             'mesaha' => ['type' => 'decimal', 'min' => 0, 'bulk' => false],
             'hay' => ['type' => 'text', 'max' => 70, 'bulk' => true],
-            'block' => ['type' => 'text', 'max' => 70, 'bulk' => true],
+            'block' => ['type' => 'lookup_text', 'max' => 70, 'bulk' => true],
+            'share3' => ['type' => 'lookup_text', 'max' => 245, 'bulk' => true],
             'address' => ['type' => 'text', 'max' => 250, 'bulk' => false],
             'note' => ['type' => 'text', 'max' => 10000, 'bulk' => false],
             'price' => ['type' => 'integer', 'min' => 0, 'bulk' => false],
@@ -224,11 +231,14 @@ function aqaryBulkNormalize($rawValue, array $fieldPolicy)
     }
 
     $type = (string)($fieldPolicy['type'] ?? 'text');
-    if ($type === 'integer') {
+    if ($type === 'integer' || $type === 'lookup_plan') {
         if (!preg_match('/^-?\d+$/', $value)) {
             throw new InvalidArgumentException('يجب إدخال رقم صحيح');
         }
         $value = (string)intval($value);
+        if ($type === 'lookup_plan' && intval($value) < 1) {
+            throw new InvalidArgumentException('يجب اختيار مخطط صالح');
+        }
     } elseif ($type === 'decimal') {
         $value = str_replace(',', '.', $value);
         if ($value === '' || !is_numeric($value) || !is_finite((float)$value)) {
@@ -284,6 +294,131 @@ function aqaryBulkRecordAccessible($resource, array $policy, $recordId, $userId,
     return $record;
 }
 
+function aqaryBulkLookupOptions($resource, array $policy, $field, $rawValue, $userId, $canSeeOthers, $link)
+{
+    if (!isset($policy['fields'][$field])) {
+        throw new InvalidArgumentException('الحقل المطلوب غير قابل للاختيار');
+    }
+    $fieldPolicy = $policy['fields'][$field];
+    $type = (string)($fieldPolicy['type'] ?? '');
+
+    if ($type === 'lookup_plan') {
+        $lookupKind = (string)($_POST['lookup_kind'] ?? 'location');
+        $cityId = intval($_POST['parent_id'] ?? 0);
+        $currentPlanId = intval($rawValue);
+        $currentCityId = 0;
+        if ($currentPlanId > 0) {
+            $currentResult = mysql_query(
+                "SELECT cityid FROM mokhatat WHERE mokhatatid='" . $currentPlanId . "' LIMIT 1",
+                $link
+            );
+            $currentRow = $currentResult ? mysql_fetch_array($currentResult) : false;
+            $currentCityId = is_array($currentRow) ? intval($currentRow['cityid'] ?? 0) : 0;
+        }
+
+        if ($lookupKind === 'plans') {
+            if ($cityId < 1) {
+                return ['options' => []];
+            }
+            $planResult = mysql_query(
+                "SELECT mokhatatid, mokhatatname FROM mokhatat WHERE cityid='" . $cityId . "' ORDER BY mokhatatname, mokhatatid LIMIT 5000",
+                $link
+            );
+            if (!$planResult) {
+                throw new RuntimeException('Could not load plan options');
+            }
+            $plans = [];
+            while ($planResult && $planRow = mysql_fetch_array($planResult)) {
+                $plans[] = [
+                    'value' => (string)intval($planRow['mokhatatid']),
+                    'label' => trim((string)$planRow['mokhatatname']),
+                ];
+            }
+            return ['options' => $plans];
+        }
+
+        if ($lookupKind !== 'location') {
+            throw new InvalidArgumentException('نوع قائمة الاختيار غير صالح');
+        }
+        $cityResult = mysql_query('SELECT cityid, cityname FROM city ORDER BY cityname, cityid', $link);
+        if (!$cityResult) {
+            throw new RuntimeException('Could not load city options');
+        }
+        $cities = [];
+        while ($cityResult && $cityRow = mysql_fetch_array($cityResult)) {
+            $cities[] = [
+                'value' => (string)intval($cityRow['cityid']),
+                'label' => trim((string)$cityRow['cityname']),
+            ];
+        }
+        $plans = [];
+        if ($currentCityId > 0) {
+            $planResult = mysql_query(
+                "SELECT mokhatatid, mokhatatname FROM mokhatat WHERE cityid='" . $currentCityId . "' ORDER BY mokhatatname, mokhatatid LIMIT 5000",
+                $link
+            );
+            if (!$planResult) {
+                throw new RuntimeException('Could not load plan options');
+            }
+            while ($planResult && $planRow = mysql_fetch_array($planResult)) {
+                $plans[] = [
+                    'value' => (string)intval($planRow['mokhatatid']),
+                    'label' => trim((string)$planRow['mokhatatname']),
+                ];
+            }
+        }
+        return [
+            'cities' => $cities,
+            'current_city_id' => (string)$currentCityId,
+            'plans' => $plans,
+        ];
+    }
+
+    if ($type !== 'lookup_text') {
+        throw new InvalidArgumentException('هذا الحقل لا يملك قائمة اختيار');
+    }
+    $table = (string)$policy['table'];
+    $column = (string)($fieldPolicy['column'] ?? $field);
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $table) || !preg_match('/^[A-Za-z0-9_]+$/', $column)) {
+        throw new RuntimeException('Invalid server lookup policy');
+    }
+    $conditions = ["TRIM(COALESCE(`$column`, ''))<>''"];
+    if (!empty($policy['soft_delete'])) {
+        $conditions[] = "(statusx IS NULL OR statusx<>'3')";
+    }
+    if (!empty($policy['owner']) && !$canSeeOthers) {
+        $owner = (string)$policy['owner'];
+        $conditions[] = "`$owner`='" . intval($userId) . "'";
+    }
+    $optionResult = mysql_query(
+        "SELECT DISTINCT `$column` AS option_value FROM `$table` WHERE " . implode(' AND ', $conditions) . " ORDER BY option_value LIMIT 500",
+        $link
+    );
+    if (!$optionResult) {
+        throw new RuntimeException('Could not load text lookup options');
+    }
+    $options = [];
+    while ($optionResult && $optionRow = mysql_fetch_array($optionResult)) {
+        $optionValue = trim((string)$optionRow['option_value']);
+        if ($optionValue !== '') {
+            $options[] = ['value' => $optionValue, 'label' => $optionValue];
+        }
+    }
+    return ['options' => $options];
+}
+
+if ($action === 'lookup_options') {
+    try {
+        $lookupData = aqaryBulkLookupOptions($resource, $policy, $field, $rawValue, $userId, $canSeeOthers, $link);
+        sendResponse(true, 'تم تحميل خيارات الحقل', $lookupData);
+    } catch (InvalidArgumentException $e) {
+        sendResponse(false, $e->getMessage(), [], 422);
+    } catch (Throwable $e) {
+        error_log('Aqary bulk lookup failed: ' . $e->getMessage());
+        sendResponse(false, 'تعذر تحميل خيارات الحقل حالياً', [], 500);
+    }
+}
+
 $updatedIds = [];
 $deletedIds = [];
 $skipped = [];
@@ -300,9 +435,25 @@ try {
             throw new InvalidArgumentException('هذا الحقل يقبل تعديل سجل واحد فقط');
         }
         $value = aqaryBulkNormalize($rawValue, $fieldPolicy);
+        $displayValue = $value;
+        $cityDisplayValue = '';
         $column = (string)($fieldPolicy['column'] ?? $field);
         if (!preg_match('/^[A-Za-z0-9_]+$/', $column)) {
             throw new RuntimeException('Invalid server field policy');
+        }
+        if (($fieldPolicy['type'] ?? '') === 'lookup_plan') {
+            $planResult = mysql_query(
+                "SELECT m.mokhatatname, c.cityname
+                 FROM mokhatat m LEFT JOIN city c ON c.cityid=m.cityid
+                 WHERE m.mokhatatid='" . intval($value) . "' LIMIT 1",
+                $link
+            );
+            $planRow = $planResult ? mysql_fetch_array($planResult) : false;
+            if (!is_array($planRow)) {
+                throw new InvalidArgumentException('المخطط المختار غير موجود');
+            }
+            $displayValue = trim((string)$planRow['mokhatatname']);
+            $cityDisplayValue = trim((string)$planRow['cityname']);
         }
 
         foreach ($recordIds as $recordId) {
@@ -392,7 +543,8 @@ if ($action === 'inline_update') {
         'updated_ids' => $updatedIds,
         'field' => $field,
         'value' => $value,
-        'display' => $value === '' ? '—' : $value,
+        'display' => $displayValue === '' ? '—' : $displayValue,
+        'city_display' => $cityDisplayValue === '' ? '—' : $cityDisplayValue,
         'skipped' => $skipped,
     ]);
 }
