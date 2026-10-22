@@ -1,0 +1,41 @@
+<?php
+/** Shared authenticated bootstrap for cash-custody pages. */
+require_once dirname(__DIR__, 3) . '/connectdb.hnt';
+require_once __DIR__ . '/CashCustodyService.class.hnt';
+date_default_timezone_set('Asia/Riyadh');
+
+if (isset($qdb_db, $dbSuffix) && $db instanceof mysqli) {
+    mysqli_select_db($db, $qdb_db . $dbSuffix);
+    $db->set_charset('utf8mb4');
+}
+
+$sc_id = CashCustodyService::resolveScreenId($db);
+include_once dirname(__DIR__, 3) . '/header.hnt';
+
+$cashAccessUserId = intval($_SESSION['useridv'] ?? 0);
+$cashAccessStmt = $db->prepare("SELECT g.allprevilage, COALESCE(p.sees,0) AS sees
+    FROM user u
+    LEFT JOIN usergroups g ON g.groupid=u.groupid
+    LEFT JOIN ugroupscreen p ON p.groupid=u.groupid AND p.screenid=?
+    WHERE u.userid=? LIMIT 1");
+$cashAccessStmt->bind_param('ii', $sc_id, $cashAccessUserId);
+$cashAccessStmt->execute();
+$cashAccess = $cashAccessStmt->get_result()->fetch_assoc();
+$cashAccessStmt->close();
+if (!$cashAccess || (empty($cashAccess['allprevilage']) && empty($cashAccess['sees']))) {
+    http_response_code(403);
+    echo '<div dir="rtl" style="margin:30px;padding:20px;border:1px solid #fecaca;background:#fee2e2;color:#991b1b">ليس لديك الصلاحية لعرض إدارة العهد النقدية.</div>';
+    exit;
+}
+
+$cashCustodyService = new CashCustodyService($db, intval($_SESSION['useridv'] ?? 0));
+if (empty($_SESSION['cash_custody_csrf'])) {
+    try {
+        $_SESSION['cash_custody_csrf'] = bin2hex(random_bytes(24));
+    } catch (Throwable $exception) {
+        $_SESSION['cash_custody_csrf'] = hash('sha256', session_id() . microtime(true));
+    }
+}
+$cashCustodyCsrf = (string)$_SESSION['cash_custody_csrf'];
+require_once __DIR__ . '/cash_custody_common.hnt';
+

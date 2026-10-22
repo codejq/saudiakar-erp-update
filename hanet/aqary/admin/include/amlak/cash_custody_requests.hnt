@@ -1,0 +1,73 @@
+<?php
+$sc_title = 'طلبات العهد النقدية';
+require_once __DIR__ . '/cash_custody_bootstrap.hnt';
+$filterStatus = trim((string)($_GET['status'] ?? ''));
+$filterHolder = intval($_GET['holder_id'] ?? 0);
+$holders = $cashCustodyService->listHolders(true);
+$users = $cashCustodyService->listUsers();
+$requests = $cashCustodyService->listRequests(array('status' => $filterStatus, 'holder_id' => $filterHolder));
+$requestAttachments = array();
+foreach ($cashCustodyService->listAttachments('request', array_map(function($row){ return intval($row['request_id']); }, $requests)) as $attachment) {
+    $requestAttachments[intval($attachment['entity_id'])][] = $attachment;
+}
+$openCustodies = $cashCustodyService->listCustodies(array('status' => 'open'));
+ccRenderStart('طلبات العهد النقدية', 'requests');
+?>
+<section class="cc-card cc-no-print">
+    <div class="cc-actions"><button class="cc-btn cc-primary policy_<?= intval($sc_id) ?>_adds" onclick="ccOpen('requestModal')"><i class="bi bi-plus-circle"></i> طلب عهدة</button></div>
+    <form method="get" class="cc-form-grid" style="margin-top:14px">
+        <div class="cc-field"><label>صاحب العهدة</label><select name="holder_id"><option value="0">الكل</option><?php foreach($holders as $holder): ?><option value="<?= intval($holder['holder_id']) ?>" <?= $filterHolder===intval($holder['holder_id'])?'selected':'' ?>><?= ccEsc($holder['user_name']) ?></option><?php endforeach; ?></select></div>
+        <div class="cc-field"><label>الحالة</label><select name="status"><option value="">الكل</option><?php foreach(array('pending','approved','disbursed','rejected','cancelled') as $status): ?><option value="<?= $status ?>" <?= $filterStatus===$status?'selected':'' ?>><?= ccEsc(ccStatusLabel($status)) ?></option><?php endforeach; ?></select></div>
+        <div class="cc-field"><label>&nbsp;</label><button class="cc-btn cc-info" type="submit">بحث</button></div>
+    </form>
+</section>
+<section class="cc-card cc-scroll"><table class="cc-table"><thead><tr><th>رقم الطلب</th><th>صاحب العهدة</th><th>النوع</th><th>المبلغ</th><th>التاريخ المطلوب</th><th>الغرض</th><th>الحالة</th><th class="cc-no-print">الإجراءات</th></tr></thead><tbody>
+<?php foreach($requests as $request): ?><tr>
+    <td><?= ccEsc($request['request_number']) ?> <?php foreach($requestAttachments[intval($request['request_id'])] ?? array() as $file): ?><a href="cash_custody_attachment.hnt?id=<?= intval($file['attachment_id']) ?>" target="_blank" title="<?= ccEsc($file['original_name']) ?>"><i class="bi bi-paperclip"></i></a><?php endforeach; ?></td><td><?= ccEsc($request['holder_name']) ?></td><td><?= ccEsc(ccTypeLabel($request['request_type'])) ?></td><td><?= ccMoney($request['requested_amount']) ?></td><td><?= ccEsc($request['required_date']) ?></td><td><?= ccEsc($request['purpose']) ?></td>
+    <td><span class="cc-badge <?= ccEsc($request['status']) ?>"><?= ccEsc(ccStatusLabel($request['status'])) ?></span></td>
+    <td class="cc-no-print"><div class="cc-actions">
+        <a class="cc-btn cc-secondary" href="cash_custody_print.hnt?request_id=<?= intval($request['request_id']) ?>" target="_blank"><i class="bi bi-printer"></i></a>
+        <?php if($request['status']==='pending'): ?>
+            <form onsubmit="return ccSubmit(this,'هل تريد اعتماد الطلب؟')"><input type="hidden" name="action" value="review_request"><input type="hidden" name="request_id" value="<?= intval($request['request_id']) ?>"><input type="hidden" name="decision" value="approve"><button class="cc-btn cc-primary policy_<?= intval($sc_id) ?>_edits">اعتماد</button></form>
+            <form onsubmit="return ccSubmit(this,'هل تريد رفض الطلب؟')"><input type="hidden" name="action" value="review_request"><input type="hidden" name="request_id" value="<?= intval($request['request_id']) ?>"><input type="hidden" name="decision" value="reject"><button class="cc-btn cc-danger policy_<?= intval($sc_id) ?>_edits">رفض</button></form>
+            <form onsubmit="return ccSubmit(this,'هل تريد إلغاء الطلب؟')"><input type="hidden" name="action" value="review_request"><input type="hidden" name="request_id" value="<?= intval($request['request_id']) ?>"><input type="hidden" name="decision" value="cancel"><button class="cc-btn cc-secondary policy_<?= intval($sc_id) ?>_edits">إلغاء</button></form>
+        <?php elseif($request['status']==='approved'): ?><button class="cc-btn cc-warning policy_<?= intval($sc_id) ?>_edits" onclick="ccDisburse(<?= intval($request['request_id']) ?>)">صرف</button><?php endif; ?>
+        <?php if(intval($request['created_custody_id'])>0): ?><a class="cc-btn cc-secondary" href="cash_custody_view.hnt?id=<?= intval($request['created_custody_id']) ?>">فتح العهدة</a><?php endif; ?>
+    </div></td>
+</tr><?php endforeach; ?><?php if(!$requests): ?><tr><td colspan="8" class="cc-empty">لا توجد طلبات مطابقة.</td></tr><?php endif; ?></tbody></table></section>
+
+<div class="cc-modal" id="requestModal"><div class="cc-modal-box"><div class="cc-modal-head"><h2>طلب عهدة</h2><button class="cc-close" onclick="ccClose('requestModal')">×</button></div>
+<form onsubmit="return ccSubmit(this)" enctype="multipart/form-data"><input type="hidden" name="action" value="create_request"><input type="hidden" name="formuid" value="<?= ccEsc(ccUuid()) ?>">
+<div class="cc-form-grid">
+<div class="cc-field"><label>صاحب العهدة *</label><select name="holder_user_id" id="request_holder_user_id" onchange="ccFilterTargetCustodies()" required><option value="">اختر</option><?php foreach($users as $user): ?><option value="<?= intval($user['userid']) ?>"><?= ccEsc(trim((string)$user['name']) !== '' ? $user['name'] : $user['username']) ?></option><?php endforeach; ?></select></div>
+<div class="cc-field"><label>نوع الطلب *</label><select name="request_type" id="request_type" onchange="ccRequestTypeChanged()"><option value="new">عهدة جديدة</option><option value="topup">تعزيز عهدة</option></select></div>
+<div class="cc-field" id="targetField" style="display:none"><label>العهدة المطلوب تعزيزها</label><select name="target_custody_id" id="target_custody_id"><option value="0">اختر</option><?php foreach($openCustodies as $custody): ?><option value="<?= intval($custody['custody_id']) ?>" data-holder-user-id="<?= intval($custody['holder_user_id']) ?>"><?= ccEsc($custody['custody_number'].' - '.$custody['holder_name']) ?></option><?php endforeach; ?></select></div>
+<div class="cc-field"><label>المبلغ المطلوب *</label><input type="number" step="0.01" min="0.01" name="requested_amount" required></div>
+<div class="cc-field"><label>التاريخ المطلوب *</label><input type="date" name="required_date" value="<?= date('Y-m-d') ?>" required></div>
+<div class="cc-field"><label>مرفق اختياري</label><input type="file" name="attachment" accept=".pdf,.jpg,.jpeg,.png"></div>
+<div class="cc-field" style="grid-column:1/-1"><label>الغرض من العهدة *</label><textarea name="purpose" maxlength="2000" required></textarea></div>
+</div><div class="cc-actions" style="margin-top:16px"><button class="cc-btn cc-primary" type="submit">إرسال الطلب</button><button class="cc-btn cc-secondary" type="button" onclick="ccClose('requestModal')">إلغاء</button></div></form></div></div>
+
+<div class="cc-modal" id="disburseModal"><div class="cc-modal-box"><div class="cc-modal-head"><h2>صرف طلب العهدة</h2><button class="cc-close" onclick="ccClose('disburseModal')">×</button></div>
+<form onsubmit="return ccSubmit(this,'سيتم إنشاء حركة مالية للعهدة. هل تريد المتابعة؟')"><input type="hidden" name="action" value="disburse_request"><input type="hidden" name="request_id" id="disburse_request_id"><input type="hidden" name="formuid" id="disburse_uid">
+<div class="cc-form-grid"><div class="cc-field"><label>تاريخ الصرف *</label><input type="date" name="transaction_date" value="<?= date('Y-m-d') ?>" required></div><div class="cc-field"><label>طريقة الصرف</label><select name="payment_method"><option value="cash">نقدي</option><option value="bank">تحويل بنكي</option><option value="cheque">شيك</option></select></div><div class="cc-field"><label>رقم المرجع</label><input name="reference_number" maxlength="150"></div></div>
+<div class="cc-actions" style="margin-top:16px"><button class="cc-btn cc-primary" type="submit">تأكيد الصرف</button><button class="cc-btn cc-secondary" type="button" onclick="ccClose('disburseModal')">إلغاء</button></div></form></div></div>
+<script>
+function ccFilterTargetCustodies(){
+    const userId=document.getElementById('request_holder_user_id').value;
+    const target=document.getElementById('target_custody_id');
+    Array.from(target.options).forEach(function(option,index){
+        option.disabled=index>0 && (!userId || option.dataset.holderUserId!==userId);
+    });
+    if(target.selectedOptions.length && target.selectedOptions[0].disabled) target.value='0';
+    if(window.jQuery && jQuery.fn.select2) jQuery(target).trigger('change.select2');
+}
+function ccRequestTypeChanged(){
+    const isTopup=document.getElementById('request_type').value==='topup';
+    document.getElementById('targetField').style.display=isTopup?'block':'none';
+    ccFilterTargetCustodies();
+}
+function ccDisburse(id){document.getElementById('disburse_request_id').value=id;document.getElementById('disburse_uid').value=ccNewUid();ccOpen('disburseModal');}
+</script>
+<?php ccRenderEnd($cashCustodyCsrf); ?>
+

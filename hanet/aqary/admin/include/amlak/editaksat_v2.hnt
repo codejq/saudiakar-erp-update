@@ -227,6 +227,10 @@ if (!$property) {
                         <div class="col-md-3">
                             <p class="mb-1"><strong>العقار:</strong> <?= htmlspecialchars($property['aqarname']) ?></p>
                             <p class="mb-0"><strong>قيمة القسط:</strong> <?= number_format($property['depositeamount'], 2) ?> ريال</p>
+                            <p class="mb-0"><strong>الزيادة السنوية:</strong>
+                                <?= number_format(floatval($property['annual_rent_increase_percent'] ?? 0), 2) ?>%
+                                (حد أعلى <?= number_format(floatval($property['max_rent_increase_percent'] ?? 0), 2) ?>%)
+                            </p>
                         </div>
                         <div class="col-md-3">
                             <p class="mb-1"><strong>بداية العقد:</strong>
@@ -400,7 +404,7 @@ if (!$property) {
     <div class="row" id="installmentsList">
         <?php
         // Get installments with VAT info for this specific property's current contract
-        $sql = "SELECT a.*, e.vat_type
+        $sql = "SELECT a.*, e.vat_type, e.tamen AS contract_tamen
                 FROM aksat a
                 LEFT JOIN amlakdetails ad ON a.idsubaqar = ad.idsubaqar
                 LEFT JOIN egar e ON ad.rakam3akdid = e.rakam3akdid
@@ -427,7 +431,9 @@ if (!$property) {
             $vat_type = $installment['vat_type'] ?? 0;
             
             if ($vat_type > 0) {
-                $rentValue = $installment['kastvalue'] - $installment['water'] - $installment['sa3ee'] - $installment['services'];
+                $rentValue = floatval($installment['base_rent_amount'] ?? 0) > 0
+                    ? floatval($installment['base_rent_amount'])
+                    : $installment['kastvalue'] - $installment['water'] - $installment['sa3ee'] - $installment['services'];
                 $commesion_vat = $installment['sa3ee'] * 0.15;
                 
                 if ($vat_type == 2) {
@@ -437,6 +443,26 @@ if (!$property) {
 
             // Calculate total amount including VAT
             $totalAmount = $installment['kastvalue'] + $commesion_vat + $depositeamount_vat;
+            $displayBaseRent = floatval($installment['base_rent_amount'] ?? 0) > 0
+                ? floatval($installment['base_rent_amount'])
+                : floatval($installment['kastvalue']) - floatval($installment['water']) - floatval($installment['sa3ee']) - floatval($installment['services']);
+            $insuranceAmount = 0;
+            $storedCharges = floatval($installment['water']) + floatval($installment['sa3ee']) + floatval($installment['services']);
+            if (
+                intval($installment['kastname']) === 1 &&
+                floatval($installment['base_rent_amount'] ?? 0) > 0 &&
+                floatval($installment['contract_tamen'] ?? 0) > 0 &&
+                floatval($installment['kastvalue']) + 0.01 >=
+                    $displayBaseRent + $storedCharges + floatval($installment['contract_tamen'])
+            ) {
+                $insuranceAmount = floatval($installment['contract_tamen']);
+            }
+            $originalPeriodicRent = floatval($property['depositeamount'] ?? 0);
+            $appliedRentIncrease = floatval($installment['base_rent_amount'] ?? 0) > 0
+                ? floatval($installment['rent_increase_percent'] ?? 0)
+                : ($originalPeriodicRent > 0
+                    ? (($displayBaseRent / $originalPeriodicRent) - 1) * 100
+                    : 0);
 
             // Calculate remaining amount
             $installment['amount_remaining'] = $totalAmount - $installment['amount_paid'];
@@ -497,7 +523,17 @@ if (!$property) {
                         <div class="mb-3">
                             <div class="d-flex justify-content-between mb-2">
                                 <span>قيمة الإيجار:</span>
-                                <strong><?= number_format(($installment['kastvalue']-$installment['water'] - $installment['sa3ee'] - $installment['services']), 2) ?></strong>
+                                <strong><?= number_format($displayBaseRent, 2) ?></strong>
+                            </div>
+                            <?php if ($insuranceAmount > 0): ?>
+                                <div class="d-flex justify-content-between mb-2">
+                                    <span class="text-primary">التأمين:</span>
+                                    <strong class="text-primary"><?= number_format($insuranceAmount, 2) ?></strong>
+                                </div>
+                            <?php endif; ?>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span class="text-muted">نسبة الزيادة المطبقة:</span>
+                                <span><?= number_format($appliedRentIncrease, 2) ?>%</span>
                             </div>
                             <div class="d-flex justify-content-between mb-2">
                                 <span class="text-muted">المياه:</span>
@@ -1201,7 +1237,14 @@ if (!$property) {
                     $('#edit_kastid').val(kastid);
                     $('#edit_kastname').val(inst.kastname);
                     $('#edit_kastdate').val(inst.kastdate_input); // Use dd/mm/yyyy format for datepicker
-                    $('#edit_kastvalue').val(inst.kastvalue);
+                    $('#edit_kastvalue').val(
+                        (parseFloat(inst.base_rent_amount || 0) > 0
+                            ? parseFloat(inst.base_rent_amount)
+                            : parseFloat(inst.kastvalue || 0)
+                                - parseFloat(inst.water || 0)
+                                - parseFloat(inst.sa3ee || 0)
+                                - parseFloat(inst.services || 0)).toFixed(2)
+                    );
                     $('#edit_water').val(inst.water);
                     $('#edit_sa3ee').val(inst.sa3ee);
                     $('#edit_services').val(inst.services);

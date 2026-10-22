@@ -1,0 +1,184 @@
+<?php
+// Contract Renewal Logic
+// This file handles automatic contract renewal when all installments are paid
+
+// Check if this is the last installment
+$sql = "SELECT COUNT(kastid) AS dd FROM aksat WHERE idsubaqar='$idsubaqar' AND iscomplete=0";
+$numberofaksat = mysql_fetch_array(mysql_query($sql, $link));
+$numberofaksat = $numberofaksat['dd'];
+
+// Renew contract if no pending installments
+if ($numberofaksat < 1) {
+    $sql = "SELECT * FROM egar, amlakdetails WHERE egar.rakam3akdid = amlakdetails.rakam3akdid AND amlakdetails.idsubaqar='$idsubaqar'";
+    $re = mysql_fetch_array(mysql_query($sql, $link));
+
+    // Calculate duration if not set
+    if ($re['duration'] < 1) {
+        $sql = "SELECT kastdate FROM aksat WHERE idsubaqar='$idsubaqar' ORDER BY kastdate LIMIT 2";
+        $moda = mysql_query($sql, $link);
+        $mymoda = 0;
+        while ($rowmoda = mysql_fetch_array($moda)) {
+            $mymoda = $rowmoda['kastdate'] - $mymoda;
+        }
+        $mymoda = sqrt($mymoda * $mymoda);
+        $mymoda = ceil(($mymoda) / (60 * 60 * 24 * 30));
+        $re['duration'] = $mymoda;
+
+        $sql = "UPDATE egar SET duration='$mymoda' WHERE rakam3akdid='" . $re['rakam3akdid'] . "'";
+        mysql_query($sql, $link);
+    }
+
+    // Set collection day if not set
+    if (!$re['egartahseldate']) {
+        $re['egartahseldate'] = date("d", $re['startegar']);
+
+        if (!$hnt_dll && $hnt_supper_dll != 5) {
+            $dateo = $dcal->g2u(date("d", $re['startegar']), date("m", $re['startegar']), date("Y", $re['startegar']));
+            $re['egartahseldate'] = $dateo['day'];
+        }
+        mysql_query("UPDATE egar SET egartahseldate='{$re['egartahseldate']}' WHERE rakam3akdid='" . $re['rakam3akdid'] . "' LIMIT 1");
+    }
+
+    // Calculate date correction
+    $corection = 0;
+    if ($re['egartahseldate'] > 28) {
+        $corection = 2 * 86400;
+    }
+    if ($re['egartahseldate'] > 29) {
+        $corection = 3 * 86400;
+    }
+    if ($re['egartahseldate'] < 2) {
+        $corection = -86400;
+    }
+
+    $newstart = $re['end3aqd'] - $corection;
+    $newend = $re['end3aqd'] + ($re['end3aqd'] - $re['startegar']) - $corection;
+
+    // Adjust dates for calendar system
+    list($mst_date, $mst_month, $mst_year) = explode("/", date("d/m/Y", $newstart));
+    list($mst_date0, $mst_month0, $mst_year0) = explode("/", date("d/m/Y", $newend));
+    $mst_date = $re['egartahseldate'];
+    $mst_date0 = $re['egartahseldate'];
+
+    if (!$hnt_dll && $hnt_supper_dll != 5) {
+        $dateo = $dcal->g2u(date("d", $newstart), date("m", $newstart), date("Y", $newstart));
+        $dateo = $dcal->u2g($re['egartahseldate'], $dateo['month'], $dateo['year']);
+
+        $mst_date = $dateo['day'];
+        $mst_month = $dateo['month'];
+        $mst_year = $dateo['year'];
+
+        $dateo = $dcal->g2u(date("d", $newend), date("m", $newend), date("Y", $newend));
+        $dateo = $dcal->u2g($re['egartahseldate'], $dateo['month'], $dateo['year']);
+
+        $mst_date0 = $dateo['day'];
+        $mst_month0 = $dateo['month'];
+        $mst_year0 = $dateo['year'];
+
+        $dateo = "";
+    }
+
+    $newstart = mktime(0, 0, 0, $mst_month, $mst_date, $mst_year);
+    $newend = mktime(0, 0, 0, $mst_month0, $mst_date0, $mst_year0);
+
+    // Update contract dates
+    $sql = "UPDATE egar SET
+        startegar='$newstart',
+        end3aqd='$newend'
+        WHERE rakam3akdid='" . $re['rakam3akdid'] . "'";
+    mysql_query($sql, $link);
+
+    // Calculate new installments
+    if (!$hnt_dll && $hnt_supper_dll != 5) {
+        $dateo = $dcal->g2u(date("d", $newstart), date("m", $newstart), date("Y", $newstart));
+        $st_date = $dateo['day'];
+        $st_month = $dateo['month'];
+        $st_year = $dateo['year'];
+    } else {
+        list($st_date, $st_month, $st_year) = explode("/", date("d/m/Y", $newstart));
+    }
+
+    $numberofdays = ($newend - $newstart) / 86400;
+    $numberofmonths = ceil(($numberofdays - 12) / (30 + $hnt_dll));
+    $namberofaksat = ceil($numberofmonths / $re['duration']);
+
+    // Generate installment schedule
+    for ($i = 1; $i < $namberofaksat + 1; $i++) {
+        if (!$hnt_dll && $hnt_supper_dll != 5) {
+            $dateo = $dcal->u2g($st_date, ($st_month + ($re['duration'] * ($i - 1))), $st_year);
+            $dateo = $dcal->g2u($dateo['day'], $dateo['month'], $dateo['year']);
+            $est7kak = array($dateo['day'], $dateo['month'], $dateo['year']);
+        } else {
+            $est7kak = mktime(0, 0, 0, $st_month + ($re['duration'] * ($i - 1)), $st_date, $st_year);
+            $est7kak = explode("/", date("d/m/Y", $est7kak));
+        }
+
+        if (is_int((($re['duration'] * ($i - 1)) / 12))) {
+            $newyear = 1;
+        } else {
+            $newyear = 0;
+        }
+
+        if ($newyear == 1) {
+            $newkast = ($re['depositeamount'] + $re['secondsa3e'] + $re['water'] + $re['services']);
+            $newwater = $re['water'];
+            $newsecondsa3e = $re['secondsa3e'];
+            $newservices = $re['services'];
+        } else {
+            $newwater = 0;
+            $newsecondsa3e = 0;
+            $newservices = 0;
+
+            if ($re['secondsa3e_duration'] == 1) {
+                $newsecondsa3e = $re['secondsa3e'];
+            }
+            if ($re['water_duration'] == 1) {
+                $newwater = $re['water'];
+            }
+            if ($re['water_duration'] == 1) {
+                $newservices = $re['services'];
+            }
+
+            $newkast = ($re['depositeamount'] + $newsecondsa3e + $newwater + $newservices);
+        }
+
+        $k[$i] = $newkast;
+        $wa[$i] = $newwater;
+        $se[$i] = $newsecondsa3e;
+        $srvs[$i] = $newservices;
+        $d[$i] = $est7kak[0];
+        $m[$i] = $est7kak[1];
+        $y[$i] = $est7kak[2];
+    }
+
+    // Insert new installments
+    for ($i = 1; isset($k[$i]); $i++) {
+        if (!$hnt_dll && $hnt_supper_dll != 5) {
+            $dateo = $dcal->u2g($d[$i], $m[$i], $y[$i]);
+            $dd = $dateo['day'];
+            $mm = $dateo['month'];
+            $yy = $dateo['year'];
+            $kastdate = mktime(0, 0, 0, $mm, $dd, $yy);
+        } else {
+            $dd = $d[$i];
+            $mm = $m[$i];
+            $yy = $y[$i];
+            $kastdate = mktime(0, 0, 0, $mm, $dd, $yy);
+        }
+
+        $sql = "INSERT INTO aksat SET
+            idsubaqar='$idsubaqar',
+            kastname='$i',
+            kastvalue='" . $k[$i] . "',
+            base_rent_amount='" . floatval($re['depositeamount']) . "',
+            rent_increase_percent='0',
+            kastdate='$kastdate',
+            water='" . $wa[$i] . "',
+            sa3ee='" . $se[$i] . "',
+            services='" . $srvs[$i] . "',
+            egar_id='" . $re['rakam3akdid'] . "',
+            iscomplete=''";
+        mysql_query($sql, $link);
+    }
+}
+?>

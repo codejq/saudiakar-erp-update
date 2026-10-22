@@ -1,0 +1,94 @@
+<?php
+/**
+ * Shared sales-representative helpers for rental contracts and receipts.
+ *
+ * Settings are stored in the existing global table. A receipt keeps its own
+ * snapshot so changing the setting later never changes historical commission.
+ */
+
+if (!function_exists('amlakGetGlobalSetting')) {
+    function amlakGetGlobalSetting($name, $defaultValue, $link) {
+        $escapedName = mysql_real_escape_string($name, $link);
+        $result = mysql_query(
+            "SELECT valuribalevalue FROM global WHERE variblename='{$escapedName}' ORDER BY id DESC LIMIT 1",
+            $link
+        );
+        $row = $result ? mysql_fetch_assoc($result) : false;
+        return $row ? $row['valuribalevalue'] : $defaultValue;
+    }
+}
+
+if (!function_exists('amlakSaveGlobalSetting')) {
+    function amlakSaveGlobalSetting($name, $value, $link) {
+        $escapedName = mysql_real_escape_string($name, $link);
+        $escapedValue = mysql_real_escape_string((string)$value, $link);
+        $result = mysql_query(
+            "SELECT id FROM global WHERE variblename='{$escapedName}' ORDER BY id DESC LIMIT 1",
+            $link
+        );
+        $row = $result ? mysql_fetch_assoc($result) : false;
+        if ($row) {
+            return (bool)mysql_query(
+                "UPDATE global SET valuribalevalue='{$escapedValue}' WHERE id='" . intval($row['id']) . "' LIMIT 1",
+                $link
+            );
+        }
+        return (bool)mysql_query(
+            "INSERT INTO global SET variblename='{$escapedName}', valuribalevalue='{$escapedValue}', formuid=''",
+            $link
+        );
+    }
+}
+
+if (!function_exists('amlakGetSalesCommissionSettings')) {
+    function amlakGetSalesCommissionSettings($link) {
+        $type = amlakGetGlobalSetting('sales_representative_commission_type', 'percentage', $link);
+        if ($type !== 'fixed') {
+            $type = 'percentage';
+        }
+        $value = max(0, floatval(
+            amlakGetGlobalSetting('sales_representative_commission_value', '0', $link)
+        ));
+        if ($type === 'percentage') {
+            $value = min(100, $value);
+        }
+        return array('type' => $type, 'value' => round($value, 2));
+    }
+}
+
+if (!function_exists('amlakValidateSalesRepresentativeId')) {
+    function amlakValidateSalesRepresentativeId($userid, $link) {
+        $userid = intval($userid);
+        if ($userid <= 0) {
+            return 0;
+        }
+        $result = mysql_query(
+            "SELECT userid FROM user WHERE userid='{$userid}' LIMIT 1",
+            $link
+        );
+        return ($result && mysql_num_rows($result) === 1) ? $userid : 0;
+    }
+}
+
+if (!function_exists('amlakCalculateSalesCommissionSnapshot')) {
+    function amlakCalculateSalesCommissionSnapshot($collectedAmount, $representativeUserid, $link) {
+        $representativeUserid = amlakValidateSalesRepresentativeId($representativeUserid, $link);
+        $settings = amlakGetSalesCommissionSettings($link);
+        $collectedAmount = max(0, floatval($collectedAmount));
+        $commissionAmount = 0;
+
+        if ($representativeUserid > 0 && $collectedAmount > 0) {
+            $commissionAmount = $settings['type'] === 'fixed'
+                ? $settings['value']
+                : ($collectedAmount * $settings['value'] / 100);
+        }
+
+        return array(
+            'representative_userid' => $representativeUserid,
+            'type' => $settings['type'],
+            'value' => $representativeUserid > 0 ? $settings['value'] : 0,
+            'amount' => round($commissionAmount, 2),
+        );
+    }
+}
+?>

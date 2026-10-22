@@ -1,0 +1,44 @@
+<?php
+$sc_title = 'تقارير العهد النقدية';
+require_once __DIR__ . '/cash_custody_bootstrap.hnt';
+$filters = array(
+    'holder_id' => intval($_GET['holder_id'] ?? 0), 'custody_id' => intval($_GET['custody_id'] ?? 0),
+    'transaction_type' => trim((string)($_GET['transaction_type'] ?? '')), 'status' => trim((string)($_GET['status'] ?? '')),
+    'date_from' => trim((string)($_GET['date_from'] ?? date('Y-m-01'))), 'date_to' => trim((string)($_GET['date_to'] ?? date('Y-m-d'))),
+    'category_id' => intval($_GET['category_id'] ?? 0), 'supplier_id' => intval($_GET['supplier_id'] ?? 0),
+    'cost_center_id' => intval($_GET['cost_center_id'] ?? 0), 'vat_status' => trim((string)($_GET['vat_status'] ?? ''))
+);
+$holders = $cashCustodyService->listHolders(false);
+$custodies = $cashCustodyService->listCustodies();
+$categories = $cashCustodyService->listCategories();
+$suppliers = $cashCustodyService->listSuppliers();
+$costCenters = $cashCustodyService->listCostCenters();
+$rows = $cashCustodyService->reportTransactions($filters);
+$requestedLevel = (string)($_GET['level'] ?? 'detail');
+$level = in_array($requestedLevel, array('detail','daily','monthly','yearly'), true) ? $requestedLevel : 'detail';
+$totals = array('funding'=>0.0,'expense'=>0.0,'return'=>0.0);
+$grouped = array();
+foreach($rows as $row){$type=$row['transaction_type'];if(in_array($type,array('funding','topup','opening'),true)&&$row['status']==='approved')$totals['funding']+=floatval($row['amount']);elseif($type==='expense'&&$row['status']==='approved')$totals['expense']+=floatval($row['amount']);elseif($type==='return'&&$row['status']==='approved')$totals['return']+=floatval($row['amount']);if($level!=='detail'){$length=$level==='daily'?10:($level==='monthly'?7:4);$key=substr($row['transaction_date'],0,$length);if(!isset($grouped[$key]))$grouped[$key]=array('funding'=>0.0,'expense'=>0.0,'return'=>0.0,'count'=>0);$grouped[$key]['count']++;if($row['status']==='approved'){if(in_array($type,array('funding','topup','opening'),true))$grouped[$key]['funding']+=floatval($row['amount']);elseif($type==='expense')$grouped[$key]['expense']+=floatval($row['amount']);elseif($type==='return')$grouped[$key]['return']+=floatval($row['amount']);}}}
+ccRenderStart('تقارير وكشوف العهد', 'report');
+?>
+<section class="cc-card cc-no-print"><form method="get" class="cc-form-grid">
+<div class="cc-field"><label>من تاريخ</label><input type="date" name="date_from" value="<?= ccEsc($filters['date_from']) ?>"></div><div class="cc-field"><label>إلى تاريخ</label><input type="date" name="date_to" value="<?= ccEsc($filters['date_to']) ?>"></div>
+<div class="cc-field"><label>صاحب العهدة</label><select name="holder_id"><option value="0">الكل</option><?php foreach($holders as $holder): ?><option value="<?= intval($holder['holder_id']) ?>" <?= $filters['holder_id']===intval($holder['holder_id'])?'selected':'' ?>><?= ccEsc($holder['user_name']) ?></option><?php endforeach; ?></select></div>
+<div class="cc-field"><label>العهدة</label><select name="custody_id"><option value="0">الكل</option><?php foreach($custodies as $custody): ?><option value="<?= intval($custody['custody_id']) ?>" <?= $filters['custody_id']===intval($custody['custody_id'])?'selected':'' ?>><?= ccEsc($custody['custody_number'].' - '.$custody['holder_name']) ?></option><?php endforeach; ?></select></div>
+<div class="cc-field"><label>نوع الحركة</label><select name="transaction_type"><option value="">الكل</option><?php foreach(array('funding','topup','opening','expense','return','carry_out') as $type): ?><option value="<?= $type ?>" <?= $filters['transaction_type']===$type?'selected':'' ?>><?= ccEsc(ccTypeLabel($type)) ?></option><?php endforeach; ?></select></div>
+<div class="cc-field"><label>الحالة</label><select name="status"><option value="">الكل</option><?php foreach(array('pending','approved','rejected') as $state): ?><option value="<?= $state ?>" <?= $filters['status']===$state?'selected':'' ?>><?= ccEsc(ccStatusLabel($state)) ?></option><?php endforeach; ?></select></div>
+<div class="cc-field"><label>تصنيف المصروف</label><select name="category_id"><option value="0">الكل</option><?php foreach($categories as $category): ?><option value="<?= intval($category['category_id']) ?>" <?= $filters['category_id']===intval($category['category_id'])?'selected':'' ?>><?= ccEsc($category['category_name']) ?></option><?php endforeach; ?></select></div>
+<div class="cc-field"><label>المورد</label><select name="supplier_id"><option value="0">الكل</option><?php foreach($suppliers as $supplier): ?><option value="<?= intval($supplier['supplier_id']) ?>" <?= $filters['supplier_id']===intval($supplier['supplier_id'])?'selected':'' ?>><?= ccEsc($supplier['supplier_name']) ?></option><?php endforeach; ?></select></div>
+<div class="cc-field"><label>مركز التكلفة</label><select name="cost_center_id"><option value="0">الكل</option><?php foreach($costCenters as $center): ?><option value="<?= intval($center['cost_center_id']) ?>" <?= $filters['cost_center_id']===intval($center['cost_center_id'])?'selected':'' ?>><?= ccEsc($center['cost_center_code'].' - '.$center['cost_center_name_ar']) ?></option><?php endforeach; ?></select></div>
+<div class="cc-field"><label>الضريبة</label><select name="vat_status"><option value="">الكل</option><option value="with_vat" <?= $filters['vat_status']==='with_vat'?'selected':'' ?>>بضريبة</option><option value="without_vat" <?= $filters['vat_status']==='without_vat'?'selected':'' ?>>بدون ضريبة</option></select></div>
+<div class="cc-field"><label>مستوى التفاصيل</label><select name="level"><option value="detail" <?= $level==='detail'?'selected':'' ?>>تفصيلي</option><option value="daily" <?= $level==='daily'?'selected':'' ?>>يومي</option><option value="monthly" <?= $level==='monthly'?'selected':'' ?>>شهري</option><option value="yearly" <?= $level==='yearly'?'selected':'' ?>>سنوي</option></select></div>
+<div class="cc-field"><label>&nbsp;</label><div class="cc-actions"><button class="cc-btn cc-primary">عرض التقرير</button><button type="button" class="cc-btn cc-secondary" onclick="window.print()">طباعة</button><button type="button" class="cc-btn cc-info" onclick="ccExportCsv()">Excel / CSV</button></div></div>
+</form></section>
+<section class="cc-grid"><div class="cc-card cc-stat"><span>إجمالي التمويل</span><strong><?= ccMoney($totals['funding']) ?></strong></div><div class="cc-card cc-stat"><span>المصروفات المعتمدة</span><strong><?= ccMoney($totals['expense']) ?></strong></div><div class="cc-card cc-stat"><span>المبالغ المردودة</span><strong><?= ccMoney($totals['return']) ?></strong></div><div class="cc-card cc-stat"><span>صافي الحركة</span><strong><?= ccMoney($totals['funding']-$totals['expense']-$totals['return']) ?></strong></div></section>
+<?php if($level!=='detail'): ?><section class="cc-card cc-scroll"><h2>الملخص <?= $level==='daily'?'اليومي':($level==='monthly'?'الشهري':'السنوي') ?></h2><table class="cc-table"><thead><tr><th>الفترة</th><th>عدد الحركات</th><th>التمويل</th><th>المصروفات</th><th>المردود</th><th>الصافي</th></tr></thead><tbody><?php foreach($grouped as $period=>$group): ?><tr><td><?= ccEsc($period) ?></td><td><?= intval($group['count']) ?></td><td><?= ccMoney($group['funding']) ?></td><td><?= ccMoney($group['expense']) ?></td><td><?= ccMoney($group['return']) ?></td><td><?= ccMoney($group['funding']-$group['expense']-$group['return']) ?></td></tr><?php endforeach; ?></tbody></table></section><?php endif; ?>
+<section class="cc-card cc-scroll"><table class="cc-table" id="reportTable"><thead><tr><th>التاريخ</th><th>رقم العهدة</th><th>صاحب العهدة</th><th>رقم المستند</th><th>النوع</th><th>التصنيف</th><th>البيان</th><th>المبلغ</th><th>الضريبة</th><th>الحالة</th></tr></thead><tbody><?php foreach($rows as $row): ?><tr><td><?= ccEsc($row['transaction_date']) ?></td><td><?= ccEsc($row['custody_number']) ?></td><td><?= ccEsc($row['holder_name']) ?></td><td><?= ccEsc($row['document_number']) ?></td><td><?= ccEsc(ccTypeLabel($row['transaction_type'])) ?></td><td><?= ccEsc($row['category_name']) ?></td><td><?= ccEsc($row['description']) ?></td><td><?= ccMoney($row['amount']) ?></td><td><?= ccMoney($row['vat_amount']) ?></td><td><?= ccEsc(ccStatusLabel($row['status'])) ?></td></tr><?php endforeach; ?><?php if(!$rows): ?><tr><td colspan="10" class="cc-empty">لا توجد حركات خلال الفترة المحددة.</td></tr><?php endif; ?></tbody></table></section>
+<script>
+function ccExportCsv(){const rows=[...document.querySelectorAll('#reportTable tr')].map(tr=>[...tr.cells].map(td=>'"'+td.innerText.replaceAll('"','""')+'"').join(','));const blob=new Blob(['\ufeff'+rows.join('\r\n')],{type:'text/csv;charset=utf-8'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='cash-custody-report-<?= date('Ymd') ?>.csv';a.click();URL.revokeObjectURL(a.href)}
+</script>
+<?php ccRenderEnd($cashCustodyCsrf); ?>
+

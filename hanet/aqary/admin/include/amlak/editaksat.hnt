@@ -6,6 +6,9 @@ include_once "../../../nocash.hnt";
 
 // Initialize variables from GET/POST
 $report = $_REQUEST['report'] ?? 0;
+$idsubaqar = isset($_REQUEST['idsubaqar']) && is_scalar($_REQUEST['idsubaqar'])
+	? intval($_REQUEST['idsubaqar'])
+	: 0;
 $mostagerid = $_REQUEST['mostagerid'] ?? 0;
 $saveaksat = $_REQUEST['saveaksat'] ?? 0;
 $saveegar = $_REQUEST['saveegar'] ?? 0;
@@ -123,6 +126,23 @@ if (!function_exists('editAksatTimestampToDisplayDate')) {
 		}
 
 		return date('d/m/Y', $timestamp);
+	}
+}
+
+if (!function_exists('editAksatActualIncreasePercent')) {
+	function editAksatActualIncreasePercent($installment, $originalPeriodicRent) {
+		$originalPeriodicRent = floatval($originalPeriodicRent);
+		if ($originalPeriodicRent <= 0 || !is_array($installment)) {
+			return 0;
+		}
+		if (floatval($installment['base_rent_amount'] ?? 0) > 0) {
+			return floatval($installment['rent_increase_percent'] ?? 0);
+		}
+		$actualBaseRent = floatval($installment['kastvalue'] ?? 0)
+			- floatval($installment['water'] ?? 0)
+			- floatval($installment['sa3ee'] ?? 0)
+			- floatval($installment['services'] ?? 0);
+		return round((($actualBaseRent / $originalPeriodicRent) - 1) * 100, 2);
 	}
 }
 	//###############prepare the data ###################//
@@ -354,10 +374,19 @@ if (!function_exists('editAksatTimestampToDisplayDate')) {
 			if($id < $maxKey){
 				$iscomplete[$id] = 1;
 			}
-
+			$storedInstallmentValue = floatval($kastvalue[$id] ?? 0);
+			$storedBaseRentAmount = $storedInstallmentValue
+				- floatval($water[$id] ?? 0)
+				- floatval($sa3ee[$id] ?? 0)
+				- floatval($services[$id] ?? 0);
+			$storedRentIncreasePercent = floatval($row2['depositeamount'] ?? 0) > 0
+				? round((($storedBaseRentAmount / floatval($row2['depositeamount'])) - 1) * 100, 2)
+				: 0;
 			$sql = "update aksat set
 kastname='" . ($kastname[$id] ?? '') . "',
-kastvalue='" . ($kastvalue[$id] ?? 0) . "',
+kastvalue='" . $storedInstallmentValue . "',
+base_rent_amount='" . $storedBaseRentAmount . "',
+rent_increase_percent='" . $storedRentIncreasePercent . "',
 dof3at='" . ($dof3at[$id] ?? 0) . "',
 dof3at_tafsel='" . ($dof3at_tafsel[$id] ?? 0) . "',
 kastdate='" . ($kastdate[$id] ?? 0) . "',
@@ -389,14 +418,25 @@ where kastid='" . $id . "'
 			}
 
 			if (isset($kastdate['rosa']) && is_int($kastdate['rosa'])) {
+				$newInstallmentValue = floatval($kastvalue['rosa'] ?? 0);
+				$newBaseRentAmount = $newInstallmentValue
+					- floatval($water['rosa'] ?? 0)
+					- floatval($sa3ee['rosa'] ?? 0)
+					- floatval($services['rosa'] ?? 0);
+				$newRentIncreasePercent = floatval($row2['depositeamount'] ?? 0) > 0
+					? round((($newBaseRentAmount / floatval($row2['depositeamount'])) - 1) * 100, 2)
+					: 0;
 				$sql = "insert into  aksat set
  kastname='" . $kastname['rosa'] . "',
- kastvalue='" . $kastvalue['rosa'] . "',
+ kastvalue='" . $newInstallmentValue . "',
+ base_rent_amount='" . $newBaseRentAmount . "',
+ rent_increase_percent='" . $newRentIncreasePercent . "',
 dof3at='" . $dof3at['rosa'] . "',
 dof3at_tafsel='" . $dof3at_tafsel['rosa'] . "',
 kastdate='" . $kastdate['rosa'] . "',
 water='" . $water['rosa'] . "',
 sa3ee='" . $sa3ee['rosa'] . "',
+ services='" . ($services['rosa'] ?? 0) . "',
 iscomplete='" . $iscomplete['rosa'] . "',
 egar_id = '" . $row['rakam3akdid'] . "',
  idsubaqar='" . $idsubaqar . "'
@@ -415,6 +455,22 @@ egar_id = '" . $row['rakam3akdid'] . "',
 	//start save egar data
 
 	if ($saveegar) {
+		$annualRentIncreasePercent = isset($_POST['annual_rent_increase_percent'])
+			? floatval(str_replace(',', '', $_POST['annual_rent_increase_percent']))
+			: 0;
+		$maxRentIncreasePercent = isset($_POST['max_rent_increase_percent'])
+			? floatval(str_replace(',', '', $_POST['max_rent_increase_percent']))
+			: 0;
+		if (
+			$annualRentIncreasePercent < 0 ||
+			$maxRentIncreasePercent < 0 ||
+			$annualRentIncreasePercent > 100 ||
+			$maxRentIncreasePercent > 100 ||
+			($annualRentIncreasePercent > 0 && $maxRentIncreasePercent < $annualRentIncreasePercent)
+		) {
+			$dateValidationErrors[] = 'إعدادات زيادة الإيجار غير صحيحة: الحد الأعلى يجب ألا يقل عن الزيادة السنوية، والقيم بين 0 و100.';
+			$contractDateValidationFailed = true;
+		}
 		try {
 			$t1 = editAksatDateToTimestamp(
 				$startegar1,
@@ -462,6 +518,8 @@ egar_id = '" . $row['rakam3akdid'] . "',
             end3aqd='" . $t2 . "',
             date3akd='" . $t3 . "',
             annualprice='" . $annualprice . "',
+            annual_rent_increase_percent='" . $annualRentIncreasePercent . "',
+            max_rent_increase_percent='" . $maxRentIncreasePercent . "',
             aqaraddress='" . $aqaraddress . "',
             vat_type='" . $vat_type . "',
             water_duration = '".$water_duration."',
@@ -829,6 +887,31 @@ egar_id = '" . $row['rakam3akdid'] . "',
 
                 <div class="col-md-3">
                     <div class="form-group-modern">
+                        <label><i class="bi bi-graph-up-arrow"></i>الزيادة السنوية</label>
+                        <div class="input-group">
+                            <input type="number" name="annual_rent_increase_percent" id="annual_rent_increase_percent"
+                                   value="<?= htmlspecialchars($row2['annual_rent_increase_percent'] ?? '0', ENT_QUOTES, 'UTF-8'); ?>"
+                                   class="form-control" min="0" max="100" step="0.01">
+                            <span class="input-group-text">%</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-md-3">
+                    <div class="form-group-modern">
+                        <label><i class="bi bi-speedometer2"></i>الحد الأعلى للزيادة</label>
+                        <div class="input-group">
+                            <input type="number" name="max_rent_increase_percent" id="max_rent_increase_percent"
+                                   value="<?= htmlspecialchars($row2['max_rent_increase_percent'] ?? '0', ENT_QUOTES, 'UTF-8'); ?>"
+                                   class="form-control" min="0" max="100" step="0.01">
+                            <span class="input-group-text">%</span>
+                        </div>
+                        <small class="currency-suffix">تطبق على الإيجار الأساسي فقط</small>
+                    </div>
+                </div>
+
+                <div class="col-md-3">
+                    <div class="form-group-modern">
                         <label><i class="bi bi-calculator"></i>قيمة القسط</label>
                         <input type="text" name="depositeamount" value="<?= $row2['depositeamount']; ?>" class="form-control" readonly style="background-color: #f3f4f6;">
                         <small class="currency-suffix"><?= $myomla ?></small>
@@ -1072,25 +1155,20 @@ egar_id = '" . $row['rakam3akdid'] . "',
             var depositeamount = parseFloat($('input[name="depositeamount"]').val()) || 0;
             var tamen = parseFloat($('input[name="tamen"]').val()) || 0;
             var fristsa3e = parseFloat($('input[name="fristsa3e"]').val()) || 0;
-            var secondsa3e = parseFloat($('input[name="secondsa3e"]').val()) || 0;
             var water = parseFloat($('input[name="water"]').val()) || 0;
             var services = parseFloat($('input[name="services"]').val()) || 0;
             
-            // Get duration settings (0 = first installment only, 1 = every installment)
-            var secondsa3e_duration = parseInt($('#secondsa3e_duration').val()) || 0;
+            // Get recurring-charge settings (0 = first installment only, 1 = every installment)
             var water_duration = parseInt($('#water_duration').val()) || 0;
             var services_duration = parseInt($('#services_duration').val()) || 0;
             
-            // Start with depositeamount and tamen (always included)
+            // The first payment contains rent, insurance and the immediate
+            // commission. The annual commission starts at renewal and must not
+            // be added to the first payment.
             var payedamount = depositeamount + tamen + fristsa3e;
-            
-            // Add fees based on their duration settings
-            // If duration is 0, add with first installment only
-            // If duration is 1, add with every installment (but we're calculating first payment here)
-            if (secondsa3e_duration == 0 || secondsa3e_duration == 1) {
-                payedamount += secondsa3e;
-            }
-            
+
+            // Water and services are due in the first installment for both
+            // schedules: first-only and every-installment.
             if (water_duration == 0 || water_duration == 1) {
                 payedamount += water;
             }
@@ -1189,6 +1267,7 @@ egar_id = '" . $row['rakam3akdid'] . "',
             <tr bgcolor=#a7eaa7 >
                 <td>                    القسط
                 <td> القيمة
+                <td>التأمين</td>
                 <td>ضريبة</td>
                 <td> المدفوع
                 <td> تفاصيل الدفعات
@@ -1220,7 +1299,19 @@ if($row2["insert_date"] > 1571751136 ){
 						);
 
                         $vat_value = 0;
-                        $rentValue = $rowa['kastvalue'] - $rowa['water']- $rowa['sa3ee']- $rowa['services'];
+                        $rentValue = floatval($rowa['base_rent_amount'] ?? 0) > 0
+							? floatval($rowa['base_rent_amount'])
+							: $rowa['kastvalue'] - $rowa['water']- $rowa['sa3ee']- $rowa['services'];
+                        $insuranceValue = 0;
+                        $storedCharges = floatval($rowa['water']) + floatval($rowa['sa3ee']) + floatval($rowa['services']);
+                        if (
+                            intval($rowa['kastname']) === 1 &&
+                            floatval($rowa['base_rent_amount'] ?? 0) > 0 &&
+                            floatval($row2['tamen'] ?? 0) > 0 &&
+                            floatval($rowa['kastvalue']) + 0.01 >= $rentValue + $storedCharges + floatval($row2['tamen'])
+                        ) {
+                            $insuranceValue = floatval($row2['tamen']);
+                        }
                         if($row2['vat_type'] == 1) {
                             $vat_value = $rowa['sa3ee'] * 0.15 ;
                         }
@@ -1239,6 +1330,9 @@ style='border:none' size=3 type=text name=kastname[" . $rowa['kastid'] . "] valu
 onfocus=\"this.style.border='1px solid red ';\";
 onblur=\"this.style.border='none';\";
 style='border:none' size=12 type=text name=kastvalue[" . $rowa['kastid'] . "] value='" . $rowa['kastvalue'] . "' >
+<small class='d-block text-muted'>زيادة الإيجار: " . number_format(editAksatActualIncreasePercent($rowa, $row2['depositeamount']), 2) . "%</small>
+
+<td>" . number_format($insuranceValue, 2) . "</td>
 
 <td>
 $vat_value
@@ -1466,7 +1560,8 @@ style='border:none' size=3 type=text name=iscomplete[" . $rowa['kastid'] . "]
                 <td> اعادة
 
 					<?
-					$sql = "select * from aksat where idsubaqar='" . -$idsubaqar . "'
+					$deletedInstallmentUnitId = -$idsubaqar;
+					$sql = "select * from aksat where idsubaqar='" . $deletedInstallmentUnitId . "'
 order by kastid asc
 ";
 
@@ -1492,6 +1587,7 @@ style='border:none' size=3 type=text name=kastname[" . $rowa['kastid'] . "] valu
 <input
 
 style='border:none' size=12 type=text name=kastvalue[" . $rowa['kastid'] . "] value='" . $rowa['kastvalue'] . "' >
+<small class='d-block text-muted'>زيادة الإيجار: " . number_format(editAksatActualIncreasePercent($rowa, $row2['depositeamount']), 2) . "%</small>
 
 
 <td>
@@ -1661,6 +1757,7 @@ style='border:none' size=3 type=text name=kastname[" . $rowa['kastid'] . "] valu
 <input
 
 style='border:none' size=12 type=text name=kastvalue[" . $rowa['kastid'] . "] value='" . $rowa['kastvalue'] . "' >
+<small class='d-block text-muted'>زيادة الإيجار: " . number_format(editAksatActualIncreasePercent($rowa, $row2['depositeamount']), 2) . "%</small>
 
 
 <td>

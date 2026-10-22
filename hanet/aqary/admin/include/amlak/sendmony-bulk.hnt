@@ -1,0 +1,594 @@
+<?php
+/**
+ * Review and atomically deliver several collected rents to the property owner.
+ * One sanadsarf row is created per eradat row to preserve all legacy links.
+ */
+$sc_title = 'تسليم عدة تحصيلات للمالك';
+$sc_id = '138';
+
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit'] === '1';
+if ($is_ajax_request) {
+    require_once '../../../reqloginajax.hnt';
+} else {
+    include_once '../../../nocash.hnt';
+    include_once '../../../header.hnt';
+}
+
+require_once '../uCal.class.hnt';
+$dcal = new uCal();
+date_default_timezone_set('Asia/Riyadh');
+
+function bulkDeliveryEsc($value) {
+    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+}
+
+function bulkDeliveryJson($success, $message, $extra = array(), $status = 200) {
+    if (!headers_sent()) {
+        http_response_code($status);
+        header('Content-Type: application/json; charset=utf-8');
+    }
+    echo json_encode(array_merge(array('success' => $success, 'message' => $message), $extra), JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+
+function bulkDeliveryToken() {
+    try {
+        return bin2hex(random_bytes(24));
+    } catch (Throwable $exception) {
+        return hash('sha256', session_id() . microtime(true) . mt_rand());
+    }
+}
+
+function bulkDeliveryIds($input) {
+    if (!is_array($input)) {
+        $input = preg_split('/[^0-9]+/', (string)$input, -1, PREG_SPLIT_NO_EMPTY);
+    }
+    $ids = array();
+    foreach ($input as $value) {
+        $id = intval($value);
+        if ($id > 0) $ids[$id] = $id;
+    }
+    return array_values($ids);
+}
+
+function bulkDeliveryTimestamp($value, $isGregorian, $dcal) {
+    $parts = explode('/', trim((string)$value));
+    if (count($parts) !== 3) return 0;
+    $day = intval($parts[0]);
+    $month = intval($parts[1]);
+    $year = intval($parts[2]);
+    if ($day < 1 || $month < 1 || $month > 12) return 0;
+    try {
+        if (!$isGregorian) {
+            $converted = $dcal->u2g($day, $month, $year);
+            $day = intval($converted['day']);
+            $month = intval($converted['month']);
+            $year = intval($converted['year']);
+        }
+    } catch (Throwable $exception) {
+        return 0;
+    }
+    if (!checkdate($month, $day, $year)) return 0;
+    return mktime(0, 0, 0, $month, $day, $year);
+}
+
+function bulkDeliveryFinancials($row, $property) {
+    $rate = floatval($property['persentage']);
+    if ($rate > 100) $rate = $rate / 100;
+    $base = floatval($row['amount']) - floatval($row['services']) - floatval($row['mysa3ee']) - floatval($row['mywater']) - floatval($row['tamen']);
+    $ownerWater = $property['addwaterto'] === 'malek' ? floatval($row['mywater']) : 0;
+    $ownerInsurance = $property['addtameento'] === 'malek' ? floatval($row['tamen']) : 0;
+    $officeCommission = round(($rate / 100) * $base, 2);
+    return array(
+        'base' => round($base, 2),
+        'commission_rate' => $rate,
+        'office_commission' => $officeCommission,
+        'owner_net' => round($ownerWater + $ownerInsurance + $base - $officeCommission, 2),
+    );
+}
+
+function bulkDeliveryOwnerNet($row, $property) {
+    $financials = bulkDeliveryFinancials($row, $property);
+    return $financials['owner_net'];
+}
+
+function bulkDeliveryRows($ids, $propertyId, $link, $forUpdate = false) {
+    if (empty($ids) || count($ids) > 1000) return array();
+    $idSql = implode(',', array_map('intval', $ids));
+    $sql = "SELECT e.*, s.period, s.bankid AS sanad_bankid,
+                   ad.rakam, ad.hnt_dll_type, st.aqarsubtypename,
+                   COALESCE(NULLIF(t.mostagername,''), e.mostagername) AS tenant_name,
+                   COALESCE(b.ownerid2,0) AS source_ownerid
+            FROM eradat e
+            LEFT JOIN sanad s ON s.idsanad=CAST(e.sanadrakam AS UNSIGNED)
+            LEFT JOIN amlakdetails ad ON ad.idsubaqar=e.idsubaqar
+            LEFT JOIN aqarsubtype st ON st.aqarsubtype=ad.aqarsubtype
+            LEFT JOIN mostagereen t ON t.mostagerid=e.mostagerid
+            LEFT JOIN bankacounts b ON b.id=s.bankid
+            WHERE e.idaqar='" . intval($propertyId) . "'
+              AND e.iderad IN ({$idSql})
+              AND e.tasfia=''
+            ORDER BY e.iderad" . ($forUpdate ? ' FOR UPDATE' : '');
+    $result = mysql_query($sql, $link);
+    $rows = array();
+    if ($result) {
+        while ($row = mysql_fetch_assoc($result)) $rows[] = $row;
+    }
+    return $rows;
+}
+
+function bulkDeliveryExpenses($ids, $propertyId, $link, $forUpdate = false) {
+    if (empty($ids) || count($ids) > 1000) return array();
+    $idSql = implode(',', array_map('intval', $ids));
+    $sql = "SELECT idmasrof, amount, payeddue, payeddate
+            FROM masrofat
+            WHERE idaqar='" . intval($propertyId) . "'
+              AND fund_source=0
+              AND tasfia=''
+              AND idmasrof IN ({$idSql})
+            ORDER BY idmasrof" . ($forUpdate ? ' FOR UPDATE' : '');
+    $result = mysql_query($sql, $link);
+    $rows = array();
+    if ($result) {
+        while ($row = mysql_fetch_assoc($result)) $rows[] = $row;
+    }
+    return $rows;
+}
+
+if (empty($_SESSION['bulk_delivery_csrf'])) {
+    $_SESSION['bulk_delivery_csrf'] = bulkDeliveryToken();
+}
+
+$action = isset($_POST['action']) ? (string)$_POST['action'] : 'review';
+$propertyId = isset($_POST['idaqar']) ? max(0, intval($_POST['idaqar'])) : 0;
+$selectedIds = bulkDeliveryIds(isset($_POST['iderad_ids']) ? $_POST['iderad_ids'] : array());
+$selectedExpenseIds = bulkDeliveryIds(isset($_POST['expense_ids']) ? $_POST['expense_ids'] : array());
+
+if ($is_ajax_request && $action === 'create_bulk') {
+    $postedCsrf = isset($_POST['csrf_token']) ? (string)$_POST['csrf_token'] : '';
+    if ($postedCsrf === '' || !hash_equals((string)$_SESSION['bulk_delivery_csrf'], $postedCsrf)) {
+        bulkDeliveryJson(false, 'انتهت صلاحية النموذج. أعد تحميل صفحة المراجعة.', array(), 403);
+    }
+    if ($propertyId < 1 || empty($selectedIds) || count($selectedIds) > 1000) {
+        bulkDeliveryJson(false, 'قائمة التحصيلات أو العقار غير صحيحة.', array(), 422);
+    }
+
+    $formUid = isset($_POST['formuid']) ? preg_replace('/[^a-zA-Z0-9_-]/', '', (string)$_POST['formuid']) : '';
+    if (strlen($formUid) < 24) {
+        bulkDeliveryJson(false, 'معرف العملية غير صحيح. أعد تحميل الصفحة.', array(), 422);
+    }
+    $escapedUidPrefix = mysql_real_escape_string($formUid . '-%', $link);
+    $duplicateResult = mysql_query("SELECT sanadid FROM sanadsarf WHERE formuid LIKE '{$escapedUidPrefix}' ORDER BY sanadid", $link);
+    if ($duplicateResult && mysql_num_rows($duplicateResult) > 0) {
+        $existingIds = array();
+        while ($existing = mysql_fetch_assoc($duplicateResult)) $existingIds[] = intval($existing['sanadid']);
+        bulkDeliveryJson(true, 'تم تنفيذ هذه العملية مسبقاً ولم تتكرر السندات.', array(
+            'duplicate' => true,
+            'voucher_ids' => $existingIds,
+            'redirect' => 'sendmony.hnt?idaqar=' . $propertyId,
+        ));
+    }
+
+    $propertyResult = mysql_query("SELECT idaqar, aqarname, ownername, persentage, addwaterto, addtameento FROM amlak WHERE idaqar='{$propertyId}' LIMIT 1", $link);
+    $property = $propertyResult ? mysql_fetch_assoc($propertyResult) : false;
+    if (!$property) bulkDeliveryJson(false, 'العقار المحدد غير موجود.', array(), 404);
+
+    $beneficiary = trim(isset($_POST['mostafeed']) ? (string)$_POST['mostafeed'] : '');
+    $description = trim(isset($_POST['bayan']) ? (string)$_POST['bayan'] : '');
+    $note = trim(isset($_POST['sanadnote']) ? (string)$_POST['sanadnote'] : '');
+    if ($beneficiary === '' || $description === '') {
+        bulkDeliveryJson(false, 'اسم المستلم وبيان السند مطلوبان.', array(), 422);
+    }
+    if (mb_strlen($beneficiary, 'UTF-8') > 245 || mb_strlen($description, 'UTF-8') > 200 || mb_strlen($note, 'UTF-8') > 245) {
+        bulkDeliveryJson(false, 'أحد الحقول النصية أطول من الحد المسموح.', array(), 422);
+    }
+
+    $calendarType = isset($_POST['local_hnt_dll_type']) ? intval($_POST['local_hnt_dll_type']) : 1;
+    $voucherDate = bulkDeliveryTimestamp(isset($_POST['sanadrealdate']) ? $_POST['sanadrealdate'] : '', $calendarType, $dcal);
+    $receivedDate = bulkDeliveryTimestamp(isset($_POST['money_received_date']) ? $_POST['money_received_date'] : '', $calendarType, $dcal);
+    $actualDate = bulkDeliveryTimestamp(isset($_POST['money_actual_date']) ? $_POST['money_actual_date'] : '', $calendarType, $dcal);
+    if (!$voucherDate || !$receivedDate || !$actualDate) {
+        bulkDeliveryJson(false, 'أحد التواريخ المدخلة غير صحيح.', array(), 422);
+    }
+
+    $paymentType = isset($_POST['payment_type']) && in_array(intval($_POST['payment_type']), array(1,2,3,4,5), true) ? intval($_POST['payment_type']) : 1;
+    $bankId = isset($_POST['bankid']) ? max(0, intval($_POST['bankid'])) : 0;
+    if ($bankId > 0) {
+        $bankCheck = mysql_query("SELECT id FROM bankacounts WHERE id='{$bankId}' AND ownerid2 IN (0,'{$propertyId}') LIMIT 1", $link);
+        if (!$bankCheck || mysql_num_rows($bankCheck) === 0) {
+            bulkDeliveryJson(false, 'الحساب البنكي المحدد غير متاح لهذا العقار.', array(), 422);
+        }
+    }
+
+    $checkNumber = trim(isset($_POST['checkrakam']) ? (string)$_POST['checkrakam'] : '');
+    $checkDate = trim(isset($_POST['checkdate']) ? (string)$_POST['checkdate'] : '');
+    $checkBank = trim(isset($_POST['checkbank']) ? (string)$_POST['checkbank'] : '');
+    $employee = (isset($_SESSION['useridv']) ? intval($_SESSION['useridv']) : 0) . '-' . (isset($_SESSION['namev']) ? (string)$_SESSION['namev'] : '');
+    $settlementMarker = time();
+    $voucherIds = array();
+    $batchTotal = 0;
+
+    if (!mysql_query('START TRANSACTION', $link)) {
+        bulkDeliveryJson(false, 'تعذر بدء عملية التسليم.', array(), 500);
+    }
+    $rows = bulkDeliveryRows($selectedIds, $propertyId, $link, true);
+    if (count($rows) !== count($selectedIds)) {
+        mysql_query('ROLLBACK', $link);
+        bulkDeliveryJson(false, 'تغيرت حالة أحد التحصيلات أو تم تسليمه من مستخدم آخر. أعد فتح القائمة.', array(), 409);
+    }
+
+    $expenses = empty($selectedExpenseIds) ? array() : bulkDeliveryExpenses($selectedExpenseIds, $propertyId, $link, true);
+    if (count($expenses) !== count($selectedExpenseIds)) {
+        mysql_query('ROLLBACK', $link);
+        bulkDeliveryJson(false, 'تغيرت حالة أحد المصروفات المحددة أو تم خصمه من مستخدم آخر. أعد فتح القائمة.', array(), 409);
+    }
+
+    $totalBeforeExpenses = 0;
+    foreach ($rows as &$calculationRow) {
+        $calculationRow['financials'] = bulkDeliveryFinancials($calculationRow, $property);
+        $totalBeforeExpenses += $calculationRow['financials']['owner_net'];
+    }
+    unset($calculationRow);
+    $totalBeforeExpenses = round($totalBeforeExpenses, 2);
+
+    $totalExpenses = 0;
+    foreach ($expenses as $expense) $totalExpenses += floatval($expense['amount']);
+    $totalExpenses = round($totalExpenses, 2);
+    $finalBatchTotal = round($totalBeforeExpenses - $totalExpenses, 2);
+    if ($finalBatchTotal < 1) {
+        mysql_query('ROLLBACK', $link);
+        bulkDeliveryJson(false, 'إجمالي المصروفات المحددة أكبر من أو يساوي المبلغ المستحق للمالك. ألغِ بعض المصروفات ثم حاول مجدداً.', array(), 422);
+    }
+
+    $failed = '';
+    $remainingBeforeExpenses = $totalBeforeExpenses;
+    $remainingPayable = $finalBatchTotal;
+    $expenseIdsCsv = implode(',', array_map('intval', $selectedExpenseIds));
+    $voucherExpenseIds = array();
+    $voucherExpenseIdsLength = 0;
+    foreach ($selectedExpenseIds as $expenseId) {
+        $expenseIdText = (string)intval($expenseId);
+        $additionalLength = strlen($expenseIdText) + ($voucherExpenseIdsLength > 0 ? 1 : 0);
+        if ($voucherExpenseIdsLength + $additionalLength > 500) break;
+        $voucherExpenseIds[] = $expenseIdText;
+        $voucherExpenseIdsLength += $additionalLength;
+    }
+    $voucherExpenseIdsCsv = implode(',', $voucherExpenseIds);
+    $expenseDetailsHtml = '';
+    if (!empty($expenses)) {
+        $expenseDetailsHtml = '<tr><td colspan="2"><strong>المصروفات المخصومة من الدفعة:</strong><ul>';
+        foreach (array_slice($expenses, 0, 15) as $expense) {
+            $expenseDetailsHtml .= '<li>#' . intval($expense['idmasrof']) . ' - ' .
+                bulkDeliveryEsc(mb_substr((string)$expense['payeddue'], 0, 100, 'UTF-8')) . ' - ' . number_format(floatval($expense['amount']), 2) . '</li>';
+        }
+        if (count($expenses) > 15) $expenseDetailsHtml .= '<li>وعدد ' . (count($expenses) - 15) . ' مصروفات إضافية</li>';
+        $expenseDetailsHtml .= '</ul><strong>إجمالي المصروفات: ' . number_format($totalExpenses, 2) . '</strong></td></tr>';
+    }
+    $lastRowIndex = count($rows) - 1;
+    foreach ($rows as $rowIndex => $row) {
+        $financials = $row['financials'];
+        $ownerNet = $financials['owner_net'];
+        if ($ownerNet < 1) {
+            $failed = 'صافي التحصيل رقم ' . intval($row['iderad']) . ' أقل من ريال واحد ولا يمكن تسليمه.';
+            break;
+        }
+        if ($rowIndex === $lastRowIndex) {
+            $settlementAmount = round($remainingPayable, 2);
+        } else {
+            $settlementAmount = $remainingBeforeExpenses > 0
+                ? round($remainingPayable * ($ownerNet / $remainingBeforeExpenses), 2)
+                : 0;
+            $settlementAmount = max(0, min($ownerNet, $settlementAmount));
+        }
+        $expenseShare = round($ownerNet - $settlementAmount, 2);
+        $remainingBeforeExpenses = round($remainingBeforeExpenses - $ownerNet, 2);
+        $remainingPayable = round($remainingPayable - $settlementAmount, 2);
+        $rowUid = $formUid . '-' . intval($row['iderad']);
+        $rowDescription = $description . ' - تحصيل رقم ' . intval($row['iderad']);
+        $rowBreakdown = '<table class="calc-table"><tr><td>رقم التحصيل</td><td>' . intval($row['iderad']) . '</td></tr>' .
+                        '<tr><td>المبلغ المحصل</td><td>' . number_format(floatval($row['amount']), 2) . '</td></tr>' .
+                        '<tr><td>السعي/التجديد</td><td>' . number_format(floatval($row['mysa3ee']), 2) . '</td></tr>' .
+                        '<tr><td>الخدمات</td><td>' . number_format(floatval($row['services']), 2) . '</td></tr>' .
+                        '<tr><td>عمولة المكتب (' . number_format(floatval($financials['commission_rate']), 2) . '%)</td><td>' . number_format(floatval($financials['office_commission']), 2) . '</td></tr>' .
+                        '<tr><td>صافي المالك قبل المصروفات</td><td>' . number_format($ownerNet, 2) . '</td></tr>' .
+                        '<tr><td>حصة التحصيل من المصروفات المخصومة</td><td>' . number_format($expenseShare, 2) . '</td></tr>' .
+                        '<tr><td>صافي التسليم</td><td>' . number_format($settlementAmount, 2) . '</td></tr>' .
+                        ($rowIndex === 0 ? $expenseDetailsHtml : '') . '</table>';
+        $moneySource = intval($row['source_ownerid']) > 0 ? 1 : 0;
+        $rowExpenseIds = $rowIndex === 0 ? $voucherExpenseIdsCsv : '';
+
+        $sql = "INSERT INTO sanadsarf SET
+                    sanadate='" . intval($voucherDate) . "', aqarid='{$propertyId}', amount='" . number_format($settlementAmount, 2, '.', '') . "',
+                    bayan='" . mysql_real_escape_string($rowDescription, $link) . "', note='" . mysql_real_escape_string($note, $link) . "',
+                    mostafeed='" . mysql_real_escape_string($beneficiary, $link) . "', qayedtype=3,
+                    mowazaf='" . mysql_real_escape_string($employee, $link) . "', extradata='" . mysql_real_escape_string($rowBreakdown, $link) . "',
+                    checkrakam='" . mysql_real_escape_string($checkNumber, $link) . "', checkdate='" . mysql_real_escape_string($checkDate, $link) . "',
+                    checkbank='" . mysql_real_escape_string($checkBank, $link) . "', tasfia='{$settlementMarker}',
+                    idsubaqar='" . intval($row['idsubaqar']) . "', iderad='" . intval($row['iderad']) . "', masrofatarray='" . mysql_real_escape_string($rowExpenseIds, $link) . "',
+                    payment_type='{$paymentType}', bankid='{$bankId}', money_source='{$moneySource}',
+                    money_received_date='" . intval($receivedDate) . "', money_actual_date='" . intval($actualDate) . "',
+                    formuid='" . mysql_real_escape_string($rowUid, $link) . "'";
+        if (!mysql_query($sql, $link)) {
+            $failed = 'تعذر إنشاء سند التحصيل رقم ' . intval($row['iderad']) . ': ' . mysql_error($link);
+            break;
+        }
+        $voucherIds[] = intval(mysql_insert_id($link));
+        $updateSql = "UPDATE eradat SET tasfia='{$settlementMarker}', formuid='" . mysql_real_escape_string($rowUid, $link) . "'
+                      WHERE iderad='" . intval($row['iderad']) . "' AND idaqar='{$propertyId}' AND tasfia='' LIMIT 1";
+        if (!mysql_query($updateSql, $link) || mysql_affected_rows($link) !== 1) {
+            $failed = 'تعذر تحديث التحصيل رقم ' . intval($row['iderad']) . ' لأنه تغير أثناء العملية.';
+            break;
+        }
+        $batchTotal += $settlementAmount;
+    }
+
+    if ($failed === '' && !empty($selectedExpenseIds)) {
+        $expenseFormUid = $formUid . '-' . intval($rows[0]['iderad']);
+        $expenseUpdateSql = "UPDATE masrofat
+                             SET tasfia='{$settlementMarker}', formuid='" . mysql_real_escape_string($expenseFormUid, $link) . "'
+                             WHERE idaqar='{$propertyId}' AND fund_source=0 AND tasfia=''
+                               AND idmasrof IN ({$expenseIdsCsv})";
+        if (!mysql_query($expenseUpdateSql, $link) || mysql_affected_rows($link) !== count($selectedExpenseIds)) {
+            $failed = 'تعذر اعتماد المصروفات المحددة لأنها تغيرت أثناء العملية.';
+        }
+    }
+
+    if ($failed !== '') {
+        mysql_query('ROLLBACK', $link);
+        bulkDeliveryJson(false, $failed . ' لم يتم تسليم أي تحصيل.', array(), 409);
+    }
+    if (!mysql_query('COMMIT', $link)) {
+        mysql_query('ROLLBACK', $link);
+        bulkDeliveryJson(false, 'تعذر إكمال عملية التسليم. لم يتم اعتماد العملية.', array(), 500);
+    }
+
+    $_SESSION['bulk_delivery_csrf'] = bulkDeliveryToken();
+    bulkDeliveryJson(true, 'تم تسليم ' . count($voucherIds) . ' تحصيلات للمالك بنجاح.', array(
+        'voucher_ids' => $voucherIds,
+        'total' => number_format($batchTotal, 2),
+        'expenses_total' => number_format($totalExpenses, 2),
+        'redirect' => 'sendmony.hnt?idaqar=' . $propertyId,
+    ));
+}
+
+if ($propertyId < 1 || empty($selectedIds) || count($selectedIds) > 1000) {
+    ?>
+    <div class="container-fluid py-4" dir="rtl"><div class="alert alert-danger">اختر تحصيلاً واحداً على الأقل من صفحة التسليم.</div><a class="btn btn-secondary" href="sendmony-select-aqar.hnt">عودة</a></div>
+    <?php require '../../../foter.hnt'; exit;
+}
+
+$propertyResult = mysql_query("SELECT idaqar, aqarname, ownername, persentage, addwaterto, addtameento FROM amlak WHERE idaqar='{$propertyId}' LIMIT 1", $link);
+$property = $propertyResult ? mysql_fetch_assoc($propertyResult) : false;
+$rows = $property ? bulkDeliveryRows($selectedIds, $propertyId, $link) : array();
+if (!$property || count($rows) !== count($selectedIds)) {
+    ?>
+    <div class="container-fluid py-4" dir="rtl"><div class="alert alert-danger">بعض التحصيلات المحددة غير موجودة أو تم تسليمها بالفعل. أعد فتح القائمة.</div><a class="btn btn-secondary" href="sendmony.hnt?idaqar=<?= intval($propertyId) ?>">عودة</a></div>
+    <?php require '../../../foter.hnt'; exit;
+}
+
+$calendarType = (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) ? 1 : 0;
+if ($calendarType) {
+    $currentDate = date('d/m/Y');
+} else {
+    $hijriToday = $dcal->g2u(intval(date('d')), intval(date('m')), intval(date('Y')));
+    $currentDate = intval($hijriToday['day']) . '/' . intval($hijriToday['month']) . '/' . intval($hijriToday['year']);
+}
+$batchTotal = 0;
+$batchOfficeCommission = 0;
+$batchSaee = 0;
+$invalidRows = array();
+foreach ($rows as &$row) {
+    $rowFinancials = bulkDeliveryFinancials($row, $property);
+    $row['owner_net'] = $rowFinancials['owner_net'];
+    $row['office_commission'] = $rowFinancials['office_commission'];
+    $row['commission_rate'] = $rowFinancials['commission_rate'];
+    $batchTotal += $row['owner_net'];
+    $batchOfficeCommission += $row['office_commission'];
+    $batchSaee += floatval($row['mysa3ee']);
+    if ($row['owner_net'] < 1) $invalidRows[] = intval($row['iderad']);
+}
+unset($row);
+$batchTotal = round($batchTotal, 2);
+$batchOfficeCommission = round($batchOfficeCommission, 2);
+$batchSaee = round($batchSaee, 2);
+
+$availableExpenses = array();
+$expenseResult = mysql_query("SELECT idmasrof, amount, payeddue, payeddate
+                              FROM masrofat
+                              WHERE idaqar='{$propertyId}' AND fund_source=0 AND tasfia=''
+                              ORDER BY payeddate DESC, idmasrof DESC", $link);
+if ($expenseResult) {
+    while ($expense = mysql_fetch_assoc($expenseResult)) {
+        if ($calendarType) {
+            $expense['formatted_date'] = date('d/m/Y', intval($expense['payeddate']));
+        } else {
+            try {
+                $expenseHijri = $dcal->g2u(intval(date('d', intval($expense['payeddate']))), intval(date('m', intval($expense['payeddate']))), intval(date('Y', intval($expense['payeddate']))));
+                $expense['formatted_date'] = intval($expenseHijri['day']) . '/' . intval($expenseHijri['month']) . '/' . intval($expenseHijri['year']);
+            } catch (Throwable $exception) {
+                $expense['formatted_date'] = date('d/m/Y', intval($expense['payeddate']));
+            }
+        }
+        $availableExpenses[] = $expense;
+    }
+}
+
+$bankAccounts = array();
+$bankResult = mysql_query("SELECT id, bankname, acountholder, acountnumber, iban FROM bankacounts WHERE ownerid2 IN (0,'{$propertyId}') ORDER BY ownerid2 DESC, id DESC", $link);
+if ($bankResult) while ($bank = mysql_fetch_assoc($bankResult)) $bankAccounts[] = $bank;
+$formUid = bulkDeliveryToken();
+?>
+
+<style>
+.bulk-title{background:linear-gradient(135deg,#0f766e,#15803d);color:#fff;border-radius:.8rem;padding:1rem 1.25rem}
+.bulk-card{border:0;box-shadow:0 2px 14px rgba(15,23,42,.09)}
+.bulk-table th{white-space:nowrap;background:#f1f5f9}.bulk-table td{white-space:nowrap;vertical-align:middle}
+.bulk-total{font-size:1.5rem;font-weight:800;color:#166534}
+.bulk-summary{border:1px solid #dbe4ee;border-radius:.75rem;padding:1rem;background:#fff;height:100%}
+.bulk-summary .label{color:#64748b;font-size:.9rem}.bulk-summary .value{font-size:1.35rem;font-weight:800;margin-top:.25rem}
+.bulk-expenses{max-height:340px;overflow:auto;border:1px solid #e2e8f0;border-radius:.65rem}
+.bulk-expenses th{position:sticky;top:0;background:#f8fafc;z-index:1}.bulk-expenses td,.bulk-expenses th{vertical-align:middle;white-space:nowrap}
+</style>
+
+<div class="container-fluid py-4" dir="rtl">
+    <div class="bulk-title d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+        <div><h3 class="mb-1"><i class="bi bi-check2-square me-2"></i>تسليم عدة تحصيلات للمالك</h3><div class="opacity-75"><?= bulkDeliveryEsc($property['aqarname']) ?> — <?= count($rows) ?> تحصيلات محددة</div></div>
+        <a class="btn btn-outline-light" href="sendmony.hnt?idaqar=<?= $propertyId ?>"><i class="bi bi-arrow-return-right me-1"></i>العودة للاختيار</a>
+    </div>
+
+    <div id="bulkDeliveryMessage" aria-live="polite"></div>
+    <div class="alert alert-info"><i class="bi bi-info-circle me-1"></i>سينشئ النظام سند تسليم مستقل لكل تحصيل للحفاظ على الارتباطات والتقارير، ويخصم المصروفات المحددة من إجمالي الدفعة ويوزع الخصم على التحصيلات تلقائياً.</div>
+    <?php if (!empty($invalidRows)) { ?><div class="alert alert-danger">لا يمكن المتابعة لأن صافي التحصيلات التالية أقل من ريال واحد: <?= bulkDeliveryEsc(implode(', ', $invalidRows)) ?></div><?php } ?>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-3"><div class="bulk-summary"><div class="label">السعي / التجديد</div><div class="value text-primary"><?= number_format($batchSaee, 2) ?></div></div></div>
+        <div class="col-md-3"><div class="bulk-summary"><div class="label">عمولة المكتب بالنسبة</div><div class="value text-danger"><?= number_format($batchOfficeCommission, 2) ?></div></div></div>
+        <div class="col-md-3"><div class="bulk-summary"><div class="label">صافي المالك قبل المصروفات</div><div class="value text-success"><?= number_format($batchTotal, 2) ?></div></div></div>
+        <div class="col-md-3"><div class="bulk-summary"><div class="label">صافي التسليم بعد المصروفات</div><div class="value text-success" id="bulkFinalSummary"><?= number_format($batchTotal, 2) ?></div></div></div>
+    </div>
+
+    <div class="card bulk-card mb-4"><div class="card-header bg-white py-3"><strong>التحصيلات المحددة وعمولة المكتب</strong></div><div class="table-responsive"><table class="table table-striped table-hover bulk-table mb-0"><thead><tr><th>التحصيل</th><th>الوحدة</th><th>المستأجر</th><th>البيان</th><th>المحصل</th><th>السعي</th><th>عمولة المكتب</th><th>الخدمات</th><th>المياه</th><th>التأمين</th><th>صافي المالك</th><th>مصدر المبلغ</th></tr></thead><tbody>
+    <?php foreach ($rows as $row) { ?><tr><td>#<?= intval($row['iderad']) ?></td><td><?= bulkDeliveryEsc(trim($row['aqarsubtypename'] . ' ' . $row['rakam'])) ?></td><td><?= bulkDeliveryEsc($row['tenant_name']) ?></td><td><?= bulkDeliveryEsc($row['pymentdesription']) ?></td><td><?= number_format(floatval($row['amount']),2) ?></td><td><?= number_format(floatval($row['mysa3ee']),2) ?></td><td class="text-danger fw-semibold"><?= number_format(floatval($row['office_commission']),2) ?> <small>(<?= number_format(floatval($row['commission_rate']),2) ?>%)</small></td><td><?= number_format(floatval($row['services']),2) ?></td><td><?= number_format(floatval($row['mywater']),2) ?></td><td><?= number_format(floatval($row['tamen']),2) ?></td><td class="fw-bold text-success"><?= number_format(floatval($row['owner_net']),2) ?></td><td><?= intval($row['source_ownerid']) > 0 ? 'حساب المالك' : 'حساب المكتب' ?></td></tr><?php } ?>
+    </tbody><tfoot><tr class="table-success"><th colspan="10" class="text-end">إجمالي المستحق للمالك قبل المصروفات</th><th class="bulk-total"><?= number_format($batchTotal,2) ?></th><th><?= count($rows) ?> سندات</th></tr></tfoot></table></div></div>
+
+    <form id="bulkDeliveryForm" class="card bulk-card" method="post">
+        <div class="card-header bg-white py-3"><strong><i class="bi bi-file-earmark-check me-1"></i>بيانات سندات التسليم</strong></div>
+        <div class="card-body row g-3">
+            <input type="hidden" name="ajax_submit" value="1"><input type="hidden" name="action" value="create_bulk">
+            <input type="hidden" name="csrf_token" value="<?= bulkDeliveryEsc($_SESSION['bulk_delivery_csrf']) ?>">
+            <input type="hidden" name="formuid" value="<?= bulkDeliveryEsc($formUid) ?>">
+            <input type="hidden" name="idaqar" value="<?= $propertyId ?>"><input type="hidden" name="iderad_ids" value="<?= bulkDeliveryEsc(implode(',', $selectedIds)) ?>">
+            <input type="hidden" name="local_hnt_dll_type" value="<?= $calendarType ?>"><input type="hidden" name="bankid" id="bulkBankId" value="0">
+            <div class="col-12">
+                <div class="border rounded-3 overflow-hidden">
+                    <div class="bg-light p-3 d-flex flex-wrap align-items-center justify-content-between gap-2">
+                        <div><strong><i class="bi bi-wallet2 me-1"></i>خصم مصروفات العقار من الدفعة المجمعة</strong><div class="small text-muted mt-1">يمكن أن يكون المصروف أكبر من تحصيل واحد؛ سيُخصم من إجمالي التحصيلات المحددة.</div></div>
+                        <?php if (!empty($availableExpenses)) { ?><label class="form-check mb-0"><input class="form-check-input" type="checkbox" id="bulkSelectAllExpenses"> <span class="form-check-label">تحديد كل المصروفات</span></label><?php } ?>
+                    </div>
+                    <?php if (empty($availableExpenses)) { ?>
+                        <div class="p-3 text-muted">لا توجد مصروفات دفعها المكتب بانتظار الخصم لهذا العقار.</div>
+                    <?php } else { ?>
+                        <div class="table-responsive bulk-expenses">
+                            <table class="table table-hover mb-0">
+                                <thead><tr><th style="width:70px">خصم</th><th>رقم المصروف</th><th>البيان</th><th>التاريخ</th><th class="text-end">المبلغ</th></tr></thead>
+                                <tbody>
+                                <?php foreach ($availableExpenses as $expense) { ?>
+                                    <tr>
+                                        <td><input class="form-check-input bulk-expense-checkbox" type="checkbox" name="expense_ids[]" value="<?= intval($expense['idmasrof']) ?>" data-amount="<?= bulkDeliveryEsc(number_format(floatval($expense['amount']), 2, '.', '')) ?>"></td>
+                                        <td>#<?= intval($expense['idmasrof']) ?></td>
+                                        <td><?= bulkDeliveryEsc($expense['payeddue']) ?></td>
+                                        <td dir="ltr"><?= bulkDeliveryEsc($expense['formatted_date']) ?></td>
+                                        <td class="text-end fw-semibold"><?= number_format(floatval($expense['amount']), 2) ?></td>
+                                    </tr>
+                                <?php } ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php } ?>
+                    <div class="p-3 bg-light d-flex flex-wrap justify-content-between gap-3">
+                        <span>المصروفات المحددة: <strong class="text-danger" id="bulkExpenseTotal">0.00</strong></span>
+                        <span>المبلغ النهائي للمالك: <strong class="text-success" id="bulkFinalTotal"><?= number_format($batchTotal, 2) ?></strong></span>
+                    </div>
+                    <div class="alert alert-danger m-3 d-none" id="bulkExpenseWarning">إجمالي المصروفات يجب أن يكون أقل من المبلغ المستحق للمالك.</div>
+                </div>
+            </div>
+            <div class="col-md-6"><label class="form-label" for="bulkMostafeed">اسم المستلم</label><input class="form-control" id="bulkMostafeed" name="mostafeed" maxlength="245" required value="<?= bulkDeliveryEsc($property['ownername']) ?>"></div>
+            <div class="col-md-6"><label class="form-label" for="bulkBayan">بيان السند</label><input class="form-control" id="bulkBayan" name="bayan" maxlength="200" required value="تصفية مجمعة لعدد <?= count($rows) ?> تحصيلات"></div>
+            <div class="col-md-4"><label class="form-label" for="bulkVoucherDate">تاريخ التسليم</label><input class="form-control datepicker-input" id="bulkVoucherDate" name="sanadrealdate" required value="<?= bulkDeliveryEsc($currentDate) ?>" autocomplete="off"></div>
+            <div class="col-md-4"><label class="form-label" for="bulkReceivedDate">تاريخ استلام المبلغ</label><input class="form-control datepicker-input" id="bulkReceivedDate" name="money_received_date" required value="<?= bulkDeliveryEsc($currentDate) ?>" autocomplete="off"></div>
+            <div class="col-md-4"><label class="form-label" for="bulkActualDate">تاريخ التسجيل</label><input class="form-control" id="bulkActualDate" name="money_actual_date" readonly value="<?= bulkDeliveryEsc($currentDate) ?>"></div>
+            <div class="col-md-4"><label class="form-label" for="bulkPaymentType">طريقة الصرف</label><select class="form-select" name="payment_type" id="bulkPaymentType"><option value="1">نقداً</option><option value="2">شيك</option><option value="4">تحويل بنكي</option><option value="5">شبكة</option><option value="3">أخرى</option></select></div>
+            <div class="col-md-4" id="bulkBankWrap" style="display:none"><label class="form-label" for="bulkBankSelect">الحساب البنكي</label><select class="form-select" id="bulkBankSelect"><option value="">اختر الحساب</option><?php foreach ($bankAccounts as $bank) { ?><option value="<?= intval($bank['id']) ?>" data-bank="<?= bulkDeliveryEsc($bank['bankname']) ?>" data-holder="<?= bulkDeliveryEsc($bank['acountholder']) ?>"><?= bulkDeliveryEsc($bank['bankname'] . ' - ' . $bank['acountholder'] . ' (' . $bank['acountnumber'] . ')') ?></option><?php } ?></select></div>
+            <div class="col-md-4" id="bulkReferenceWrap" style="display:none"><label class="form-label" for="bulkReference">رقم الشيك / الحوالة</label><input class="form-control" name="checkrakam" id="bulkReference" maxlength="50"></div>
+            <div class="col-md-4" id="bulkCheckDateWrap" style="display:none"><label class="form-label" for="bulkCheckDate">تاريخ الشيك</label><input class="form-control datepicker-input" name="checkdate" id="bulkCheckDate" autocomplete="off"></div>
+            <div class="col-md-4" id="bulkCheckBankWrap" style="display:none"><label class="form-label" for="bulkCheckBank">البنك</label><input class="form-control" name="checkbank" id="bulkCheckBank" maxlength="50"></div>
+            <div class="col-12"><label class="form-label" for="bulkNote">ملاحظات</label><input class="form-control" name="sanadnote" id="bulkNote" maxlength="245"></div>
+            <div class="col-12 text-center"><button class="btn btn-success btn-lg px-5" id="bulkSubmit" type="submit" <?= !empty($invalidRows) ? 'disabled' : '' ?>><i class="bi bi-check2-all me-1"></i>تسليم التحصيلات المحددة</button></div>
+        </div>
+    </form>
+</div>
+
+<script>
+(function ($) {
+    var isHijri = <?= $calendarType ? 'false' : 'true' ?>;
+    var batchBeforeExpenses = <?= json_encode((float)$batchTotal) ?>;
+    var hasInvalidRows = <?= !empty($invalidRows) ? 'true' : 'false' ?>;
+
+    function money(value) {
+        return Number(value || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    }
+
+    function updateExpenseSummary() {
+        var expenseTotal = 0;
+        $('.bulk-expense-checkbox:checked').each(function () {
+            expenseTotal += parseFloat($(this).data('amount')) || 0;
+        });
+        expenseTotal = Math.round(expenseTotal * 100) / 100;
+        var finalTotal = Math.round((batchBeforeExpenses - expenseTotal) * 100) / 100;
+        var invalidExpenses = finalTotal < 1;
+        $('#bulkExpenseTotal').text(money(expenseTotal));
+        $('#bulkFinalTotal,#bulkFinalSummary').text(money(finalTotal));
+        $('#bulkFinalTotal,#bulkFinalSummary').toggleClass('text-danger', invalidExpenses).toggleClass('text-success', !invalidExpenses);
+        $('#bulkExpenseWarning').toggleClass('d-none', !invalidExpenses);
+        $('#bulkSubmit').prop('disabled', hasInvalidRows || invalidExpenses);
+
+        var boxes = $('.bulk-expense-checkbox');
+        var checked = boxes.filter(':checked').length;
+        $('#bulkSelectAllExpenses').prop('checked', boxes.length > 0 && checked === boxes.length)
+            .prop('indeterminate', checked > 0 && checked < boxes.length);
+        return !invalidExpenses;
+    }
+
+    $('.datepicker-input').data('calendartype', isHijri ? 'hijri' : 'gregorian').datepicker({format:'dd/mm/yyyy',language:'ar',rtl:true,autoclose:true,todayHighlight:true,calendarType:isHijri?'hijri':'gregorian'});
+    $('#bulkSelectAllExpenses').on('change', function () {
+        $('.bulk-expense-checkbox').prop('checked', this.checked);
+        updateExpenseSummary();
+    });
+    $('.bulk-expense-checkbox').on('change', updateExpenseSummary);
+    $('#bulkPaymentType').on('change', function () {
+        var method = parseInt(this.value || '1', 10);
+        var showDetails = method !== 1;
+        $('#bulkReferenceWrap,#bulkCheckDateWrap,#bulkCheckBankWrap').toggle(showDetails);
+        $('#bulkBankWrap').toggle(method === 4);
+        if (!showDetails) $('#bulkReference,#bulkCheckDate,#bulkCheckBank').val('');
+        if (method !== 4) { $('#bulkBankSelect').val(''); $('#bulkBankId').val('0'); }
+    });
+    $('#bulkBankSelect').on('change', function () {
+        var option = $(this).find('option:selected');
+        $('#bulkBankId').val(option.val() || '0');
+        if (option.val()) $('#bulkCheckBank').val((option.data('bank') || '') + ' - ' + (option.data('holder') || ''));
+    });
+    $('#bulkDeliveryForm').on('submit', function (event) {
+        event.preventDefault();
+        if (!updateExpenseSummary()) {
+            document.getElementById('bulkExpenseWarning').scrollIntoView({behavior:'smooth', block:'center'});
+            return;
+        }
+        if (!this.checkValidity()) { this.reportValidity(); return; }
+        var formData = new FormData(this);
+        var button = $('#bulkSubmit');
+        var original = button.html();
+        button.prop('disabled', true).html('<i class="bi bi-hourglass-split me-1"></i>جاري التسليم...');
+        $.ajax({url:'sendmony-bulk.hnt',method:'POST',data:formData,processData:false,contentType:false,dataType:'json'})
+            .done(function (response) {
+                if (!response.success) { $('#bulkDeliveryMessage').html($('<div class="alert alert-danger">').text(response.message || 'تعذر تنفيذ التسليم.')); return; }
+                var totalText = response.total ? ' الإجمالي: ' + response.total : '';
+                var expenseText = response.expenses_total && parseFloat(response.expenses_total) > 0 ? ' المصروفات المخصومة: ' + response.expenses_total : '';
+                $('#bulkDeliveryMessage').html($('<div class="alert alert-success">').text(response.message + totalText + expenseText));
+                if (response.redirect) window.setTimeout(function () { window.location.href = response.redirect; }, 900);
+            }).fail(function (xhr) {
+                var response = xhr.responseJSON || {};
+                $('#bulkDeliveryMessage').html($('<div class="alert alert-danger">').text(response.message || 'تعذر الاتصال بالخادم أثناء التسليم.'));
+                button.prop('disabled', false).html(original);
+            }).always(function () {
+                if (!$('#bulkDeliveryMessage .alert-success').length) {
+                    button.html(original);
+                    updateExpenseSummary();
+                }
+            });
+    });
+    updateExpenseSummary();
+})(jQuery);
+</script>
+
+<?php require '../../../foter.hnt'; ?>

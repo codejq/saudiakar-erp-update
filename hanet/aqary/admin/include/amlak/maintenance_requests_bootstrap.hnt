@@ -1,0 +1,36 @@
+<?php
+/** Shared authenticated bootstrap for maintenance-request pages. */
+require_once dirname(__DIR__, 3) . '/connectdb.hnt';
+require_once __DIR__ . '/MaintenanceRequestService.class.hnt';
+date_default_timezone_set('Asia/Riyadh');
+
+if (isset($qdb_db, $dbSuffix) && $db instanceof mysqli) {
+    mysqli_select_db($db, $qdb_db . $dbSuffix);
+    $db->set_charset('utf8mb4');
+}
+$sc_id = MaintenanceRequestService::resolveScreenId($db);
+$sc_title = $sc_title ?? 'طلبات الصيانة';
+include_once dirname(__DIR__, 3) . '/header.hnt';
+
+$maintenanceUserId = intval($_SESSION['useridv'] ?? 0);
+$accessStmt = $db->prepare("SELECT g.allprevilage,COALESCE(p.sees,0) sees,COALESCE(p.adds,0) adds,COALESCE(p.edits,0) edits,COALESCE(p.deleetes,0) deleetes
+    FROM user u LEFT JOIN usergroups g ON g.groupid=u.groupid LEFT JOIN ugroupscreen p ON p.groupid=u.groupid AND p.screenid=? WHERE u.userid=? LIMIT 1");
+$accessStmt->bind_param('ii', $sc_id, $maintenanceUserId);
+$accessStmt->execute();
+$maintenanceAccess = $accessStmt->get_result()->fetch_assoc();
+$accessStmt->close();
+if ($sc_id <= 0 || !$maintenanceAccess || (empty($maintenanceAccess['allprevilage']) && empty($maintenanceAccess['sees']))) {
+    http_response_code(403);
+    echo '<div dir="rtl" style="margin:30px;padding:20px;border:1px solid #fecaca;background:#fee2e2;color:#991b1b">ليس لديك الصلاحية لعرض طلبات الصيانة، أو لم يتم تشغيل ترحيل الوحدة بعد. افتح إدارة الأملاك أولاً.</div>';
+    exit;
+}
+$maintenanceCanAdd = !empty($maintenanceAccess['allprevilage']) || !empty($maintenanceAccess['adds']);
+$maintenanceCanEdit = !empty($maintenanceAccess['allprevilage']) || !empty($maintenanceAccess['edits']);
+$maintenanceService = new MaintenanceRequestService($db, $maintenanceUserId);
+if (empty($_SESSION['maintenance_request_csrf'])) {
+    try { $_SESSION['maintenance_request_csrf'] = bin2hex(random_bytes(24)); }
+    catch (Throwable $exception) { $_SESSION['maintenance_request_csrf'] = hash('sha256', session_id() . microtime(true)); }
+}
+$maintenanceCsrf = (string)$_SESSION['maintenance_request_csrf'];
+require_once __DIR__ . '/maintenance_requests_common.hnt';
+

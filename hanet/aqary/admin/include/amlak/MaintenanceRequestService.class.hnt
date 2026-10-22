@@ -1,0 +1,531 @@
+<?php
+/** Business logic for maintenance requests and their complete audit trail. */
+class MaintenanceRequestService
+{
+    private $db;
+    private $userId;
+
+    public function __construct(mysqli $db, $userId)
+    {
+        $this->db = $db;
+        $this->userId = intval($userId);
+    }
+
+    public static function resolveScreenId(mysqli $db)
+    {
+        $result = $db->query("SELECT screenid FROM screens WHERE screen_id='maintenance_requests' ORDER BY screenid LIMIT 1");
+        $row = $result ? $result->fetch_assoc() : null;
+        return intval($row['screenid'] ?? 0);
+    }
+
+    private function esc($value)
+    {
+        return $this->db->real_escape_string(trim((string)$value));
+    }
+
+    private function dateTimeOrNull($value)
+    {
+        $value = trim((string)$value);
+        if ($value === '') {
+            return null;
+        }
+        $value = str_replace('T', ' ', $value);
+        $date = DateTime::createFromFormat('Y-m-d H:i', substr($value, 0, 16), new DateTimeZone('Asia/Riyadh'));
+        $errors = DateTime::getLastErrors();
+        if (!$date || (is_array($errors) && (intval($errors['warning_count']) > 0 || intval($errors['error_count']) > 0))) {
+            throw new InvalidArgumentException('أحد التواريخ المدخلة غير صحيح.');
+        }
+        return $date->format('Y-m-d H:i:s');
+    }
+
+    private function event($requestId, $eventType, $fromStatus, $toStatus, $note, $data = array())
+    {
+        $stmt = $this->db->prepare("INSERT INTO maintenance_request_events
+            (request_id,event_type,from_status,to_status,note,event_data,event_by_userid,event_at)
+            VALUES (?,?,?,?,?,?,?,?)");
+        $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $now = time();
+        $stmt->bind_param('isssssii', $requestId, $eventType, $fromStatus, $toStatus, $note, $json, $this->userId, $now);
+        $stmt->execute();
+        $stmt->close();
+        $this->db->query("UPDATE maintenance_requests SET updated_by_userid=" . intval($this->userId) . ",updated_at={$now} WHERE request_id=" . intval($requestId));
+    }
+
+    private function notifyAssignedUser($assignedUserId, $requestNumber, $message)
+    {
+        $assignedUserId = intval($assignedUserId);
+        if ($assignedUserId <= 0) {
+            return;
+        }
+        $text = $this->esc('طلب الصيانة ' . $requestNumber . ': ' . $message);
+        $sender = intval($this->userId);
+        $now = time();
+        // Notifications are helpful but must never roll back a completed maintenance action.
+        try {
+            $this->db->query("INSERT INTO notifications
+                (notifitext,notifiuserid,notifisender,notifitype,notifitime,notifiisseen)
+                VALUES ('{$text}',{$assignedUserId},'{$sender}','طلب صيانة',{$now},0)");
+            $this->db->query("UPDATE user SET notificationscount=COALESCE(notificationscount,0)+1 WHERE userid={$assignedUserId}");
+        } catch (Throwable $exception) {
+            error_log('Maintenance request notification: ' . $exception->getMessage());
+        }
+    }
+
+    private function validateReferences(&$data)
+    {
+        $propertyId = intval($data['idaqar'] ?? 0);
+        $unitId = intval($data['idsubaqar'] ?? 0);
+        $tenantId = intval($data['mostagerid'] ?? 0);
+        $assignedUserId = intval($data['assigned_userid'] ?? 0);
+
+        if ($unitId > 0) {
+            $stmt = $this->db->prepare("SELECT idaqar,mostagerid FROM amlakdetails WHERE idsubaqar=? LIMIT 1");
+            $stmt->bind_param('i', $unitId);
+            $stmt->execute();
+            $unit = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            if (!$unit) {
+                throw new InvalidArgumentException('الوحدة المحددة غير موجودة.');
+            }
+            $propertyId = intval($unit['idaqar']);
+            // A selected unit always determines its current tenant.
+            $tenantId = max(0, intval($unit['mostagerid']));
+        }
+        if ($propertyId > 0) {
+            $stmt = $this->db->prepare("SELECT idaqar FROM amlak WHERE idaqar=? LIMIT 1");
+            $stmt->bind_param('i', $propertyId);
+            $stmt->execute();
+            $exists = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            if (!$exists) {
+                throw new InvalidArgumentException('العقار المحدد غير موجود.');
+            }
+        }
+        if ($tenantId > 0) {
+            $stmt = $this->db->prepare("SELECT mostagerid,mostagername,mostagertel FROM mostagereen WHERE mostagerid=? LIMIT 1");
+            $stmt->bind_param('i', $tenantId);
+            $stmt->execute();
+            $tenant = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            if (!$tenant) {
+                throw new InvalidArgumentException('المستأجر المحدد غير موجود.');
+            }
+            $data['tenant_name_snapshot'] = $tenant['mostagername'];
+            $data['tenant_phone_snapshot'] = $tenant['mostagertel'];
+        }
+        if ($assignedUserId > 0) {
+            $stmt = $this->db->prepare("SELECT userid FROM user WHERE userid=? LIMIT 1");
+            $stmt->bind_param('i', $assignedUserId);
+            $stmt->execute();
+            $exists = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            if (!$exists) {
+                throw new InvalidArgumentException('المستخدم المكلف غير موجود.');
+            }
+        }
+        $data['idaqar'] = $propertyId;
+        $data['idsubaqar'] = $unitId;
+        $data['mostagerid'] = $tenantId;
+        $data['assigned_userid'] = $assignedUserId;
+    }
+
+    public function createRequest($data)
+    {
+        $title = trim((string)($data['title'] ?? ''));
+        $description = trim((string)($data['description'] ?? ''));
+        if ($title === '' || $description === '') {
+            throw new InvalidArgumentException('عنوان الطلب ووصف المشكلة مطلوبان.');
+        }
+        $this->validateReferences($data);
+        $allowedPriorities = array('low','normal','high','urgent');
+        $priority = in_array((string)($data['priority'] ?? ''), $allowedPriorities, true) ? (string)$data['priority'] : 'normal';
+        $status = intval($data['assigned_userid']) > 0 ? 'assigned' : 'new';
+        $category = trim((string)($data['category'] ?? 'other')) ?: 'other';
+        $preferredVisit = $this->dateTimeOrNull($data['preferred_visit_at'] ?? '');
+        $dueAt = $this->dateTimeOrNull($data['due_at'] ?? '');
+        $scheduledAt = $this->dateTimeOrNull($data['scheduled_at'] ?? '');
+        if ($scheduledAt !== null && intval($data['assigned_userid']) > 0) {
+            $status = 'scheduled';
+        }
+        $now = time();
+        $formuid = trim((string)($data['formuid'] ?? ''));
+        if ($formuid === '') {
+            $formuid = bin2hex(random_bytes(16));
+        }
+
+        $this->db->begin_transaction();
+        try {
+            $temporaryNumber = 'TMP-' . bin2hex(random_bytes(12));
+            $stmt = $this->db->prepare("INSERT INTO maintenance_requests
+                (request_number,title,description,category,priority,status,idaqar,idsubaqar,mostagerid,
+                 tenant_name_snapshot,tenant_phone_snapshot,assigned_userid,reported_by_type,reported_by_name,
+                 reported_by_contact,preferred_visit_at,scheduled_at,due_at,location_details,access_instructions,
+                 requires_tenant_presence,vendor_name,vendor_phone,estimated_cost,actual_cost,created_by_userid,
+                 updated_by_userid,created_at,updated_at,formuid)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+            $tenantName = (string)($data['tenant_name_snapshot'] ?? '');
+            $tenantPhone = (string)($data['tenant_phone_snapshot'] ?? '');
+            $reportedType = (string)($data['reported_by_type'] ?? 'tenant');
+            if (!in_array($reportedType, array('tenant','user','owner','other'), true)) $reportedType = 'tenant';
+            $reportedName = trim((string)($data['reported_by_name'] ?? ''));
+            $reportedContact = trim((string)($data['reported_by_contact'] ?? ''));
+            $location = trim((string)($data['location_details'] ?? ''));
+            $access = trim((string)($data['access_instructions'] ?? ''));
+            $tenantPresence = !empty($data['requires_tenant_presence']) ? 1 : 0;
+            $vendorName = trim((string)($data['vendor_name'] ?? ''));
+            $vendorPhone = trim((string)($data['vendor_phone'] ?? ''));
+            $estimatedCost = max(0, floatval($data['estimated_cost'] ?? 0));
+            $actualCost = 0.0;
+            $stmt->bind_param('ssssssiiississssssssissddiiiis',
+                $temporaryNumber, $title, $description, $category, $priority, $status,
+                $data['idaqar'], $data['idsubaqar'], $data['mostagerid'], $tenantName, $tenantPhone,
+                $data['assigned_userid'], $reportedType, $reportedName, $reportedContact,
+                $preferredVisit, $scheduledAt, $dueAt, $location, $access, $tenantPresence,
+                $vendorName, $vendorPhone, $estimatedCost, $actualCost, $this->userId, $this->userId,
+                $now, $now, $formuid);
+            $stmt->execute();
+            $requestId = intval($this->db->insert_id);
+            $stmt->close();
+            $requestNumber = 'MR-' . date('Y') . '-' . str_pad((string)$requestId, 6, '0', STR_PAD_LEFT);
+            $stmt = $this->db->prepare("UPDATE maintenance_requests SET request_number=? WHERE request_id=?");
+            $stmt->bind_param('si', $requestNumber, $requestId);
+            $stmt->execute();
+            $stmt->close();
+            $this->event($requestId, 'created', '', $status, 'تم إنشاء طلب الصيانة.', array('assigned_userid' => intval($data['assigned_userid'])));
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+        if (intval($data['assigned_userid']) > 0) {
+            $this->notifyAssignedUser($data['assigned_userid'], $requestNumber, 'تم إسناد الطلب إليك.');
+        }
+        return $requestId;
+    }
+
+    public function updateRequest($requestId, $data)
+    {
+        $request = $this->getRequest($requestId);
+        if (!$request) throw new InvalidArgumentException('طلب الصيانة غير موجود.');
+        $this->validateReferences($data);
+        if (in_array((string)$request['status'], array('assigned','scheduled','in_progress','waiting_parts'), true) && intval($data['assigned_userid']) <= 0) {
+            throw new InvalidArgumentException('لا يمكن إلغاء إسناد طلب دخل دورة التنفيذ. أسنده إلى مستخدم آخر أو غيّر حالته أولاً.');
+        }
+        $title = trim((string)($data['title'] ?? ''));
+        $description = trim((string)($data['description'] ?? ''));
+        if ($title === '' || $description === '') throw new InvalidArgumentException('عنوان الطلب ووصف المشكلة مطلوبان.');
+        $priority = in_array((string)($data['priority'] ?? ''), array('low','normal','high','urgent'), true) ? (string)$data['priority'] : 'normal';
+        $preferredVisit = $this->dateTimeOrNull($data['preferred_visit_at'] ?? '');
+        $scheduledAt = $this->dateTimeOrNull($data['scheduled_at'] ?? '');
+        $dueAt = $this->dateTimeOrNull($data['due_at'] ?? '');
+        $tenantName = (string)($data['tenant_name_snapshot'] ?? '');
+        $tenantPhone = (string)($data['tenant_phone_snapshot'] ?? '');
+        $reportedType = in_array((string)($data['reported_by_type'] ?? ''), array('tenant','user','owner','other'), true) ? (string)$data['reported_by_type'] : 'tenant';
+        $category = trim((string)($data['category'] ?? 'other')) ?: 'other';
+        $reportedName = trim((string)($data['reported_by_name'] ?? ''));
+        $reportedContact = trim((string)($data['reported_by_contact'] ?? ''));
+        $location = trim((string)($data['location_details'] ?? ''));
+        $access = trim((string)($data['access_instructions'] ?? ''));
+        $tenantPresence = !empty($data['requires_tenant_presence']) ? 1 : 0;
+        $vendorName = trim((string)($data['vendor_name'] ?? ''));
+        $vendorPhone = trim((string)($data['vendor_phone'] ?? ''));
+        $estimatedCost = max(0, floatval($data['estimated_cost'] ?? 0));
+        $actualCost = max(0, floatval($data['actual_cost'] ?? 0));
+        $now = time();
+        $newSnapshot = array(
+            'title'=>$title,'description'=>$description,'category'=>$category,'priority'=>$priority,
+            'idaqar'=>$data['idaqar'],'idsubaqar'=>$data['idsubaqar'],'mostagerid'=>$data['mostagerid'],
+            'tenant_name_snapshot'=>$tenantName,'tenant_phone_snapshot'=>$tenantPhone,
+            'assigned_userid'=>$data['assigned_userid'],'reported_by_type'=>$reportedType,
+            'reported_by_name'=>$reportedName,'reported_by_contact'=>$reportedContact,
+            'preferred_visit_at'=>$preferredVisit,'scheduled_at'=>$scheduledAt,'due_at'=>$dueAt,
+            'location_details'=>$location,'access_instructions'=>$access,
+            'requires_tenant_presence'=>$tenantPresence,'vendor_name'=>$vendorName,'vendor_phone'=>$vendorPhone,
+            'estimated_cost'=>$estimatedCost,'actual_cost'=>$actualCost
+        );
+        $changes = array();
+        foreach ($newSnapshot as $field => $newValue) {
+            if ((string)($request[$field] ?? '') !== (string)$newValue) {
+                $changes[$field] = array('from'=>$request[$field] ?? null,'to'=>$newValue);
+            }
+        }
+        $this->db->begin_transaction();
+        try {
+            $stmt = $this->db->prepare("UPDATE maintenance_requests SET title=?,description=?,category=?,priority=?,idaqar=?,idsubaqar=?,mostagerid=?,tenant_name_snapshot=?,tenant_phone_snapshot=?,assigned_userid=?,reported_by_type=?,reported_by_name=?,reported_by_contact=?,preferred_visit_at=?,scheduled_at=?,due_at=?,location_details=?,access_instructions=?,requires_tenant_presence=?,vendor_name=?,vendor_phone=?,estimated_cost=?,actual_cost=?,updated_by_userid=?,updated_at=? WHERE request_id=?");
+            $stmt->bind_param('ssssiiississssssssissddiii', $title,$description,$category,$priority,$data['idaqar'],$data['idsubaqar'],$data['mostagerid'],$tenantName,$tenantPhone,$data['assigned_userid'],$reportedType,$reportedName,$reportedContact,$preferredVisit,$scheduledAt,$dueAt,$location,$access,$tenantPresence,$vendorName,$vendorPhone,$estimatedCost,$actualCost,$this->userId,$now,$requestId);
+            $stmt->execute();
+            $stmt->close();
+            $this->event($requestId, 'updated', $request['status'], $request['status'], trim((string)($data['update_note'] ?? 'تم تحديث بيانات الطلب.')), $changes);
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+        if (intval($data['assigned_userid']) > 0 && intval($request['assigned_userid']) !== intval($data['assigned_userid'])) {
+            $this->notifyAssignedUser($data['assigned_userid'], $request['request_number'], 'تم إسناد الطلب إليك.');
+        }
+    }
+
+    public function changeStatus($requestId, $newStatus, $note)
+    {
+        $request = $this->getRequest($requestId);
+        if (!$request) throw new InvalidArgumentException('طلب الصيانة غير موجود.');
+        $allowed = array(
+            'new' => array('assigned','scheduled','cancelled'),
+            'assigned' => array('scheduled','in_progress','on_hold','cancelled'),
+            'scheduled' => array('in_progress','on_hold','cancelled'),
+            'in_progress' => array('waiting_parts','on_hold','completed','cancelled'),
+            'waiting_parts' => array('in_progress','on_hold','cancelled'),
+            'on_hold' => array('assigned','scheduled','in_progress','cancelled'),
+            'completed' => array('verified','in_progress'),
+            'verified' => array(),
+            'cancelled' => array('new')
+        );
+        $oldStatus = (string)$request['status'];
+        if (!isset($allowed[$oldStatus]) || !in_array($newStatus, $allowed[$oldStatus], true)) {
+            throw new InvalidArgumentException('الانتقال المطلوب غير مسموح من الحالة الحالية.');
+        }
+        if (in_array($newStatus, array('assigned','scheduled','in_progress'), true) && intval($request['assigned_userid']) <= 0) {
+            throw new InvalidArgumentException('حدد المستخدم المكلف قبل متابعة دورة تنفيذ الطلب.');
+        }
+        if ($newStatus === 'scheduled' && empty($request['scheduled_at'])) {
+            throw new InvalidArgumentException('حدد الموعد المجدول في بيانات الطلب قبل تحويله إلى مجدول.');
+        }
+        if (in_array($newStatus, array('on_hold','cancelled'), true) && trim($note) === '') {
+            throw new InvalidArgumentException('اكتب سبب التعليق أو الإلغاء.');
+        }
+        if ($newStatus === 'completed' && trim($note) === '') {
+            throw new InvalidArgumentException('اكتب ملخص العمل المنجز قبل الإكمال.');
+        }
+        $sets = array("status='" . $this->esc($newStatus) . "'", 'updated_by_userid=' . $this->userId, 'updated_at=' . time());
+        if ($newStatus === 'in_progress' && empty($request['started_at'])) $sets[] = "started_at=NOW()";
+        if ($newStatus === 'in_progress' && $oldStatus === 'completed') {
+            $sets[] = 'completed_at=NULL';
+            $sets[] = 'verified_at=NULL';
+        }
+        if ($newStatus === 'completed') {
+            $sets[] = "completed_at=NOW()";
+            $sets[] = "resolution_summary='" . $this->esc($note) . "'";
+        }
+        if ($newStatus === 'verified') $sets[] = "verified_at=NOW()";
+        if ($newStatus === 'cancelled') $sets[] = "cancellation_reason='" . $this->esc($note) . "'";
+        $this->db->begin_transaction();
+        try {
+            $this->db->query("UPDATE maintenance_requests SET " . implode(',', $sets) . " WHERE request_id=" . intval($requestId));
+            $this->event($requestId, 'status_changed', $oldStatus, $newStatus, trim($note), array());
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+        if (intval($request['assigned_userid']) > 0) {
+            $this->notifyAssignedUser($request['assigned_userid'], $request['request_number'], 'تم تحديث الحالة إلى ' . self::statusLabel($newStatus) . '.');
+        }
+    }
+
+    public function addItem($requestId, $data)
+    {
+        if (!$this->getRequest($requestId)) throw new InvalidArgumentException('طلب الصيانة غير موجود.');
+        $name = trim((string)($data['item_name'] ?? ''));
+        if ($name === '') throw new InvalidArgumentException('اسم المادة أو الخدمة مطلوب.');
+        $type = in_array((string)($data['item_type'] ?? ''), array('material','service','transport','other'), true) ? (string)$data['item_type'] : 'material';
+        $quantity = max(0.01, floatval($data['quantity'] ?? 1));
+        $unit = trim((string)($data['unit'] ?? 'قطعة'));
+        $unitCost = max(0, floatval($data['unit_cost'] ?? 0));
+        $supplier = trim((string)($data['supplier_name'] ?? ''));
+        $notes = trim((string)($data['notes'] ?? ''));
+        $now = time();
+        $status = 'requested';
+        $this->db->begin_transaction();
+        try {
+            $stmt = $this->db->prepare("INSERT INTO maintenance_request_items (request_id,item_type,item_name,quantity,unit,unit_cost,supplier_name,status,notes,created_by_userid,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)");
+            $stmt->bind_param('issdsdsssiii', $requestId,$type,$name,$quantity,$unit,$unitCost,$supplier,$status,$notes,$this->userId,$now,$now);
+            $stmt->execute();
+            $itemId = intval($this->db->insert_id);
+            $stmt->close();
+            $this->event($requestId, 'item_added', '', '', 'تمت إضافة بند لوجستي: ' . $name, array('item_id' => $itemId, 'quantity' => $quantity, 'unit_cost' => $unitCost));
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+        return $itemId;
+    }
+
+    public function updateItemStatus($requestId, $itemId, $status, $note)
+    {
+        $allowed = array('requested','ordered','received','used','returned','cancelled');
+        if (!in_array($status, $allowed, true)) throw new InvalidArgumentException('حالة البند غير صحيحة.');
+        $stmt = $this->db->prepare("SELECT item_name,status FROM maintenance_request_items WHERE item_id=? AND request_id=? LIMIT 1");
+        $stmt->bind_param('ii', $itemId, $requestId);
+        $stmt->execute();
+        $item = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if (!$item) throw new InvalidArgumentException('البند غير موجود.');
+        $now = time();
+        $this->db->begin_transaction();
+        try {
+            $stmt = $this->db->prepare("UPDATE maintenance_request_items SET status=?,notes=CASE WHEN ?='' THEN notes ELSE ? END,updated_at=? WHERE item_id=? AND request_id=?");
+            $stmt->bind_param('sssiii', $status,$note,$note,$now,$itemId,$requestId);
+            $stmt->execute();
+            $stmt->close();
+            $this->event($requestId, 'item_status_changed', $item['status'], $status, trim($note) ?: ('تم تحديث بند ' . $item['item_name']), array('item_id' => $itemId));
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+    }
+
+    public function addAttachment($requestId, $originalName, $storedName, $storagePath, $mimeType, $fileSize)
+    {
+        $now = time();
+        $this->db->begin_transaction();
+        try {
+            $stmt = $this->db->prepare("INSERT INTO maintenance_request_attachments (request_id,original_name,stored_name,storage_path,mime_type,file_size,uploaded_by_userid,uploaded_at) VALUES (?,?,?,?,?,?,?,?)");
+            $stmt->bind_param('issssiii', $requestId,$originalName,$storedName,$storagePath,$mimeType,$fileSize,$this->userId,$now);
+            $stmt->execute();
+            $id = intval($this->db->insert_id);
+            $stmt->close();
+            $this->event($requestId, 'attachment_added', '', '', 'تمت إضافة مرفق: ' . $originalName, array('attachment_id' => $id));
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+        return $id;
+    }
+
+    public function addTimelineNote($requestId, $noteType, $note)
+    {
+        $request = $this->getRequest($requestId);
+        if (!$request) throw new InvalidArgumentException('طلب الصيانة غير موجود.');
+        $note = trim((string)$note);
+        if ($note === '') throw new InvalidArgumentException('اكتب تفاصيل المتابعة.');
+        $allowedTypes = array('note','tenant_contact','vendor_contact','visit');
+        if (!in_array($noteType, $allowedTypes, true)) $noteType = 'note';
+        $this->db->begin_transaction();
+        try {
+            $this->event($requestId, $noteType, $request['status'], $request['status'], $note, array());
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+    }
+
+    public function getRequest($requestId)
+    {
+        $stmt = $this->db->prepare("SELECT r.*,p.aqarname,p.aqaraddress,ad.rakam AS unit_number,ut.aqarsubtypename,u.name AS assigned_name,u.username AS assigned_username,creator.name AS creator_name
+            FROM maintenance_requests r
+            LEFT JOIN amlak p ON p.idaqar=r.idaqar
+            LEFT JOIN amlakdetails ad ON ad.idsubaqar=r.idsubaqar
+            LEFT JOIN aqarsubtype ut ON ut.aqarsubtype=ad.aqarsubtype
+            LEFT JOIN user u ON u.userid=r.assigned_userid
+            LEFT JOIN user creator ON creator.userid=r.created_by_userid
+            WHERE r.request_id=? LIMIT 1");
+        $stmt->bind_param('i', $requestId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $row;
+    }
+
+    public function getRequestDetails($requestId)
+    {
+        $request = $this->getRequest($requestId);
+        if (!$request) return null;
+        $request['events'] = $this->all("SELECT e.*,u.name AS user_name,u.username FROM maintenance_request_events e LEFT JOIN user u ON u.userid=e.event_by_userid WHERE e.request_id=" . intval($requestId) . " ORDER BY e.event_id DESC");
+        $request['items'] = $this->all("SELECT * FROM maintenance_request_items WHERE request_id=" . intval($requestId) . " ORDER BY item_id DESC");
+        $request['attachments'] = $this->all("SELECT * FROM maintenance_request_attachments WHERE request_id=" . intval($requestId) . " ORDER BY attachment_id DESC");
+        return $request;
+    }
+
+    private function all($sql)
+    {
+        $rows = array();
+        $result = $this->db->query($sql);
+        while ($result && ($row = $result->fetch_assoc())) $rows[] = $row;
+        return $rows;
+    }
+
+    public function getLookups()
+    {
+        return array(
+            'users' => $this->all("SELECT userid,username,name FROM user WHERE userid>0 ORDER BY name,username"),
+            'properties' => $this->all("SELECT idaqar,aqarname,aqaraddress FROM amlak WHERE idaqar>0 ORDER BY aqarname"),
+            'tenants' => $this->all("SELECT mostagerid,mostagername,mostagertel FROM mostagereen WHERE mostagerid>0 ORDER BY mostagername")
+        );
+    }
+
+    public function searchUnits($propertyId, $search = '', $page = 1, $pageSize = 30)
+    {
+        $propertyId = intval($propertyId);
+        if ($propertyId <= 0) return array('rows'=>array(),'more'=>false);
+        $page = max(1, intval($page));
+        $pageSize = max(10, min(50, intval($pageSize)));
+        $offset = ($page - 1) * $pageSize;
+        $limit = $pageSize + 1;
+        $where = 'ad.idaqar=' . $propertyId . ' AND ad.idsubaqar>0 AND ad.mostagerid>0';
+        $search = trim((string)$search);
+        if ($search !== '') {
+            $escaped = $this->esc($search);
+            $where .= " AND CONCAT_WS(' ',COALESCE(ut.aqarsubtypename,''),COALESCE(ad.rakam,''),COALESCE(t.mostagername,'')) LIKE '%{$escaped}%'";
+        }
+        $rows = $this->all("SELECT ad.idsubaqar,ad.idaqar,ad.rakam,ad.mostagerid,
+                COALESCE(ut.aqarsubtypename,'') AS aqarsubtypename,
+                COALESCE(t.mostagername,'') AS tenant_name,
+                COALESCE(t.mostagertel,'') AS tenant_phone
+            FROM amlakdetails ad
+            LEFT JOIN aqarsubtype ut ON ut.aqarsubtype=ad.aqarsubtype
+            INNER JOIN mostagereen t ON t.mostagerid=ad.mostagerid AND t.mostagerid>0
+            WHERE {$where}
+            ORDER BY ut.aqarsubtypename,ad.rakam,ad.idsubaqar
+            LIMIT {$offset},{$limit}");
+        $more = count($rows) > $pageSize;
+        if ($more) array_pop($rows);
+        return array('rows'=>$rows,'more'=>$more);
+    }
+
+    public function getStats()
+    {
+        $row = $this->db->query("SELECT COUNT(*) total,SUM(status IN ('new','assigned','scheduled')) open_count,SUM(status='in_progress') in_progress_count,SUM(status='waiting_parts') waiting_parts_count,SUM(status='completed') completed_count,SUM(status='verified') verified_count,SUM(priority='urgent' AND status NOT IN ('verified','cancelled')) urgent_count FROM maintenance_requests")->fetch_assoc();
+        return $row ?: array();
+    }
+
+    public function listRequests($filters, $page, $pageSize)
+    {
+        $conditions = array('1=1');
+        if (!empty($filters['status'])) $conditions[] = "r.status='" . $this->esc($filters['status']) . "'";
+        if (!empty($filters['priority'])) $conditions[] = "r.priority='" . $this->esc($filters['priority']) . "'";
+        if (intval($filters['assigned_userid'] ?? 0) > 0) $conditions[] = 'r.assigned_userid=' . intval($filters['assigned_userid']);
+        if (intval($filters['idaqar'] ?? 0) > 0) $conditions[] = 'r.idaqar=' . intval($filters['idaqar']);
+        if (intval($filters['mostagerid'] ?? 0) > 0) $conditions[] = 'r.mostagerid=' . intval($filters['mostagerid']);
+        if (!empty($filters['search'])) {
+            $search = $this->esc($filters['search']);
+            $conditions[] = "CONCAT_WS(' ',r.request_number,r.title,r.description,r.tenant_name_snapshot,r.tenant_phone_snapshot,r.vendor_name,r.vendor_phone,p.aqarname,ad.rakam,u.name,u.username) LIKE '%{$search}%'";
+        }
+        $where = implode(' AND ', $conditions);
+        $count = $this->db->query("SELECT COUNT(*) total FROM maintenance_requests r LEFT JOIN amlak p ON p.idaqar=r.idaqar LEFT JOIN amlakdetails ad ON ad.idsubaqar=r.idsubaqar LEFT JOIN user u ON u.userid=r.assigned_userid WHERE {$where}")->fetch_assoc();
+        $total = intval($count['total'] ?? 0);
+        $pageSize = max(10, min(100, intval($pageSize)));
+        $pages = max(1, intval(ceil($total / $pageSize)));
+        $page = max(1, min(intval($page), $pages));
+        $offset = ($page - 1) * $pageSize;
+        $rows = $this->all("SELECT r.*,p.aqarname,ad.rakam AS unit_number,ut.aqarsubtypename,u.name AS assigned_name,u.username AS assigned_username
+            FROM maintenance_requests r
+            LEFT JOIN amlak p ON p.idaqar=r.idaqar
+            LEFT JOIN amlakdetails ad ON ad.idsubaqar=r.idsubaqar
+            LEFT JOIN aqarsubtype ut ON ut.aqarsubtype=ad.aqarsubtype
+            LEFT JOIN user u ON u.userid=r.assigned_userid
+            WHERE {$where} ORDER BY FIELD(r.priority,'urgent','high','normal','low'),r.request_id DESC LIMIT {$offset},{$pageSize}");
+        return array('rows' => $rows, 'total' => $total, 'page' => $page, 'pages' => $pages, 'page_size' => $pageSize);
+    }
+
+    public static function statusLabel($status)
+    {
+        $labels = array('new'=>'جديد','assigned'=>'مسند','scheduled'=>'مجدول','in_progress'=>'قيد التنفيذ','waiting_parts'=>'بانتظار قطع','on_hold'=>'معلق','completed'=>'مكتمل','verified'=>'تم التحقق','cancelled'=>'ملغي');
+        return $labels[$status] ?? $status;
+    }
+}
+

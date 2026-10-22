@@ -390,8 +390,11 @@ class AccountingManager {
         $subaqarId = isset($data['subaqar_id']) && $data['subaqar_id'] !== '' ? (int)$data['subaqar_id'] : null;
         $egarId = isset($data['egar_id']) && $data['egar_id'] !== '' ? (int)$data['egar_id'] : null;
         $sanadId = isset($data['sanad_id']) && $data['sanad_id'] !== '' ? (int)$data['sanad_id'] : null;
+        $sanadsarfId = isset($data['sanadsarf_id']) && $data['sanadsarf_id'] !== '' ? (int)$data['sanadsarf_id'] : null;
         $masrofatId = isset($data['masrofat_id']) && $data['masrofat_id'] !== '' ? (int)$data['masrofat_id'] : null;
         $invoiceId = isset($data['invoice_id']) && $data['invoice_id'] !== '' ? (int)$data['invoice_id'] : null;
+        $salesRepresentativeUserId = isset($data['sales_representative_userid']) && $data['sales_representative_userid'] !== ''
+            ? (int)$data['sales_representative_userid'] : null;
         
         // Insert entry header
         $requestedStatus = $data['status'] ?? 'draft';
@@ -399,10 +402,11 @@ class AccountingManager {
         $stmt = $this->db->prepare("
             INSERT INTO acc_journal_entries 
             (entry_number, entry_date, entry_type, journal_id, tenant_id, owner_id,
-             aqar_id, subaqar_id, egar_id, sanad_id, masrofat_id, invoice_id,
+             aqar_id, subaqar_id, egar_id, sanad_id, sanadsarf_id, masrofat_id, invoice_id,
+             sales_representative_userid,
              reference_type, reference_id, description, total_debit, total_credit,
              fiscal_year, fiscal_period, status, created_by, formuid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UUID())
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UUID())
         ");
 
         if (!$stmt) {
@@ -411,7 +415,7 @@ class AccountingManager {
         
         $fiscalPeriod = (int)date('m', strtotime($data['entry_date']));
         
-        $stmt->bind_param("sssiiiiiiiiisisddiisi",
+        $stmt->bind_param("sssiiiiiiiiiiisisddiisi",
             $entryNumber,
             $data['entry_date'],
             $data['entry_type'],
@@ -422,8 +426,10 @@ class AccountingManager {
             $subaqarId,
             $egarId,
             $sanadId,
+            $sanadsarfId,
             $masrofatId,
             $invoiceId,
+            $salesRepresentativeUserId,
             $data['reference_type'],
             $data['reference_id'],
             $data['description'],
@@ -451,6 +457,7 @@ class AccountingManager {
             ");
 
             if (!$stmt) {
+                $this->db->query("DELETE FROM acc_journal_entry_lines WHERE entry_id = $entryId");
                 $this->db->query("DELETE FROM acc_journal_entries WHERE entry_id = $entryId");
                 return ['success' => false, 'error' => $this->db->error, 'message' => 'فشل في تجهيز بنود القيد'];
             }
@@ -468,7 +475,8 @@ class AccountingManager {
             );
             
             if (!$stmt->execute()) {
-                // Rollback - delete entry
+                // Roll back the partially inserted entry and all prior lines.
+                $this->db->query("DELETE FROM acc_journal_entry_lines WHERE entry_id = $entryId");
                 $this->db->query("DELETE FROM acc_journal_entries WHERE entry_id = $entryId");
                 return ['success' => false, 'error' => $stmt->error];
             }

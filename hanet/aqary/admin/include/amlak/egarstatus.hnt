@@ -93,7 +93,7 @@ if ($exportType !== '') {
     prepareEgarStatusAssignedPropertyFilter($link);
     $aksatUnitIndexHint = getEgarStatusAksatUnitIndexHint($link);
     $exp_first_base = "SELECT aksat.*,
-        egar.vat_type,
+        egar.vat_type, egar.depositeamount AS contract_base_installment,
         mostagereen.mostagername, mostagereen.mostagertel,
         amlakdetails.rakam, amlakdetails.hnt_dll_type, amlakdetails.aqarsubtype, amlakdetails.idaqar,
         amlak.aqarname
@@ -111,7 +111,7 @@ if ($exportType !== '') {
     WHERE 1 = 1";
 
     $exp_all_base = "SELECT aksat.*,
-        egar.vat_type,
+        egar.vat_type, egar.depositeamount AS contract_base_installment,
         mostagereen.mostagername, mostagereen.mostagertel,
         amlakdetails.rakam, amlakdetails.hnt_dll_type, amlakdetails.aqarsubtype, amlakdetails.idaqar,
         amlak.aqarname
@@ -144,7 +144,7 @@ if ($exportType !== '') {
         $water    = floatval($erow['water']    ?? 0);
         $sa3ee    = floatval($erow['sa3ee']    ?? 0);
         $services = floatval($erow['services'] ?? 0);
-        $rentVal  = $erow['kastvalue'] - $water - $sa3ee - $services;
+        $rentVal  = GetInstallmentBaseRent($erow);
         $vat = 0;
         if (intval($erow['vat_type']) == 1) $vat = $sa3ee * 0.15;
         if (intval($erow['vat_type']) == 2) $vat = ($sa3ee * 0.15) + ($rentVal * 0.15);
@@ -156,6 +156,7 @@ if ($exportType !== '') {
             displaysubtype($erow['aqarsubtype']) . ' ' . $erow['rakam'],
             $erow['kastname'],
             number_format($erow['kastvalue'], 2, '.', ''),
+            number_format(CalcActualRentIncrease($erow), 2, '.', '') . '%',
             number_format($vat, 2, '.', ''),
             number_format($erow['dof3at'], 2, '.', ''),
             number_format($erow['kastvalue'] + $vat - $erow['dof3at'], 2, '.', ''),
@@ -163,7 +164,7 @@ if ($exportType !== '') {
         ];
     }
 
-    $exp_headers = ['اسم المستأجر', 'هاتف', 'العقار', 'الوحدة', 'القسط', 'القيمة', 'الضريبة', 'المدفوع', 'المتبقي', 'تاريخ الاستحقاق'];
+    $exp_headers = ['اسم المستأجر', 'هاتف', 'العقار', 'الوحدة', 'القسط', 'القيمة', 'زيادة الإيجار', 'الضريبة', 'المدفوع', 'المتبقي', 'تاريخ الاستحقاق'];
     $filenameDate = date('Ymd_His');
 
     if ($exportType === 'csv') {
@@ -240,6 +241,30 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
         $depositeamount_vat = $rentValue * 0.15;
     }
     return $kastvalue + $commesion_vat + $depositeamount_vat;
+}
+
+function GetInstallmentBaseRent($installment)
+{
+    if (floatval($installment['base_rent_amount'] ?? 0) > 0) {
+        return floatval($installment['base_rent_amount']);
+    }
+    return floatval($installment['kastvalue'] ?? 0)
+        - floatval($installment['water'] ?? 0)
+        - floatval($installment['sa3ee'] ?? 0)
+        - floatval($installment['services'] ?? 0);
+}
+
+function CalcActualRentIncrease($installment)
+{
+    $originalPeriodicRent = floatval($installment['contract_base_installment'] ?? 0);
+    if ($originalPeriodicRent <= 0) {
+        return 0;
+    }
+    if (floatval($installment['base_rent_amount'] ?? 0) > 0) {
+        return floatval($installment['rent_increase_percent'] ?? 0);
+    }
+    $actualBaseRent = GetInstallmentBaseRent($installment);
+    return (($actualBaseRent / $originalPeriodicRent) - 1) * 100;
 }
 ?>
 
@@ -1023,7 +1048,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
 
         $sql = "SELECT
                     aksat.*,
-                    egar.vat_type,
+                    egar.vat_type, egar.depositeamount AS contract_base_installment,
                     mostagereen.mostagerid,
                     mostagereen.mostagername,
                     mostagereen.mostagertel,
@@ -1072,6 +1097,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                             <th>الوحدة</th>
                             <th>قسط</th>
                             <th>القيمة</th>
+                            <th>زيادة الإيجار</th>
                             <th>ضريبة</th>
                             <th>المدفوع</th>
                             <th>المتبقي</th>
@@ -1114,7 +1140,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                             }
 
                             $vat_value = 0;
-                            $rentValue = $row['kastvalue'] - $row['water'] - $row['sa3ee'] - $row['services'];
+                            $rentValue = GetInstallmentBaseRent($row);
                             if (isset($row['vat_type']) && $row['vat_type'] == 1) {
                                 $vat_value = $row['sa3ee'] * 0.15;
                             }
@@ -1140,6 +1166,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                                 <td class='align-middle'><?= displaysubtype($row['aqarsubtype']) . " رقم " . $row['rakam']; ?></td>
                                 <td class='align-middle'><?= htmlspecialchars($row['kastname'] ?? '', ENT_QUOTES, 'UTF-8'); ?></td>
                                 <td class='align-middle'><?= number_format($row['kastvalue'], 2); ?> <?= $myomla ?? 'ريال'; ?></td>
+                                <td class='align-middle'><?= number_format(CalcActualRentIncrease($row), 2); ?>%</td>
                                 <td class='align-middle'><?= $vat_value; ?></td>
                                 <td class='align-middle'><?= number_format($row['dof3at'], 2); ?></td>
                                 <td class='align-middle'><?= number_format($vat_value + $row['kastvalue'] - $row['dof3at'], 2); ?></td>
@@ -1155,7 +1182,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                                 </td>
                             </tr>
                             <tr class='screenonly' style='border:0px;display:none;' id='grid-<?= $row['idsubaqar']; ?>'>
-                                <td colspan='10' style='border:0px;'>
+                                <td colspan='11' style='border:0px;'>
                                     <div style='display:none; padding:1rem;' id='gridcontrol-<?= $row['idsubaqar']; ?>'></div>
                                 </td>
                             </tr>
@@ -1205,7 +1232,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
 
         $sql = "SELECT
                     aksat.*,
-                    egar.vat_type,
+                    egar.vat_type, egar.depositeamount AS contract_base_installment,
                     mostagereen.mostagerid,
                     mostagereen.mostagername,
                     mostagereen.mostagertel,
@@ -1249,6 +1276,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                             <th>الوحدة</th>
                             <th>القسط المستحق</th>
                             <th>قيمة القسط</th>
+                            <th>زيادة الإيجار</th>
                             <th>المدفوع</th>
                             <th>المتبقي</th>
                             <th>تاريخ الاستحقاق</th>
@@ -1275,6 +1303,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                                 <td class='align-middle'><?= displaysubtype($row['aqarsubtype']) . " رقم " . $row['rakam']; ?></td>
                                 <td class='align-middle'>القسط رقم <?= htmlspecialchars($row['kastname'] ?? '', ENT_QUOTES, 'UTF-8'); ?></td>
                                 <td class='align-middle'><?= number_format($row['kastvalue'], 2); ?> <?= $myomla ?? 'ريال'; ?></td>
+                                <td class='align-middle'><?= number_format(CalcActualRentIncrease($row), 2); ?>%</td>
                                 <td class='align-middle'><?= number_format($row['dof3at'], 2); ?></td>
                                 <td class='align-middle'><?= number_format($row['kastvalue'] - $row['dof3at'], 2); ?></td>
                                 <td class='align-middle date-cell' style='color: #dc3545; font-weight: 700;'>
@@ -1290,7 +1319,7 @@ function CalcRentWithTax($kastvalue, $water, $services, $sa3ee, $vatType)
                             </tr>
                             <tr class='screenonly' style='border:0px;display:none;'
                                 id='grid-<?= $row['idsubaqar']; ?>_<?= $row['kastid']; ?>'>
-                                <td colspan='9'>
+                                <td colspan='10'>
                                     <div style='display:none; padding:1rem;'
                                         id='gridcontrol-<?= $row['idsubaqar']; ?>_<?= $row['kastid']; ?>'></div>
                                 </td>

@@ -1,0 +1,342 @@
+<?php
+/** Daily, monthly and yearly report for office-wide expenses (masrofat.idaqar=0). */
+$sc_title = 'تقرير مصروفات المكتب';
+$sc_id = '49';
+
+include_once '../../../nocash.hnt';
+
+$reportMode = isset($_GET['report']) ? intval($_GET['report']) : 0;
+if ($reportMode === 1) {
+    include_once '../../../report_header.hnt';
+} else {
+    include_once '../../../header.hnt';
+}
+
+date_default_timezone_set('Asia/Riyadh');
+
+function officeExpenseReportEsc($value) {
+    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+}
+
+function officeExpenseReportMoney($value) {
+    return number_format(floatval($value), 2);
+}
+
+function officeExpenseReportValidDate($value, $format, DateTimeZone $timezone) {
+    $date = DateTimeImmutable::createFromFormat('!' . $format, (string)$value, $timezone);
+    $errors = DateTimeImmutable::getLastErrors();
+    if ($date === false || ($errors !== false && ($errors['warning_count'] || $errors['error_count']))) {
+        return false;
+    }
+    return $date->format($format) === $value ? $date : false;
+}
+
+$timezone = new DateTimeZone('Asia/Riyadh');
+$now = new DateTimeImmutable('now', $timezone);
+$periodType = isset($_GET['period_type']) && in_array($_GET['period_type'], array('day', 'month', 'year'), true)
+    ? $_GET['period_type'] : 'month';
+$detailLevel = isset($_GET['detail_level']) && in_array($_GET['detail_level'], array('summary', 'category', 'payer', 'transactions'), true)
+    ? $_GET['detail_level'] : 'summary';
+$selectedCategory = isset($_GET['idmasrofcod']) ? max(0, intval($_GET['idmasrofcod'])) : 0;
+$selectedPayer = isset($_GET['payedby']) ? trim((string)$_GET['payedby']) : '';
+$keyword = isset($_GET['keyword']) ? trim((string)$_GET['keyword']) : '';
+$minAmount = isset($_GET['min_amount']) && $_GET['min_amount'] !== '' ? max(0, floatval($_GET['min_amount'])) : null;
+$maxAmount = isset($_GET['max_amount']) && $_GET['max_amount'] !== '' ? max(0, floatval($_GET['max_amount'])) : null;
+$page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
+$perPage = isset($_GET['per_page']) && in_array(intval($_GET['per_page']), array(50, 100, 250), true)
+    ? intval($_GET['per_page']) : 100;
+$inputWarning = '';
+
+if ($minAmount !== null && $maxAmount !== null && $minAmount > $maxAmount) {
+    $swap = $minAmount;
+    $minAmount = $maxAmount;
+    $maxAmount = $swap;
+    $inputWarning = 'تم تبديل الحدين لأن الحد الأدنى كان أكبر من الحد الأعلى.';
+}
+
+$dayValue = isset($_GET['day']) ? trim((string)$_GET['day']) : $now->format('Y-m-d');
+$monthValue = isset($_GET['month']) ? trim((string)$_GET['month']) : $now->format('Y-m');
+$yearValue = isset($_GET['year']) ? intval($_GET['year']) : intval($now->format('Y'));
+
+if ($periodType === 'day') {
+    $periodStart = officeExpenseReportValidDate($dayValue, 'Y-m-d', $timezone);
+    if ($periodStart === false) {
+        $periodStart = new DateTimeImmutable('today', $timezone);
+        $dayValue = $periodStart->format('Y-m-d');
+        $inputWarning = 'تم استخدام تاريخ اليوم لأن التاريخ المحدد غير صحيح.';
+    }
+    $periodEnd = $periodStart->modify('+1 day');
+    $periodLabel = 'يوم ' . $periodStart->format('d/m/Y');
+} elseif ($periodType === 'year') {
+    if ($yearValue < 2000 || $yearValue > 2100) {
+        $yearValue = intval($now->format('Y'));
+        $inputWarning = 'تم استخدام السنة الحالية لأن السنة المحددة غير صحيحة.';
+    }
+    $periodStart = new DateTimeImmutable($yearValue . '-01-01 00:00:00', $timezone);
+    $periodEnd = $periodStart->modify('+1 year');
+    $periodLabel = 'سنة ' . $yearValue;
+} else {
+    $periodStart = officeExpenseReportValidDate($monthValue, 'Y-m', $timezone);
+    if ($periodStart === false) {
+        $periodStart = new DateTimeImmutable($now->format('Y-m-01') . ' 00:00:00', $timezone);
+        $monthValue = $periodStart->format('Y-m');
+        $inputWarning = 'تم استخدام الشهر الحالي لأن الشهر المحدد غير صحيح.';
+    }
+    $periodEnd = $periodStart->modify('+1 month');
+    $periodLabel = 'شهر ' . $periodStart->format('m/Y');
+}
+
+$categories = array();
+$categoryResult = mysql_query('SELECT idmasrofcod, masrofkind FROM masrofattakweed ORDER BY masrofkind, idmasrofcod', $link);
+if ($categoryResult) {
+    while ($category = mysql_fetch_assoc($categoryResult)) {
+        $categories[] = $category;
+    }
+}
+
+$payers = array();
+$payerResult = mysql_query("SELECT DISTINCT TRIM(payedby) AS payedby FROM masrofat WHERE idaqar=0 AND TRIM(payedby)<>'' ORDER BY payedby", $link);
+if ($payerResult) {
+    while ($payer = mysql_fetch_assoc($payerResult)) {
+        $payers[] = $payer['payedby'];
+    }
+}
+
+$where = "m.idaqar=0 AND m.payeddate>='" . intval($periodStart->getTimestamp()) . "' AND m.payeddate<'" . intval($periodEnd->getTimestamp()) . "'";
+if ($selectedCategory > 0) {
+    $where .= " AND m.idmasrofcod='" . intval($selectedCategory) . "'";
+}
+if ($selectedPayer !== '') {
+    $where .= " AND TRIM(m.payedby)='" . mysql_real_escape_string($selectedPayer, $link) . "'";
+}
+if ($keyword !== '') {
+    $escapedKeyword = mysql_real_escape_string($keyword, $link);
+    $where .= " AND (m.payeddue LIKE '%{$escapedKeyword}%' OR m.payedby LIKE '%{$escapedKeyword}%'
+                        OR m.beneficiary_name LIKE '%{$escapedKeyword}%' OR c.masrofkind LIKE '%{$escapedKeyword}%')";
+}
+if ($minAmount !== null) {
+    $where .= " AND m.amount>='" . number_format($minAmount, 2, '.', '') . "'";
+}
+if ($maxAmount !== null) {
+    $where .= " AND m.amount<='" . number_format($maxAmount, 2, '.', '') . "'";
+}
+
+$fromSql = "FROM masrofat m
+            LEFT JOIN masrofattakweed c ON c.idmasrofcod=m.idmasrofcod
+            LEFT JOIN user creator ON creator.userid=m.created_by_userid
+            WHERE {$where}";
+$aggregateSql = "COUNT(*) AS transaction_count,
+                 COALESCE(SUM(m.amount),0) AS total_amount,
+                 COALESCE(AVG(m.amount),0) AS average_amount,
+                 COALESCE(MAX(m.amount),0) AS largest_amount,
+                 COUNT(DISTINCT m.idmasrofcod) AS category_count";
+$reportError = '';
+$totals = array('transaction_count' => 0, 'total_amount' => 0, 'average_amount' => 0, 'largest_amount' => 0, 'category_count' => 0);
+$totalsResult = mysql_query("SELECT {$aggregateSql} {$fromSql}", $link);
+if ($totalsResult && ($totalsRow = mysql_fetch_assoc($totalsResult))) {
+    $totals = array_merge($totals, $totalsRow);
+} elseif (!$totalsResult) {
+    $reportError = mysql_error($link);
+}
+
+$rows = array();
+$totalPages = 1;
+if ($reportError === '') {
+    if ($detailLevel === 'category') {
+        $sql = "SELECT m.idmasrofcod,
+                       COALESCE(NULLIF(c.masrofkind,''), CONCAT('تصنيف #',m.idmasrofcod)) AS row_label,
+                       {$aggregateSql}
+                {$fromSql}
+                GROUP BY m.idmasrofcod, c.masrofkind
+                ORDER BY total_amount DESC, row_label";
+    } elseif ($detailLevel === 'payer') {
+        $sql = "SELECT COALESCE(NULLIF(TRIM(m.payedby),''),'غير محدد') AS row_label,
+                       {$aggregateSql}
+                {$fromSql}
+                GROUP BY COALESCE(NULLIF(TRIM(m.payedby),''),'غير محدد')
+                ORDER BY total_amount DESC, row_label";
+    } elseif ($detailLevel === 'transactions') {
+        $totalPages = max(1, intval(ceil(intval($totals['transaction_count']) / $perPage)));
+        if ($page > $totalPages) $page = $totalPages;
+        $offset = ($page - 1) * $perPage;
+        $sql = "SELECT m.idmasrof, m.amount, m.payedby, m.beneficiary_name, m.payeddue, m.payeddate, m.created_at,
+                       COALESCE(NULLIF(creator.name,''), creator.username, '') AS created_by_name,
+                       COALESCE(NULLIF(c.masrofkind,''), CONCAT('تصنيف #',m.idmasrofcod)) AS category_name
+                {$fromSql}
+                ORDER BY m.payeddate DESC, m.idmasrof DESC
+                LIMIT " . intval($offset) . ', ' . intval($perPage);
+    } else {
+        if ($periodType === 'year') {
+            $bucketExpr = "DATE_FORMAT(FROM_UNIXTIME(m.payeddate), '%Y-%m')";
+        } else {
+            $bucketExpr = "DATE_FORMAT(FROM_UNIXTIME(m.payeddate), '%Y-%m-%d')";
+        }
+        $sql = "SELECT {$bucketExpr} AS bucket_key, MIN(m.payeddate) AS bucket_sort,
+                       {$aggregateSql}
+                {$fromSql}
+                GROUP BY bucket_key
+                ORDER BY bucket_sort";
+    }
+
+    $dataResult = mysql_query($sql, $link);
+    if ($dataResult) {
+        while ($row = mysql_fetch_assoc($dataResult)) {
+            $rows[] = $row;
+        }
+    } else {
+        $reportError = mysql_error($link);
+    }
+}
+
+$monthNames = array('01'=>'يناير','02'=>'فبراير','03'=>'مارس','04'=>'أبريل','05'=>'مايو','06'=>'يونيو',
+                    '07'=>'يوليو','08'=>'أغسطس','09'=>'سبتمبر','10'=>'أكتوبر','11'=>'نوفمبر','12'=>'ديسمبر');
+$currency = isset($myomla) && trim((string)$myomla) !== '' ? $myomla : 'ريال';
+$baseQuery = array(
+    'period_type' => $periodType, 'day' => $dayValue, 'month' => $monthValue, 'year' => $yearValue,
+    'detail_level' => $detailLevel, 'idmasrofcod' => $selectedCategory, 'payedby' => $selectedPayer,
+    'keyword' => $keyword, 'min_amount' => $minAmount, 'max_amount' => $maxAmount, 'per_page' => $perPage,
+);
+$printQuery = $baseQuery;
+$printQuery['page'] = $page;
+$printQuery['report'] = 1;
+?>
+
+<style>
+.expense-report-title{background:linear-gradient(135deg,#991b1b,#ea580c);color:#fff;border-radius:.8rem;padding:1rem 1.25rem}
+.expense-report-card,.expense-kpi{border:0;box-shadow:0 2px 12px rgba(15,23,42,.08)}
+.expense-kpi{height:100%;border-inline-start:4px solid var(--expense-color,#dc2626)}
+.expense-kpi .expense-value{font-size:1.45rem;font-weight:800;color:#0f172a}
+.expense-kpi .expense-label{color:#64748b;font-size:.88rem}
+.expense-report-table thead th{white-space:nowrap;background:#f1f5f9}
+.expense-report-table td{white-space:nowrap;vertical-align:middle}
+@media print{.expense-screen-only{display:none!important}.expense-report-card,.expense-kpi{box-shadow:none}.container-fluid{max-width:none!important}.expense-report-table td,.expense-report-table th{font-size:10px!important;padding:4px!important}}
+</style>
+
+<div class="container-fluid py-4" dir="rtl">
+    <div class="expense-report-title d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h3 class="mb-1"><i class="bi bi-graph-down-arrow me-2"></i><?= officeExpenseReportEsc($sc_title) ?></h3>
+            <div class="opacity-75"><?= officeExpenseReportEsc($periodLabel) ?></div>
+        </div>
+        <?php if ($reportMode !== 1) { ?>
+        <div class="d-flex flex-wrap gap-2 expense-screen-only">
+            <a class="btn btn-light" href="office_expense.hnt"><i class="bi bi-plus-circle me-1"></i>تسجيل مصروف</a>
+            <a class="btn btn-light" target="_blank" href="office_expense_report.hnt?<?= officeExpenseReportEsc(http_build_query($printQuery)) ?>"><i class="bi bi-printer me-1"></i>طباعة</a>
+            <a class="btn btn-outline-light" href="reports.hnt"><i class="bi bi-arrow-return-right me-1"></i>التقارير</a>
+        </div>
+        <?php } ?>
+    </div>
+
+    <?php if ($inputWarning !== '') { ?><div class="alert alert-warning"><?= officeExpenseReportEsc($inputWarning) ?></div><?php } ?>
+    <?php if ($reportError !== '') { ?><div class="alert alert-danger">تعذر تحميل التقرير: <?= officeExpenseReportEsc($reportError) ?></div><?php } ?>
+
+    <?php if ($reportMode !== 1) { ?>
+    <form method="get" class="card expense-report-card mb-4 expense-screen-only" id="officeExpenseFilters">
+        <div class="card-body row g-3 align-items-end">
+            <div class="col-sm-6 col-lg-2">
+                <label class="form-label" for="period_type">الفترة</label>
+                <select class="form-select" name="period_type" id="period_type">
+                    <option value="day" <?= $periodType === 'day' ? 'selected' : '' ?>>يومي</option>
+                    <option value="month" <?= $periodType === 'month' ? 'selected' : '' ?>>شهري</option>
+                    <option value="year" <?= $periodType === 'year' ? 'selected' : '' ?>>سنوي</option>
+                </select>
+            </div>
+            <div class="col-sm-6 col-lg-2 expense-period-input" data-period="day"><label class="form-label" for="day">اليوم</label><input class="form-control" type="date" name="day" id="day" value="<?= officeExpenseReportEsc($dayValue) ?>"></div>
+            <div class="col-sm-6 col-lg-2 expense-period-input" data-period="month"><label class="form-label" for="month">الشهر</label><input class="form-control" type="month" name="month" id="month" value="<?= officeExpenseReportEsc($monthValue) ?>"></div>
+            <div class="col-sm-6 col-lg-2 expense-period-input" data-period="year"><label class="form-label" for="year">السنة</label><input class="form-control" type="number" min="2000" max="2100" name="year" id="year" value="<?= intval($yearValue) ?>"></div>
+            <div class="col-sm-6 col-lg-2">
+                <label class="form-label" for="detail_level">مستوى التفاصيل</label>
+                <select class="form-select" name="detail_level" id="detail_level">
+                    <option value="summary" <?= $detailLevel === 'summary' ? 'selected' : '' ?>>ملخص زمني</option>
+                    <option value="category" <?= $detailLevel === 'category' ? 'selected' : '' ?>>حسب التصنيف</option>
+                    <option value="payer" <?= $detailLevel === 'payer' ? 'selected' : '' ?>>حسب الدافع</option>
+                    <option value="transactions" <?= $detailLevel === 'transactions' ? 'selected' : '' ?>>تفاصيل العمليات</option>
+                </select>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <label class="form-label" for="idmasrofcod">التصنيف</label>
+                <select class="form-select" name="idmasrofcod" id="idmasrofcod">
+                    <option value="0">جميع التصنيفات</option>
+                    <?php foreach ($categories as $category) { ?><option value="<?= intval($category['idmasrofcod']) ?>" <?= intval($category['idmasrofcod']) === $selectedCategory ? 'selected' : '' ?>><?= officeExpenseReportEsc($category['masrofkind']) ?></option><?php } ?>
+                </select>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <label class="form-label" for="payedby">دفع بواسطة</label>
+                <select class="form-select" name="payedby" id="payedby">
+                    <option value="">الجميع</option>
+                    <?php foreach ($payers as $payer) { ?><option value="<?= officeExpenseReportEsc($payer) ?>" <?= $payer === $selectedPayer ? 'selected' : '' ?>><?= officeExpenseReportEsc($payer) ?></option><?php } ?>
+                </select>
+            </div>
+            <div class="col-sm-6 col-lg-3"><label class="form-label" for="keyword">بحث في البيان أو المستفيد</label><input class="form-control" type="search" name="keyword" id="keyword" value="<?= officeExpenseReportEsc($keyword) ?>" placeholder="اسم مستفيد، كلمة أو رقم فاتورة"></div>
+            <div class="col-sm-6 col-lg-2"><label class="form-label" for="min_amount">المبلغ من</label><input class="form-control" type="number" min="0" step="0.01" name="min_amount" id="min_amount" value="<?= $minAmount !== null ? officeExpenseReportEsc($minAmount) : '' ?>"></div>
+            <div class="col-sm-6 col-lg-2"><label class="form-label" for="max_amount">المبلغ إلى</label><input class="form-control" type="number" min="0" step="0.01" name="max_amount" id="max_amount" value="<?= $maxAmount !== null ? officeExpenseReportEsc($maxAmount) : '' ?>"></div>
+            <div class="col-sm-6 col-lg-2" id="expensePerPageWrap"><label class="form-label" for="per_page">لكل صفحة</label><select class="form-select" name="per_page" id="per_page"><?php foreach (array(50,100,250) as $size) { ?><option value="<?= $size ?>" <?= $size === $perPage ? 'selected' : '' ?>><?= $size ?></option><?php } ?></select></div>
+            <div class="col-sm-6 col-lg-2"><button class="btn btn-success w-100" type="submit"><i class="bi bi-search me-1"></i>عرض التقرير</button></div>
+            <div class="col-sm-6 col-lg-2"><a class="btn btn-outline-secondary w-100" href="office_expense_report.hnt"><i class="bi bi-arrow-counterclockwise me-1"></i>مسح الفلاتر</a></div>
+        </div>
+    </form>
+    <?php } ?>
+
+    <div class="row g-3 mb-4">
+        <div class="col-6 col-md-4 col-xl"><div class="card expense-kpi" style="--expense-color:#dc2626"><div class="card-body"><div class="expense-label">إجمالي المصروفات</div><div class="expense-value"><?= officeExpenseReportMoney($totals['total_amount']) ?></div><small><?= officeExpenseReportEsc($currency) ?></small></div></div></div>
+        <div class="col-6 col-md-4 col-xl"><div class="card expense-kpi" style="--expense-color:#2563eb"><div class="card-body"><div class="expense-label">عدد العمليات</div><div class="expense-value"><?= number_format(intval($totals['transaction_count'])) ?></div><small>عملية</small></div></div></div>
+        <div class="col-6 col-md-4 col-xl"><div class="card expense-kpi" style="--expense-color:#7c3aed"><div class="card-body"><div class="expense-label">متوسط العملية</div><div class="expense-value"><?= officeExpenseReportMoney($totals['average_amount']) ?></div><small><?= officeExpenseReportEsc($currency) ?></small></div></div></div>
+        <div class="col-6 col-md-4 col-xl"><div class="card expense-kpi" style="--expense-color:#ea580c"><div class="card-body"><div class="expense-label">أكبر مصروف</div><div class="expense-value"><?= officeExpenseReportMoney($totals['largest_amount']) ?></div><small><?= officeExpenseReportEsc($currency) ?></small></div></div></div>
+        <div class="col-6 col-md-4 col-xl"><div class="card expense-kpi" style="--expense-color:#0f766e"><div class="card-body"><div class="expense-label">التصنيفات المستخدمة</div><div class="expense-value"><?= number_format(intval($totals['category_count'])) ?></div><small>تصنيف</small></div></div></div>
+    </div>
+
+    <div class="card expense-report-card expense-report-table">
+        <div class="card-header bg-white d-flex justify-content-between align-items-center gap-2 py-3"><strong><i class="bi bi-table me-1"></i><?= officeExpenseReportEsc($periodLabel) ?></strong><span class="badge bg-danger"><?= number_format(intval($totals['transaction_count'])) ?> عملية</span></div>
+        <div class="table-responsive">
+        <?php if ($detailLevel === 'transactions') { ?>
+            <table class="table table-hover table-striped mb-0"><thead><tr><th>الرقم</th><th>تاريخ المصروف</th><th>التصنيف</th><th>البيان</th><th>دفع بواسطة</th><th>المستفيد</th><th>أنشأه</th><th>وقت الإنشاء</th><th>المبلغ</th></tr></thead><tbody>
+            <?php foreach ($rows as $row) { ?><tr><td>#<?= intval($row['idmasrof']) ?></td><td><?= date('d/m/Y', intval($row['payeddate'])) ?></td><td><?= officeExpenseReportEsc($row['category_name']) ?></td><td title="<?= officeExpenseReportEsc($row['payeddue']) ?>"><?= officeExpenseReportEsc(mb_strimwidth($row['payeddue'], 0, 70, '…', 'UTF-8')) ?></td><td><?= officeExpenseReportEsc($row['payedby'] !== '' ? $row['payedby'] : 'غير محدد') ?></td><td><?= officeExpenseReportEsc($row['beneficiary_name'] !== '' ? $row['beneficiary_name'] : 'غير محدد') ?></td><td><?= officeExpenseReportEsc($row['created_by_name'] !== '' ? $row['created_by_name'] : 'غير محدد') ?></td><td><?= intval($row['created_at']) > 0 ? date('d/m/Y H:i', intval($row['created_at'])) : '—' ?></td><td class="fw-bold text-danger"><?= officeExpenseReportMoney($row['amount']) ?></td></tr><?php } ?>
+            <?php if (empty($rows)) { ?><tr><td colspan="9" class="text-center text-muted py-5">لا توجد مصروفات مطابقة للفلاتر.</td></tr><?php } ?>
+            </tbody></table>
+        <?php } else { ?>
+            <table class="table table-hover table-striped mb-0"><thead><tr><th><?= $detailLevel === 'summary' ? 'الفترة' : ($detailLevel === 'category' ? 'التصنيف' : 'دفع بواسطة') ?></th><th>العمليات</th><?php if ($detailLevel === 'summary') { ?><th>التصنيفات</th><?php } ?><th>الإجمالي</th><th>المتوسط</th><th>أكبر مصروف</th><?php if ($detailLevel !== 'summary') { ?><th>النسبة من الإجمالي</th><?php } ?></tr></thead><tbody>
+            <?php foreach ($rows as $row) {
+                if ($detailLevel === 'summary') {
+                    if ($periodType === 'year') {
+                        $parts = explode('-', $row['bucket_key']);
+                        $rowLabel = (isset($parts[1], $monthNames[$parts[1]]) ? $monthNames[$parts[1]] : $row['bucket_key']) . ' ' . (isset($parts[0]) ? $parts[0] : '');
+                    } else {
+                        $rowLabel = date('d/m/Y', intval($row['bucket_sort']));
+                    }
+                } else {
+                    $rowLabel = $row['row_label'];
+                }
+                $percentage = floatval($totals['total_amount']) > 0 ? (floatval($row['total_amount']) / floatval($totals['total_amount']) * 100) : 0;
+            ?><tr><td class="fw-bold"><?= officeExpenseReportEsc($rowLabel) ?></td><td><?= number_format(intval($row['transaction_count'])) ?></td><?php if ($detailLevel === 'summary') { ?><td><?= number_format(intval($row['category_count'])) ?></td><?php } ?><td class="fw-bold text-danger"><?= officeExpenseReportMoney($row['total_amount']) ?></td><td><?= officeExpenseReportMoney($row['average_amount']) ?></td><td><?= officeExpenseReportMoney($row['largest_amount']) ?></td><?php if ($detailLevel !== 'summary') { ?><td><?= number_format($percentage, 1) ?>%</td><?php } ?></tr><?php } ?>
+            <?php if (empty($rows)) { ?><tr><td colspan="7" class="text-center text-muted py-5">لا توجد مصروفات مطابقة للفلاتر.</td></tr><?php } ?>
+            </tbody></table>
+        <?php } ?>
+        </div>
+    </div>
+
+    <?php if ($detailLevel === 'transactions' && $totalPages > 1 && $reportMode !== 1) { ?>
+    <nav class="mt-4 expense-screen-only" aria-label="صفحات التقرير"><ul class="pagination justify-content-center">
+        <?php if ($page > 1) { $previousQuery=$baseQuery; $previousQuery['page']=$page-1; ?><li class="page-item"><a class="page-link" href="?<?= officeExpenseReportEsc(http_build_query($previousQuery)) ?>">السابق</a></li><?php } ?>
+        <li class="page-item disabled"><span class="page-link">صفحة <?= $page ?> من <?= $totalPages ?></span></li>
+        <?php if ($page < $totalPages) { $nextQuery=$baseQuery; $nextQuery['page']=$page+1; ?><li class="page-item"><a class="page-link" href="?<?= officeExpenseReportEsc(http_build_query($nextQuery)) ?>">التالي</a></li><?php } ?>
+    </ul></nav>
+    <?php } ?>
+</div>
+
+<script>
+(function () {
+    var period = document.getElementById('period_type');
+    var detail = document.getElementById('detail_level');
+    function updatePeriodInputs() {
+        document.querySelectorAll('.expense-period-input').forEach(function (container) {
+            container.style.display = container.getAttribute('data-period') === period.value ? '' : 'none';
+        });
+    }
+    function updatePagination() {
+        var wrap = document.getElementById('expensePerPageWrap');
+        if (wrap) wrap.style.display = detail.value === 'transactions' ? '' : 'none';
+    }
+    if (period) { period.addEventListener('change', updatePeriodInputs); updatePeriodInputs(); }
+    if (detail) { detail.addEventListener('change', updatePagination); updatePagination(); }
+})();
+</script>

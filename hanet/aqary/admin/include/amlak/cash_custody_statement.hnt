@@ -1,0 +1,18 @@
+<?php
+$sc_title = 'كشف حساب صاحب عهدة';
+require_once __DIR__ . '/cash_custody_bootstrap.hnt';
+$holderId = intval($_GET['holder_id'] ?? 0);
+$dateFrom = trim((string)($_GET['date_from'] ?? date('Y-01-01')));
+$dateTo = trim((string)($_GET['date_to'] ?? date('Y-m-d')));
+$holders = $cashCustodyService->listHolders(false);
+$rows = $holderId ? $cashCustodyService->reportTransactions(array('holder_id'=>$holderId,'date_from'=>$dateFrom,'date_to'=>$dateTo,'status'=>'approved')) : array();
+$rows = array_reverse($rows);
+$openingBalance = $holderId ? $cashCustodyService->getHolderBalanceBefore($holderId, $dateFrom) : 0.0;
+$running = $openingBalance;
+ccRenderStart('كشف حساب صاحب عهدة', 'report');
+?>
+<section class="cc-card cc-no-print"><form method="get" class="cc-form-grid"><div class="cc-field"><label>صاحب العهدة *</label><select name="holder_id" required><option value="">اختر</option><?php foreach($holders as $holder): ?><option value="<?= intval($holder['holder_id']) ?>" <?= $holderId===intval($holder['holder_id'])?'selected':'' ?>><?= ccEsc($holder['user_name'].' - '.$holder['employee_number']) ?></option><?php endforeach; ?></select></div><div class="cc-field"><label>من تاريخ</label><input type="date" name="date_from" value="<?= ccEsc($dateFrom) ?>"></div><div class="cc-field"><label>إلى تاريخ</label><input type="date" name="date_to" value="<?= ccEsc($dateTo) ?>"></div><div class="cc-field"><label>&nbsp;</label><div class="cc-actions"><button class="cc-btn cc-primary">عرض</button><button type="button" class="cc-btn cc-secondary" onclick="window.print()">طباعة</button><a class="cc-btn cc-info" target="_blank" href="https://wa.me/?text=<?= rawurlencode('كشف حساب عهدة للفترة '.$dateFrom.' إلى '.$dateTo) ?>">مشاركة واتساب</a></div></div></form></section>
+<?php if(!$holderId): ?><div class="cc-alert">اختر صاحب العهدة لعرض كشف الحساب.</div><?php else: ?>
+<section class="cc-card cc-scroll"><table class="cc-table"><thead><tr><th>التاريخ</th><th>العهدة</th><th>المستند</th><th>البيان</th><th>مدين (تمويل)</th><th>دائن (مصروف/رد)</th><th>الرصيد</th></tr></thead><tbody><tr><td><?= ccEsc($dateFrom) ?></td><td>-</td><td>-</td><td>الرصيد الافتتاحي قبل الفترة</td><td></td><td></td><td><?= ccMoney($openingBalance) ?></td></tr><?php foreach($rows as $row): $incoming=in_array($row['transaction_type'],array('funding','topup','opening'),true)?floatval($row['amount']):0.0;$outgoing=in_array($row['transaction_type'],array('expense','return','carry_out'),true)?floatval($row['amount']):0.0;$running += $incoming-$outgoing; ?><tr><td><?= ccEsc($row['transaction_date']) ?></td><td><?= ccEsc($row['custody_number']) ?></td><td><?= ccEsc($row['document_number']) ?></td><td><?= ccEsc($row['description']) ?></td><td><?= $incoming?ccMoney($incoming):'' ?></td><td><?= $outgoing?ccMoney($outgoing):'' ?></td><td><?= ccMoney($running) ?></td></tr><?php endforeach; ?><?php if(!$rows): ?><tr><td colspan="7" class="cc-empty">لا توجد حركات معتمدة في الفترة المحددة.</td></tr><?php endif; ?></tbody></table></section>
+<?php endif; ccRenderEnd($cashCustodyCsrf); ?>
+

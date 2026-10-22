@@ -1,0 +1,644 @@
+<?php
+/**
+ * Contract Lifecycle Management API
+ * Handles: renew, terminate, extend, amend, get history
+ *
+ * CRITICAL: Supports both Hijri and Gregorian calendars
+ * CRITICAL: Maintains immutable contract history
+ *
+ * @version 1.0
+ * @date 2025-12-04
+ */
+
+header('Content-Type: application/json; charset=utf-8');
+header('Access-Control-Allow-Origin: *');
+
+require_once('../../../reqloginajax.hnt');
+require_once('../../../connectdb.hnt');
+require_once(__DIR__ . '/CalendarManager.class.hnt');
+require_once(__DIR__ . '/amlakfunctions.hnt');
+
+$action = isset($_REQUEST['action']) ? $_REQUEST['action'] : '';
+$response = ['success' => false, 'message' => '', 'data' => null];
+
+try {
+    switch ($action) {
+        case 'renew_contract':
+            $response = renewContract($_REQUEST, $link, $user_data);
+            break;
+
+        case 'terminate_contract':
+            $response = terminateContract($_REQUEST, $link, $user_data);
+            break;
+
+        case 'get_contract_chain':
+            $response = getContractChain($_REQUEST['contract_id'], $link);
+            break;
+
+        case 'get_contract_history':
+            $response = getContractHistory($_REQUEST['contract_id'], $link);
+            break;
+
+        case 'validate_can_renew':
+            $response = validateCanRenewAPI($_REQUEST['contract_id'], $link);
+            break;
+
+        default:
+            $response['message'] = 'عملية غير صالحة';
+    }
+} catch (Exception $e) {
+    $response['success'] = false;
+    $response['message'] = 'خطأ: ' . $e->getMessage();
+    logError($e, $_REQUEST);
+}
+
+echo json_encode($response, JSON_UNESCAPED_UNICODE);
+exit;
+
+/**
+ * Renew Contract - Creates NEW contract linked to old one
+ *
+ * @param array $data Request data
+ * @param resource $link Database connection
+ * @param array $user_data Current user info
+ * @return array Response
+ */
+function renewContract($data, $link, $user_data) {
+    $response = ['success' => false, 'message' => '', 'data' => null];
+
+    $oldContractId = intval($data['old_contract_id']);
+
+    // Start transaction for data integrity
+    mysql_query("START TRANSACTION", $link);
+
+    try {
+        // 1. Get old contract
+        $oldContract = getContractById($oldContractId, $link);
+        if (!$oldContract) {
+            throw new Exception('العقد غير موجود: ' . $oldContractId);
+        }
+
+        // 2. Validate old contract can be renewed
+        $validation = validateCanRenew($oldContract, $link);
+        if (!$validation['can_renew']) {
+            throw new Exception($validation['reason']);
+        }
+
+        // 3. Initialize Calendar Manager
+        $calendar = new CalendarManager();
+
+        // Get calendar type (use contract's calendar or default to property unit's)
+        $calendarType = isset($data['calendar_type'])
+            ? intval($data['calendar_type'])
+            : intval($oldContract['calendar_type']);
+
+        // Get duration
+        $duration = isset($data['duration']) ? intval($data['duration']) : intval($oldContract['duration']);
+
+        // 4. Calculate new dates (respecting calendar type)
+        // New contract starts where old one ended
+        $newStartDate = $oldContract['end3aqd'] + (24 * 60 * 60); // Next day after old contract ends
+
+        // Calculate end date based on duration (in months)
+        $contractDurationMonths = $duration; // Duration is per installment, need total
+
+        // Get total contract duration from form data
+        $totalMonths = isset($data['contract_duration_months'])
+            ? intval($data['contract_duration_months'])
+            : 12; // Default to 1 year
+
+        $newEndDate = $calendar->calculateEndDate($newStartDate, $totalMonths, $calendarType);
+
+        // 5. Clean numeric values
+        $annualprice = str_replace(",", "", $data['annualprice']);
+        $depositeamount = str_replace(",", "", $data['depositeamount']);
+        $tamen = str_replace(",", "", $data['tamen']);
+        $water = isset($data['water']) ? str_replace(",", "", $data['water']) : 0;
+        $secondsa3e = isset($data['secondsa3e']) ? str_replace(",", "", $data['secondsa3e']) : 0;
+        $services = isset($data['services']) ? str_replace(",", "", $data['services']) : 0;
+        $annualRentIncreasePercent = isset($data['annual_rent_increase_percent'])
+            ? floatval($data['annual_rent_increase_percent'])
+            : floatval($oldContract['annual_rent_increase_percent'] ?? 0);
+        $maxRentIncreasePercent = isset($data['max_rent_increase_percent'])
+            ? floatval($data['max_rent_increase_percent'])
+            : floatval($oldContract['max_rent_increase_percent'] ?? 0);
+        $salesRepresentativeUserId = isset($data['sales_representative_userid'])
+            ? intval($data['sales_representative_userid'])
+            : intval($oldContract['sales_representative_userid'] ?? 0);
+        if (
+            $annualRentIncreasePercent < 0 || $maxRentIncreasePercent < 0 ||
+            $annualRentIncreasePercent > 100 || $maxRentIncreasePercent > 100 ||
+            ($annualRentIncreasePercent > 0 && $maxRentIncreasePercent < $annualRentIncreasePercent)
+        ) {
+            throw new InvalidArgumentException('إعدادات زيادة الإيجار غير صحيحة');
+        }
+
+        // 6. Generate new contract number
+        $newContractNumber = generateContractNumber($link);
+        $formuid = generateFormUID();
+
+        // 7. Create NEW contract record
+        $sql = "INSERT INTO egar SET
+            mostagerid='" . $oldContract['mostagerid'] . "',
+            aqaraddress='" . mysql_real_escape_string($oldContract['aqaraddress'], $link) . "',
+            depositeamount='$depositeamount',
+            annualprice='$annualprice',
+            annual_rent_increase_percent='$annualRentIncreasePercent',
+            max_rent_increase_percent='$maxRentIncreasePercent',
+            sales_representative_userid='$salesRepresentativeUserId',
+            tamen='$tamen',
+            fristsa3e='" . mysql_real_escape_string($oldContract['fristsa3e'], $link) . "',
+            secondsa3e='$secondsa3e',
+            water='$water',
+            services='$services',
+            startegar='$newStartDate',
+            end3aqd='$newEndDate',
+            date3akd='" . time() . "',
+            duration='$duration',
+            secondsa3e_duration='" . (isset($data['secondsa3e_duration']) ? intval($data['secondsa3e_duration']) : intval($oldContract['secondsa3e_duration'])) . "',
+            water_duration='" . (isset($data['water_duration']) ? intval($data['water_duration']) : intval($oldContract['water_duration'])) . "',
+            services_duration='" . (isset($data['services_duration']) ? intval($data['services_duration']) : intval($oldContract['services_duration'])) . "',
+            aqartype='" . mysql_real_escape_string($oldContract['aqartype'], $link) . "',
+            rakam3akd='$newContractNumber',
+            vat_type='" . (isset($data['vat_type']) ? intval($data['vat_type']) : intval($oldContract['vat_type'])) . "',
+            calendar_type='$calendarType',
+            status='active',
+            is_renewal=1,
+            renewed_from_contract_id='$oldContractId',
+            created_by_userid='" . $user_data['userid'] . "',
+            insert_date='" . time() . "',
+            formuid='$formuid'";
+
+        if (!mysql_query($sql, $link)) {
+            throw new Exception('فشل في إنشاء العقد الجديد: ' . mysql_error($link));
+        }
+
+        $newContractId = mysql_insert_id($link);
+
+        // 8. Update OLD contract status
+        $updateOld = mysql_query("UPDATE egar SET
+            status='renewed',
+            renewed_to_contract_id='$newContractId',
+            updated_at='" . time() . "',
+            updated_by_userid='" . $user_data['userid'] . "'
+            WHERE rakam3akdid='$oldContractId'", $link);
+
+        if (!$updateOld) {
+            throw new Exception('فشل في تحديث العقد القديم: ' . mysql_error($link));
+        }
+
+        // 9. Generate installments for NEW contract
+        $installments = generateInstallmentsForRenewal(
+            $newContractId,
+            $newStartDate,
+            $newEndDate,
+            $depositeamount,
+            $duration,
+            $water,
+            $secondsa3e,
+            $services,
+            intval($data['water_duration']),
+            intval($data['secondsa3e_duration']),
+            intval($data['services_duration']),
+            $tamen,
+            $oldContract['idsubaqar'],
+            $formuid,
+            $calendarType,
+            $annualRentIncreasePercent,
+            $maxRentIncreasePercent,
+            $calendar,
+            $link
+        );
+
+        if (empty($installments)) {
+            throw new Exception('فشل في إنشاء الأقساط');
+        }
+
+        // 10. Log to history
+        logContractHistory(
+            $oldContractId,
+            'renewed',
+            $oldContract,
+            [
+                'renewed_to_contract_id' => $newContractId,
+                'new_contract_number' => $newContractNumber,
+                'new_annual_price' => $annualprice
+            ],
+            $user_data,
+            $link
+        );
+
+        logContractHistory(
+            $newContractId,
+            'created_from_renewal',
+            null,
+            [
+                'renewed_from_contract_id' => $oldContractId,
+                'old_contract_number' => $oldContract['rakam3akd'],
+                'old_annual_price' => $oldContract['annualprice'],
+                'new_annual_price' => $annualprice
+            ],
+            $user_data,
+            $link
+        );
+
+        // 11. Update property unit to point to new contract
+        $updateProperty = mysql_query("UPDATE amlakdetails SET
+            rakam3akdid='$newContractId'
+            WHERE idsubaqar='" . $oldContract['idsubaqar'] . "'", $link);
+
+        if (!$updateProperty) {
+            throw new Exception('فشل في تحديث ربط العقار');
+        }
+
+        // Commit transaction
+        mysql_query("COMMIT", $link);
+
+        $response['success'] = true;
+        $response['message'] = 'تم تجديد العقد بنجاح';
+        $response['data'] = [
+            'old_contract_id' => $oldContractId,
+            'new_contract_id' => $newContractId,
+            'new_contract_number' => $newContractNumber,
+            'start_date' => $newStartDate,
+            'end_date' => $newEndDate,
+            'installments_count' => count($installments),
+            'calendar_type' => $calendarType == 0 ? 'hijri' : 'gregorian',
+            'start_date_formatted' => $calendar->formatDateForDisplay($newStartDate, $calendarType),
+            'end_date_formatted' => $calendar->formatDateForDisplay($newEndDate, $calendarType)
+        ];
+
+    } catch (Exception $e) {
+        mysql_query("ROLLBACK", $link);
+        $response['success'] = false;
+        $response['message'] = 'فشل تجديد العقد: ' . $e->getMessage();
+    }
+
+    return $response;
+}
+
+/**
+ * Generate installments for renewed contract
+ */
+function generateInstallmentsForRenewal($contractId, $startDate, $endDate, $totalAmount,
+    $paymentPeriod, $water, $secondsa3e, $services, $waterDuration, $sa3eeDuration,
+    $servicesDuration, $tamen, $idsubaqar, $formuid, $calendarType,
+    $annualRentIncreasePercent, $maxRentIncreasePercent, $calendar, $link) {
+
+    $installments = [];
+
+    // Calculate total contract months
+    // calculateEndDate() stores the final day immediately before the next
+    // period, so the raw full-month difference is one month short.
+    $totalMonths = $calendar->monthsDifference($startDate, $endDate, $calendarType) + 1;
+
+    // Calculate number of installments
+    $numInstallments = ceil($totalMonths / $paymentPeriod);
+
+    // The renewal form sends the annual base rent. Derive the periodic base
+    // rent from the payment period; dividing by all installments would make a
+    // two-year renewal incorrectly charge half the monthly rent.
+    $baseRentPerInstallment = (floatval($totalAmount) / 12) * intval($paymentPeriod);
+
+    for ($i = 1; $i <= $numInstallments; $i++) {
+        // Calculate due date for this installment
+        $dueDate = $calendar->calculateInstallmentDueDate($startDate, $paymentPeriod, $i, $calendarType);
+
+        $rentEscalation = $calendar->calculateEscalatedBaseRent(
+            $baseRentPerInstallment,
+            $startDate,
+            $dueDate,
+            $calendarType,
+            $annualRentIncreasePercent,
+            $maxRentIncreasePercent
+        );
+        $kastvalue = $rentEscalation['amount'];
+        $appliedRentIncreasePercent = $rentEscalation['percentage'];
+
+        // Determine if utilities should be included
+        $includeWater = shouldIncludeCharge($i, $paymentPeriod, $waterDuration);
+        $includeSa3ee = shouldIncludeCharge($i, $paymentPeriod, $sa3eeDuration);
+        $includeServices = shouldIncludeCharge($i, $paymentPeriod, $servicesDuration);
+
+        $waterAmount = $includeWater ? $water : 0;
+        $sa3eeAmount = $includeSa3ee ? $secondsa3e : 0;
+        $servicesAmount = $includeServices ? $services : 0;
+
+        // Keep aksat.kastvalue consistent with the main contract and automatic
+        // generators: base rent plus water, commission, and services. Insurance
+        // remains a first-payment obligation but is not part of the rent base.
+        $storedInstallmentValue = $kastvalue + $waterAmount + $sa3eeAmount + $servicesAmount;
+        $totalInstallmentAmount = $storedInstallmentValue;
+
+        // Insert installment
+        $sql = "INSERT INTO aksat SET
+            idsubaqar='$idsubaqar',
+            egar_id='$contractId',
+            kastname='$i',
+            kastvalue='$storedInstallmentValue',
+            base_rent_amount='$kastvalue',
+            rent_increase_percent='$appliedRentIncreasePercent',
+            water='$waterAmount',
+            sa3ee='$sa3eeAmount',
+            services='$servicesAmount',
+            kastdate='$dueDate',
+            status='pending',
+            iscomplete=0,
+            amount_paid=0,
+            amount_remaining='$totalInstallmentAmount',
+            grace_period_days=0,
+            effective_due_date='$dueDate',
+            created_at='" . time() . "',
+            formuid='$formuid'";
+
+        if (!mysql_query($sql, $link)) {
+            throw new Exception('فشل في إنشاء القسط رقم ' . $i . ': ' . mysql_error($link));
+        }
+
+        $installments[] = mysql_insert_id($link);
+    }
+
+    return $installments;
+}
+
+/**
+ * Determine if a charge should be included in this installment
+ */
+function shouldIncludeCharge($installmentNumber, $paymentPeriod, $chargeDuration) {
+    // Calculate how many months have passed at this installment
+    $monthsPassed = $paymentPeriod * ($installmentNumber - 1);
+
+    // Check if this installment aligns with the charge frequency
+    return ($monthsPassed % $chargeDuration == 0);
+}
+
+/**
+ * Terminate Contract
+ */
+function terminateContract($data, $link, $user_data) {
+    $response = ['success' => false, 'message' => ''];
+
+    $contractId = intval($data['contract_id']);
+    $reason = mysql_real_escape_string($data['reason'], $link);
+    $terminationDate = isset($data['termination_date']) ? intval($data['termination_date']) : time();
+
+    mysql_query("START TRANSACTION", $link);
+
+    try {
+        // Get contract
+        $contract = getContractById($contractId, $link);
+        if (!$contract) {
+            throw new Exception('العقد غير موجود');
+        }
+
+        // Check if already terminated
+        if ($contract['status'] == 'terminated' || $contract['status'] == 'cancelled') {
+            throw new Exception('العقد منتهي أو ملغي بالفعل');
+        }
+
+        // Update contract status
+        $sql = "UPDATE egar SET
+            status='terminated',
+            termination_date='$terminationDate',
+            termination_reason='$reason',
+            terminated_by_userid='" . $user_data['userid'] . "',
+            updated_at='" . time() . "'
+            WHERE rakam3akdid='$contractId'";
+
+        if (!mysql_query($sql, $link)) {
+            throw new Exception('فشل في إنهاء العقد');
+        }
+
+        // Cancel all future installments
+        $sql = "UPDATE aksat SET
+            status='cancelled',
+            updated_at='" . time() . "'
+            WHERE egar_id='$contractId'
+            AND kastdate > $terminationDate
+            AND status IN ('pending', 'due')";
+
+        mysql_query($sql, $link);
+
+        // Log history
+        logContractHistory($contractId, 'terminated', $contract, [
+            'termination_date' => $terminationDate,
+            'reason' => $reason
+        ], $user_data, $link);
+
+        mysql_query("COMMIT", $link);
+
+        $response['success'] = true;
+        $response['message'] = 'تم إنهاء العقد بنجاح';
+
+    } catch (Exception $e) {
+        mysql_query("ROLLBACK", $link);
+        $response['message'] = 'فشل إنهاء العقد: ' . $e->getMessage();
+    }
+
+    return $response;
+}
+
+/**
+ * Get contract by ID
+ */
+function getContractById($contractId, $link) {
+    $sql = "SELECT e.*, a.idsubaqar
+            FROM egar e
+            LEFT JOIN amlakdetails a ON e.rakam3akdid = a.rakam3akdid
+            WHERE e.rakam3akdid='" . intval($contractId) . "'
+            LIMIT 1";
+    $result = mysql_query($sql, $link);
+    if (!$result || mysql_num_rows($result) == 0) {
+        return null;
+    }
+    return mysql_fetch_assoc($result);
+}
+
+/**
+ * Validate if contract can be renewed
+ */
+function validateCanRenew($contract, $link) {
+    $response = ['can_renew' => false, 'reason' => '', 'warnings' => []];
+
+    // Check if already renewed
+    if (!empty($contract['renewed_to_contract_id'])) {
+        $response['reason'] = 'العقد تم تجديده مسبقاً';
+        return $response;
+    }
+
+    // Check if terminated
+    if ($contract['status'] == 'terminated' || $contract['status'] == 'cancelled') {
+        $response['reason'] = 'العقد منتهي أو ملغي';
+        return $response;
+    }
+
+    // Check if has unpaid installments (warning, not blocker)
+    $sql = "SELECT COUNT(*) as unpaid FROM aksat
+            WHERE egar_id='" . $contract['rakam3akdid'] . "'
+            AND status IN ('pending', 'overdue', 'partial', 'due')";
+    $result = mysql_fetch_assoc(mysql_query($sql, $link));
+
+    if ($result['unpaid'] > 0) {
+        $response['warnings'][] = 'يوجد ' . $result['unpaid'] . ' قسط غير مدفوع';
+    }
+
+    $response['can_renew'] = true;
+    return $response;
+}
+
+/**
+ * Validate can renew API endpoint
+ */
+function validateCanRenewAPI($contractId, $link) {
+    $contract = getContractById($contractId, $link);
+    if (!$contract) {
+        return [
+            'success' => false,
+            'message' => 'العقد غير موجود'
+        ];
+    }
+
+    $validation = validateCanRenew($contract, $link);
+
+    return [
+        'success' => true,
+        'data' => $validation,
+        'contract' => $contract
+    ];
+}
+
+/**
+ * Log contract history
+ */
+function logContractHistory($contractId, $action, $oldValues, $newValues, $userData, $link) {
+    $sql = "INSERT INTO egar_history SET
+        rakam3akdid='$contractId',
+        action='" . mysql_real_escape_string($action, $link) . "',
+        old_values='" . mysql_real_escape_string(json_encode($oldValues, JSON_UNESCAPED_UNICODE), $link) . "',
+        new_values='" . mysql_real_escape_string(json_encode($newValues, JSON_UNESCAPED_UNICODE), $link) . "',
+        changed_by_userid='" . intval($userData['userid']) . "',
+        changed_at='" . time() . "',
+        ip_address='" . mysql_real_escape_string($_SERVER['REMOTE_ADDR'], $link) . "',
+        user_agent='" . mysql_real_escape_string($_SERVER['HTTP_USER_AGENT'], $link) . "'";
+
+    return mysql_query($sql, $link);
+}
+
+/**
+ * Generate unique contract number
+ */
+function generateContractNumber($link) {
+    // Get current year (Gregorian)
+    $year = date('Y');
+
+    // Get last contract number for this year
+    $sql = "SELECT MAX(CAST(SUBSTRING_INDEX(rakam3akd, '-', -1) AS UNSIGNED)) as last_num
+            FROM egar
+            WHERE rakam3akd LIKE '$year-%'";
+    $result = mysql_fetch_assoc(mysql_query($sql, $link));
+
+    $nextNum = ($result['last_num'] ? $result['last_num'] : 0) + 1;
+
+    return $year . '-' . str_pad($nextNum, 5, '0', STR_PAD_LEFT);
+}
+
+/**
+ * Generate unique form UID
+ */
+function generateFormUID() {
+    return str_replace('.', '', microtime(true) . rand(11111, 99999));
+}
+
+/**
+ * Get contract renewal chain
+ */
+function getContractChain($contractId, $link) {
+    $response = ['success' => true, 'chain' => [], 'message' => ''];
+
+    $contractId = intval($contractId);
+    $current = getContractById($contractId, $link);
+
+    if (!$current) {
+        $response['success'] = false;
+        $response['message'] = 'العقد غير موجود';
+        return $response;
+    }
+
+    // Go backwards to find original
+    while (!empty($current['renewed_from_contract_id'])) {
+        $current = getContractById($current['renewed_from_contract_id'], $link);
+        if (!$current) break;
+    }
+
+    // Now go forwards building the chain
+    $chain = [$current];
+    while (!empty($current['renewed_to_contract_id'])) {
+        $current = getContractById($current['renewed_to_contract_id'], $link);
+        if (!$current) break;
+        $chain[] = $current;
+    }
+
+    // Format dates for display
+    $calendar = new CalendarManager();
+    foreach ($chain as &$contract) {
+        $calType = intval($contract['calendar_type']);
+        $contract['start_date_formatted'] = $calendar->formatDateForDisplay($contract['startegar'], $calType);
+        $contract['end_date_formatted'] = $calendar->formatDateForDisplay($contract['end3aqd'], $calType);
+    }
+
+    $response['chain'] = $chain;
+    $response['total_contracts'] = count($chain);
+
+    return $response;
+}
+
+/**
+ * Get contract history
+ */
+function getContractHistory($contractId, $link) {
+    $response = ['success' => true, 'history' => [], 'message' => ''];
+
+    $contractId = intval($contractId);
+
+    $sql = "SELECT h.*, u.name as user_name
+            FROM egar_history h
+            LEFT JOIN users u ON h.changed_by_userid = u.userid
+            WHERE h.rakam3akdid='$contractId'
+            ORDER BY h.changed_at DESC";
+
+    $result = mysql_query($sql, $link);
+
+    if (!$result) {
+        $response['success'] = false;
+        $response['message'] = 'فشل في جلب السجل';
+        return $response;
+    }
+
+    $calendar = new CalendarManager();
+
+    while ($row = mysql_fetch_assoc($result)) {
+        // Format timestamp
+        $row['changed_at_formatted'] = $calendar->formatDateForDisplay($row['changed_at'], 1, true);
+        $response['history'][] = $row;
+    }
+
+    return $response;
+}
+
+/**
+ * Log error for debugging
+ */
+function logError($exception, $requestData) {
+    $logFile = __DIR__ . '/../../../logs/contract_lifecycle_errors.log';
+    $logDir = dirname($logFile);
+
+    if (!is_dir($logDir)) {
+        @mkdir($logDir, 0755, true);
+    }
+
+    $logMessage = date('Y-m-d H:i:s') . " - " . $exception->getMessage() . "\n";
+    $logMessage .= "Request: " . json_encode($requestData, JSON_UNESCAPED_UNICODE) . "\n";
+    $logMessage .= "Trace: " . $exception->getTraceAsString() . "\n\n";
+
+    @file_put_contents($logFile, $logMessage, FILE_APPEND);
+}

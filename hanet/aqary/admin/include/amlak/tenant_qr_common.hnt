@@ -1,0 +1,103 @@
+<?php
+/** Shared helpers for tenant QR cards. */
+
+function tenantQrResolveScreenId($db)
+{
+    if (!($db instanceof mysqli)) {
+        return 0;
+    }
+    $result = $db->query("SELECT screenid FROM screens WHERE screen_id='tenant_qr_cards' ORDER BY screenid ASC LIMIT 1");
+    $row = $result ? $result->fetch_assoc() : null;
+    return $row ? intval($row['screenid']) : 0;
+}
+
+function tenantQrAccess($db, $screenId, $userId)
+{
+    if (!($db instanceof mysqli) || $screenId <= 0 || $userId <= 0) {
+        return array('allowed' => false, 'print' => false);
+    }
+    $stmt = $db->prepare("SELECT COALESCE(g.allprevilage,0) AS allprevilage,
+        COALESCE(p.sees,0) AS sees, COALESCE(p.prints,0) AS prints
+        FROM user u
+        LEFT JOIN usergroups g ON g.groupid=u.groupid
+        LEFT JOIN ugroupscreen p ON p.groupid=u.groupid AND p.screenid=?
+        WHERE u.userid=? LIMIT 1");
+    if (!$stmt) {
+        return array('allowed' => false, 'print' => false);
+    }
+    $stmt->bind_param('ii', $screenId, $userId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    $all = !empty($row['allprevilage']);
+    return array(
+        'allowed' => $all || !empty($row['sees']),
+        'print' => $all || !empty($row['prints'])
+    );
+}
+
+function tenantQrNormalizeText($value)
+{
+    $value = (string)$value;
+    if ($value === '' || !preg_match('/(?:Ã|Â|Ø|Ù|â)/u', $value)) {
+        return $value;
+    }
+    if (function_exists('mb_convert_encoding')) {
+        $converted = @mb_convert_encoding($value, 'Windows-1252', 'UTF-8');
+    } elseif (function_exists('iconv')) {
+        $converted = @iconv('UTF-8', 'Windows-1252//IGNORE', $value);
+    } else {
+        return $value;
+    }
+    if (!is_string($converted) || $converted === '' || !preg_match('//u', $converted)) {
+        return $value;
+    }
+    $before = preg_match_all('/[\x{0600}-\x{06FF}]/u', $value, $unusedBefore);
+    $after = preg_match_all('/[\x{0600}-\x{06FF}]/u', $converted, $unusedAfter);
+    return $after > $before ? $converted : $value;
+}
+
+function tenantQrEsc($value)
+{
+    return htmlspecialchars(tenantQrNormalizeText($value), ENT_QUOTES, 'UTF-8');
+}
+
+function tenantQrUnitLabel($row)
+{
+    $property = trim(tenantQrNormalizeText($row['aqarname'] ?? ''));
+    $type = trim(tenantQrNormalizeText($row['aqarsubtypename'] ?? ''));
+    $number = trim(tenantQrNormalizeText($row['rakam'] ?? ''));
+    $unit = trim($type . ($number !== '' ? ' ' . $number : ''));
+    return trim($property . ($unit !== '' ? ' - ' . $unit : ''));
+}
+
+function tenantQrLoadUnits($db, $tenantIds)
+{
+    $units = array();
+    $ids = array_values(array_unique(array_filter(array_map('intval', (array)$tenantIds))));
+    if (!($db instanceof mysqli) || !$ids) {
+        return $units;
+    }
+    $idSql = implode(',', $ids);
+    $sql = "SELECT d.mostagerid,d.idsubaqar,d.rakam,d.rakam3akdid,
+        COALESCE(a.aqarname,'') AS aqarname,
+        COALESCE(st.aqarsubtypename,'') AS aqarsubtypename
+        FROM amlakdetails d
+        LEFT JOIN amlak a ON a.idaqar=d.idaqar
+        LEFT JOIN aqarsubtype st ON st.aqarsubtype=d.aqarsubtype
+        WHERE d.mostagerid IN ({$idSql})
+        ORDER BY a.aqarname,st.aqarsubtypename,d.rakam";
+    $result = $db->query($sql);
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $tenantId = intval($row['mostagerid']);
+            if (!isset($units[$tenantId])) {
+                $units[$tenantId] = array();
+            }
+            $row['label'] = tenantQrUnitLabel($row);
+            $units[$tenantId][] = $row;
+        }
+    }
+    return $units;
+}
+

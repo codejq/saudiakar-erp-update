@@ -1,0 +1,154 @@
+<?php
+/** Printable maintenance request and work-order report. */
+$requestId = intval($_GET['id'] ?? 0);
+$sc_title = 'طباعة طلب صيانة';
+include_once dirname(__DIR__, 3) . '/nocash.hnt';
+include_once dirname(__DIR__, 3) . '/report_header.hnt';
+require_once __DIR__ . '/MaintenanceRequestService.class.hnt';
+require_once __DIR__ . '/maintenance_requests_common.hnt';
+date_default_timezone_set('Asia/Riyadh');
+
+if (isset($qdb_db, $dbSuffix) && $db instanceof mysqli) {
+    mysqli_select_db($db, $qdb_db . $dbSuffix);
+    $db->set_charset('utf8mb4');
+}
+
+$printScreenId = MaintenanceRequestService::resolveScreenId($db);
+$printUserId = intval($_SESSION['useridv'] ?? 0);
+$printAccess = null;
+if ($printScreenId > 0 && $printUserId > 0) {
+    $accessStmt = $db->prepare("SELECT g.allprevilage,COALESCE(p.sees,0) sees
+        FROM user u
+        LEFT JOIN usergroups g ON g.groupid=u.groupid
+        LEFT JOIN ugroupscreen p ON p.groupid=u.groupid AND p.screenid=?
+        WHERE u.userid=? LIMIT 1");
+    $accessStmt->bind_param('ii', $printScreenId, $printUserId);
+    $accessStmt->execute();
+    $printAccess = $accessStmt->get_result()->fetch_assoc();
+    $accessStmt->close();
+}
+
+if (!$printAccess || (empty($printAccess['allprevilage']) && empty($printAccess['sees']))) {
+    echo '<div dir="rtl" style="padding:40px;text-align:center;color:#991b1b">ليس لديك صلاحية لطباعة طلبات الصيانة.</div>';
+    require dirname(__DIR__, 3) . '/reportfooter.hnt';
+    exit;
+}
+
+$printService = new MaintenanceRequestService($db, $printUserId);
+$request = $printService->getRequestDetails($requestId);
+if (!$request) {
+    echo '<div dir="rtl" style="padding:40px;text-align:center;color:#991b1b">طلب الصيانة غير موجود.</div>';
+    require dirname(__DIR__, 3) . '/reportfooter.hnt';
+    exit;
+}
+
+function mrPrintDateTime($value)
+{
+    if (!$value) return '-';
+    $timestamp = is_numeric($value) ? intval($value) : strtotime((string)$value);
+    return $timestamp ? date('d/m/Y h:i A', $timestamp) : (string)$value;
+}
+
+function mrPrintEventLabel($type)
+{
+    $labels = array(
+        'created'=>'إنشاء الطلب','updated'=>'تحديث البيانات','status_changed'=>'تغيير الحالة',
+        'item_added'=>'إضافة بند','item_status_changed'=>'تحديث بند','attachment_added'=>'إضافة مرفق',
+        'note'=>'ملاحظة داخلية','tenant_contact'=>'تواصل مع المستأجر',
+        'vendor_contact'=>'تواصل مع المورد','visit'=>'زيارة ميدانية'
+    );
+    return $labels[$type] ?? $type;
+}
+
+$itemTotal = 0.0;
+foreach ($request['items'] as $item) {
+    $itemTotal += floatval($item['quantity']) * floatval($item['unit_cost']);
+}
+$assignedName = trim((string)$request['assigned_name']) !== '' ? $request['assigned_name'] : ($request['assigned_username'] ?: 'غير مسند');
+$unitDescription = trim((string)$request['aqarsubtypename'] . ' ' . (string)$request['unit_number']);
+$propertyDescription = trim((string)$request['aqarname'] . ($request['aqaraddress'] ? ' - ' . $request['aqaraddress'] : ''));
+?>
+<script>
+document.title=<?= json_encode('طلب صيانة ' . $request['request_number'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+if(document.getElementById('pagetitle'))document.getElementById('pagetitle').value=document.title;
+</script>
+<style>
+.mr-print{direction:rtl;font-family:Tahoma,Arial,sans-serif;color:#000;font-size:13px;line-height:1.65;padding:4mm 2mm}.mr-print *{box-sizing:border-box}.mr-print-title{text-align:center;margin:4px 0 12px}.mr-print-title h1{font-size:22px;margin:0}.mr-print-title .number{color:#b42318;font-weight:800}.mr-print-meta{display:flex;justify-content:center;gap:22px;flex-wrap:wrap;margin-top:5px}.mr-print-section{margin:10px 0;break-inside:avoid}.mr-print-section.mr-print-flow{break-inside:auto}.mr-print-section h2{font-size:15px;margin:0;padding:6px 9px;border:1px solid #111;border-bottom:0;background:#f1f1f1}.mr-print-table{width:100%;border-collapse:collapse;table-layout:fixed}.mr-print-table th,.mr-print-table td{border:1px solid #111;padding:6px 8px;text-align:right;vertical-align:top;word-break:break-word}.mr-print-table th{background:#f4f4f4;font-weight:800}.mr-print-label{width:15%;font-weight:800;background:#fafafa}.mr-print-description{min-height:55px;white-space:pre-wrap}.mr-print-status{font-weight:800}.mr-print-timeline td:first-child{width:19%;white-space:nowrap}.mr-print-signatures{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;margin-top:28px;break-inside:avoid}.mr-print-signature{text-align:center;min-height:90px}.mr-print-signature strong{display:block;margin-bottom:35px}.mr-print-signature span{display:block;border-top:1px dotted #222;padding-top:5px}.mr-print-note{font-size:11px;color:#444}.mr-print-empty{text-align:center;color:#666}.mr-print a{color:#000;text-decoration:none}@media print{.mr-print{font-size:12px}.mr-print-section{break-inside:avoid}.mr-print-section.mr-print-flow{break-inside:auto}.mr-print-timeline{break-inside:auto}.mr-print-timeline tr,.mr-print-table tr{break-inside:avoid}.mr-print-table thead{display:table-header-group}}
+</style>
+
+<div class="mr-print">
+    <div class="mr-print-title">
+        <h1>طلب صيانة / أمر عمل</h1>
+        <div class="mr-print-meta">
+            <span>رقم الطلب: <span class="number"><?= mrEsc($request['request_number']) ?></span></span>
+            <span>تاريخ الإنشاء: <?= mrEsc(mrPrintDateTime($request['created_at'])) ?></span>
+            <span>الحالة: <span class="mr-print-status"><?= mrEsc(mrStatusLabel($request['status'])) ?></span></span>
+            <span>الأولوية: <?= mrEsc(mrPriorityLabel($request['priority'])) ?></span>
+        </div>
+    </div>
+
+    <section class="mr-print-section">
+        <h2>بيانات البلاغ</h2>
+        <table class="mr-print-table">
+            <tr><td class="mr-print-label">عنوان الطلب</td><td colspan="3"><strong><?= mrEsc($request['title']) ?></strong></td><td class="mr-print-label">التصنيف</td><td><?= mrEsc(mrCategoryLabel($request['category'])) ?></td></tr>
+            <tr><td class="mr-print-label">وصف المشكلة</td><td colspan="5" class="mr-print-description"><?= nl2br(mrEsc($request['description'])) ?></td></tr>
+            <tr><td class="mr-print-label">مصدر البلاغ</td><td><?= mrEsc(array('tenant'=>'المستأجر','user'=>'موظف','owner'=>'المالك','other'=>'أخرى')[$request['reported_by_type']] ?? $request['reported_by_type']) ?></td><td class="mr-print-label">اسم المبلّغ</td><td><?= mrEsc($request['reported_by_name'] ?: '-') ?></td><td class="mr-print-label">وسيلة التواصل</td><td><?= mrEsc($request['reported_by_contact'] ?: '-') ?></td></tr>
+        </table>
+    </section>
+
+    <section class="mr-print-section">
+        <h2>العقار والوحدة والمستأجر</h2>
+        <table class="mr-print-table">
+            <tr><td class="mr-print-label">العقار</td><td colspan="2"><?= mrEsc($propertyDescription ?: '-') ?></td><td class="mr-print-label">الوحدة</td><td colspan="2"><?= mrEsc($unitDescription ?: '-') ?></td></tr>
+            <tr><td class="mr-print-label">المستأجر</td><td colspan="2"><?= mrEsc($request['tenant_name_snapshot'] ?: '-') ?></td><td class="mr-print-label">هاتف المستأجر</td><td colspan="2"><?= mrEsc($request['tenant_phone_snapshot'] ?: '-') ?></td></tr>
+            <tr><td class="mr-print-label">الموقع داخل العقار</td><td colspan="2"><?= mrEsc($request['location_details'] ?: '-') ?></td><td class="mr-print-label">حضور المستأجر</td><td colspan="2"><?= !empty($request['requires_tenant_presence']) ? 'مطلوب' : 'غير مطلوب' ?></td></tr>
+            <tr><td class="mr-print-label">تعليمات الدخول</td><td colspan="5"><?= nl2br(mrEsc($request['access_instructions'] ?: '-')) ?></td></tr>
+        </table>
+    </section>
+
+    <section class="mr-print-section">
+        <h2>الإسناد والجدولة والتنفيذ</h2>
+        <table class="mr-print-table">
+            <tr><td class="mr-print-label">المستخدم المكلف</td><td><?= mrEsc($assignedName) ?></td><td class="mr-print-label">الزيارة المفضلة</td><td><?= mrEsc(mrPrintDateTime($request['preferred_visit_at'])) ?></td><td class="mr-print-label">الموعد المجدول</td><td><?= mrEsc(mrPrintDateTime($request['scheduled_at'])) ?></td></tr>
+            <tr><td class="mr-print-label">الموعد المستهدف</td><td><?= mrEsc(mrPrintDateTime($request['due_at'])) ?></td><td class="mr-print-label">بدء التنفيذ</td><td><?= mrEsc(mrPrintDateTime($request['started_at'])) ?></td><td class="mr-print-label">الإنجاز</td><td><?= mrEsc(mrPrintDateTime($request['completed_at'])) ?></td></tr>
+            <tr><td class="mr-print-label">المورد / المقاول</td><td><?= mrEsc($request['vendor_name'] ?: '-') ?></td><td class="mr-print-label">هاتف المورد</td><td><?= mrEsc($request['vendor_phone'] ?: '-') ?></td><td class="mr-print-label">التحقق النهائي</td><td><?= mrEsc(mrPrintDateTime($request['verified_at'])) ?></td></tr>
+            <?php if($request['resolution_summary']): ?><tr><td class="mr-print-label">ملخص الإنجاز</td><td colspan="5"><?= nl2br(mrEsc($request['resolution_summary'])) ?></td></tr><?php endif; ?>
+            <?php if($request['cancellation_reason']): ?><tr><td class="mr-print-label">سبب الإلغاء</td><td colspan="5"><?= nl2br(mrEsc($request['cancellation_reason'])) ?></td></tr><?php endif; ?>
+        </table>
+    </section>
+
+    <section class="mr-print-section mr-print-flow">
+        <h2>المواد والخدمات واللوجستيات</h2>
+        <table class="mr-print-table">
+            <thead><tr><th>النوع</th><th>البند</th><th>الكمية</th><th>تكلفة الوحدة</th><th>الإجمالي</th><th>المورد</th><th>الحالة</th></tr></thead>
+            <tbody><?php foreach($request['items'] as $item): $lineTotal=floatval($item['quantity'])*floatval($item['unit_cost']); ?><tr><td><?= mrEsc(array('material'=>'مادة','service'=>'خدمة','transport'=>'نقل','other'=>'أخرى')[$item['item_type']] ?? $item['item_type']) ?></td><td><?= mrEsc($item['item_name']) ?><?php if($item['notes']): ?><div class="mr-print-note"><?= nl2br(mrEsc($item['notes'])) ?></div><?php endif; ?></td><td><?= mrEsc($item['quantity'].' '.$item['unit']) ?></td><td><?= mrMoney($item['unit_cost']) ?></td><td><?= mrMoney($lineTotal) ?></td><td><?= mrEsc($item['supplier_name'] ?: '-') ?></td><td><?= mrEsc(mrItemStatusLabel($item['status'])) ?></td></tr><?php endforeach; ?><?php if(!$request['items']): ?><tr><td colspan="7" class="mr-print-empty">لا توجد مواد أو خدمات مسجلة.</td></tr><?php endif; ?></tbody>
+            <tfoot><tr><th colspan="4">إجمالي البنود</th><th><?= mrMoney($itemTotal) ?> ريال</th><th colspan="2"></th></tr></tfoot>
+        </table>
+    </section>
+
+    <section class="mr-print-section">
+        <h2>التكاليف والمرفقات</h2>
+        <table class="mr-print-table">
+            <tr><td class="mr-print-label">التكلفة التقديرية</td><td><?= mrMoney($request['estimated_cost']) ?> ريال</td><td class="mr-print-label">التكلفة الفعلية</td><td><?= mrMoney($request['actual_cost']) ?> ريال</td><td class="mr-print-label">إجمالي البنود</td><td><?= mrMoney($itemTotal) ?> ريال</td></tr>
+            <tr><td class="mr-print-label">المرفقات</td><td colspan="5"><?php if($request['attachments']): ?><?php foreach($request['attachments'] as $index=>$attachment): ?><?= $index ? '، ' : '' ?><a href="maintenance_request_attachment.hnt?id=<?= intval($attachment['attachment_id']) ?>"><?= mrEsc($attachment['original_name']) ?></a><?php endforeach; ?><?php else: ?>لا توجد مرفقات<?php endif; ?></td></tr>
+        </table>
+    </section>
+
+    <section class="mr-print-section mr-print-flow">
+        <h2>سجل المتابعة</h2>
+        <table class="mr-print-table mr-print-timeline">
+            <thead><tr><th>التاريخ</th><th>الإجراء</th><th>الحالة</th><th>الملاحظة</th><th>بواسطة</th></tr></thead>
+            <tbody><?php foreach(array_reverse($request['events']) as $event): ?><tr><td><?= mrEsc(mrPrintDateTime($event['event_at'])) ?></td><td><?= mrEsc(mrPrintEventLabel($event['event_type'])) ?></td><td><?= mrEsc($event['to_status'] ? mrStatusLabel($event['to_status']) : '-') ?></td><td><?= nl2br(mrEsc($event['note'] ?: '-')) ?></td><td><?= mrEsc($event['user_name'] ?: $event['username'] ?: 'النظام') ?></td></tr><?php endforeach; ?><?php if(!$request['events']): ?><tr><td colspan="5" class="mr-print-empty">لا توجد حركات متابعة.</td></tr><?php endif; ?></tbody>
+        </table>
+    </section>
+
+    <div class="mr-print-signatures">
+        <div class="mr-print-signature"><strong>المستأجر / المبلّغ</strong><span>الاسم والتوقيع</span></div>
+        <div class="mr-print-signature"><strong>منفذ أعمال الصيانة</strong><span>الاسم والتوقيع</span></div>
+        <div class="mr-print-signature"><strong>اعتماد الإدارة</strong><span>الاسم والتوقيع والختم</span></div>
+    </div>
+</div>
+<?php
+$forceprintfooter = 1;
+require dirname(__DIR__, 3) . '/reportfooter.hnt';
+?>

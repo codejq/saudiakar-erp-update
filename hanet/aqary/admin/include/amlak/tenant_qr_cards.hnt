@@ -1,0 +1,149 @@
+<?php
+/** Search current tenants and print one or more QR identification cards. */
+$sc_title = 'بطاقات QR للمستأجرين';
+include_once dirname(__DIR__, 3) . '/connectdb.hnt';
+require_once __DIR__ . '/tenant_qr_common.hnt';
+
+if (isset($qdb_db, $dbSuffix) && $db instanceof mysqli) {
+    mysqli_select_db($db, $qdb_db . $dbSuffix);
+    $db->set_charset('utf8mb4');
+}
+$tenantQrScreenId = tenantQrResolveScreenId($db);
+$sc_id = $tenantQrScreenId > 0 ? $tenantQrScreenId : 36;
+include_once dirname(__DIR__, 3) . '/header.hnt';
+
+$tenantQrAccess = tenantQrAccess($db, $tenantQrScreenId, intval($_SESSION['useridv'] ?? 0));
+if (!$tenantQrAccess['allowed']) {
+    http_response_code(403);
+    echo '<div class="alert alert-danger m-4" dir="rtl">ليس لديك صلاحية لعرض بطاقات المستأجرين، أو لم يتم تشغيل الترحيل بعد. افتح إدارة الأملاك أولاً.</div>';
+    exit;
+}
+
+$search = trim((string)($_GET['search'] ?? ''));
+$propertyId = max(0, intval($_GET['idaqar'] ?? 0));
+$tenantScope = ($_GET['scope'] ?? 'current') === 'all' ? 'all' : 'current';
+$page = max(1, intval($_GET['page'] ?? 1));
+$perPage = 50;
+$offset = ($page - 1) * $perPage;
+
+$joins = " LEFT JOIN amlakdetails d ON d.mostagerid=m.mostagerid
+    LEFT JOIN amlak a ON a.idaqar=d.idaqar
+    LEFT JOIN aqarsubtype st ON st.aqarsubtype=d.aqarsubtype ";
+$conditions = array('m.mostagerid > 0');
+if ($tenantScope === 'current') {
+    $conditions[] = 'd.idsubaqar IS NOT NULL';
+}
+if ($propertyId > 0) {
+    $conditions[] = 'd.idaqar=' . $propertyId;
+}
+if ($search !== '') {
+    $escapedSearch = $db->real_escape_string($search);
+    $like = "'%{$escapedSearch}%'";
+    $conditions[] = "(m.mostagername LIKE {$like} OR m.mostagertel LIKE {$like}
+        OR m.mostageridnumber LIKE {$like} OR m.mostageremail LIKE {$like}
+        OR a.aqarname LIKE {$like} OR d.rakam LIKE {$like} OR st.aqarsubtypename LIKE {$like})";
+}
+$where = ' WHERE ' . implode(' AND ', $conditions);
+
+$countResult = $db->query("SELECT COUNT(DISTINCT m.mostagerid) AS total FROM mostagereen m {$joins} {$where}");
+$countRow = $countResult ? $countResult->fetch_assoc() : array('total' => 0);
+$totalRows = intval($countRow['total'] ?? 0);
+$totalPages = max(1, (int)ceil($totalRows / $perPage));
+if ($page > $totalPages) {
+    $page = $totalPages;
+    $offset = ($page - 1) * $perPage;
+}
+
+$tenants = array();
+$sql = "SELECT m.mostagerid,m.mostagername,m.mostagertel,m.mostageridnumber,m.mostageremail,
+    COUNT(DISTINCT d.idsubaqar) AS unit_count,
+    GROUP_CONCAT(DISTINCT CONCAT_WS(' - ',NULLIF(a.aqarname,''),TRIM(CONCAT(COALESCE(st.aqarsubtypename,''),' ',COALESCE(d.rakam,'')))) ORDER BY a.aqarname,d.rakam SEPARATOR ' | ') AS units
+    FROM mostagereen m {$joins} {$where}
+    GROUP BY m.mostagerid,m.mostagername,m.mostagertel,m.mostageridnumber,m.mostageremail
+    ORDER BY m.mostagername,m.mostagerid LIMIT {$offset},{$perPage}";
+$tenantResult = $db->query($sql);
+if ($tenantResult) {
+    while ($row = $tenantResult->fetch_assoc()) {
+        $tenants[] = $row;
+    }
+}
+
+$properties = array();
+$propertyResult = $db->query("SELECT idaqar,aqarname FROM amlak WHERE idaqar>0 ORDER BY aqarname");
+if ($propertyResult) {
+    while ($row = $propertyResult->fetch_assoc()) {
+        $properties[] = $row;
+    }
+}
+
+function tenantQrCardsPageUrl($pageNumber)
+{
+    return '?' . http_build_query(array_filter(array(
+        'search' => $_GET['search'] ?? '',
+        'idaqar' => intval($_GET['idaqar'] ?? 0),
+        'scope' => ($_GET['scope'] ?? 'current') === 'all' ? 'all' : 'current',
+        'page' => intval($pageNumber)
+    ), function ($value) { return $value !== '' && $value !== 0; }));
+}
+?>
+<style>
+.tqr-shell{direction:rtl;padding:18px}.tqr-heading{background:linear-gradient(135deg,#0f766e,#0e7490);color:#fff;border-radius:12px;padding:18px 22px;display:flex;align-items:center;justify-content:space-between;gap:15px;margin-bottom:18px}.tqr-heading h1{font-size:1.45rem;margin:0;font-weight:800}.tqr-heading p{margin:5px 0 0;opacity:.9}.tqr-panel{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 2px 8px rgba(15,23,42,.05)}.tqr-filters{display:grid;grid-template-columns:minmax(230px,2fr) minmax(190px,1fr) minmax(150px,.7fr) auto;gap:12px;align-items:end}.tqr-field label{display:block;font-weight:700;margin-bottom:6px}.tqr-field input,.tqr-field select{width:100%;min-height:43px;border:1px solid #cbd5e1;border-radius:8px;padding:8px 10px;background:#fff}.tqr-actions{display:flex;gap:8px;flex-wrap:wrap}.tqr-btn{border:0;border-radius:8px;padding:10px 15px;font-weight:700;text-decoration:none;display:inline-flex;align-items:center;gap:7px;cursor:pointer}.tqr-primary{background:#0f766e;color:#fff}.tqr-secondary{background:#e2e8f0;color:#1e293b}.tqr-print{background:#2563eb;color:#fff}.tqr-table-wrap{overflow:auto}.tqr-table{width:100%;border-collapse:collapse;min-width:850px}.tqr-table th,.tqr-table td{padding:11px 9px;border-bottom:1px solid #e2e8f0;text-align:right;vertical-align:middle}.tqr-table th{background:#f1f5f9;color:#334155;white-space:nowrap}.tqr-table tbody tr:hover{background:#f8fafc}.tqr-name{font-weight:800;color:#0f172a}.tqr-units{max-width:430px;color:#475569;font-size:.92rem;line-height:1.6}.tqr-badge{display:inline-block;padding:3px 8px;background:#e0f2fe;color:#075985;border-radius:20px;font-size:.8rem}.tqr-selection{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.tqr-pagination{display:flex;justify-content:center;gap:6px;margin-top:16px;direction:ltr}.tqr-pagination a,.tqr-pagination span{min-width:36px;padding:7px 9px;border:1px solid #cbd5e1;border-radius:7px;text-align:center;text-decoration:none}.tqr-pagination .active{background:#0f766e;color:#fff;border-color:#0f766e}.tqr-empty{text-align:center;padding:35px;color:#64748b}@media(max-width:850px){.tqr-filters{grid-template-columns:1fr}.tqr-shell{padding:10px}.tqr-heading{align-items:flex-start;flex-direction:column}}
+</style>
+
+<main class="tqr-shell">
+    <header class="tqr-heading">
+        <div><h1><i class="bi bi-qr-code"></i> بطاقات QR للمستأجرين</h1><p>ابحث عن المستأجر ثم اطبع بطاقة واحدة أو مجموعة بطاقات.</p></div>
+        <a class="tqr-btn tqr-secondary" href="/aqary/admin/amlak.hnt"><i class="bi bi-arrow-right"></i> إدارة الأملاك</a>
+    </header>
+
+    <section class="tqr-panel">
+        <form method="get" class="tqr-filters">
+            <div class="tqr-field"><label>بحث شامل</label><input name="search" value="<?= tenantQrEsc($search) ?>" placeholder="الاسم، الهاتف، الهوية، العقار أو الوحدة"></div>
+            <div class="tqr-field"><label>العقار</label><select name="idaqar"><option value="0">كل العقارات</option><?php foreach($properties as $property): ?><option value="<?= intval($property['idaqar']) ?>" <?= $propertyId===intval($property['idaqar'])?'selected':'' ?>><?= tenantQrEsc($property['aqarname']) ?></option><?php endforeach; ?></select></div>
+            <div class="tqr-field"><label>المستأجرون</label><select name="scope"><option value="current" <?= $tenantScope==='current'?'selected':'' ?>>الحاليون فقط</option><option value="all" <?= $tenantScope==='all'?'selected':'' ?>>جميع السجلات</option></select></div>
+            <div class="tqr-actions"><button class="tqr-btn tqr-primary" type="submit"><i class="bi bi-search"></i> بحث</button><a class="tqr-btn tqr-secondary" href="tenant_qr_cards.hnt">مسح</a></div>
+        </form>
+    </section>
+
+    <form class="tqr-panel" method="get" action="tenant_qr_cards_print.hnt" target="_blank" id="tenantQrPrintForm">
+        <div class="tqr-selection">
+            <div><strong><?= number_format($totalRows) ?></strong> مستأجر <span class="text-muted">— يمكنك طباعة حتى 100 بطاقة في المرة الواحدة.</span></div>
+            <div class="tqr-actions">
+                <button type="button" class="tqr-btn tqr-secondary" id="selectVisibleTenants"><i class="bi bi-check2-square"></i> تحديد الصفحة</button>
+                <?php if($tenantQrAccess['print']): ?><button type="submit" class="tqr-btn tqr-print"><i class="bi bi-printer"></i> طباعة المحدد</button><?php endif; ?>
+            </div>
+        </div>
+        <div class="tqr-table-wrap mt-3">
+            <table class="tqr-table">
+                <thead><tr><th><input type="checkbox" id="tenantQrSelectAll" aria-label="تحديد الجميع"></th><th>المستأجر</th><th>الهاتف</th><th>رقم الهوية</th><th>العقار والوحدة</th><th>الإجراءات</th></tr></thead>
+                <tbody>
+                <?php foreach($tenants as $tenant): $tenantId=intval($tenant['mostagerid']); ?>
+                    <tr>
+                        <td><input type="checkbox" class="tenant-qr-checkbox" name="ids[]" value="<?= $tenantId ?>"></td>
+                        <td><div class="tqr-name"><?= tenantQrEsc($tenant['mostagername']) ?></div><small class="text-muted">#<?= $tenantId ?></small></td>
+                        <td style="direction:ltr;text-align:right"><?= tenantQrEsc($tenant['mostagertel'] ?: '-') ?></td>
+                        <td><?= tenantQrEsc($tenant['mostageridnumber'] ?: '-') ?></td>
+                        <td class="tqr-units"><?php if(intval($tenant['unit_count'])>0): ?><span class="tqr-badge"><?= intval($tenant['unit_count']) ?> وحدة</span> <?= tenantQrEsc($tenant['units']) ?><?php else: ?>لا توجد وحدة حالية<?php endif; ?></td>
+                        <td><div class="tqr-actions"><a class="tqr-btn tqr-secondary" href="tenant_qr_view.hnt?mostagerid=<?= $tenantId ?>"><i class="bi bi-eye"></i> عرض</a><?php if($tenantQrAccess['print']): ?><a class="tqr-btn tqr-print" target="_blank" href="tenant_qr_cards_print.hnt?ids[]=<?= $tenantId ?>"><i class="bi bi-printer"></i> بطاقة</a><?php endif; ?></div></td>
+                    </tr>
+                <?php endforeach; ?>
+                <?php if(!$tenants): ?><tr><td colspan="6" class="tqr-empty">لا توجد نتائج مطابقة.</td></tr><?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php if($totalPages>1): ?><nav class="tqr-pagination"><?php if($page>1): ?><a href="<?= tenantQrEsc(tenantQrCardsPageUrl($page-1)) ?>">‹</a><?php endif; ?><?php for($p=max(1,$page-2);$p<=min($totalPages,$page+2);$p++): ?><a class="<?= $p===$page?'active':'' ?>" href="<?= tenantQrEsc(tenantQrCardsPageUrl($p)) ?>"><?= $p ?></a><?php endfor; ?><?php if($page<$totalPages): ?><a href="<?= tenantQrEsc(tenantQrCardsPageUrl($page+1)) ?>">›</a><?php endif; ?></nav><?php endif; ?>
+    </form>
+</main>
+<script>
+(function(){
+    var master=document.getElementById('tenantQrSelectAll');
+    var boxes=Array.prototype.slice.call(document.querySelectorAll('.tenant-qr-checkbox'));
+    function setAll(checked){boxes.forEach(function(box){box.checked=checked;});if(master)master.checked=checked;}
+    if(master)master.addEventListener('change',function(){setAll(master.checked);});
+    var selectButton=document.getElementById('selectVisibleTenants');
+    if(selectButton)selectButton.addEventListener('click',function(){var shouldSelect=boxes.some(function(box){return !box.checked;});setAll(shouldSelect);});
+    var form=document.getElementById('tenantQrPrintForm');
+    if(form)form.addEventListener('submit',function(event){var selected=boxes.filter(function(box){return box.checked;});if(!selected.length){event.preventDefault();alert('اختر مستأجراً واحداً على الأقل.');return;}if(selected.length>100){event.preventDefault();alert('الحد الأقصى للطباعة هو 100 بطاقة في المرة الواحدة.');}});
+})();
+</script>
+

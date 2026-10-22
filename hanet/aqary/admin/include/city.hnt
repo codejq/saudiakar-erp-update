@@ -2,20 +2,21 @@
 $sc_title="اضافة المدن والأحياء";
 $sc_id="73";
 include_once"../../nocash.hnt";
-include_once"../../header.hnt";
+include_once"../../connectdb.hnt";
 
-// Initialize country variables
-$country = isset($country) && $country != "" ? $country : $programmcountery;
-$countryid = isset($countryid) && $countryid != "" ? $countryid : $programmcountryid;
-?>
+// AJAX actions on this page are submitted by POST.
+$action = isset($_POST['action']) ? trim((string)$_POST['action']) : '';
 
-<div class="container-fluid py-4">
-
-<?php
+// Read AJAX values directly from POST. Program defaults may not be available
+// until header.hnt is loaded for a normal page request.
+$country = isset($_POST['country']) ? trim((string)$_POST['country']) : '';
+$countryid = isset($_POST['countryid'])
+	? intval($_POST['countryid'])
+	: (isset($_GET['countryid']) ? intval($_GET['countryid']) : 0);
 
 // Handle delete action
 if (isset($action) && $action == 'delete') {
-	$cityid = isset($cityid) ? intval($cityid) : 0;
+	$cityid = isset($_POST['cityid']) ? intval($_POST['cityid']) : 0;
 
 	if($cityid <= 0) {
 		header('Content-Type: application/json; charset=utf-8');
@@ -54,8 +55,8 @@ if (isset($action) && $action == 'delete') {
 if (isset($action) && $action == 'insert') {
 
 	// Sanitize inputs
-	$cityname = isset($cityname) ? trim($cityname) : '';
-	$countryid = isset($countryid) ? intval($countryid) : 0;
+	$cityname = isset($_POST['cityname']) ? trim((string)$_POST['cityname']) : '';
+	$countryid = isset($_POST['countryid']) ? intval($_POST['countryid']) : 0;
 
 	// Validate city name is not empty
 	if(empty($cityname)) {
@@ -126,7 +127,20 @@ if (isset($action) && $action == 'insert') {
 	exit();
 }
 
+// Include the page header only after AJAX handlers have returned clean JSON.
+include_once"../../header.hnt";
+
+// Apply program defaults only for the rendered page and only when available.
+if ($country === '') {
+	$country = isset($programmcountery) ? $programmcountery : '';
+}
+if ($countryid <= 0) {
+	$countryid = isset($programmcountryid) ? intval($programmcountryid) : 0;
+}
+
 ?>
+
+<div class="container-fluid py-4">
 
 
 <div id="maintitlebox" class="mb-3"></div>
@@ -140,40 +154,92 @@ if (isset($action) && $action == 'insert') {
 
 <div class="card shadow-sm mb-4">
 	<div class="card-header bg-primary text-white">
-		<h5 class="mb-0"><i class="bi bi-plus-circle"></i> إضافة مدينة جديدة</h5>
+		<h5 class="mb-0"><i class="bi bi-geo-alt"></i> اختيار الدولة</h5>
 	</div>
 	<div class="card-body">
-		<form dir="rtl" method="post" action="city.hnt" id="cityForm">
-			<div class="row g-3">
-				<div class="col-md-6">
-					<label for="countrySelect" class="form-label">اختر الدولة:</label>
-					<select name="countryid" id="countrySelect" class="form-select" required>
-						<option value="">اختر الدولة...</option>
-						<?php
-						$sql_countries = "SELECT countryid, country FROM countries ORDER BY country";
-						$result_countries = mysql_query($sql_countries, $link);
-						while($country_row = mysql_fetch_array($result_countries)) {
-							$selected = ($country_row['countryid'] == $countryid) ? 'selected' : '';
-							echo "<option value='{$country_row['countryid']}' {$selected}>{$country_row['country']}</option>";
-						}
-						?>
-					</select>
-				</div>
-				<div class="col-md-6">
-					<label for="cityname" class="form-label">اسم المدينة:</label>
-					<input type="text" name="cityname" id="cityname" class="form-control" dir="rtl" placeholder="أدخل اسم المدينة" required>
-				</div>
-				<div class="col-12">
-					<input type="hidden" name="action" value="insert">
-					<button type="submit" class="btn btn-success btn-lg" id="submitBtn">
-						<i class="bi bi-plus-lg"></i> إضافة إلى قائمة المدن
-					</button>
-					<button type="button" class="btn btn-secondary btn-lg" onclick="document.getElementById('cityname').value='';document.getElementById('cityname').focus();">
-						<i class="bi bi-x-lg"></i> مسح
-					</button>
-				</div>
+		<div class="row g-3 align-items-end">
+			<div class="col-md-9">
+				<label for="countrySelect" class="form-label">اختر الدولة:</label>
+				<select id="countrySelect" class="form-select" required>
+					<option value="">اختر الدولة...</option>
+					<?php
+					$sql_countries = "SELECT countryid, country FROM countries ORDER BY country";
+					$result_countries = mysql_query($sql_countries, $link);
+					while($country_row = mysql_fetch_array($result_countries)) {
+						$selected = ($country_row['countryid'] == $countryid) ? 'selected' : '';
+						echo "<option value='{$country_row['countryid']}' {$selected}>{$country_row['country']}</option>";
+					}
+					?>
+				</select>
 			</div>
-		</form>
+			<div class="col-md-3 d-grid">
+				<label class="form-label d-none d-md-block" aria-hidden="true">&nbsp;</label>
+				<button type="button" class="btn btn-success" id="openAddCityModal"
+					data-bs-toggle="modal" data-bs-target="#addCityModal" <?= $countryid > 0 ? '' : 'disabled' ?>>
+					<i class="bi bi-plus-circle me-1"></i> إضافة مدينة
+				</button>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div class="modal fade" id="addCityModal" tabindex="-1" aria-labelledby="addCityModalLabel" aria-hidden="true" dir="rtl">
+	<div class="modal-dialog modal-dialog-centered">
+		<div class="modal-content">
+			<form method="post" action="city.hnt" id="cityForm">
+				<div class="modal-header">
+					<h5 class="modal-title" id="addCityModalLabel"><i class="bi bi-plus-circle text-success me-2"></i>إضافة مدينة جديدة</h5>
+					<button type="button" class="btn-close ms-0" data-bs-dismiss="modal" aria-label="إغلاق"></button>
+				</div>
+				<div class="modal-body">
+					<div id="cityFormMessage"></div>
+					<div class="alert alert-light border mb-3">
+						<span class="text-muted">الدولة:</span>
+						<strong id="selectedCountryName"></strong>
+					</div>
+					<label for="cityname" class="form-label">اسم المدينة:</label>
+					<input type="text" name="cityname" id="cityname" class="form-control" dir="rtl" placeholder="أدخل اسم المدينة" required autocomplete="off">
+					<input type="hidden" name="countryid" id="cityFormCountryId" value="<?= intval($countryid) ?>">
+					<input type="hidden" name="action" value="insert">
+				</div>
+				<div class="modal-footer justify-content-start">
+					<button type="submit" class="btn btn-success" id="submitBtn">
+						<i class="bi bi-plus-lg me-1"></i> إضافة
+					</button>
+					<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+				</div>
+			</form>
+		</div>
+	</div>
+</div>
+
+<div class="modal fade" id="addRegionModal" tabindex="-1" aria-labelledby="addRegionModalLabel" aria-hidden="true" dir="rtl">
+	<div class="modal-dialog modal-dialog-centered">
+		<div class="modal-content">
+			<form method="post" action="mokhatat.hnt" id="regionForm">
+				<div class="modal-header">
+					<h5 class="modal-title" id="addRegionModalLabel"><i class="bi bi-pin-map text-success me-2"></i>إضافة منطقة / حي</h5>
+					<button type="button" class="btn-close ms-0" data-bs-dismiss="modal" aria-label="إغلاق"></button>
+				</div>
+				<div class="modal-body">
+					<div id="regionFormMessage"></div>
+					<div class="alert alert-light border mb-3">
+						<span class="text-muted">المدينة:</span>
+						<strong id="regionCityName"></strong>
+					</div>
+					<label for="regionName" class="form-label">اسم المنطقة / الحي:</label>
+					<input type="text" name="mokhatatname" id="regionName" class="form-control" dir="rtl" placeholder="أدخل اسم المنطقة أو الحي" required autocomplete="off">
+					<input type="hidden" name="cityid" id="regionFormCityId" value="">
+					<input type="hidden" name="action" value="insert">
+				</div>
+				<div class="modal-footer justify-content-start">
+					<button type="submit" class="btn btn-success" id="regionSubmitBtn">
+						<i class="bi bi-plus-lg me-1"></i> إضافة
+					</button>
+					<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
+				</div>
+			</form>
+		</div>
 	</div>
 </div>
 
@@ -229,17 +295,17 @@ function fillfreecontrato(){
 				response.cities.forEach(function(city, index) {
 					tableHtml += '<tr>';
 					tableHtml += '<td>' + (index + 1) + '</td>';
-					tableHtml += '<td><strong>' + city.cityname + '</strong></td>';
+					tableHtml += '<td><strong class="city-name">' + city.cityname + '</strong></td>';
 					tableHtml += '<td><span class="badge bg-info">' + city.region_count + '</span></td>';
 					tableHtml += '<td class="text-center">';
 					tableHtml += '<div class="btn-group btn-group-sm gap-1" role="group">';
 					tableHtml += '<a href="/aqary/admin/include/mokhatat.hnt?action=view&cityid=' + city.cityid + '" class="btn btn-primary" title="عرض المناطق">';
 					tableHtml += '<i class="bi bi-eye"></i> عرض';
 					tableHtml += '</a>';
-					tableHtml += '<a href="/aqary/admin/include/mokhatat.hnt?action=add&cityid=' + city.cityid + '" class="btn btn-success ms-1" title="إضافة منطقة">';
+					tableHtml += '<button type="button" class="btn btn-success ms-1 btn-add-region" data-city-id="' + city.cityid + '" title="إضافة منطقة">';
 					tableHtml += '<i class="bi bi-plus-circle"></i> إضافة';
-					tableHtml += '</a>';
-					tableHtml += `<button class="btn btn-danger ms-1" onclick="deleteCity(' + city.cityid + ', '' + city.cityname.replace(/'/g, "\'") + '')" title="حذف">`;
+					tableHtml += '</button>';
+					tableHtml += `<button class="btn btn-danger ms-1" onclick="deleteCity(${city.cityid}, '${city.cityname.replace(/'/g, '')}')" title="حذف">`;
 					tableHtml += '<i class="bi bi-trash"></i> حذف';
 					tableHtml += '</button>';
 					tableHtml += '</div>';
@@ -263,7 +329,10 @@ function fillfreecontrato(){
 
 // Delete city function
 function deleteCity(cityid, cityname) {
-	if(confirm('هل أنت متأكد من حذف مدينة "' + cityname + '"؟\nسيتم حذف جميع المناطق المرتبطة بها.')) {
+	confirm(
+		'هل أنت متأكد من حذف مدينة "' + cityname + '"؟\nسيتم حذف جميع المناطق المرتبطة بها.',
+		'تأكيد الحذف',
+		function() {
 		$.ajax({
 			url: 'city.hnt',
 			type: 'POST',
@@ -292,15 +361,38 @@ function deleteCity(cityid, cityname) {
 				alert('حدث خطأ في الاتصال بالخادم');
 			}
 		});
-	}
+		}
+	);
 }
 
 // Initialize Select2 and event handlers
 $(document).ready(function() {
+	function syncAddCityCountry() {
+		var selectedCountryId = $('#countrySelect').val() || '';
+		var selectedCountryName = selectedCountryId ? $('#countrySelect option:selected').text() : '';
+		$('#cityFormCountryId').val(selectedCountryId);
+		$('#selectedCountryName').text(selectedCountryName);
+		$('#openAddCityModal').prop('disabled', !selectedCountryId);
+		return selectedCountryId;
+	}
+
+	$('#addCityModal').on('show.bs.modal', function(e) {
+		if (!syncAddCityCountry()) {
+			e.preventDefault();
+			return;
+		}
+		$('#cityFormMessage').empty();
+	}).on('shown.bs.modal', function() {
+		$('#cityname').trigger('focus');
+	});
 
 	// Handle form submission via AJAX
 	$('#cityForm').on('submit', function(e) {
 		e.preventDefault(); // Prevent default form submission
+		if (!syncAddCityCountry()) {
+			$('#cityFormMessage').html('<div class="alert alert-danger">برجاء اختيار الدولة أولاً</div>');
+			return;
+		}
 
 		var formData = $(this).serialize();
 		var submitBtn = $('#submitBtn');
@@ -318,6 +410,12 @@ $(document).ready(function() {
 			dataType: 'json',
 			success: function(response) {
 				if(response.success) {
+					var modalElement = document.getElementById('addCityModal');
+					var modalInstance = bootstrap.Modal.getInstance(modalElement);
+					if (modalInstance) {
+						modalInstance.hide();
+					}
+
 					// Show success message
 					$('#maintitlebox').html(
 						'<div class="alert alert-success alert-dismissible fade show" role="alert">' +
@@ -327,7 +425,8 @@ $(document).ready(function() {
 					);
 
 					// Clear form
-					$('#cityname').val('').focus();
+					$('#cityname').val('');
+					$('#cityFormMessage').empty();
 
 					// Reload cities table
 					fillfreecontrato();
@@ -338,27 +437,99 @@ $(document).ready(function() {
 					}, 5000);
 
 				} else {
-					// Show error message
-					$('#maintitlebox').html(
-						'<div class="alert alert-danger alert-dismissible fade show" role="alert">' +
+					// Keep validation errors visible inside the open modal.
+					$('#cityFormMessage').html(
+						'<div class="alert alert-danger mb-3" role="alert">' +
 						'<strong>خطأ!</strong> ' + response.message +
-						'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
 						'</div>'
 					);
 				}
 			},
 			error: function(xhr, status, error) {
-				// Show error message
-				$('#maintitlebox').html(
-					'<div class="alert alert-danger alert-dismissible fade show" role="alert">' +
+				$('#cityFormMessage').html(
+					'<div class="alert alert-danger mb-3" role="alert">' +
 					'<strong>خطأ!</strong> حدث خطأ في الاتصال بالخادم' +
-					'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
 					'</div>'
 				);
 				console.error('AJAX Error:', status, error);
 			},
 			complete: function() {
 				// Re-enable button and restore text
+				submitBtn.prop('disabled', false).html(originalBtnText);
+			}
+		});
+	});
+
+	var addRegionModal = null;
+	$(document).on('click', '.btn-add-region', function() {
+		var button = $(this);
+		var cityId = parseInt(button.data('city-id'), 10) || 0;
+		var cityName = $.trim(button.closest('tr').find('.city-name').text());
+		if (!cityId) {
+			return;
+		}
+
+		$('#regionFormCityId').val(cityId);
+		$('#regionCityName').text(cityName);
+		$('#regionName').val('');
+		$('#regionFormMessage').empty();
+
+		if (!addRegionModal) {
+			addRegionModal = new bootstrap.Modal(document.getElementById('addRegionModal'));
+		}
+		addRegionModal.show();
+	});
+
+	$('#addRegionModal').on('shown.bs.modal', function() {
+		$('#regionName').trigger('focus');
+	});
+
+	$('#regionForm').on('submit', function(e) {
+		e.preventDefault();
+		var cityId = parseInt($('#regionFormCityId').val(), 10) || 0;
+		if (!cityId) {
+			$('#regionFormMessage').html('<div class="alert alert-danger">معرف المدينة غير صحيح</div>');
+			return;
+		}
+
+		var formData = $(this).serialize();
+		var submitBtn = $('#regionSubmitBtn');
+		var originalBtnText = submitBtn.html();
+		submitBtn.prop('disabled', true)
+			.html('<span class="spinner-border spinner-border-sm" role="status"></span> جاري الإضافة...');
+
+		$.ajax({
+			url: 'mokhatat.hnt',
+			type: 'POST',
+			data: formData,
+			dataType: 'json',
+			success: function(response) {
+				if (response.success) {
+					if (addRegionModal) {
+						addRegionModal.hide();
+					}
+					$('#regionName').val('');
+					$('#regionFormMessage').empty();
+					$('#maintitlebox').html(
+						'<div class="alert alert-success alert-dismissible fade show" role="alert">' +
+						'<strong>نجح!</strong> ' + response.message +
+						'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+						'</div>'
+					);
+					fillfreecontrato();
+				} else {
+					$('#regionFormMessage').html(
+						'<div class="alert alert-danger mb-3"><strong>خطأ!</strong> ' + response.message + '</div>'
+					);
+				}
+			},
+			error: function(xhr, status, error) {
+				$('#regionFormMessage').html(
+					'<div class="alert alert-danger mb-3"><strong>خطأ!</strong> حدث خطأ في الاتصال بالخادم</div>'
+				);
+				console.error('Region AJAX Error:', status, error);
+			},
+			complete: function() {
 				submitBtn.prop('disabled', false).html(originalBtnText);
 			}
 		});
@@ -389,6 +560,7 @@ $(document).ready(function() {
 		$('#countrySelect').on('select2:select', function(e) {
 			var countryId = e.params.data.id;
 			console.log('Country selected:', countryId);
+			syncAddCityCountry();
 
 			// Load cities without page reload for better UX
 			fillfreecontrato();
@@ -401,9 +573,12 @@ $(document).ready(function() {
 
 		// Trigger event when country is cleared
 		$('#countrySelect').on('select2:clear', function() {
+			syncAddCityCountry();
 			document.getElementById('containerid').innerHTML = '<div class="alert alert-info text-center"><i class="bi bi-info-circle"></i> الرجاء اختيار دولة لعرض المدن</div>';
 		});
 	}
+
+	syncAddCityCountry();
 
 	// Load cities if country is already selected on page load
 	<?php if($countryid): ?>

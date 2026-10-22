@@ -1,0 +1,397 @@
+<?php
+/**
+ * ============================================================================
+ * Schema Verification Script
+ * ============================================================================
+ *
+ * Purpose: Verify database schema is correct for new system
+ *
+ * Checks:
+ * 1. All required fields exist in egar table
+ * 2. All required fields exist in aksat table
+ * 3. egar_history table exists and has correct structure
+ * 4. Indexes are in place
+ * 5. Data integrity checks
+ *
+ * Date: 2025-12-05
+ * ============================================================================
+ */
+
+// Security check
+$isCLI = php_sapi_name() === 'cli';
+$runParam = isset($_GET['run']) && $_GET['run'] == '1';
+
+if (!$isCLI && !$runParam) {
+    die('Access denied. Use ?run=1 to execute or run from CLI.');
+}
+
+// Include required files
+require_once '../../../connectdb.hnt';
+
+// Initialize results
+$checks = [];
+$passed = 0;
+$failed = 0;
+$warnings = 0;
+
+// Output header
+outputHeader();
+
+// ============================================================================
+// CHECK 1: Egar Table Structure
+// ============================================================================
+
+echo "CHECK 1: Egar Table Structure\n";
+echo str_repeat('-', 70) . "\n";
+
+$egarFields = [
+    'status' => 'Contract status field',
+    'calendar_type' => 'Calendar type field (Hijri/Gregorian)',
+    'created_by_userid' => 'Created by user ID',
+    'updated_at' => 'Last update timestamp',
+    'updated_by_userid' => 'Last updated by user ID',
+    'fixed_payment_day' => 'Fixed payment day (1-31)',
+    'installments_extended_to' => 'Installments coverage timestamp',
+    'annual_rent_increase_percent' => 'Annual base-rent increase percentage',
+    'max_rent_increase_percent' => 'Maximum cumulative rent increase percentage',
+    'sales_representative_userid' => 'Default sales representative for the contract'
+];
+
+foreach ($egarFields as $field => $description) {
+    $sql = "SHOW COLUMNS FROM egar LIKE '{$field}'";
+    $result = mysql_query($sql, $link);
+
+    if (mysql_num_rows($result) > 0) {
+        echo "  ✅ {$field}: Found\n";
+        $passed++;
+    } else {
+        echo "  ❌ {$field}: MISSING - {$description}\n";
+        $failed++;
+        $checks[] = "Missing field: egar.{$field}";
+    }
+}
+
+// ============================================================================
+// CHECK 2: Aksat Table Structure
+// ============================================================================
+
+echo "\nCHECK 2: Aksat Table Structure\n";
+echo str_repeat('-', 70) . "\n";
+
+$aksatFields = [
+    'status' => 'Installment status',
+    'amount_paid' => 'Amount paid so far',
+    'amount_remaining' => 'Amount remaining',
+    'grace_period_days' => 'Grace period days',
+    'effective_due_date' => 'Due date with grace period',
+    'base_rent_amount' => 'Escalated rent amount excluding fees',
+    'rent_increase_percent' => 'Applied cumulative rent increase percentage',
+    'created_at' => 'Creation timestamp',
+    'updated_at' => 'Last update timestamp'
+];
+
+foreach ($aksatFields as $field => $description) {
+    $sql = "SHOW COLUMNS FROM aksat LIKE '{$field}'";
+    $result = mysql_query($sql, $link);
+
+    if (mysql_num_rows($result) > 0) {
+        echo "  ✅ {$field}: Found\n";
+        $passed++;
+    } else {
+        echo "  ❌ {$field}: MISSING - {$description}\n";
+        $failed++;
+        $checks[] = "Missing field: aksat.{$field}";
+    }
+}
+
+$sanadSalesFields = [
+    'sales_representative_userid' => 'Sales representative linked to the receipt',
+    'sales_commission_type' => 'Commission calculation type snapshot',
+    'sales_commission_value' => 'Commission rule value snapshot',
+    'sales_commission_amount' => 'Calculated receipt commission amount'
+];
+
+foreach ($sanadSalesFields as $field => $description) {
+    $sql = "SHOW COLUMNS FROM sanad LIKE '{$field}'";
+    $result = mysql_query($sql, $link);
+    if ($result && mysql_num_rows($result) > 0) {
+        echo "  ✅ sanad.{$field}: Found\n";
+        $passed++;
+    } else {
+        echo "  ❌ sanad.{$field}: MISSING - {$description}\n";
+        $failed++;
+        $checks[] = "Missing field: sanad.{$field}";
+    }
+}
+
+// ============================================================================
+// CHECK 3: Egar History Table
+// ============================================================================
+
+echo "\nCHECK 3: Egar History Table\n";
+echo str_repeat('-', 70) . "\n";
+
+$sql = "SHOW TABLES LIKE 'egar_history'";
+$result = mysql_query($sql, $link);
+
+if (mysql_num_rows($result) > 0) {
+    echo "  ✅ egar_history table exists\n";
+    $passed++;
+
+    // Check columns
+    $historyFields = ['egar_id', 'action_type', 'change_description', 'changed_by_userid', 'changed_at'];
+    foreach ($historyFields as $field) {
+        $sql = "SHOW COLUMNS FROM egar_history LIKE '{$field}'";
+        $result = mysql_query($sql, $link);
+
+        if (mysql_num_rows($result) > 0) {
+            echo "  ✅ egar_history.{$field}: Found\n";
+            $passed++;
+        } else {
+            echo "  ❌ egar_history.{$field}: MISSING\n";
+            $failed++;
+        }
+    }
+} else {
+    echo "  ❌ egar_history table MISSING\n";
+    $failed++;
+    $checks[] = "Missing table: egar_history";
+}
+
+// ============================================================================
+// CHECK 4: Indexes
+// ============================================================================
+
+echo "\nCHECK 4: Database Indexes\n";
+echo str_repeat('-', 70) . "\n";
+
+// Check egar indexes
+$sql = "SHOW INDEX FROM egar WHERE Key_name = 'idx_installments_extended'";
+$result = mysql_query($sql, $link);
+if (mysql_num_rows($result) > 0) {
+    echo "  ✅ egar.idx_installments_extended: Found\n";
+    $passed++;
+} else {
+    echo "  ⚠️  egar.idx_installments_extended: Missing (recommended for performance)\n";
+    $warnings++;
+}
+
+// Check aksat indexes
+$sql = "SHOW INDEX FROM aksat WHERE Key_name = 'idx_status'";
+$result = mysql_query($sql, $link);
+if (mysql_num_rows($result) > 0) {
+    echo "  ✅ aksat.idx_status: Found\n";
+    $passed++;
+} else {
+    echo "  ⚠️  aksat.idx_status: Missing (recommended for performance)\n";
+    $warnings++;
+}
+
+// ============================================================================
+// CHECK 5: Data Integrity
+// ============================================================================
+
+echo "\nCHECK 5: Data Integrity\n";
+echo str_repeat('-', 70) . "\n";
+
+// 5.1 - Contracts with status
+$sql = "SELECT COUNT(*) as total,
+               SUM(CASE WHEN status IS NOT NULL AND status != '' THEN 1 ELSE 0 END) as with_status
+        FROM egar";
+$result = mysql_fetch_assoc(mysql_query($sql, $link));
+
+if ($result['total'] == $result['with_status']) {
+    echo "  ✅ All {$result['total']} contracts have status\n";
+    $passed++;
+} else {
+    $missing = $result['total'] - $result['with_status'];
+    echo "  ❌ {$missing} of {$result['total']} contracts missing status\n";
+    $failed++;
+}
+
+// 5.2 - Installments with status
+$sql = "SELECT COUNT(*) as total,
+               SUM(CASE WHEN status IS NOT NULL AND status != '' THEN 1 ELSE 0 END) as with_status
+        FROM aksat";
+$result = mysql_fetch_assoc(mysql_query($sql, $link));
+
+if ($result['total'] == $result['with_status']) {
+    echo "  ✅ All {$result['total']} installments have status\n";
+    $passed++;
+} else {
+    $missing = $result['total'] - $result['with_status'];
+    echo "  ❌ {$missing} of {$result['total']} installments missing status\n";
+    $failed++;
+}
+
+// 5.3 - Contracts with calendar_type
+$sql = "SELECT COUNT(*) as total,
+               SUM(CASE WHEN calendar_type IS NOT NULL THEN 1 ELSE 0 END) as with_type
+        FROM egar";
+$result = mysql_fetch_assoc(mysql_query($sql, $link));
+
+if ($result['total'] == $result['with_type']) {
+    echo "  ✅ All {$result['total']} contracts have calendar_type\n";
+    $passed++;
+} else {
+    $missing = $result['total'] - $result['with_type'];
+    echo "  ⚠️  {$missing} of {$result['total']} contracts missing calendar_type\n";
+    $warnings++;
+}
+
+// 5.4 - Contracts with history
+$sql = "SELECT COUNT(DISTINCT rakam3akdid) as total_contracts FROM egar";
+$totalContracts = mysql_fetch_assoc(mysql_query($sql, $link))['total_contracts'];
+
+$sql = "SELECT COUNT(DISTINCT egar_id) as with_history FROM egar_history";
+$withHistory = mysql_fetch_assoc(mysql_query($sql, $link))['with_history'];
+
+$percentage = $totalContracts > 0 ? round(($withHistory / $totalContracts) * 100, 1) : 0;
+echo "  ℹ️  {$withHistory} of {$totalContracts} contracts have history ({$percentage}%)\n";
+
+if ($percentage < 50) {
+    $warnings++;
+}
+
+// ============================================================================
+// CHECK 6: Configuration Files
+// ============================================================================
+
+echo "\nCHECK 6: Required Files\n";
+echo str_repeat('-', 70) . "\n";
+
+$requiredFiles = [
+    'CalendarManager.class.hnt' => 'Calendar management class',
+    'auto_renewal_config.hnt' => 'Auto-renewal configuration',
+    'auto_add_installments.api.hnt' => 'Daily installment service',
+    'payment_trigger_installments.hnt' => 'Payment trigger',
+    'contract_status_indicator.hnt' => 'Status indicator helper (optional)'
+];
+
+foreach ($requiredFiles as $file => $description) {
+    if (file_exists(__DIR__ . '/' . $file)) {
+        echo "  ✅ {$file}: Found\n";
+        $passed++;
+    } else {
+        if (strpos($description, 'optional') !== false) {
+            echo "  ⚠️  {$file}: Not found ({$description})\n";
+            $warnings++;
+        } else {
+            echo "  ❌ {$file}: MISSING - {$description}\n";
+            $failed++;
+        }
+    }
+}
+
+// ============================================================================
+// CHECK 7: Configuration Constants
+// ============================================================================
+
+echo "\nCHECK 7: Configuration Constants\n";
+echo str_repeat('-', 70) . "\n";
+
+if (file_exists(__DIR__ . '/auto_renewal_config.hnt')) {
+    require_once 'auto_renewal_config.hnt';
+
+    $constants = [
+        'INSTALLMENT_MONTHS_UPFRONT',
+        'INSTALLMENT_GENERATION_THRESHOLD_DAYS',
+        'AUTO_ADD_ON_LAST_PAYMENT',
+        'MAX_HIJRI_DAY',
+        'INSTALLMENT_GRACE_PERIOD_DAYS'
+    ];
+
+    foreach ($constants as $constant) {
+        if (defined($constant)) {
+            $value = constant($constant);
+            $display = is_bool($value) ? ($value ? 'true' : 'false') : $value;
+            echo "  ✅ {$constant}: {$display}\n";
+            $passed++;
+        } else {
+            echo "  ❌ {$constant}: NOT DEFINED\n";
+            $failed++;
+        }
+    }
+} else {
+    echo "  ❌ Cannot check constants (auto_renewal_config.hnt missing)\n";
+    $failed++;
+}
+
+// ============================================================================
+// Summary
+// ============================================================================
+
+echo "\n" . str_repeat('=', 70) . "\n";
+echo "VERIFICATION SUMMARY\n";
+echo str_repeat('=', 70) . "\n\n";
+
+$total = $passed + $failed + $warnings;
+echo "Total Checks: {$total}\n";
+echo "  ✅ Passed: {$passed}\n";
+echo "  ❌ Failed: {$failed}\n";
+echo "  ⚠️  Warnings: {$warnings}\n\n";
+
+if ($failed == 0 && $warnings == 0) {
+    echo "🎉 RESULT: All checks passed! System is ready.\n\n";
+} elseif ($failed == 0) {
+    echo "✅ RESULT: All critical checks passed. Review warnings above.\n\n";
+} else {
+    echo "❌ RESULT: Some checks failed. Review errors above.\n\n";
+    echo "Failed Checks:\n";
+    foreach ($checks as $check) {
+        echo "  - {$check}\n";
+    }
+    echo "\n";
+}
+
+echo "Next Steps:\n";
+if ($failed > 0) {
+    echo "  1. Run Phase 1 database migration script\n";
+    echo "  2. Re-run this verification script\n";
+    echo "  3. Once all checks pass, proceed to Phase 4 migration\n";
+} else {
+    echo "  1. If not done yet: Run Phase 4 migration (migrate_existing_contracts.hnt)\n";
+    echo "  2. Test contract creation and viewing\n";
+    echo "  3. Test installment payment registration\n";
+    echo "  4. Proceed to Phase 5: Testing & Training\n";
+}
+echo "\n";
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+function outputHeader() {
+    $isCLI = php_sapi_name() === 'cli';
+
+    if (!$isCLI) {
+        echo "<!DOCTYPE html>\n";
+        echo "<html dir='rtl' lang='ar'>\n";
+        echo "<head>\n";
+        echo "<meta charset='UTF-8'>\n";
+        echo "<title>Schema Verification</title>\n";
+        echo "<style>\n";
+        echo "body { font-family: 'Courier New', monospace; margin: 20px; background: #f5f5f5; }\n";
+        echo "pre { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); line-height: 1.6; }\n";
+        echo "</style>\n";
+        echo "</head>\n";
+        echo "<body><pre>\n";
+    }
+
+    echo "\n";
+    echo "╔═══════════════════════════════════════════════════════════════════════╗\n";
+    echo "║                                                                       ║\n";
+    echo "║                      SCHEMA VERIFICATION SCRIPT                       ║\n";
+    echo "║                                                                       ║\n";
+    echo "║  Purpose: Verify database schema for new system                      ║\n";
+    echo "║  Date: " . date('Y-m-d H:i:s') . "                                           ║\n";
+    echo "║                                                                       ║\n";
+    echo "╚═══════════════════════════════════════════════════════════════════════╝\n\n";
+}
+
+// Close HTML if web request
+if (!$isCLI) {
+    echo "</pre></body></html>";
+}
+
+?>

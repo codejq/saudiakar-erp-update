@@ -16,6 +16,60 @@ class AmlakAccountingIntegration {
         $this->accountingManager = $accountingManager;
     }
 
+    private function sourceEntry($column, $sourceId, $referenceType) {
+        $allowedColumns = ['sanad_id', 'sanadsarf_id', 'masrofat_id'];
+        if (!in_array($column, $allowedColumns, true) || (int)$sourceId <= 0) {
+            return null;
+        }
+
+        $stmt = $this->db->prepare("SELECT entry_id, entry_number FROM acc_journal_entries
+            WHERE {$column}=? OR (reference_type=? AND reference_id=?)
+            ORDER BY entry_id DESC LIMIT 1");
+        if (!$stmt) {
+            return null;
+        }
+        $sourceId = (int)$sourceId;
+        $stmt->bind_param('isi', $sourceId, $referenceType, $sourceId);
+        $stmt->execute();
+        $entry = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $entry ?: null;
+    }
+
+    private function accountId($settingKey, $fallbackCode) {
+        $configuredId = (int)$this->accountingManager->getSetting($settingKey, 0);
+        if ($configuredId > 0) {
+            $configured = $this->db->prepare("SELECT account_id FROM acc_chart_of_accounts WHERE account_id=? AND is_active=1 LIMIT 1");
+            if ($configured) {
+                $configured->bind_param('i', $configuredId);
+                $configured->execute();
+                $row = $configured->get_result()->fetch_assoc();
+                $configured->close();
+                if ($row) {
+                    return (int)$row['account_id'];
+                }
+            }
+        }
+
+        $fallback = $this->db->prepare("SELECT account_id FROM acc_chart_of_accounts WHERE account_code=? AND is_active=1 LIMIT 1");
+        if (!$fallback) {
+            return 0;
+        }
+        $fallback->bind_param('s', $fallbackCode);
+        $fallback->execute();
+        $row = $fallback->get_result()->fetch_assoc();
+        $fallback->close();
+        return $row ? (int)$row['account_id'] : 0;
+    }
+
+    private function timestampDate($value) {
+        $timestamp = (int)$value;
+        if ($timestamp > 20000000000) {
+            $timestamp = (int)floor($timestamp / 1000);
+        }
+        return $timestamp > 0 ? date('Y-m-d', $timestamp) : date('Y-m-d');
+    }
+
     private function buildPropertyContext($aqarId, $subaqarId = null) {
         $aqarId = (int)$aqarId;
         $subaqarId = !empty($subaqarId) ? (int)$subaqarId : null;
@@ -25,19 +79,22 @@ class AmlakAccountingIntegration {
                 'aqar_id' => null,
                 'subaqar_id' => $subaqarId,
                 'property_name' => null,
+                'owner_id' => null,
                 'sub_property_name' => null,
                 'cost_center_id' => null,
                 'cost_center_message' => null
             ];
         }
 
-        $propertyStmt = $this->db->prepare("SELECT aqarname FROM amlak WHERE idaqar = ? LIMIT 1");
+        $propertyStmt = $this->db->prepare("SELECT aqarname, ownerid FROM amlak WHERE idaqar = ? LIMIT 1");
         $propertyName = null;
+        $ownerId = null;
         if ($propertyStmt) {
             $propertyStmt->bind_param('i', $aqarId);
             $propertyStmt->execute();
             $propertyRow = $propertyStmt->get_result()->fetch_assoc();
             $propertyName = $propertyRow['aqarname'] ?? null;
+            $ownerId = !empty($propertyRow['ownerid']) ? (int)$propertyRow['ownerid'] : null;
             $propertyStmt->close();
         }
 
@@ -59,6 +116,7 @@ class AmlakAccountingIntegration {
             'aqar_id' => $aqarId,
             'subaqar_id' => $subaqarId,
             'property_name' => $propertyName,
+            'owner_id' => $ownerId,
             'sub_property_name' => $subPropertyName,
             'cost_center_id' => $costCenterResult['success'] ? ($costCenterResult['cost_center']['cost_center_id'] ?? null) : null,
             'cost_center_message' => $costCenterResult['success'] ? null : ($costCenterResult['message'] ?? null)
@@ -101,6 +159,28 @@ class AmlakAccountingIntegration {
             }
         }
 
+        if (!$context['egar_id'] && !empty($sanad['kastid'])) {
+            $installmentId = (int)$sanad['kastid'];
+            if ($installmentId > 0) {
+                $stmt = $this->db->prepare("SELECT e.rakam3akdid, e.mostagerid, e.idaqar, e.idsubaqar
+                    FROM aksat k
+                    INNER JOIN egar e ON e.rakam3akdid=k.egar_id
+                    WHERE k.kastid=? LIMIT 1");
+                if ($stmt) {
+                    $stmt->bind_param('i', $installmentId);
+                    $stmt->execute();
+                    $egar = $stmt->get_result()->fetch_assoc();
+                    $stmt->close();
+                    if ($egar) {
+                        $context['egar_id'] = (int)$egar['rakam3akdid'];
+                        $context['tenant_id'] = $context['tenant_id'] ?: (!empty($egar['mostagerid']) ? (int)$egar['mostagerid'] : null);
+                        $context['aqar_id'] = $context['aqar_id'] ?: (!empty($egar['idaqar']) ? (int)$egar['idaqar'] : null);
+                        $context['subaqar_id'] = $context['subaqar_id'] ?: (!empty($egar['idsubaqar']) ? (int)$egar['idsubaqar'] : null);
+                    }
+                }
+            }
+        }
+
         if (!$context['egar_id'] && !$context['aqar_id'] && !$context['tenant_id']) {
             $referenceText = trim((string)($sanad['mybyan'] ?? ''));
             if ($referenceText !== '') {
@@ -124,6 +204,7 @@ class AmlakAccountingIntegration {
         $propertyContext = $this->buildPropertyContext($context['aqar_id'], $context['subaqar_id']);
         $context['property_name'] = $propertyContext['property_name'];
         $context['cost_center_id'] = $propertyContext['cost_center_id'];
+        $context['owner_id'] = $context['owner_id'] ?: $propertyContext['owner_id'];
 
         return $context;
     }
@@ -150,6 +231,48 @@ class AmlakAccountingIntegration {
             return ['success' => false, 'message' => 'Contract not found'];
         }
 
+        if (!empty($egar['invoice_id'])) {
+            $invoiceCheck = $this->db->prepare("SELECT invoice_id, invoice_number FROM acc_invoices WHERE invoice_id=? LIMIT 1");
+            if ($invoiceCheck) {
+                $invoiceId = (int)$egar['invoice_id'];
+                $invoiceCheck->bind_param('i', $invoiceId);
+                $invoiceCheck->execute();
+                $existingInvoice = $invoiceCheck->get_result()->fetch_assoc();
+                $invoiceCheck->close();
+                if ($existingInvoice) {
+                    return [
+                        'success' => true,
+                        'existing' => true,
+                        'invoice_id' => (int)$existingInvoice['invoice_id'],
+                        'invoice_number' => $existingInvoice['invoice_number']
+                    ];
+                }
+            }
+        }
+
+        $invoiceByContract = $this->db->prepare("SELECT invoice_id, invoice_number FROM acc_invoices WHERE egar_id=? ORDER BY invoice_id LIMIT 1");
+        if ($invoiceByContract) {
+            $invoiceByContract->bind_param('i', $egarId);
+            $invoiceByContract->execute();
+            $existingInvoice = $invoiceByContract->get_result()->fetch_assoc();
+            $invoiceByContract->close();
+            if ($existingInvoice) {
+                $updateContract = $this->db->prepare("UPDATE egar SET invoice_id=? WHERE rakam3akdid=?");
+                if ($updateContract) {
+                    $existingInvoiceId = (int)$existingInvoice['invoice_id'];
+                    $updateContract->bind_param('ii', $existingInvoiceId, $egarId);
+                    $updateContract->execute();
+                    $updateContract->close();
+                }
+                return [
+                    'success' => true,
+                    'existing' => true,
+                    'invoice_id' => (int)$existingInvoice['invoice_id'],
+                    'invoice_number' => $existingInvoice['invoice_number']
+                ];
+            }
+        }
+
         $propertyContext = $this->buildPropertyContext($egar['idaqar'] ?? 0, $egar['idsubaqar'] ?? null);
         $salesJournalId = $this->accountingManager->getDefaultJournalIdByCode('SAL');
 
@@ -167,7 +290,7 @@ class AmlakAccountingIntegration {
             'customer_vat_number' => $egar['mostagervatnumber'] ?? null,
             'customer_address' => null,
             'invoice_date' => date('Y-m-d'),
-            'due_date' => $egar['egarenddate'] ?? null,
+            'due_date' => $this->timestampDate($egar['endegar'] ?? 0),
             'payment_method' => 'bank_transfer',
             'notes' => "إيجار {$egar['aqarname']} - عقد رقم {$egar['rakam3akdid']}",
             'journal_id' => $salesJournalId,
@@ -209,12 +332,26 @@ class AmlakAccountingIntegration {
      * إنشاء قيد من سند القبض
      */
     public function createEntryFromSanad($sanadId) {
-        // Get sanad details
-        $sanadQuery = "SELECT * FROM sanad WHERE idsanad = ?";
+        $sanadId = (int)$sanadId;
+        $existingEntry = $this->sourceEntry('sanad_id', $sanadId, 'sanad');
+        if ($existingEntry) {
+            return [
+                'success' => true,
+                'existing' => true,
+                'entry_id' => (int)$existingEntry['entry_id'],
+                'entry_number' => $existingEntry['entry_number']
+            ];
+        }
+
+        $sanadQuery = "SELECT s.*, COALESCE(b.ownerid2,0) AS bank_owner_id
+                       FROM sanad s
+                       LEFT JOIN bankacounts b ON b.id=s.bankid
+                       WHERE s.idsanad=? LIMIT 1";
         $stmt = $this->db->prepare($sanadQuery);
         $stmt->bind_param('i', $sanadId);
         $stmt->execute();
         $sanad = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
 
         if (!$sanad) {
             return ['success' => false, 'message' => 'Voucher not found'];
@@ -238,16 +375,12 @@ class AmlakAccountingIntegration {
             return ['success' => false, 'message' => 'Invalid amount in voucher'];
         }
 
-        // Convert timestamp to date (sanaddate is in seconds)
-        $sanadDate = date('Y-m-d');
-        if (!empty($sanad['sanaddate'])) {
-            $sanadDate = date('Y-m-d', $sanad['sanaddate']);
-        }
+        $sanadDate = $this->timestampDate($sanad['sanaddate'] ?? 0);
 
         // Prepare journal entry
         $entryData = [
             'entry_date' => $sanadDate,
-            'entry_type' => 'payment',
+            'entry_type' => 'receipt',
             'journal_id' => $receiptJournalId,
             'tenant_id' => $sanadContext['tenant_id'],
             'owner_id' => $sanadContext['owner_id'],
@@ -256,34 +389,26 @@ class AmlakAccountingIntegration {
             'egar_id' => $sanadContext['egar_id'],
             'sanad_id' => $sanadId,
             'invoice_id' => $sanadContext['invoice_id'],
+            'sales_representative_userid' => !empty($sanad['sales_representative_userid'])
+                ? (int)$sanad['sales_representative_userid'] : null,
             'reference_type' => 'sanad',
             'reference_id' => $sanadId,
             'description' => $sanad['mybyan'] ?? "سند قبض رقم " . ($sanad['sanadrakam'] ?? $sanadId),
             'status' => 'posted'
         ];
 
-        // Get account IDs from chart of accounts by code
-        $cashAccountQuery = "SELECT account_id FROM acc_chart_of_accounts WHERE account_code = '1111' AND is_active = 1 LIMIT 1";
-        $cashResult = $this->db->query($cashAccountQuery);
-        $cashAccount = $cashResult->fetch_assoc();
-        $cashAccountId = $cashAccount['account_id'] ?? 2;
-
-        $bankAccountQuery = "SELECT account_id FROM acc_chart_of_accounts WHERE account_code = '1112' AND is_active = 1 LIMIT 1";
-        $bankResult = $this->db->query($bankAccountQuery);
-        $bankAccount = $bankResult->fetch_assoc();
-        $bankAccountId = $bankAccount['account_id'] ?? 3;
-
-        $receivableAccountQuery = "SELECT account_id FROM acc_chart_of_accounts WHERE account_code = '1121' AND is_active = 1 LIMIT 1";
-        $receivableResult = $this->db->query($receivableAccountQuery);
-        $receivableAccount = $receivableResult->fetch_assoc();
-        $receivableAccountId = $receivableAccount['account_id'] ?? 4;
+        $cashAccountId = $this->accountId('default_receipt_cash_account_id', '1111');
+        $bankAccountId = $this->accountId('default_receipt_bank_account_id', '1112');
+        $ownerFundsAccountId = $this->accountId('default_owner_funds_clearing_account_id', '1130');
+        $receivableAccountId = $this->accountId('default_receivable_account_id', '1121');
 
         // Determine payment account based on type
-        $paymentAccountId = $cashAccountId; // Default to cash
-        $sanadType = $sanad['payment_type'] ?? $sanad['sanadtype'] ?? 0;
-
-        if ($sanadType == 1 || $sanadType == 'bank') { // Bank transfer
-            $paymentAccountId = $bankAccountId;
+        $sanadType = (int)($sanad['payment_type'] ?? 0);
+        $isOwnerBank = (int)($sanad['bank_owner_id'] ?? 0) > 0;
+        $usesBank = (int)($sanad['bankid'] ?? 0) > 0 || in_array($sanadType, [2, 4, 5], true);
+        $paymentAccountId = $isOwnerBank ? $ownerFundsAccountId : ($usesBank ? $bankAccountId : $cashAccountId);
+        if ($paymentAccountId <= 0 || $receivableAccountId <= 0) {
+            return ['success' => false, 'message' => 'حسابات المقبوضات أو ذمم المستأجرين غير مهيأة.'];
         }
 
         $description = $sanad['mybyan'] ?? 'دفعة';
@@ -305,6 +430,30 @@ class AmlakAccountingIntegration {
             ]
         ];
 
+        $commissionAmount = max(0, round((float)($sanad['sales_commission_amount'] ?? 0), 2));
+        if ($commissionAmount > 0 && !empty($sanad['sales_representative_userid'])) {
+            $commissionExpenseId = $this->accountId('default_sales_commission_expense_account_id', '5120');
+            $commissionPayableId = $this->accountId('default_sales_commission_payable_account_id', '2112');
+            if ($commissionExpenseId <= 0 || $commissionPayableId <= 0) {
+                return ['success' => false, 'message' => 'حسابات عمولة مندوب المبيعات غير مهيأة.'];
+            }
+            $representativeLabel = 'عمولة مندوب المبيعات #' . (int)$sanad['sales_representative_userid'];
+            $lines[] = [
+                'account_id' => $commissionExpenseId,
+                'description' => $representativeLabel,
+                'debit_amount' => $commissionAmount,
+                'credit_amount' => 0,
+                'cost_center_id' => $sanadContext['cost_center_id']
+            ];
+            $lines[] = [
+                'account_id' => $commissionPayableId,
+                'description' => 'عمولة مستحقة - ' . $representativeLabel,
+                'debit_amount' => 0,
+                'credit_amount' => $commissionAmount,
+                'cost_center_id' => $sanadContext['cost_center_id']
+            ];
+        }
+
         return $this->accountingManager->createJournalEntry($entryData, $lines);
     }
 
@@ -313,12 +462,29 @@ class AmlakAccountingIntegration {
      * إنشاء قيد من المصروفات
      */
     public function createEntryFromMasrofat($masrofatId) {
-        // Get expense details
-        $masrofatQuery = "SELECT * FROM masrofat WHERE fund_source = 0  AND masrofatid = ?";
+        $masrofatId = (int)$masrofatId;
+        $existingEntry = $this->sourceEntry('masrofat_id', $masrofatId, 'masrofat');
+        if (!$existingEntry) {
+            $existingEntry = $this->sourceEntry('masrofat_id', $masrofatId, 'office_expense');
+        }
+        if ($existingEntry) {
+            return [
+                'success' => true,
+                'existing' => true,
+                'entry_id' => (int)$existingEntry['entry_id'],
+                'entry_number' => $existingEntry['entry_number']
+            ];
+        }
+
+        $masrofatQuery = "SELECT m.*, c.masrofkind AS category_name
+                           FROM masrofat m
+                           LEFT JOIN masrofattakweed c ON c.idmasrofcod=m.idmasrofcod
+                           WHERE m.fund_source=0 AND m.idmasrof=? LIMIT 1";
         $stmt = $this->db->prepare($masrofatQuery);
         $stmt->bind_param('i', $masrofatId);
         $stmt->execute();
         $masrofat = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
 
         if (!$masrofat) {
             return ['success' => false, 'error' => 'Expense not found'];
@@ -327,38 +493,142 @@ class AmlakAccountingIntegration {
         $propertyContext = $this->buildPropertyContext($masrofat['idaqar'] ?? 0, $masrofat['idsubaqar'] ?? null);
         $paymentJournalId = $this->accountingManager->getDefaultJournalIdByCode('PAY');
 
-        $amount = $masrofat['masrofatamount'] ?? 0;
+        $amount = max(0, round((float)($masrofat['amount'] ?? 0), 2));
+        if ($amount <= 0) {
+            return ['success' => false, 'message' => 'مبلغ المصروف غير صحيح'];
+        }
+        $description = trim((string)($masrofat['payeddue'] ?? ''));
+        if ($description === '') {
+            $description = trim((string)($masrofat['category_name'] ?? '')) ?: ('مصروف رقم ' . $masrofatId);
+        }
+        $referenceType = (int)($masrofat['idaqar'] ?? 0) > 0 ? 'masrofat' : 'office_expense';
 
         // Prepare journal entry
         $entryData = [
-            'entry_date' => $masrofat['masrofatdate'] ?? date('Y-m-d'),
+            'entry_date' => $this->timestampDate($masrofat['payeddate'] ?? 0),
             'entry_type' => 'expense',
             'journal_id' => $paymentJournalId,
-            'owner_id' => !empty($masrofat['malekid']) ? (int)$masrofat['malekid'] : null,
+            'owner_id' => $propertyContext['owner_id'],
             'aqar_id' => $propertyContext['aqar_id'],
             'subaqar_id' => $propertyContext['subaqar_id'],
             'masrofat_id' => $masrofatId,
-            'reference_type' => 'masrofat',
+            'reference_type' => $referenceType,
             'reference_id' => $masrofatId,
-            'description' => $masrofat['masrofatdescription'] ?? "مصروف رقم {$masrofatId}",
+            'description' => $description,
             'status' => 'posted'
         ];
 
-        // Determine accounts
-        $cashAccountId = 2; // Cash account
-        $expenseAccountId = 10; // Expenses account (5000)
+        $cashAccountId = $this->accountId('default_payment_cash_account_id', '1111');
+        $expenseAccountId = $this->accountId('default_expense_account_id', '5190');
+        if (strpos((string)($masrofat['category_name'] ?? ''), 'رواتب') !== false) {
+            $salaryAccountId = $this->accountId('default_salary_expense_account_id', '5110');
+            if ($salaryAccountId > 0) {
+                $expenseAccountId = $salaryAccountId;
+            }
+        }
+        if ($cashAccountId <= 0 || $expenseAccountId <= 0) {
+            return ['success' => false, 'message' => 'حساب المصروفات أو الصندوق غير مهيأ.'];
+        }
 
         $lines = [
             [
                 'account_id' => $expenseAccountId,
-                'description' => $masrofat['masrofatdescription'],
+                'description' => $description,
                 'debit_amount' => $amount,
                 'credit_amount' => 0,
                 'cost_center_id' => $propertyContext['cost_center_id']
             ],
             [
                 'account_id' => $cashAccountId,
-                'description' => "صرف - {$masrofat['masrofatdescription']}",
+                'description' => "صرف - {$description}",
+                'debit_amount' => 0,
+                'credit_amount' => $amount,
+                'cost_center_id' => $propertyContext['cost_center_id']
+            ]
+        ];
+
+        return $this->accountingManager->createJournalEntry($entryData, $lines);
+    }
+
+    /**
+     * Create a journal entry for a rent collection delivered to the owner.
+     * Office-funded settlements credit cash/bank.  Collections already held
+     * in an owner's bank account credit the owner-held collections clearing
+     * account, so no office cash is invented.
+     */
+    public function createEntryFromSanadsarf($sanadsarfId) {
+        $sanadsarfId = (int)$sanadsarfId;
+        $existingEntry = $this->sourceEntry('sanadsarf_id', $sanadsarfId, 'sanadsarf');
+        if ($existingEntry) {
+            return [
+                'success' => true,
+                'existing' => true,
+                'entry_id' => (int)$existingEntry['entry_id'],
+                'entry_number' => $existingEntry['entry_number']
+            ];
+        }
+
+        $stmt = $this->db->prepare("SELECT ss.*, e.mostagerid, e.idsubaqar AS eradat_subaqar
+            FROM sanadsarf ss
+            LEFT JOIN eradat e ON e.iderad=ss.iderad
+            WHERE ss.sanadid=? AND ss.aqarid>0 AND ss.iderad>0 LIMIT 1");
+        if (!$stmt) {
+            return ['success' => false, 'message' => 'تعذر قراءة سند التسليم.'];
+        }
+        $stmt->bind_param('i', $sanadsarfId);
+        $stmt->execute();
+        $voucher = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if (!$voucher) {
+            return ['success' => false, 'message' => 'سند التسليم غير موجود أو ليس مرتبطاً بتحصيل إيجار.'];
+        }
+
+        $amount = max(0, round((float)($voucher['amount'] ?? 0), 2));
+        if ($amount <= 0) {
+            return ['success' => false, 'message' => 'مبلغ سند التسليم غير صحيح.'];
+        }
+
+        $subaqarId = !empty($voucher['idsubaqar']) ? (int)$voucher['idsubaqar'] : (int)($voucher['eradat_subaqar'] ?? 0);
+        $propertyContext = $this->buildPropertyContext((int)$voucher['aqarid'], $subaqarId ?: null);
+        $settlementAccountId = $this->accountId('default_owner_settlement_account_id', '5210');
+        $cashAccountId = $this->accountId('default_payment_cash_account_id', '1111');
+        $bankAccountId = $this->accountId('default_payment_bank_account_id', '1112');
+        $ownerFundsAccountId = $this->accountId('default_owner_funds_clearing_account_id', '1130');
+        $paymentType = (int)($voucher['payment_type'] ?? 0);
+        $usesBank = (int)($voucher['bankid'] ?? 0) > 0 || in_array($paymentType, [2, 4, 5], true);
+        $creditAccountId = (int)($voucher['money_source'] ?? 0) === 1
+            ? $ownerFundsAccountId
+            : ($usesBank ? $bankAccountId : $cashAccountId);
+        if ($settlementAccountId <= 0 || $creditAccountId <= 0) {
+            return ['success' => false, 'message' => 'حسابات تسليم الملاك غير مهيأة.'];
+        }
+
+        $description = trim((string)($voucher['bayan'] ?? '')) ?: ('تسليم تحصيل للمالك #' . $sanadsarfId);
+        $entryData = [
+            'entry_date' => $this->timestampDate($voucher['sanadate'] ?? 0),
+            'entry_type' => 'owner_settlement',
+            'journal_id' => $this->accountingManager->getDefaultJournalIdByCode('PAY'),
+            'tenant_id' => !empty($voucher['mostagerid']) ? (int)$voucher['mostagerid'] : null,
+            'owner_id' => $propertyContext['owner_id'],
+            'aqar_id' => $propertyContext['aqar_id'],
+            'subaqar_id' => $propertyContext['subaqar_id'],
+            'sanadsarf_id' => $sanadsarfId,
+            'reference_type' => 'sanadsarf',
+            'reference_id' => $sanadsarfId,
+            'description' => $description,
+            'status' => 'posted'
+        ];
+        $lines = [
+            [
+                'account_id' => $settlementAccountId,
+                'description' => $description,
+                'debit_amount' => $amount,
+                'credit_amount' => 0,
+                'cost_center_id' => $propertyContext['cost_center_id']
+            ],
+            [
+                'account_id' => $creditAccountId,
+                'description' => 'تسليم للمالك - ' . $description,
                 'debit_amount' => 0,
                 'credit_amount' => $amount,
                 'cost_center_id' => $propertyContext['cost_center_id']
@@ -463,24 +733,26 @@ class AmlakAccountingIntegration {
     public function getPropertyFinancialSummary($idaqar, $dateFrom = null, $dateTo = null) {
         if (!$dateFrom) $dateFrom = date('Y-01-01');
         if (!$dateTo) $dateTo = date('Y-m-d');
+        $dateFromTimestamp = strtotime($dateFrom . ' 00:00:00');
+        $dateToTimestamp = strtotime($dateTo . ' 23:59:59');
 
         // Get total rental income
         $incomeQuery = "SELECT SUM(annualprice) as total_income
                        FROM egar
                        WHERE idaqar = ?
-                       AND egarstartdate BETWEEN ? AND ?";
+                       AND (CASE WHEN startegar > 20000000000 THEN FLOOR(startegar / 1000) ELSE startegar END) BETWEEN ? AND ?";
         $stmt = $this->db->prepare($incomeQuery);
-        $stmt->bind_param('iss', $idaqar, $dateFrom, $dateTo);
+        $stmt->bind_param('iii', $idaqar, $dateFromTimestamp, $dateToTimestamp);
         $stmt->execute();
         $income = $stmt->get_result()->fetch_assoc();
 
         // Get total expenses
-        $expenseQuery = "SELECT SUM(masrofatamount) as total_expense
+        $expenseQuery = "SELECT SUM(amount) as total_expense
                         FROM masrofat
                         WHERE idaqar = ?
-                        AND masrofatdate BETWEEN ? AND ?";
+                        AND payeddate BETWEEN ? AND ?";
         $stmt = $this->db->prepare($expenseQuery);
-        $stmt->bind_param('iss', $idaqar, $dateFrom, $dateTo);
+        $stmt->bind_param('iii', $idaqar, $dateFromTimestamp, $dateToTimestamp);
         $stmt->execute();
         $expense = $stmt->get_result()->fetch_assoc();
 

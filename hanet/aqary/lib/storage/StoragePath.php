@@ -89,6 +89,8 @@ readonly class StoragePath
             'contracts.free' => STORAGE_QR_CODES . 'contracts' . DIRECTORY_SEPARATOR . 'free' . DIRECTORY_SEPARATOR,
             'contracts.managed' => STORAGE_QR_CODES . 'contracts' . DIRECTORY_SEPARATOR . 'managed' . DIRECTORY_SEPARATOR,
             'properties' => STORAGE_QR_CODES . 'properties' . DIRECTORY_SEPARATOR,
+            'tenants' => STORAGE_QR_CODES . 'tenants' . DIRECTORY_SEPARATOR,
+            'tenants.cards' => STORAGE_QR_CODES . 'tenants' . DIRECTORY_SEPARATOR . 'cards' . DIRECTORY_SEPARATOR,
         ];
 
         $base = $types[$type] ?? STORAGE_QR_CODES;

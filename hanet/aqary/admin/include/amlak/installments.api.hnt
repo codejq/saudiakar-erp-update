@@ -41,6 +41,7 @@ include_once "../../../data.hnt";
 include_once "../../include/functions.hnt";
 require_once 'CalendarManager.class.hnt';
 require_once '../../../lib/storage/helpers.php';
+require_once 'sales_representative_helpers.hnt';
 
 // Initialize
 $calendar = new CalendarManager();
@@ -55,6 +56,28 @@ $action = isset($_REQUEST['action']) ? trim($_REQUEST['action']) : '';
 
 // Response array
 $response = ['success' => false, 'message' => '', 'data' => null];
+
+/**
+ * Calculate the actual cumulative increase stored with an installment.
+ */
+function calculateStoredRentIncreasePercent($baseRentAmount, $originalPeriodicRent) {
+    $baseRentAmount = floatval($baseRentAmount);
+    $originalPeriodicRent = floatval($originalPeriodicRent);
+    if ($originalPeriodicRent <= 0) {
+        return 0;
+    }
+    return round((($baseRentAmount / $originalPeriodicRent) - 1) * 100, 2);
+}
+
+function getStoredBaseRent($installment) {
+    if (floatval($installment['base_rent_amount'] ?? 0) > 0) {
+        return floatval($installment['base_rent_amount']);
+    }
+    return floatval($installment['kastvalue'] ?? 0)
+        - floatval($installment['water'] ?? 0)
+        - floatval($installment['sa3ee'] ?? 0)
+        - floatval($installment['services'] ?? 0);
+}
 
 // Check if action is provided
 if (empty($action)) {
@@ -183,7 +206,7 @@ function getInstallment($data, $link, $calendar) {
         $depositeamount_vat = 0;
         
         if ($vat_type > 0) {
-            $rentValue = $row['kastvalue'] - $row['water'] - $row['sa3ee'] - $row['services'];
+            $rentValue = getStoredBaseRent($row);
             $commesion_vat = $row['sa3ee'] * 0.15;
             
             if ($vat_type == 2) {
@@ -227,10 +250,9 @@ function recordPayment($data, $link, $user_data) {
         $bankid  = isset($data['bankid']) ? floatval($data['bankid']) : 0;
         // Get installment
         // Get installment with contract VAT info in single query
-        $sql = "SELECT a.*, e.vat_type
+        $sql = "SELECT a.*, e.vat_type, e.sales_representative_userid
                 FROM aksat a
-                LEFT JOIN amlakdetails ad ON a.idsubaqar = ad.idsubaqar
-                LEFT JOIN egar e ON ad.rakam3akdid = e.rakam3akdid
+                LEFT JOIN egar e ON e.rakam3akdid = a.egar_id
                 WHERE a.kastid = '$kastid'";
         $result = mysql_query($sql, $link);
         $installment = mysql_fetch_assoc($result);
@@ -245,7 +267,7 @@ function recordPayment($data, $link, $user_data) {
         $vat_type = $installment['vat_type'] ?? 0;
         
         if ($vat_type > 0) {
-            $rentValue = $installment['kastvalue'] - $installment['water'] - $installment['sa3ee'] - $installment['services'];
+            $rentValue = getStoredBaseRent($installment);
             $commesion_vat = number_format(($installment['sa3ee'] * 0.15), 2, '.', '');
             
             if ($vat_type == 2) {
@@ -360,7 +382,7 @@ function recordPayment($data, $link, $user_data) {
 
                 // Calculate VAT
                 $commesion_vat = 0;
-                $rentValue = $installment['kastvalue'] - $installment['water'] - $installment['sa3ee'] - $installment['services'];
+                $rentValue = getStoredBaseRent($installment);
                 $depositeamount_vat = 0;
 
                 if (isset($contract["vat_type"])) {
@@ -392,6 +414,14 @@ function recordPayment($data, $link, $user_data) {
 
                 // Get period (full date format dd/mm/yyyy)
                 $period = date('d/m/Y', $paymentTimestamp);
+                $receiptSalesRepresentativeId = isset($data['sales_representative_userid'])
+                    ? intval($data['sales_representative_userid'])
+                    : intval($contract['sales_representative_userid'] ?? 0);
+                $salesCommission = amlakCalculateSalesCommissionSnapshot(
+                    $amount,
+                    $receiptSalesRepresentativeId,
+                    $link
+                );
 
                 // Insert revenue record (eradat table) - only include fees on first payment
                 $sql = "INSERT INTO eradat SET
@@ -433,6 +463,10 @@ function recordPayment($data, $link, $user_data) {
                         commesion_vat='$commesion_vat',
                         depositeamount_vat='$total_vat',
                         payment_type='$nakda',
+                        sales_representative_userid='" . $salesCommission['representative_userid'] . "',
+                        sales_commission_type='" . $salesCommission['type'] . "',
+                        sales_commission_value='" . $salesCommission['value'] . "',
+                        sales_commission_amount='" . $salesCommission['amount'] . "',
                         notes='" . addslashes($notes) . "',
                         bankid = '$bankid ',
                         formuid='$formuid'";
@@ -513,21 +547,35 @@ function updateInstallment($data, $link, $calendar, $user_data) {
             throw new Exception('القسط غير موجود');
         }
 
+        // Always load the contract. It supplies both the calendar and the
+        // original periodic rent used for the installment snapshot.
+        $contractSql = "SELECT calendar_type, depositeamount
+                        FROM egar
+                        WHERE rakam3akdid = " . intval($oldValues['egar_id']) . "
+                        LIMIT 1";
+        $contractResult = mysql_query($contractSql, $link);
+        $contract = $contractResult ? mysql_fetch_assoc($contractResult) : false;
+        if (!$contract) {
+            throw new Exception('العقد غير موجود');
+        }
+        $calendarType = intval($contract['calendar_type'] ?? 0);
+
         // Parse date if provided
         $kastdate = $oldValues['kastdate'];
         if (isset($data['kastdate']) && !empty($data['kastdate'])) {
-            // Get calendar type from contract
-            $sql = "SELECT calendar_type FROM egar WHERE rakam3akdid = " . $oldValues['egar_id'];
-            $result = mysql_query($sql, $link);
-            $contract = mysql_fetch_assoc($result);
-            $calendarType = $contract['calendar_type'] ?? 0;
-
             $kastdate = $calendar->dateToTimestamp($data['kastdate'], $calendarType);
         }
 
         // Get new values
         $kastname = isset($data['kastname']) ? mysql_real_escape_string($data['kastname']) : $oldValues['kastname'];
-        $kastvalue = isset($data['kastvalue']) ? floatval($data['kastvalue']) : $oldValues['kastvalue'];
+        $existingBaseRent = floatval($oldValues['base_rent_amount'] ?? 0);
+        if ($existingBaseRent <= 0) {
+            $existingBaseRent = floatval($oldValues['kastvalue'])
+                - floatval($oldValues['water'] ?? 0)
+                - floatval($oldValues['sa3ee'] ?? 0)
+                - floatval($oldValues['services'] ?? 0);
+        }
+        $kastvalue = isset($data['kastvalue']) ? floatval($data['kastvalue']) : $existingBaseRent;
         $water = isset($data['water']) ? floatval($data['water']) : $oldValues['water'];
         $sa3ee = isset($data['sa3ee']) ? floatval($data['sa3ee']) : $oldValues['sa3ee'];
         $services = isset($data['services']) ? floatval($data['services']) : $oldValues['services'];
@@ -535,13 +583,20 @@ function updateInstallment($data, $link, $calendar, $user_data) {
         $lateFee = isset($data['late_fee']) ? floatval($data['late_fee']) : $oldValues['late_fee'];
 
         // Recalculate amounts if values changed
-        $totalAmount = $kastvalue + $water + $sa3ee + $services + $lateFee;
+        $storedInstallmentValue = $kastvalue + $water + $sa3ee + $services;
+        $rentIncreasePercent = calculateStoredRentIncreasePercent(
+            $kastvalue,
+            $contract['depositeamount'] ?? 0
+        );
+        $totalAmount = $storedInstallmentValue + $lateFee;
         $amountRemaining = $totalAmount - ($oldValues['amount_paid'] ?? 0);
 
         // Update installment
         $sql = "UPDATE aksat SET
                 kastname = '$kastname',
-                kastvalue = '$kastvalue',
+                kastvalue = '$storedInstallmentValue',
+                base_rent_amount = '$kastvalue',
+                rent_increase_percent = '$rentIncreasePercent',
                 kastdate = '$kastdate',
                 water = '$water',
                 sa3ee = '$sa3ee',
@@ -825,7 +880,7 @@ function addInstallment($data, $link, $user_data, $calendar) {
         }
 
         // Get contract to determine calendar type
-        $sql = "SELECT calendar_type FROM egar WHERE rakam3akdid = '$egarId'";
+        $sql = "SELECT calendar_type, depositeamount FROM egar WHERE rakam3akdid = '$egarId'";
         $result = mysql_query($sql, $link);
         $contract = mysql_fetch_assoc($result);
 
@@ -839,14 +894,21 @@ function addInstallment($data, $link, $user_data, $calendar) {
         $kastTimestamp = $calendar->dateToTimestamp($kastdate, $calendarType);
 
         // Calculate total amount
-        $totalAmount = $kastvalue + $water + $sa3ee + $services;
+        $storedInstallmentValue = $kastvalue + $water + $sa3ee + $services;
+        $rentIncreasePercent = calculateStoredRentIncreasePercent(
+            $kastvalue,
+            $contract['depositeamount'] ?? 0
+        );
+        $totalAmount = $storedInstallmentValue;
 
         // Insert new installment
         $sql = "INSERT INTO aksat SET
                 egar_id = '$egarId',
                 idsubaqar = '$idsubaqar',
                 kastname = '$kastname',
-                kastvalue = '$kastvalue',
+                kastvalue = '$storedInstallmentValue',
+                base_rent_amount = '$kastvalue',
+                rent_increase_percent = '$rentIncreasePercent',
                 water = '$water',
                 sa3ee = '$sa3ee',
                 services = '$services',

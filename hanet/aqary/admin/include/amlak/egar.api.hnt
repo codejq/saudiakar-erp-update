@@ -19,6 +19,7 @@ include_once "amlakfunctions.hnt";
 require_once 'CalendarManager.class.hnt';
 require_once 'auto_renewal_config.hnt';
 require_once '../../../lib/storage/helpers.php';
+require_once 'sales_representative_helpers.hnt';
 
 // Initialize calendar utility
 $dcal = new uCal;
@@ -104,6 +105,55 @@ function createContract($data, $link, $dcal, $user_data) {
     $tamen = str_replace(",", "", $data['tamen']);
     $payedamount = str_replace(",", "", $data['payedamount']);
     $data['annualprice'] = str_replace(",", "", $data['annualprice']);
+    $contractConditions = isset($data['txtcash_word']) ? $data['txtcash_word'] : '';
+    $contractNotes = isset($data['notes']) ? $data['notes'] : '';
+    $contractTemplate = isset($data['contract_template']) ? basename(trim($data['contract_template'])) : '';
+
+    if ($contractTemplate !== '') {
+        $templatePath = __DIR__ . DIRECTORY_SEPARATOR . $contractTemplate;
+        if (
+            !preg_match('/^[^\\\\\/]+\.contratotemplate$/u', $contractTemplate) ||
+            !is_file($templatePath)
+        ) {
+            $response['message'] = 'نموذج شروط العقد المحدد غير موجود';
+            return $response;
+        }
+
+        if (trim($contractConditions) === '') {
+            $response['message'] = 'تم اختيار نموذج شروط ولكن محتوى الشروط لم يتم تحميله';
+            return $response;
+        }
+    }
+    $annualRentIncreasePercent = isset($data['annual_rent_increase_percent'])
+        ? floatval(str_replace(',', '', $data['annual_rent_increase_percent']))
+        : 0;
+    $maxRentIncreasePercent = isset($data['max_rent_increase_percent'])
+        ? floatval(str_replace(',', '', $data['max_rent_increase_percent']))
+        : 0;
+    $increaseLimit = defined('MAX_RENT_INCREASE_PERCENT_LIMIT')
+        ? floatval(MAX_RENT_INCREASE_PERCENT_LIMIT)
+        : 100;
+    if (
+        $annualRentIncreasePercent < 0 ||
+        $maxRentIncreasePercent < 0 ||
+        $annualRentIncreasePercent > $increaseLimit ||
+        $maxRentIncreasePercent > $increaseLimit ||
+        ($annualRentIncreasePercent > 0 && $maxRentIncreasePercent < $annualRentIncreasePercent)
+    ) {
+        $response['message'] = 'نسبة الزيادة السنوية والحد الأعلى يجب أن يكونا بين 0 و' . $increaseLimit . '، والحد الأعلى لا يقل عن الزيادة السنوية';
+        return $response;
+    }
+    $requestedSalesRepresentativeId = isset($data['sales_representative_userid'])
+        ? intval($data['sales_representative_userid'])
+        : 0;
+    $salesRepresentativeUserId = amlakValidateSalesRepresentativeId(
+        $requestedSalesRepresentativeId,
+        $link
+    );
+    if ($requestedSalesRepresentativeId > 0 && $salesRepresentativeUserId === 0) {
+        $response['message'] = 'مندوب المبيعات المحدد غير موجود';
+        return $response;
+    }
     // Parse dates
     $parts_x = explode("/", $data['st_datex_']);
     $st_datex = $parts_x[0] ?? 1;
@@ -189,13 +239,17 @@ function createContract($data, $link, $dcal, $user_data) {
         end3aqd='" . $end3aqd . "',
         rakam3akd='" . mysql_real_escape_string($data['rakam3akd']) . "',
         annualprice='" . mysql_real_escape_string($data['annualprice']) . "',
+        annual_rent_increase_percent='" . $annualRentIncreasePercent . "',
+        max_rent_increase_percent='" . $maxRentIncreasePercent . "',
+        sales_representative_userid='" . $salesRepresentativeUserId . "',
         tamen='" . $tamen . "',
         fristsa3e='" . $fristsa3e . "',
         secondsa3e='" . $secondsa3e . "',
         services='" . $services . "',
         elect_reading='" . mysql_real_escape_string($data['elect_reading']) . "',
         elect='" . mysql_real_escape_string($data['elect']) . "',
-        notes='" . mysql_real_escape_string($data['notes']) . "',
+        notes='" . mysql_real_escape_string($contractNotes) . "',
+        txtcash_word='" . mysql_real_escape_string($contractConditions) . "',
         date3akd='" . $date3akd . "',
         water='" . $water . "',
         secondsa3e_duration='" . intval($data['secondsa3e_duration']) . "',
@@ -225,7 +279,7 @@ function createContract($data, $link, $dcal, $user_data) {
     $historySql = "INSERT INTO egar_history SET
         egar_id='" . $contractId . "',
         action_type='created',
-        change_description='Contract created with status: active, calendar_type: " . ($hnt_dll == 0 ? 'Hijri' : 'Gregorian') . "',
+        change_description='Contract created with status: active, calendar_type: " . ($hnt_dll == 0 ? 'Hijri' : 'Gregorian') . ", annual rent increase: " . $annualRentIncreasePercent . "%, maximum: " . $maxRentIncreasePercent . "%, sales representative user: " . $salesRepresentativeUserId . ", conditions template: " . mysql_real_escape_string($contractTemplate !== '' ? $contractTemplate : 'none/manual') . "',
         changed_by_userid='" . intval($_SESSION['userid'] ?? 0) . "',
         changed_at='" . time() . "'";
     mysql_query($historySql, $link);
@@ -307,6 +361,7 @@ function generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed
     $installments = [];
     $duration = intval($data['duration']); // Payment period (how often rent is paid: 1, 2, 3 months, etc.)
     $depositeamount = str_replace(",", "", $data['depositeamount']);
+    $tamen = str_replace(",", "", isset($data['tamen']) ? $data['tamen'] : 0);
     $payedamount = str_replace(",", "", $data['payedamount']);
     $total_vat = str_replace(",", "", $data['total_vat']);
     $total_amound_width_vat = str_replace(",", "", $data['total_amound_width_vat']);
@@ -317,6 +372,12 @@ function generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed
     $water_duration = intval($data['water_duration']);
     $services = str_replace(",", "", $data['services']);
     $services_duration = intval($data['services_duration']);
+    $annualRentIncreasePercent = isset($data['annual_rent_increase_percent'])
+        ? floatval(str_replace(',', '', $data['annual_rent_increase_percent']))
+        : 0;
+    $maxRentIncreasePercent = isset($data['max_rent_increase_percent'])
+        ? floatval(str_replace(',', '', $data['max_rent_increase_percent']))
+        : 0;
 
 
 
@@ -344,6 +405,16 @@ function generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed
             $hnt_dll,
             $fixed_payment_day
         );
+        $rentEscalation = $calendar->calculateEscalatedBaseRent(
+            $depositeamount,
+            $startTimestamp,
+            $kastdate,
+            $hnt_dll,
+            $annualRentIncreasePercent,
+            $maxRentIncreasePercent
+        );
+        $baseRentAmount = $rentEscalation['amount'];
+        $appliedRentIncreasePercent = $rentEscalation['percentage'];
 
         // Initialize installment variables
         $iscomplete = 0;
@@ -352,12 +423,12 @@ function generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed
 
         // Determine installment type and calculate values
         if ($i == 1) {
-            // First installment: includes first commission, all fees, and VAT
-            //$kastvalue = $total_amound_width_vat;
+            // The security deposit is due once with the first installment.
+            // VAT remains separate and is calculated by the existing payment/display logic.
             $sa3e_value = $fristsa3e;
             $water_value = $water;
             $services_value = $services;
-            $kastvalue = floatval($depositeamount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
+            $kastvalue = floatval($baseRentAmount) + floatval($tamen) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
 
             if ($payedamount >= $total_amound_width_vat) {
                 $iscomplete = 1;
@@ -378,13 +449,13 @@ function generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed
             $sa3e_value = $secondsa3e;
             $water_value = $water;
             $services_value = $services;
-            $kastvalue = floatval($depositeamount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
+            $kastvalue = floatval($baseRentAmount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
         } else {
             // Regular installment: includes only recurring fees
             $sa3e_value = ($secondsa3e_duration ? $secondsa3e : 0);
             $water_value = ($water_duration ? $water : 0);
             $services_value = ($services_duration ? $services : 0);
-            $kastvalue = floatval($depositeamount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
+            $kastvalue = floatval($baseRentAmount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
         }
 
         // Determine effective due date (with grace period if configured)
@@ -396,6 +467,8 @@ function generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed
             idsubaqar='" . intval($data['idsubaqar']) . "',
             kastname='" . $i . "',
             kastvalue='" . $kastvalue . "',
+            base_rent_amount='" . $baseRentAmount . "',
+            rent_increase_percent='" . $appliedRentIncreasePercent . "',
             dof3at='" . $fpayedamount . "',
             kastdate='" . $kastdate . "',
             iscomplete='" . $iscomplete . "',
@@ -423,6 +496,11 @@ function generateInstallments($data, $contractId, $dcal, $link, $hnt_dll, $fixed
  * Create payment receipt
  */
 function createPaymentReceipt($kastid, $data, $mostagerid, $payedamount, $user_data, $link) {
+    $salesCommission = amlakCalculateSalesCommissionSnapshot(
+        $payedamount,
+        intval($data['sales_representative_userid'] ?? 0),
+        $link
+    );
     $sql = "INSERT INTO sanad SET
         mostagerid='" . $mostagerid . "',
         mostagername='" . mysql_real_escape_string($data['mostagername']) . "',
@@ -435,6 +513,10 @@ function createPaymentReceipt($kastid, $data, $mostagerid, $payedamount, $user_d
         sanaddate='" . time() . "',
         commesion_vat='" . str_replace(",", "", $data['commesion_vat']) . "',
         depositeamount_vat='" . str_replace(",", "", $data['depositeamount_vat']) . "',
+        sales_representative_userid='" . $salesCommission['representative_userid'] . "',
+        sales_commission_type='" . $salesCommission['type'] . "',
+        sales_commission_value='" . $salesCommission['value'] . "',
+        sales_commission_amount='" . $salesCommission['amount'] . "',
         formuid='" . mysql_real_escape_string($data['formuid']) . "'";
 
     mysql_query($sql, $link);

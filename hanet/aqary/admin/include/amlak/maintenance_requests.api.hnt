@@ -1,0 +1,130 @@
+<?php
+/** AJAX mutations for maintenance requests. */
+$is_ajax_request = true;
+require_once dirname(__DIR__, 3) . '/reqloginajax.hnt';
+require_once __DIR__ . '/MaintenanceRequestService.class.hnt';
+require_once __DIR__ . '/maintenance_requests_common.hnt';
+date_default_timezone_set('Asia/Riyadh');
+header('Content-Type: application/json; charset=utf-8');
+
+function mrApiReply($success, $message, $data = array(), $status = 200)
+{
+    http_response_code($status);
+    echo json_encode(array_merge(array('success'=>$success,'message'=>$message), $data), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+function mrApiPermission(mysqli $db, $screenId, $operation)
+{
+    $userId = intval($_SESSION['useridv'] ?? 0);
+    $stmt = $db->prepare("SELECT g.allprevilage,COALESCE(p.adds,0) adds,COALESCE(p.edits,0) edits,COALESCE(p.deleetes,0) deleetes,COALESCE(p.sees,0) sees FROM user u LEFT JOIN usergroups g ON g.groupid=u.groupid LEFT JOIN ugroupscreen p ON p.groupid=u.groupid AND p.screenid=? WHERE u.userid=? LIMIT 1");
+    $stmt->bind_param('ii', $screenId, $userId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $row && (!empty($row['allprevilage']) || !empty($row[$operation]));
+}
+
+function mrStoreAttachment(MaintenanceRequestService $service, $requestId, $file)
+{
+    if (!isset($file['error']) || intval($file['error']) === UPLOAD_ERR_NO_FILE) return 0;
+    if (intval($file['size'] ?? 0) > 10 * 1024 * 1024) throw new InvalidArgumentException('حجم المرفق يجب ألا يتجاوز 10 ميجابايت.');
+    require_once dirname(__DIR__, 3) . '/lib/storage/helpers.php';
+    $validator = validate_upload($file, array('pdf','jpg','jpeg','png','webp','doc','docx','xls','xlsx'));
+    $extension = $validator->getExtension();
+    $storedName = date('Ymd-His') . '-' . bin2hex(random_bytes(10)) . '.' . $extension;
+    $relativeDirectory = 'uploads' . DIRECTORY_SEPARATOR . 'maintenance-requests' . DIRECTORY_SEPARATOR . intval($requestId) . DIRECTORY_SEPARATOR;
+    $directory = storage_path($relativeDirectory);
+    if (!ensure_dir($directory) || !move_uploaded_file($file['tmp_name'], $directory . $storedName)) throw new RuntimeException('تعذر حفظ المرفق في التخزين.');
+    $mime = function_exists('mime_content_type') ? (string)mime_content_type($directory . $storedName) : (string)($file['type'] ?? '');
+    try {
+        return $service->addAttachment($requestId, basename((string)$file['name']), $storedName, str_replace(DIRECTORY_SEPARATOR, '/', $relativeDirectory . $storedName), $mime, intval($file['size'] ?? 0));
+    } catch (Throwable $exception) {
+        @unlink($directory . $storedName);
+        throw $exception;
+    }
+}
+
+try {
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') mrApiReply(false, 'طريقة الطلب غير مسموحة.', array(), 405);
+    $token = (string)($_POST['csrf_token'] ?? '');
+    if (empty($_SESSION['maintenance_request_csrf']) || $token === '' || !hash_equals((string)$_SESSION['maintenance_request_csrf'], $token)) mrApiReply(false, 'انتهت صلاحية النموذج. أعد تحميل الصفحة.', array(), 403);
+    if (isset($qdb_db, $dbSuffix) && $db instanceof mysqli) {
+        mysqli_select_db($db, $qdb_db . $dbSuffix);
+        $db->set_charset('utf8mb4');
+    }
+    $screenId = MaintenanceRequestService::resolveScreenId($db);
+    $service = new MaintenanceRequestService($db, intval($_SESSION['useridv'] ?? 0));
+    $action = (string)($_POST['action'] ?? '');
+    $permission = $action === 'create_request' ? 'adds' : ($action === 'lookup_units' ? 'sees' : 'edits');
+    if (!mrApiPermission($db, $screenId, $permission)) mrApiReply(false, 'ليس لديك الصلاحية لتنفيذ هذه العملية.', array(), 403);
+
+    switch ($action) {
+        case 'lookup_units':
+            $units = $service->searchUnits(intval($_POST['idaqar'] ?? 0), (string)($_POST['q'] ?? ''), intval($_POST['page'] ?? 1));
+            $results = array();
+            foreach ($units['rows'] as $unit) {
+                $label = trim(mrNormalizeLegacyUtf8($unit['aqarsubtypename']) . ' - ' . mrNormalizeLegacyUtf8($unit['rakam']));
+                $results[] = array(
+                    'id'=>intval($unit['idsubaqar']), 'text'=>$label,
+                    'property_id'=>intval($unit['idaqar']), 'tenant_id'=>max(0,intval($unit['mostagerid'])),
+                    'tenant_name'=>mrNormalizeLegacyUtf8($unit['tenant_name']),
+                    'tenant_phone'=>mrNormalizeLegacyUtf8($unit['tenant_phone'])
+                );
+            }
+            mrApiReply(true, '', array('results'=>$results,'pagination'=>array('more'=>!empty($units['more']))));
+        case 'create_request':
+            $id = $service->createRequest($_POST);
+            $message = 'تم إنشاء طلب الصيانة وتسجيله في سجل المتابعة.';
+            if (!empty($_FILES['attachment']) && intval($_FILES['attachment']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE) {
+                try { mrStoreAttachment($service, $id, $_FILES['attachment']); }
+                catch (Throwable $attachmentException) {
+                    error_log('Maintenance request attachment after create: ' . $attachmentException->getMessage());
+                    $message .= ' تعذر رفع المرفق؛ يمكنك إضافته من صفحة الطلب.';
+                }
+            }
+            mrApiReply(true, $message, array('redirect'=>'maintenance_requests.hnt?id='.$id));
+        case 'update_request':
+            $id = intval($_POST['request_id'] ?? 0);
+            $service->updateRequest($id, $_POST);
+            $message = 'تم تحديث بيانات الطلب وحفظ الأثر.';
+            if (!empty($_FILES['attachment']) && intval($_FILES['attachment']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE) {
+                try { mrStoreAttachment($service, $id, $_FILES['attachment']); }
+                catch (Throwable $attachmentException) {
+                    error_log('Maintenance request attachment after update: ' . $attachmentException->getMessage());
+                    $message .= ' تعذر رفع المرفق؛ أعد رفعه من قسم المرفقات.';
+                }
+            }
+            mrApiReply(true, $message, array('redirect'=>'maintenance_requests.hnt?id='.$id));
+        case 'change_status':
+            $id = intval($_POST['request_id'] ?? 0);
+            $service->changeStatus($id, (string)($_POST['status'] ?? ''), trim((string)($_POST['note'] ?? '')));
+            mrApiReply(true, 'تم تحديث دورة حياة الطلب.', array('redirect'=>'maintenance_requests.hnt?id='.$id));
+        case 'add_item':
+            $id = intval($_POST['request_id'] ?? 0);
+            $service->addItem($id, $_POST);
+            mrApiReply(true, 'تمت إضافة البند اللوجستي.', array('redirect'=>'maintenance_requests.hnt?id='.$id.'#logistics'));
+        case 'update_item_status':
+            $id = intval($_POST['request_id'] ?? 0);
+            $service->updateItemStatus($id, intval($_POST['item_id'] ?? 0), (string)($_POST['item_status'] ?? ''), trim((string)($_POST['note'] ?? '')));
+            mrApiReply(true, 'تم تحديث حالة البند اللوجستي.', array('redirect'=>'maintenance_requests.hnt?id='.$id.'#logistics'));
+        case 'upload_attachment':
+            $id = intval($_POST['request_id'] ?? 0);
+            if (!$service->getRequest($id)) throw new InvalidArgumentException('طلب الصيانة غير موجود.');
+            if (empty($_FILES['attachment'])) throw new InvalidArgumentException('اختر ملفاً للرفع.');
+            mrStoreAttachment($service, $id, $_FILES['attachment']);
+            mrApiReply(true, 'تم رفع المرفق وحفظه في سجل الطلب.', array('redirect'=>'maintenance_requests.hnt?id='.$id.'#attachments'));
+        case 'add_note':
+            $id = intval($_POST['request_id'] ?? 0);
+            $service->addTimelineNote($id, (string)($_POST['note_type'] ?? 'note'), trim((string)($_POST['note'] ?? '')));
+            mrApiReply(true, 'تمت إضافة المتابعة إلى السجل.', array('redirect'=>'maintenance_requests.hnt?id='.$id.'#timeline'));
+        default:
+            mrApiReply(false, 'العملية المطلوبة غير معروفة.', array(), 400);
+    }
+} catch (InvalidArgumentException $exception) {
+    mrApiReply(false, $exception->getMessage(), array(), 422);
+} catch (Throwable $exception) {
+    error_log('Maintenance request API: ' . $exception->getMessage());
+    mrApiReply(false, 'تعذر تنفيذ العملية. راجع سجل النظام.', array(), 500);
+}
+

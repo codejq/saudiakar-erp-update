@@ -163,6 +163,8 @@ while ($contract = mysql_fetch_assoc($result)) {
 
         // Get contract details for installment generation
         $depositeamount = floatval($contract['depositeamount']);
+        $annualRentIncreasePercent = floatval($contract['annual_rent_increase_percent'] ?? 0);
+        $maxRentIncreasePercent = floatval($contract['max_rent_increase_percent'] ?? 0);
         $secondsa3e = floatval($contract['secondsa3e'] ?? 0);
         $water = floatval($contract['water'] ?? 0);
         $services = floatval($contract['services'] ?? 0);
@@ -194,6 +196,16 @@ while ($contract = mysql_fetch_assoc($result)) {
             // Start from old end date, add duration for each installment
             $monthsFromOldEnd = $duration * $i;
             $kastdate = $calendar->addMonths($oldEndDate, $monthsFromOldEnd, $calendarType);
+            $rentEscalation = $calendar->calculateEscalatedBaseRent(
+                $depositeamount,
+                intval($contract['startegar']),
+                $kastdate,
+                $calendarType,
+                $annualRentIncreasePercent,
+                $maxRentIncreasePercent
+            );
+            $baseRentAmount = $rentEscalation['amount'];
+            $appliedRentIncreasePercent = $rentEscalation['percentage'];
 
             // Determine installment type and calculate values
             // Using the same logic as generateInstallments in egar.api.hnt
@@ -210,13 +222,15 @@ while ($contract = mysql_fetch_assoc($result)) {
                 $services_value = ($services_duration ? $services : 0);
             }
 
-            $kastvalue = floatval($depositeamount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
+            $kastvalue = floatval($baseRentAmount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
 
             // Insert new installment
             $insertKastSql = "INSERT INTO aksat SET
                              idsubaqar = " . intval($contract['idsubaqar']) . ",
                              kastname = '$kastNum',
                              kastvalue = $kastvalue,
+                             base_rent_amount = $baseRentAmount,
+                             rent_increase_percent = $appliedRentIncreasePercent,
                              water = $water_value,
                              sa3ee = $sa3e_value,
                              services = $services_value,

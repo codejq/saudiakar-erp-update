@@ -1985,6 +1985,481 @@ mysql_query("ALTER TABLE `w_systemp` CHANGE `fristconnect` `fristconnect` BIGINT
 
 mysql_query("ALTER TABLE `freecontratoaqar` ADD  COLUMN  `contrato_type` INT(3) NOT NULL DEFAULT '0' ", $link);
 
+// Idempotent module migrations mirrored from admin/amlak.hnt.
+// Keep the original migrations there; this copy lets the repair page restore them.
+// Idempotent rental migrations. Keep future amlak schema additions in this
+// block so every customer receives them by opening the property module.
+@mysql_query("ALTER TABLE egar
+	ADD COLUMN IF NOT EXISTS annual_rent_increase_percent DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER annualprice,
+	ADD COLUMN IF NOT EXISTS max_rent_increase_percent DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER annual_rent_increase_percent,
+	ADD COLUMN IF NOT EXISTS sales_representative_userid INT(11) NOT NULL DEFAULT 0 AFTER max_rent_increase_percent", $link);
+@mysql_query("ALTER TABLE aksat
+	ADD COLUMN IF NOT EXISTS base_rent_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER kastvalue,
+	ADD COLUMN IF NOT EXISTS rent_increase_percent DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER base_rent_amount", $link);
+@mysql_query("ALTER TABLE sanad
+	ADD COLUMN IF NOT EXISTS sales_representative_userid INT(11) NOT NULL DEFAULT 0 AFTER bankid,
+	ADD COLUMN IF NOT EXISTS sales_commission_type VARCHAR(20) NOT NULL DEFAULT 'percentage' AFTER sales_representative_userid,
+	ADD COLUMN IF NOT EXISTS sales_commission_value DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER sales_commission_type,
+	ADD COLUMN IF NOT EXISTS sales_commission_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER sales_commission_value,
+	ADD INDEX IF NOT EXISTS idx_sanad_sales_rep_date (sales_representative_userid, sanaddate)", $link);
+@mysql_query("INSERT INTO global (variblename, valuribalevalue, formuid)
+	SELECT 'sales_representative_commission_type', 'percentage', '' FROM DUAL
+	WHERE NOT EXISTS (
+		SELECT 1 FROM global WHERE variblename='sales_representative_commission_type'
+	)", $link);
+@mysql_query("INSERT INTO global (variblename, valuribalevalue, formuid)
+	SELECT 'sales_representative_commission_value', '0', '' FROM DUAL
+	WHERE NOT EXISTS (
+		SELECT 1 FROM global WHERE variblename='sales_representative_commission_value'
+	)", $link);
+
+// Office-expense reporting uses the existing masrofat ledger.  idaqar=0 is
+// reserved for office-wide expenses, while positive values remain property
+// expenses.  Seed the standard categories without changing customer-defined
+// categories or creating duplicates when this migration runs again.
+@mysql_query("ALTER TABLE masrofat
+	ADD COLUMN IF NOT EXISTS paid_by_userid INT(11) NOT NULL DEFAULT 0 AFTER payedby,
+	ADD COLUMN IF NOT EXISTS beneficiary_userid INT(11) NOT NULL DEFAULT 0 AFTER paid_by_userid,
+	ADD COLUMN IF NOT EXISTS beneficiary_name VARCHAR(245) NOT NULL DEFAULT '' AFTER beneficiary_userid,
+	ADD COLUMN IF NOT EXISTS created_by_userid INT(11) NOT NULL DEFAULT 0 AFTER beneficiary_name,
+	ADD COLUMN IF NOT EXISTS created_at BIGINT(20) NOT NULL DEFAULT 0 AFTER created_by_userid,
+	ADD INDEX IF NOT EXISTS idx_masrofat_office_date_category (idaqar, payeddate, idmasrofcod),
+	ADD INDEX IF NOT EXISTS idx_masrofat_office_audit (idaqar, created_at, created_by_userid)", $link);
+@mysql_query("INSERT INTO masrofattakweed (masrofkind, formuid)
+	SELECT seed.masrofkind, 'office-expense-standard'
+	FROM (
+		SELECT 'رواتب وأجور' AS masrofkind
+		UNION ALL SELECT 'طعام وضيافة'
+		UNION ALL SELECT 'كهرباء المكتب'
+		UNION ALL SELECT 'إعلانات وتسويق'
+		UNION ALL SELECT 'إيجار المكتب'
+		UNION ALL SELECT 'اتصالات وإنترنت'
+		UNION ALL SELECT 'صيانة المكتب'
+		UNION ALL SELECT 'قرطاسية ومستلزمات'
+		UNION ALL SELECT 'مواصلات'
+		UNION ALL SELECT 'رسوم حكومية'
+		UNION ALL SELECT 'أخرى'
+	) seed
+	WHERE NOT EXISTS (
+		SELECT 1
+		FROM masrofattakweed existing
+		WHERE TRIM(existing.masrofkind) = seed.masrofkind
+	)", $link);
+
+// Cash custody schema migration. The version marker is written only after all
+// tables have been created successfully, so an interrupted migration retries.
+$cashCustodySchemaVersion = 2;
+$cashCustodyInstalledVersion = 0;
+$cashCustodyVersionResult = @mysql_query("SELECT valuribalevalue FROM global WHERE variblename='cash_custody_schema_version' ORDER BY id DESC LIMIT 1", $link);
+if ($cashCustodyVersionResult && ($cashCustodyVersionRow = mysql_fetch_array($cashCustodyVersionResult))) {
+	$cashCustodyInstalledVersion = intval($cashCustodyVersionRow['valuribalevalue']);
+}
+$cashCustodyMigrationOk = $cashCustodyInstalledVersion >= $cashCustodySchemaVersion;
+
+if ($cashCustodyInstalledVersion < $cashCustodySchemaVersion) {
+	$cashCustodyMigrationQueries = array(
+		"CREATE TABLE IF NOT EXISTS cash_custody_holders (
+			holder_id INT(11) NOT NULL AUTO_INCREMENT,
+			user_id INT(11) NOT NULL DEFAULT 0,
+			employee_number VARCHAR(100) NOT NULL DEFAULT '',
+			national_id VARCHAR(50) NOT NULL DEFAULT '',
+			phone VARCHAR(50) NOT NULL DEFAULT '',
+			department VARCHAR(150) NOT NULL DEFAULT '',
+			number_prefix VARCHAR(20) NOT NULL DEFAULT 'CUS',
+			is_active TINYINT(1) NOT NULL DEFAULT 1,
+			created_by_userid INT(11) NOT NULL DEFAULT 0,
+			created_at BIGINT(20) NOT NULL DEFAULT 0,
+			updated_by_userid INT(11) NOT NULL DEFAULT 0,
+			updated_at BIGINT(20) NOT NULL DEFAULT 0,
+			formuid VARCHAR(100) NOT NULL DEFAULT '',
+			PRIMARY KEY (holder_id),
+			UNIQUE KEY uq_cash_custody_holder_user (user_id),
+			UNIQUE KEY uq_cash_custody_holder_prefix (number_prefix),
+			KEY idx_cash_custody_holder_active (is_active)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+		"CREATE TABLE IF NOT EXISTS cash_custody_requests (
+			request_id INT(11) NOT NULL AUTO_INCREMENT,
+			request_number VARCHAR(60) NOT NULL,
+			holder_id INT(11) NOT NULL,
+			request_type VARCHAR(20) NOT NULL DEFAULT 'new',
+			target_custody_id INT(11) NOT NULL DEFAULT 0,
+			requested_amount DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+			purpose TEXT NOT NULL,
+			required_date DATE DEFAULT NULL,
+			status VARCHAR(30) NOT NULL DEFAULT 'pending',
+			requested_by_userid INT(11) NOT NULL DEFAULT 0,
+			requested_at BIGINT(20) NOT NULL DEFAULT 0,
+			reviewed_by_userid INT(11) NOT NULL DEFAULT 0,
+			reviewed_at BIGINT(20) NOT NULL DEFAULT 0,
+			decision_note TEXT NULL,
+			disbursed_by_userid INT(11) NOT NULL DEFAULT 0,
+			disbursed_at BIGINT(20) NOT NULL DEFAULT 0,
+			created_custody_id INT(11) NOT NULL DEFAULT 0,
+			formuid VARCHAR(100) NOT NULL DEFAULT '',
+			created_at BIGINT(20) NOT NULL DEFAULT 0,
+			updated_at BIGINT(20) NOT NULL DEFAULT 0,
+			PRIMARY KEY (request_id),
+			UNIQUE KEY uq_cash_custody_request_number (request_number),
+			UNIQUE KEY uq_cash_custody_request_formuid (formuid),
+			KEY idx_cash_custody_request_holder_status (holder_id, status),
+			KEY idx_cash_custody_request_date (required_date)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+		"CREATE TABLE IF NOT EXISTS cash_custodies (
+			custody_id INT(11) NOT NULL AUTO_INCREMENT,
+			custody_number VARCHAR(60) NOT NULL,
+			holder_id INT(11) NOT NULL,
+			request_id INT(11) DEFAULT NULL,
+			status VARCHAR(30) NOT NULL DEFAULT 'open',
+			opened_date DATE NOT NULL,
+			closed_date DATE DEFAULT NULL,
+			carried_from_custody_id INT(11) NOT NULL DEFAULT 0,
+			carried_to_custody_id INT(11) NOT NULL DEFAULT 0,
+			notes TEXT NULL,
+			created_by_userid INT(11) NOT NULL DEFAULT 0,
+			created_at BIGINT(20) NOT NULL DEFAULT 0,
+			updated_by_userid INT(11) NOT NULL DEFAULT 0,
+			updated_at BIGINT(20) NOT NULL DEFAULT 0,
+			formuid VARCHAR(100) NOT NULL DEFAULT '',
+			PRIMARY KEY (custody_id),
+			UNIQUE KEY uq_cash_custody_number (custody_number),
+			UNIQUE KEY uq_cash_custody_request (request_id),
+			KEY idx_cash_custody_holder_status (holder_id, status),
+			KEY idx_cash_custody_opened_date (opened_date)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+		"CREATE TABLE IF NOT EXISTS cash_custody_transactions (
+			transaction_id INT(11) NOT NULL AUTO_INCREMENT,
+			custody_id INT(11) NOT NULL,
+			request_id INT(11) NOT NULL DEFAULT 0,
+			transaction_type VARCHAR(30) NOT NULL,
+			document_number VARCHAR(70) NOT NULL,
+			transaction_date DATE NOT NULL,
+			amount DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+			net_amount DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+			vat_amount DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+			vat_rate DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+			payment_method VARCHAR(30) NOT NULL DEFAULT 'cash',
+			reference_number VARCHAR(150) NOT NULL DEFAULT '',
+			category_id INT(11) NOT NULL DEFAULT 0,
+			cost_center_id INT(11) NOT NULL DEFAULT 0,
+			supplier_id INT(11) NOT NULL DEFAULT 0,
+			supplier_name VARCHAR(255) NOT NULL DEFAULT '',
+			supplier_vat_number VARCHAR(50) NOT NULL DEFAULT '',
+			invoice_number VARCHAR(100) NOT NULL DEFAULT '',
+			description TEXT NULL,
+			status VARCHAR(30) NOT NULL DEFAULT 'approved',
+			accounting_entry_id INT(11) NOT NULL DEFAULT 0,
+			reversed_transaction_id INT(11) NOT NULL DEFAULT 0,
+			created_by_userid INT(11) NOT NULL DEFAULT 0,
+			created_at BIGINT(20) NOT NULL DEFAULT 0,
+			approved_by_userid INT(11) NOT NULL DEFAULT 0,
+			approved_at BIGINT(20) NOT NULL DEFAULT 0,
+			formuid VARCHAR(100) NOT NULL DEFAULT '',
+			PRIMARY KEY (transaction_id),
+			UNIQUE KEY uq_cash_custody_document (document_number),
+			UNIQUE KEY uq_cash_custody_transaction_formuid (formuid),
+			KEY idx_cash_custody_transaction_custody (custody_id, status, transaction_date),
+			KEY idx_cash_custody_transaction_type (transaction_type, status),
+			KEY idx_cash_custody_transaction_supplier (supplier_id),
+			KEY idx_cash_custody_transaction_category (category_id),
+			KEY idx_cash_custody_transaction_cost_center (cost_center_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+		"CREATE TABLE IF NOT EXISTS cash_custody_settlements (
+			settlement_id INT(11) NOT NULL AUTO_INCREMENT,
+			settlement_number VARCHAR(70) NOT NULL,
+			custody_id INT(11) NOT NULL,
+			settlement_date DATE NOT NULL,
+			total_funding DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+			total_expenses DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+			total_returns DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+			closing_balance DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+			settlement_action VARCHAR(30) NOT NULL DEFAULT 'close',
+			new_custody_id INT(11) NOT NULL DEFAULT 0,
+			notes TEXT NULL,
+			status VARCHAR(30) NOT NULL DEFAULT 'completed',
+			created_by_userid INT(11) NOT NULL DEFAULT 0,
+			created_at BIGINT(20) NOT NULL DEFAULT 0,
+			approved_by_userid INT(11) NOT NULL DEFAULT 0,
+			approved_at BIGINT(20) NOT NULL DEFAULT 0,
+			formuid VARCHAR(100) NOT NULL DEFAULT '',
+			PRIMARY KEY (settlement_id),
+			UNIQUE KEY uq_cash_custody_settlement_number (settlement_number),
+			UNIQUE KEY uq_cash_custody_settlement_custody (custody_id),
+			UNIQUE KEY uq_cash_custody_settlement_formuid (formuid),
+			KEY idx_cash_custody_settlement_date (settlement_date)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+		"CREATE TABLE IF NOT EXISTS cash_custody_attachments (
+			attachment_id INT(11) NOT NULL AUTO_INCREMENT,
+			entity_type VARCHAR(30) NOT NULL,
+			entity_id INT(11) NOT NULL,
+			original_name VARCHAR(255) NOT NULL DEFAULT '',
+			stored_name VARCHAR(255) NOT NULL DEFAULT '',
+			storage_path VARCHAR(500) NOT NULL DEFAULT '',
+			mime_type VARCHAR(100) NOT NULL DEFAULT '',
+			file_size BIGINT(20) NOT NULL DEFAULT 0,
+			uploaded_by_userid INT(11) NOT NULL DEFAULT 0,
+			uploaded_at BIGINT(20) NOT NULL DEFAULT 0,
+			PRIMARY KEY (attachment_id),
+			KEY idx_cash_custody_attachment_entity (entity_type, entity_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+		"CREATE TABLE IF NOT EXISTS cash_custody_sequences (
+			sequence_key VARCHAR(100) NOT NULL,
+			next_value INT(11) NOT NULL DEFAULT 1,
+			updated_at BIGINT(20) NOT NULL DEFAULT 0,
+			PRIMARY KEY (sequence_key)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+		"CREATE TABLE IF NOT EXISTS cash_custody_audit_log (
+			audit_id BIGINT(20) NOT NULL AUTO_INCREMENT,
+			entity_type VARCHAR(30) NOT NULL,
+			entity_id INT(11) NOT NULL,
+			action_type VARCHAR(40) NOT NULL,
+			old_data LONGTEXT NULL,
+			new_data LONGTEXT NULL,
+			performed_by_userid INT(11) NOT NULL DEFAULT 0,
+			performed_at BIGINT(20) NOT NULL DEFAULT 0,
+			PRIMARY KEY (audit_id),
+			KEY idx_cash_custody_audit_entity (entity_type, entity_id),
+			KEY idx_cash_custody_audit_user_date (performed_by_userid, performed_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+		"ALTER TABLE cash_custodies MODIFY COLUMN request_id INT(11) DEFAULT NULL"
+	);
+
+	$cashCustodyMigrationOk = true;
+	foreach ($cashCustodyMigrationQueries as $cashCustodyMigrationQuery) {
+		if (!mysql_query($cashCustodyMigrationQuery, $link)) {
+			$cashCustodyMigrationOk = false;
+			if (function_exists('write_log')) {
+				write_log('Cash custody migration failed: ' . mysql_error($link), 'error', 'cash-custody.log');
+			}
+			break;
+		}
+	}
+
+	if ($cashCustodyMigrationOk) {
+		$cashCustodyVersionExists = mysql_query("SELECT id FROM global WHERE variblename='cash_custody_schema_version' ORDER BY id DESC LIMIT 1", $link);
+		if ($cashCustodyVersionExists && mysql_num_rows($cashCustodyVersionExists) > 0) {
+			mysql_query("UPDATE global SET valuribalevalue='{$cashCustodySchemaVersion}' WHERE variblename='cash_custody_schema_version'", $link);
+		} else {
+			mysql_query("INSERT INTO global (variblename, valuribalevalue, formuid) VALUES ('cash_custody_schema_version', '{$cashCustodySchemaVersion}', 'cash-custody-migration')", $link);
+		}
+	}
+}
+
+// Keep settings and screen registration self-healing without duplicating rows.
+$cashCustodyScreenId = 0;
+if ($cashCustodyMigrationOk) {
+$cashCustodySettings = array(
+	'cash_custody_default_prefix' => 'CUS',
+	'cash_custody_default_vat_rate' => '15',
+	'cash_custody_allow_negative_balance' => '0',
+	'cash_custody_require_expense_attachment' => '0',
+	'cash_custody_accounting_enabled' => '0',
+	'cash_custody_account_id' => '0',
+	'cash_custody_cash_account_id' => '0',
+	'cash_custody_bank_account_id' => '0',
+	'cash_custody_expense_account_id' => '0',
+	'cash_custody_input_vat_account_id' => '0',
+	'cash_custody_journal_id' => '0'
+);
+foreach ($cashCustodySettings as $cashCustodySettingName => $cashCustodySettingValue) {
+	$escapedSettingName = mysql_real_escape_string($cashCustodySettingName, $link);
+	$escapedSettingValue = mysql_real_escape_string($cashCustodySettingValue, $link);
+	@mysql_query("INSERT INTO global (variblename, valuribalevalue, formuid)
+		SELECT '{$escapedSettingName}', '{$escapedSettingValue}', 'cash-custody-setting'
+		FROM DUAL WHERE NOT EXISTS (
+			SELECT 1 FROM global WHERE variblename='{$escapedSettingName}'
+		)", $link);
+}
+@mysql_query("INSERT INTO screens (screen_id, screen_name, screen_isactive, parentid, formuid)
+	SELECT 'cash_custody', 'إدارة العهد النقدية', '1', 36, 'cash-custody-screen'
+	FROM DUAL WHERE NOT EXISTS (
+		SELECT 1 FROM screens WHERE screen_id='cash_custody'
+	)", $link);
+$cashCustodyScreenResult = @mysql_query("SELECT screenid FROM screens WHERE screen_id='cash_custody' ORDER BY screenid ASC LIMIT 1", $link);
+if ($cashCustodyScreenResult && ($cashCustodyScreenRow = mysql_fetch_array($cashCustodyScreenResult))) {
+	$cashCustodyScreenId = intval($cashCustodyScreenRow['screenid']);
+}
+if ($cashCustodyScreenId > 0) {
+	// Inherit access from the Amlak hub; administrators can refine it later.
+	@mysql_query("INSERT INTO ugroupscreen (groupid, screenid, adds, sees, edits, deleetes, prints, formuid)
+		SELECT source.groupid, '{$cashCustodyScreenId}', MAX(source.adds), MAX(source.sees), MAX(source.edits), MAX(source.deleetes), MAX(source.prints), 'cash-custody-permission'
+		FROM ugroupscreen source
+		WHERE source.screenid=36
+		  AND NOT EXISTS (
+			SELECT 1 FROM ugroupscreen existing
+			WHERE existing.groupid=source.groupid AND existing.screenid='{$cashCustodyScreenId}'
+		  )
+		GROUP BY source.groupid", $link);
+}
+}
+
+// Maintenance request lifecycle migration. This module is separate from the
+// legacy maintenance-contract and maintenance-expense screens.
+$maintenanceRequestSchemaVersion = 1;
+$maintenanceRequestInstalledVersion = 0;
+$maintenanceRequestVersionResult = @mysql_query("SELECT valuribalevalue FROM global WHERE variblename='maintenance_request_schema_version' ORDER BY id DESC LIMIT 1", $link);
+if ($maintenanceRequestVersionResult && ($maintenanceRequestVersionRow = mysql_fetch_array($maintenanceRequestVersionResult))) {
+	$maintenanceRequestInstalledVersion = intval($maintenanceRequestVersionRow['valuribalevalue']);
+}
+$maintenanceRequestMigrationOk = $maintenanceRequestInstalledVersion >= $maintenanceRequestSchemaVersion;
+if ($maintenanceRequestInstalledVersion < $maintenanceRequestSchemaVersion) {
+	$maintenanceRequestMigrationQueries = array(
+		"CREATE TABLE IF NOT EXISTS maintenance_requests (
+			request_id BIGINT(20) NOT NULL AUTO_INCREMENT,
+			request_number VARCHAR(40) NOT NULL,
+			title VARCHAR(255) NOT NULL,
+			description TEXT NOT NULL,
+			category VARCHAR(60) NOT NULL DEFAULT 'other',
+			priority ENUM('low','normal','high','urgent') NOT NULL DEFAULT 'normal',
+			status ENUM('new','assigned','scheduled','in_progress','waiting_parts','on_hold','completed','verified','cancelled') NOT NULL DEFAULT 'new',
+			idaqar INT(11) NOT NULL DEFAULT 0,
+			idsubaqar INT(11) NOT NULL DEFAULT 0,
+			mostagerid INT(11) NOT NULL DEFAULT 0,
+			tenant_name_snapshot VARCHAR(244) NOT NULL DEFAULT '',
+			tenant_phone_snapshot VARCHAR(100) NOT NULL DEFAULT '',
+			assigned_userid INT(11) NOT NULL DEFAULT 0,
+			reported_by_type ENUM('tenant','user','owner','other') NOT NULL DEFAULT 'tenant',
+			reported_by_name VARCHAR(244) NOT NULL DEFAULT '',
+			reported_by_contact VARCHAR(150) NOT NULL DEFAULT '',
+			preferred_visit_at DATETIME DEFAULT NULL,
+			scheduled_at DATETIME DEFAULT NULL,
+			due_at DATETIME DEFAULT NULL,
+			started_at DATETIME DEFAULT NULL,
+			completed_at DATETIME DEFAULT NULL,
+			verified_at DATETIME DEFAULT NULL,
+			location_details VARCHAR(500) NOT NULL DEFAULT '',
+			access_instructions TEXT NULL,
+			requires_tenant_presence TINYINT(1) NOT NULL DEFAULT 0,
+			vendor_name VARCHAR(244) NOT NULL DEFAULT '',
+			vendor_phone VARCHAR(100) NOT NULL DEFAULT '',
+			estimated_cost DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+			actual_cost DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+			resolution_summary TEXT NULL,
+			cancellation_reason TEXT NULL,
+			created_by_userid INT(11) NOT NULL DEFAULT 0,
+			updated_by_userid INT(11) NOT NULL DEFAULT 0,
+			created_at BIGINT(20) NOT NULL DEFAULT 0,
+			updated_at BIGINT(20) NOT NULL DEFAULT 0,
+			formuid VARCHAR(100) NOT NULL DEFAULT '',
+			PRIMARY KEY (request_id),
+			UNIQUE KEY uq_maintenance_request_number (request_number),
+			UNIQUE KEY uq_maintenance_request_formuid (formuid),
+			KEY idx_maintenance_request_status_priority (status,priority,request_id),
+			KEY idx_maintenance_request_assignment (assigned_userid,status,due_at),
+			KEY idx_maintenance_request_property (idaqar,idsubaqar,status),
+			KEY idx_maintenance_request_tenant (mostagerid,status)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+		"CREATE TABLE IF NOT EXISTS maintenance_request_events (
+			event_id BIGINT(20) NOT NULL AUTO_INCREMENT,
+			request_id BIGINT(20) NOT NULL,
+			event_type VARCHAR(50) NOT NULL,
+			from_status VARCHAR(30) NOT NULL DEFAULT '',
+			to_status VARCHAR(30) NOT NULL DEFAULT '',
+			note TEXT NULL,
+			event_data LONGTEXT NULL,
+			event_by_userid INT(11) NOT NULL DEFAULT 0,
+			event_at BIGINT(20) NOT NULL DEFAULT 0,
+			PRIMARY KEY (event_id),
+			KEY idx_maintenance_event_request (request_id,event_id),
+			KEY idx_maintenance_event_user_date (event_by_userid,event_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+		"CREATE TABLE IF NOT EXISTS maintenance_request_items (
+			item_id BIGINT(20) NOT NULL AUTO_INCREMENT,
+			request_id BIGINT(20) NOT NULL,
+			item_type ENUM('material','service','transport','other') NOT NULL DEFAULT 'material',
+			item_name VARCHAR(255) NOT NULL,
+			quantity DECIMAL(12,3) NOT NULL DEFAULT 1.000,
+			unit VARCHAR(50) NOT NULL DEFAULT 'قطعة',
+			unit_cost DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+			supplier_name VARCHAR(244) NOT NULL DEFAULT '',
+			status ENUM('requested','ordered','received','used','returned','cancelled') NOT NULL DEFAULT 'requested',
+			notes TEXT NULL,
+			created_by_userid INT(11) NOT NULL DEFAULT 0,
+			created_at BIGINT(20) NOT NULL DEFAULT 0,
+			updated_at BIGINT(20) NOT NULL DEFAULT 0,
+			PRIMARY KEY (item_id),
+			KEY idx_maintenance_item_request (request_id,status)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+		"CREATE TABLE IF NOT EXISTS maintenance_request_attachments (
+			attachment_id BIGINT(20) NOT NULL AUTO_INCREMENT,
+			request_id BIGINT(20) NOT NULL,
+			original_name VARCHAR(255) NOT NULL DEFAULT '',
+			stored_name VARCHAR(255) NOT NULL DEFAULT '',
+			storage_path VARCHAR(500) NOT NULL DEFAULT '',
+			mime_type VARCHAR(120) NOT NULL DEFAULT '',
+			file_size BIGINT(20) NOT NULL DEFAULT 0,
+			uploaded_by_userid INT(11) NOT NULL DEFAULT 0,
+			uploaded_at BIGINT(20) NOT NULL DEFAULT 0,
+			PRIMARY KEY (attachment_id),
+			KEY idx_maintenance_attachment_request (request_id,attachment_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+	);
+	$maintenanceRequestMigrationOk = true;
+	foreach ($maintenanceRequestMigrationQueries as $maintenanceRequestMigrationQuery) {
+		if (!mysql_query($maintenanceRequestMigrationQuery, $link)) {
+			$maintenanceRequestMigrationOk = false;
+			if (function_exists('write_log')) {
+				write_log('Maintenance request migration failed: ' . mysql_error($link), 'error', 'maintenance-requests.log');
+			}
+			break;
+		}
+	}
+	if ($maintenanceRequestMigrationOk) {
+		$maintenanceRequestVersionExists = mysql_query("SELECT id FROM global WHERE variblename='maintenance_request_schema_version' ORDER BY id DESC LIMIT 1", $link);
+		if ($maintenanceRequestVersionExists && mysql_num_rows($maintenanceRequestVersionExists) > 0) {
+			mysql_query("UPDATE global SET valuribalevalue='{$maintenanceRequestSchemaVersion}' WHERE variblename='maintenance_request_schema_version'", $link);
+		} else {
+			mysql_query("INSERT INTO global (variblename,valuribalevalue,formuid) VALUES ('maintenance_request_schema_version','{$maintenanceRequestSchemaVersion}','maintenance-request-migration')", $link);
+		}
+	}
+}
+
+$maintenanceRequestScreenId = 0;
+if ($maintenanceRequestMigrationOk) {
+	@mysql_query("INSERT INTO screens (screen_id,screen_name,screen_isactive,parentid,formuid)
+		SELECT 'maintenance_requests','طلبات الصيانة','1',36,'maintenance-request-screen'
+		FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM screens WHERE screen_id='maintenance_requests')", $link);
+	$maintenanceRequestScreenResult = @mysql_query("SELECT screenid FROM screens WHERE screen_id='maintenance_requests' ORDER BY screenid LIMIT 1", $link);
+	if ($maintenanceRequestScreenResult && ($maintenanceRequestScreenRow = mysql_fetch_array($maintenanceRequestScreenResult))) {
+		$maintenanceRequestScreenId = intval($maintenanceRequestScreenRow['screenid']);
+	}
+	if ($maintenanceRequestScreenId > 0) {
+		@mysql_query("INSERT INTO ugroupscreen (groupid,screenid,adds,sees,edits,deleetes,prints,formuid)
+			SELECT source.groupid,'{$maintenanceRequestScreenId}',MAX(source.adds),MAX(source.sees),MAX(source.edits),MAX(source.deleetes),MAX(source.prints),'maintenance-request-permission'
+			FROM ugroupscreen source
+			WHERE source.screenid=36
+			AND NOT EXISTS (SELECT 1 FROM ugroupscreen existing WHERE existing.groupid=source.groupid AND existing.screenid='{$maintenanceRequestScreenId}')
+			GROUP BY source.groupid", $link);
+	}
+}
+
+// Register the tenant QR-card screen once and inherit the Property Management
+// hub permissions. The feature stores generated images in storage, not in SQL.
+$tenantQrScreenId = 0;
+@mysql_query("INSERT INTO screens (screen_id,screen_name,screen_isactive,parentid,formuid)
+	SELECT 'tenant_qr_cards','بطاقات QR للمستأجرين','1',36,'tenant-qr-card-screen'
+	FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM screens WHERE screen_id='tenant_qr_cards')", $link);
+$tenantQrScreenResult = @mysql_query("SELECT screenid FROM screens WHERE screen_id='tenant_qr_cards' ORDER BY screenid ASC LIMIT 1", $link);
+if ($tenantQrScreenResult && ($tenantQrScreenRow = mysql_fetch_array($tenantQrScreenResult))) {
+	$tenantQrScreenId = intval($tenantQrScreenRow['screenid']);
+}
+if ($tenantQrScreenId > 0) {
+	@mysql_query("INSERT INTO ugroupscreen (groupid,screenid,adds,sees,edits,deleetes,prints,formuid)
+		SELECT source.groupid,'{$tenantQrScreenId}',MAX(source.adds),MAX(source.sees),MAX(source.edits),MAX(source.deleetes),MAX(source.prints),'tenant-qr-card-permission'
+		FROM ugroupscreen source
+		WHERE source.screenid=36
+		AND NOT EXISTS (SELECT 1 FROM ugroupscreen existing WHERE existing.groupid=source.groupid AND existing.screenid='{$tenantQrScreenId}')
+		GROUP BY source.groupid", $link);
+}
+
+
 echo "<script>updateProgress(95, 'جاري إنهاء العملية...');</script>";
 flush_buffers();
 ?>

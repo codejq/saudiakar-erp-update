@@ -159,10 +159,51 @@ function loginfo($messagetype,
 	global $screenid;
 	$screenid = isset($screenid) ? $screenid : '';
 	if($table){
-		$row=mysql_fetch_array(mysql_query("SHOW COLUMNS FROM {$table}"));
-		$row=mysql_fetch_array(mysql_query("select * FROM {$table} where {$row['Field']} = '{$id}'"));
+		$columnRow = mysql_fetch_assoc(mysql_query("SHOW COLUMNS FROM {$table}"));
+		$primaryField = $columnRow ? $columnRow['Field'] : '';
+		$row = $primaryField !== ''
+			? mysql_fetch_assoc(mysql_query("select * FROM {$table} where {$primaryField} = '{$id}'"))
+			: false;
 		if($row){
-			$messagetxt = $messagetxt . implode ( " - " , array_values($row) ) ;
+			// Store named values for an organized notification display. Empty
+			// values are omitted and very large fields are summarized so the
+			// notification remains within the legacy VARCHAR limit.
+			$notificationDetails = array();
+			foreach ($row as $fieldName => $fieldValue) {
+				if ($fieldValue === null || $fieldValue === '') {
+					continue;
+				}
+				$fieldValue = (string)$fieldValue;
+				if (strlen($fieldValue) > 400) {
+					$fieldValue = '[large value omitted: ' . strlen($fieldValue) . ' bytes]';
+				}
+				$notificationDetails[$fieldName] = $fieldValue;
+			}
+
+			$detailsMarker = "\n[[LOG_DETAILS_JSON]]\n";
+			$availableDetailsLength = max(0, 3300 - strlen($messagetxt) - strlen($detailsMarker));
+			$detailsJson = json_encode($notificationDetails, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+			$detailsWereTrimmed = false;
+			while ($detailsJson !== false && strlen($detailsJson) > $availableDetailsLength && count($notificationDetails) > 0) {
+				unset($notificationDetails['_notice']);
+				if (count($notificationDetails) === 0) {
+					break;
+				}
+				array_pop($notificationDetails);
+				$detailsWereTrimmed = true;
+				$notificationDetails['_notice'] = 'Some technical fields were omitted because the notification is too large.';
+				$detailsJson = json_encode($notificationDetails, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+			}
+			if (!$detailsWereTrimmed) {
+				unset($notificationDetails['_notice']);
+			}
+			if (
+				$detailsJson !== false &&
+				$availableDetailsLength > 0 &&
+				strlen($detailsJson) <= $availableDetailsLength
+			) {
+				$messagetxt .= $detailsMarker . $detailsJson;
+			}
 		}
 	}
 	$pattern = "/[0-9]{10}/i";
@@ -199,11 +240,11 @@ function addnotifi($notifitext,$notifiuserid=0,$notifisender=0,$notifitype='',$l
 	mysql_query($sql,$link);
 
 	if($notifiuserid ==0){
-		//notifi alll users
-		mysql_query("update user set notificationscount = 1");
+		// Count this broadcast as pending for every user until each user visits the notification center.
+		mysql_query("update user set notificationscount = COALESCE(notificationscount, 0) + 1");
 	}
 	else{
-		mysql_query("update user set notificationscount = 1 where userid='".$notifiuserid."'");
+		mysql_query("update user set notificationscount = COALESCE(notificationscount, 0) + 1 where userid='".intval($notifiuserid)."'");
 	}
 }
 

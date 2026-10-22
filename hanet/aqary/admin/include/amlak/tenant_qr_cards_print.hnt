@@ -1,0 +1,130 @@
+<?php
+/** Printable tenant identification cards with customer-scoped QR images. */
+$sc_title = 'طباعة بطاقات المستأجرين';
+include_once dirname(__DIR__, 3) . '/nocash.hnt';
+include_once dirname(__DIR__, 3) . '/report_header.hnt';
+require_once __DIR__ . '/tenant_qr_common.hnt';
+if (!defined('APP_BASE_PATH')) {
+    define('APP_BASE_PATH', '/aqary');
+}
+require_once dirname(__DIR__, 3) . '/lib/storage/helpers.php';
+require_once dirname(__DIR__, 2) . '/qr/phpqrcode/qrlib.php';
+date_default_timezone_set('Asia/Riyadh');
+
+if (isset($qdb_db, $dbSuffix) && $db instanceof mysqli) {
+    mysqli_select_db($db, $qdb_db . $dbSuffix);
+    $db->set_charset('utf8mb4');
+}
+$screenId = tenantQrResolveScreenId($db);
+$access = tenantQrAccess($db, $screenId, intval($_SESSION['useridv'] ?? 0));
+if (!$access['allowed'] || !$access['print']) {
+    echo '<div dir="rtl" style="padding:40px;text-align:center;color:#991b1b">ليس لديك صلاحية لطباعة بطاقات المستأجرين.</div>';
+    require dirname(__DIR__, 3) . '/reportfooter.hnt';
+    exit;
+}
+
+$rawIds = $_GET['ids'] ?? array();
+if (!is_array($rawIds)) {
+    $rawIds = preg_split('/\s*,\s*/', (string)$rawIds, -1, PREG_SPLIT_NO_EMPTY);
+}
+$tenantIds = array_values(array_unique(array_filter(array_map('intval', $rawIds))));
+$tenantIds = array_slice($tenantIds, 0, 100);
+if (!$tenantIds) {
+    echo '<div dir="rtl" style="padding:40px;text-align:center;color:#991b1b">لم يتم اختيار أي مستأجر للطباعة.</div>';
+    require dirname(__DIR__, 3) . '/reportfooter.hnt';
+    exit;
+}
+
+$idSql = implode(',', $tenantIds);
+$tenants = array();
+$tenantResult = $db->query("SELECT mostagerid,mostagername,mostagertel,mostageridnumber,mostageremail,mostageraddress
+    FROM mostagereen WHERE mostagerid IN ({$idSql}) ORDER BY mostagername,mostagerid");
+if ($tenantResult) {
+    while ($row = $tenantResult->fetch_assoc()) {
+        $tenants[] = $row;
+    }
+}
+$unitsByTenant = tenantQrLoadUnits($db, $tenantIds);
+
+$databaseName = (string)($qdb_db ?? 'aqary') . (string)($dbSuffix ?? '');
+$customerScope = substr(hash('sha256', $databaseName), 0, 16);
+$requestHost = (string)($_SERVER['HTTP_HOST'] ?? '');
+if (!preg_match('/^[A-Za-z0-9.\-:\[\]]+$/', $requestHost)) {
+    $requestHost = '';
+}
+$scheme = (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off') ? 'https' : 'http';
+$officeName = trim(tenantQrNormalizeText((string)($bayanmaktabname ?? '')));
+if ($officeName === '') {
+    $officeName = 'إدارة الأملاك';
+}
+$printedAt = date('d/m/Y');
+$cards = array();
+
+foreach ($tenants as $tenant) {
+    $tenantId = intval($tenant['mostagerid']);
+    $lookupPath = '/aqary/admin/include/amlak/tenant_qr_view.hnt?mostagerid=' . $tenantId;
+    $qrContent = $requestHost !== '' ? $scheme . '://' . $requestHost . $lookupPath : $lookupPath;
+    $qrFilename = $customerScope . '-tenant-' . $tenantId . '.png';
+    $qrFile = qr_path('tenants.cards', $qrFilename);
+    $qrUrl = '';
+    try {
+        ensure_dir(dirname($qrFile));
+        QRcode::png($qrContent, $qrFile, 'M', 5, 2);
+        if (is_file($qrFile)) {
+            $qrUrl = qr_code_url('tenants.cards', $qrFilename) . '?v=' . rawurlencode((string)@filemtime($qrFile));
+        }
+    } catch (Throwable $exception) {
+        if (function_exists('write_log')) {
+            write_log('Tenant QR generation failed for tenant ' . $tenantId . ': ' . $exception->getMessage(), 'error', 'tenant-qr.log');
+        }
+    }
+    $unitRows = $unitsByTenant[$tenantId] ?? array();
+    $unitLabels = array();
+    foreach ($unitRows as $unitRow) {
+        if ($unitRow['label'] !== '') {
+            $unitLabels[] = $unitRow['label'];
+        }
+    }
+    $cards[] = array('tenant' => $tenant, 'units' => $unitRows, 'unit_labels' => $unitLabels, 'qr_url' => $qrUrl, 'qr_content' => $qrContent);
+}
+?>
+<script>
+document.title='بطاقات QR للمستأجرين';
+if(document.getElementById('pagetitle'))document.getElementById('pagetitle').value=document.title;
+</script>
+<style>
+.tqr-print-page{direction:rtl;font-family:Tahoma,Arial,sans-serif;color:#0f172a;padding:4mm}.tqr-print-intro{text-align:center;margin:0 0 8mm}.tqr-print-intro h1{font-size:22px;margin:0 0 5px}.tqr-print-intro p{margin:0;color:#64748b}.tqr-card-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8mm 6mm;align-items:start}.tqr-card{height:62mm;border:1.5px solid #0f766e;border-radius:4mm;overflow:hidden;background:#fff;display:grid;grid-template-columns:1fr 38mm;position:relative;break-inside:avoid;page-break-inside:avoid;box-shadow:0 1mm 3mm rgba(15,23,42,.09)}.tqr-card-main{padding:5mm 5mm 4mm;display:flex;flex-direction:column;min-width:0}.tqr-card-brand{font-size:11px;color:#0f766e;font-weight:800;margin-bottom:2mm}.tqr-card-name{font-size:15px;font-weight:900;line-height:1.35;margin-bottom:2.5mm;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tqr-card-row{display:grid;grid-template-columns:20mm 1fr;gap:2mm;font-size:11px;line-height:1.6;border-top:1px solid #e2e8f0;padding-top:1.5mm;margin-top:1.5mm}.tqr-card-label{font-weight:800;color:#475569}.tqr-card-value{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tqr-card-footer{margin-top:auto;display:flex;justify-content:space-between;gap:3mm;font-size:9px;color:#64748b}.tqr-card-qr{background:#f0fdfa;border-right:1px solid #99f6e4;padding:4mm 3mm;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}.tqr-card-qr img{width:31mm;height:31mm;object-fit:contain;background:#fff;border:1px solid #dbeafe;padding:1mm}.tqr-card-qr-code{font-size:10px;font-weight:900;color:#0f766e;margin-top:2mm}.tqr-card-qr-note{font-size:8px;color:#475569;margin-top:1mm}.tqr-qr-error{width:31mm;height:31mm;border:1px dashed #ef4444;color:#991b1b;display:flex;align-items:center;justify-content:center;font-size:9px}.tqr-no-cards{text-align:center;padding:30px;color:#991b1b}@media(max-width:900px){.tqr-card-grid{grid-template-columns:1fr}}@media print{.tqr-print-page{padding:0}.tqr-print-intro{display:none}.tqr-card-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:7mm 5mm}.tqr-card{box-shadow:none}.tqr-card:nth-child(8n){page-break-after:always}}
+</style>
+<div class="tqr-print-page">
+    <div class="tqr-print-intro"><h1>بطاقات QR للمستأجرين</h1><p>تم تجهيز <?= count($cards) ?> بطاقة للطباعة.</p></div>
+    <div class="tqr-card-grid">
+        <?php foreach($cards as $card): $tenant=$card['tenant']; $tenantId=intval($tenant['mostagerid']); ?>
+        <article class="tqr-card">
+            <div class="tqr-card-main">
+                <div class="tqr-card-brand"><?= tenantQrEsc($officeName) ?> — بطاقة مستأجر</div>
+                <div class="tqr-card-name"><?= tenantQrEsc($tenant['mostagername']) ?></div>
+                <div class="tqr-card-row"><span class="tqr-card-label">رقم المستأجر</span><span class="tqr-card-value">T-<?= $tenantId ?></span></div>
+                <div class="tqr-card-row"><span class="tqr-card-label">الهاتف</span><span class="tqr-card-value" style="direction:ltr;text-align:right"><?= tenantQrEsc($tenant['mostagertel'] ?: '-') ?></span></div>
+                <div class="tqr-card-row"><span class="tqr-card-label">العقار / الوحدة</span><span class="tqr-card-value" title="<?= tenantQrEsc(implode(' | ', $card['unit_labels'])) ?>"><?= tenantQrEsc($card['unit_labels'] ? implode(' | ', $card['unit_labels']) : 'لا توجد وحدة حالية') ?></span></div>
+                <div class="tqr-card-footer"><span>تاريخ الإصدار: <?= tenantQrEsc($printedAt) ?></span><span><?= count($card['units']) ? 'مستأجر حالي' : 'سجل مستأجر' ?></span></div>
+            </div>
+            <div class="tqr-card-qr">
+                <?php if($card['qr_url']): ?><img src="<?= tenantQrEsc($card['qr_url']) ?>" alt="QR <?= $tenantId ?>"><?php else: ?><div class="tqr-qr-error">تعذر إنشاء QR</div><?php endif; ?>
+                <div class="tqr-card-qr-code">T-<?= $tenantId ?></div>
+                <div class="tqr-card-qr-note">امسح الرمز لعرض السجل</div>
+            </div>
+        </article>
+        <?php endforeach; ?>
+        <?php if(!$cards): ?><div class="tqr-no-cards">لا توجد سجلات صالحة للطباعة.</div><?php endif; ?>
+    </div>
+</div>
+<script>
+$(function () {
+    $('.footnote,.qbarcodepng,.wkhtmltopdf').hide();
+});
+</script>
+<?php
+$forceprintfooter = 1;
+require dirname(__DIR__, 3) . '/reportfooter.hnt';
+?>
+

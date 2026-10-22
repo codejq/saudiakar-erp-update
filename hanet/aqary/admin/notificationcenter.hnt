@@ -35,26 +35,196 @@ if (isset($ncount['dd']) && $ncount['dd'] < 1) {
     );
 }
 
-// Initialize search variable
-$search_notification = isset($_REQUEST['search_notification']) ? trim($_REQUEST['search_notification']) : '';
+// Search and pagination. Fifty records is the default page size.
+$search_notification = isset($_GET['search_notification']) ? trim($_GET['search_notification']) : '';
+$allowedPageSizes = array(25, 50, 100);
+$currentUserId = intval($_SESSION['useridv']);
+$pageSizeCookieName = 'notificationcenter_per_page_' . $currentUserId;
+$savedPageSize = isset($_COOKIE[$pageSizeCookieName]) ? intval($_COOKIE[$pageSizeCookieName]) : 50;
+$perPage = isset($_GET['per_page']) ? intval($_GET['per_page']) : $savedPageSize;
+if (!in_array($perPage, $allowedPageSizes, true)) {
+    $perPage = 50;
+}
+$currentPage = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
+$notificationWhere = "(notifiuserid='{$currentUserId}' OR notifiuserid=0)";
 
-// Build SQL query
-$sql = "SELECT * FROM notifications WHERE (notifiuserid='" . intval($_SESSION['useridv']) . "' OR notifiuserid = 0) ORDER BY id DESC LIMIT 500";
-
-if ($search_notification != '') {
-    $search_term = addslashes($search_notification);
-    $sql = "SELECT * FROM notifications WHERE (
-        notifitext LIKE '%" . $search_term . "%' OR
-        notifisender LIKE '%" . $search_term . "%' OR
-        notifitype LIKE '%" . $search_term . "%'
-    ) AND (notifiuserid='" . intval($_SESSION['useridv']) . "' OR notifiuserid = 0)
-    ORDER BY id DESC LIMIT 500";
+if ($search_notification !== '') {
+    $normalizedSearchTerm = preg_replace('/\s+/u', ' ', trim($search_notification));
+    $search_term = mysql_real_escape_string($normalizedSearchTerm, $link);
+    // Search one combined value so LIKE covers the readable message, the full
+    // serialized/JSON details and every notification metadata field.
+    $notificationSearchValue = "CONCAT_WS(' ',
+        CAST(id AS CHAR),
+        COALESCE(notifitext, ''),
+        CAST(COALESCE(notifiuserid, 0) AS CHAR),
+        COALESCE(notifisender, ''),
+        COALESCE(notifitype, ''),
+        CAST(COALESCE(notifitime, 0) AS CHAR),
+        DATE_FORMAT(FROM_UNIXTIME(notifitime), '%d/%m/%Y %H:%i'),
+        CAST(COALESCE(notifiisseen, 0) AS CHAR)
+    )";
+    // Browsers collapse repeated whitespace when users copy displayed text.
+    // Normalize database line breaks, tabs and repeated spaces before LIKE so
+    // the copied text still matches the stored serialization.
+    $normalizedNotificationSearchValue = "REPLACE(REPLACE(REPLACE({$notificationSearchValue}, CHAR(13), ' '), CHAR(10), ' '), CHAR(9), ' ')";
+    for ($spacePass = 0; $spacePass < 6; $spacePass++) {
+        $normalizedNotificationSearchValue = "REPLACE({$normalizedNotificationSearchValue}, '  ', ' ')";
+    }
+    $notificationWhere .= " AND {$normalizedNotificationSearchValue} LIKE '%{$search_term}%'";
 }
 
+$totalNotifications = 0;
+$countResult = mysql_query("SELECT COUNT(*) AS total FROM notifications WHERE {$notificationWhere}", $link);
+if ($countResult && ($countRow = mysql_fetch_assoc($countResult))) {
+    $totalNotifications = intval($countRow['total']);
+}
+$totalPages = max(1, intval(ceil($totalNotifications / $perPage)));
+$currentPage = min($currentPage, $totalPages);
+$offset = ($currentPage - 1) * $perPage;
+$firstRecordNumber = $totalNotifications > 0 ? $offset + 1 : 0;
+$lastRecordNumber = min($offset + $perPage, $totalNotifications);
+
+$sql = "SELECT * FROM notifications
+        WHERE {$notificationWhere}
+        ORDER BY id DESC
+        LIMIT {$offset}, {$perPage}";
 $rs = mysql_query($sql, $link);
 $notifications = array();
-while ($row = mysql_fetch_array($rs)) {
+while ($rs && ($row = mysql_fetch_assoc($rs))) {
     $notifications[] = $row;
+}
+
+function notificationCenterPageUrl($page, $search, $perPage) {
+    $parameters = array(
+        'page' => max(1, intval($page)),
+        'per_page' => intval($perPage)
+    );
+    if ($search !== '') {
+        $parameters['search_notification'] = $search;
+    }
+    return '?' . http_build_query($parameters, '', '&');
+}
+
+$paginationPages = array(1, $totalPages);
+for ($pageNumber = max(1, $currentPage - 2); $pageNumber <= min($totalPages, $currentPage + 2); $pageNumber++) {
+    $paginationPages[] = $pageNumber;
+}
+$paginationPages = array_values(array_unique($paginationPages));
+sort($paginationPages);
+
+/**
+ * Split a notification into its readable message and technical record data.
+ * New log entries use a JSON marker; older entries used an unlabeled value dump.
+ */
+function notificationCenterParseText($text) {
+    $result = array(
+        'summary' => (string)$text,
+        'details' => array(),
+        'legacy' => ''
+    );
+    $marker = '[[LOG_DETAILS_JSON]]';
+    $markerPosition = strpos($result['summary'], $marker);
+    if ($markerPosition !== false) {
+        $json = trim(substr($result['summary'], $markerPosition + strlen($marker)));
+        $result['summary'] = trim(substr($result['summary'], 0, $markerPosition));
+        $decoded = json_decode($json, true);
+        if (is_array($decoded)) {
+            $result['details'] = $decoded;
+        } else {
+            $result['legacy'] = $json;
+        }
+        return $result;
+    }
+
+    // Legacy critical logs appended every database value with " - " and no
+    // field names. Separate that dump without discarding the original data.
+    $normalized = str_replace(array("\r\n", "\r"), "\n", $result['summary']);
+    $lines = explode("\n", $normalized);
+    $summaryLines = array();
+    $legacyLines = array();
+    foreach ($lines as $line) {
+        if (substr_count($line, ' - ') >= 8) {
+            $legacyLines[] = trim($line);
+        } else {
+            $summaryLines[] = $line;
+        }
+    }
+
+    // Some old delete logs contain the message and dump on the same line.
+    if (count($legacyLines) === 0 && substr_count($normalized, ' - ') >= 8) {
+        $firstSeparator = strpos($normalized, ' - ');
+        if ($firstSeparator !== false) {
+            $result['summary'] = trim(substr($normalized, 0, $firstSeparator));
+            $result['legacy'] = trim(substr($normalized, $firstSeparator + 3));
+            return $result;
+        }
+    }
+
+    if (count($legacyLines) > 0) {
+        $result['summary'] = trim(implode("\n", $summaryLines));
+        $result['legacy'] = trim(implode("\n", $legacyLines));
+    }
+    return $result;
+}
+
+function notificationCenterFieldLabel($fieldName) {
+    $labels = array(
+        'idsanad' => 'رقم السند',
+        'sanadrakam' => 'رقم السند',
+        'mostagername' => 'اسم العميل',
+        'depositeamount' => 'المبلغ',
+        'recivername' => 'المستلم',
+        'mybyan' => 'البيان',
+        'sanaddate' => 'تاريخ السند',
+        'paymentdate' => 'تاريخ الدفع',
+        'kastid' => 'رقم القسط',
+        'idsubaqar' => 'رقم الوحدة',
+        'idaqar' => 'رقم العقار',
+        'userid' => 'رقم المستخدم',
+        '_notice' => 'ملاحظة تقنية'
+    );
+    return isset($labels[$fieldName]) ? $labels[$fieldName] : str_replace('_', ' ', $fieldName);
+}
+
+function notificationCenterRenderText($text) {
+    $parsed = notificationCenterParseText($text);
+    $lines = preg_split('/\R/u', trim($parsed['summary']));
+    $html = '<div class="notification-summary">';
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '') {
+            continue;
+        }
+        if (preg_match('/^([^:：]{1,60})\s*[:：]\s*(.*)$/u', $line, $matches)) {
+            $label = htmlspecialchars(trim($matches[1]), ENT_QUOTES, 'UTF-8');
+            $value = trim($matches[2]) !== '' ? trim($matches[2]) : '—';
+            $html .= '<div class="notification-summary-row"><span class="notification-summary-label">'
+                . $label . '</span><span class="notification-summary-value">'
+                . htmlspecialchars($value, ENT_QUOTES, 'UTF-8') . '</span></div>';
+        } else {
+            $html .= '<p class="notification-summary-line">'
+                . htmlspecialchars($line, ENT_QUOTES, 'UTF-8') . '</p>';
+        }
+    }
+    $html .= '</div>';
+
+    if (count($parsed['details']) > 0) {
+        $html .= '<details class="notification-details"><summary><i class="bi bi-list-ul me-1"></i>تفاصيل السجل</summary>';
+        $html .= '<div class="table-responsive mt-2"><table class="table table-sm table-striped notification-details-table"><tbody>';
+        foreach ($parsed['details'] as $field => $value) {
+            $html .= '<tr><th>' . htmlspecialchars(notificationCenterFieldLabel($field), ENT_QUOTES, 'UTF-8')
+                . '<small>' . htmlspecialchars($field, ENT_QUOTES, 'UTF-8') . '</small></th><td>'
+                . nl2br(htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8')) . '</td></tr>';
+        }
+        $html .= '</tbody></table></div></details>';
+    } elseif ($parsed['legacy'] !== '') {
+        $html .= '<details class="notification-details notification-legacy"><summary><i class="bi bi-archive me-1"></i>بيانات تقنية قديمة</summary>'
+            . '<div class="notification-legacy-data">'
+            . htmlspecialchars($parsed['legacy'], ENT_QUOTES, 'UTF-8')
+            . '</div></details>';
+    }
+
+    return $html;
 }
 ?>
 
@@ -91,10 +261,102 @@ while ($row = mysql_fetch_array($rs)) {
     line-height: 1.6;
 }
 
+.notification-summary {
+    display: grid;
+    gap: 0.45rem;
+}
+
+.notification-summary-row {
+    display: grid;
+    grid-template-columns: minmax(130px, 190px) 1fr;
+    gap: 0.75rem;
+    align-items: start;
+    padding: 0.55rem 0.7rem;
+    border-radius: 8px;
+    background: #f8fafc;
+}
+
+.notification-summary-label {
+    color: #0f766e;
+    font-weight: 700;
+}
+
+.notification-summary-value,
+.notification-summary-line,
+.notification-details-table td,
+.notification-legacy-data {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.notification-summary-line {
+    margin: 0;
+    padding: 0.35rem 0.7rem;
+}
+
+.notification-details {
+    margin-top: 0.85rem;
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    background: #f8fbff;
+}
+
+.notification-details > summary {
+    cursor: pointer;
+    padding: 0.65rem 0.8rem;
+    color: #075985;
+    font-weight: 700;
+}
+
+.notification-details-table {
+    margin-bottom: 0;
+}
+
+.notification-details-table th {
+    min-width: 170px;
+    color: #334155;
+}
+
+.notification-details-table th small {
+    display: block;
+    direction: ltr;
+    text-align: right;
+    color: #94a3b8;
+    font-weight: 400;
+}
+
+.notification-legacy-data {
+    direction: ltr;
+    text-align: left;
+    max-height: 220px;
+    overflow: auto;
+    padding: 0.75rem;
+    border-top: 1px solid #dbeafe;
+    color: #64748b;
+    font-family: monospace;
+    font-size: 0.78rem;
+    white-space: pre-wrap;
+}
+
 .search-box {
     background: white;
     border-radius: 12px;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.notification-pagination-card {
+    background: white;
+    border-radius: 12px;
+}
+
+.notification-pagination-card .pagination {
+    margin-bottom: 0;
+    flex-wrap: wrap;
+}
+
+.notification-pagination-card .page-link {
+    min-width: 40px;
+    text-align: center;
 }
 
 .empty-state {
@@ -112,6 +374,11 @@ while ($row = mysql_fetch_array($rs)) {
     .notification-card {
         margin-bottom: 1rem;
     }
+
+    .notification-summary-row {
+        grid-template-columns: 1fr;
+        gap: 0.15rem;
+    }
 }
 </style>
 
@@ -125,7 +392,7 @@ while ($row = mysql_fetch_array($rs)) {
                     <?= htmlspecialchars($sc_title, ENT_QUOTES, 'UTF-8') ?>
                 </h4>
                 <span class="badge bg-light text-dark">
-                    <?= count($notifications) ?> تنبيه
+                    <?= number_format($totalNotifications) ?> تنبيه
                 </span>
             </div>
         </div>
@@ -142,7 +409,7 @@ while ($row = mysql_fetch_array($rs)) {
         <div class="card-body">
             <form id="searchForm" method="get" action="">
                 <div class="row g-3 align-items-end">
-                    <div class="col-md-10">
+                    <div class="col-md-8">
                         <label class="form-label">
                             <i class="bi bi-search me-2"></i>
                             البحث في التنبيهات
@@ -152,7 +419,19 @@ while ($row = mysql_fetch_array($rs)) {
                                name="search_notification"
                                id="search_notification"
                                value="<?= htmlspecialchars($search_notification, ENT_QUOTES, 'UTF-8') ?>"
-                               placeholder="ابحث في النص، المرسل، أو النوع...">
+                               placeholder="ابحث في جميع النصوص والتفاصيل والقيم...">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label" for="per_page">
+                            <i class="bi bi-list-ol me-2"></i>عدد السجلات
+                        </label>
+                        <select class="form-select form-select-lg" name="per_page" id="per_page">
+                            <?php foreach ($allowedPageSizes as $pageSize): ?>
+                                <option value="<?= $pageSize ?>" <?= $perPage === $pageSize ? 'selected' : '' ?>>
+                                    <?= $pageSize ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
                     </div>
                     <div class="col-md-2">
                         <button type="submit" class="btn btn-primary w-100 btn-lg">
@@ -162,7 +441,7 @@ while ($row = mysql_fetch_array($rs)) {
                 </div>
                 <?php if ($search_notification != ''): ?>
                 <div class="mt-3">
-                    <a href="?" class="btn btn-sm btn-outline-secondary">
+                    <a href="?per_page=<?= $perPage ?>" class="btn btn-sm btn-outline-secondary">
                         <i class="bi bi-x-circle me-2"></i>مسح البحث
                     </a>
                 </div>
@@ -178,7 +457,7 @@ while ($row = mysql_fetch_array($rs)) {
                 <?php foreach ($notifications as $notification): ?>
                     <?php
                     $notifitime = date("d-m-Y h:i A", $notification['notifitime']);
-                    $notifitext = nl2br(htmlspecialchars($notification['notifitext'], ENT_QUOTES, 'UTF-8'));
+                    $notifitext = notificationCenterRenderText($notification['notifitext']);
                     $notifisender = htmlspecialchars($notification['notifisender'], ENT_QUOTES, 'UTF-8');
                     $notifitype = htmlspecialchars($notification['notifitype'], ENT_QUOTES, 'UTF-8');
 
@@ -250,6 +529,46 @@ while ($row = mysql_fetch_array($rs)) {
             <?php endif; ?>
         </div>
     </div>
+
+    <?php if ($totalNotifications > 0): ?>
+        <div class="card shadow-sm border-0 notification-pagination-card mt-3">
+            <div class="card-body d-flex flex-column flex-md-row justify-content-between align-items-center gap-3">
+                <div class="text-muted">
+                    عرض <?= number_format($firstRecordNumber) ?>–<?= number_format($lastRecordNumber) ?>
+                    من أصل <?= number_format($totalNotifications) ?> تنبيه
+                </div>
+
+                <?php if ($totalPages > 1): ?>
+                    <nav aria-label="صفحات التنبيهات">
+                        <ul class="pagination" dir="ltr">
+                            <li class="page-item <?= $currentPage <= 1 ? 'disabled' : '' ?>">
+                                <a class="page-link" href="<?= htmlspecialchars(notificationCenterPageUrl($currentPage - 1, $search_notification, $perPage), ENT_QUOTES, 'UTF-8') ?>" aria-label="السابق">
+                                    <span aria-hidden="true">&laquo;</span>
+                                </a>
+                            </li>
+                            <?php $previousPageNumber = 0; ?>
+                            <?php foreach ($paginationPages as $pageNumber): ?>
+                                <?php if ($previousPageNumber > 0 && $pageNumber > $previousPageNumber + 1): ?>
+                                    <li class="page-item disabled"><span class="page-link">…</span></li>
+                                <?php endif; ?>
+                                <li class="page-item <?= $pageNumber === $currentPage ? 'active' : '' ?>">
+                                    <a class="page-link" href="<?= htmlspecialchars(notificationCenterPageUrl($pageNumber, $search_notification, $perPage), ENT_QUOTES, 'UTF-8') ?>">
+                                        <?= $pageNumber ?>
+                                    </a>
+                                </li>
+                                <?php $previousPageNumber = $pageNumber; ?>
+                            <?php endforeach; ?>
+                            <li class="page-item <?= $currentPage >= $totalPages ? 'disabled' : '' ?>">
+                                <a class="page-link" href="<?= htmlspecialchars(notificationCenterPageUrl($currentPage + 1, $search_notification, $perPage), ENT_QUOTES, 'UTF-8') ?>" aria-label="التالي">
+                                    <span aria-hidden="true">&raquo;</span>
+                                </a>
+                            </li>
+                        </ul>
+                    </nav>
+                <?php endif; ?>
+            </div>
+        </div>
+    <?php endif; ?>
 </div>
 
 <script>
@@ -266,6 +585,23 @@ while ($row = mysql_fetch_array($rs)) {
     const searchInput = document.getElementById('search_notification');
     if (searchInput && searchInput.value === '') {
         searchInput.focus();
+    }
+
+    // Keep the page-size control synchronized with the application's Select2
+    // initialization and reload the first page when the user changes it.
+    const pageSizeSelect = $('#per_page');
+    if (pageSizeSelect.length) {
+        pageSizeSelect.val('<?= intval($perPage) ?>').trigger('change.select2');
+        pageSizeSelect.on('change.notificationPagination', function() {
+            const pageSizeCookieName = <?= json_encode($pageSizeCookieName) ?>;
+            const tenYearsInSeconds = 60 * 60 * 24 * 365 * 10;
+            document.cookie = pageSizeCookieName + '=' + encodeURIComponent(this.value)
+                + '; Max-Age=' + tenYearsInSeconds + '; Path=/; SameSite=Lax';
+            const form = document.getElementById('searchForm');
+            if (form) {
+                form.submit();
+            }
+        });
     }
 
     // Add smooth scroll behavior

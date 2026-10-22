@@ -1,0 +1,1349 @@
+<?php
+
+/**
+ * Central cash-custody business service.
+ * Financial writes are transactional and all identifiers are server-generated.
+ */
+class CashCustodyService
+{
+    private $db;
+    private $userId;
+
+    public function __construct($db, $userId)
+    {
+        if (!($db instanceof mysqli)) {
+            throw new InvalidArgumentException('A valid database connection is required.');
+        }
+        $this->db = $db;
+        $this->userId = intval($userId);
+        if ($this->userId <= 0) {
+            throw new RuntimeException('تعذر تحديد المستخدم الحالي.');
+        }
+    }
+
+    public static function resolveScreenId($db)
+    {
+        $result = $db->query("SELECT screenid FROM screens WHERE screen_id='cash_custody' ORDER BY screenid ASC LIMIT 1");
+        if ($result && ($row = $result->fetch_assoc())) {
+            return intval($row['screenid']);
+        }
+        return 36;
+    }
+
+    public function getSetting($name, $default = '')
+    {
+        $stmt = $this->db->prepare("SELECT valuribalevalue FROM global WHERE variblename=? ORDER BY id DESC LIMIT 1");
+        $stmt->bind_param('s', $name);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $row = $result ? $result->fetch_assoc() : null;
+        $stmt->close();
+        return $row ? $row['valuribalevalue'] : $default;
+    }
+
+    public function saveSettings($settings)
+    {
+        $this->db->begin_transaction();
+        try {
+            foreach ($settings as $name => $value) {
+                $stmt = $this->db->prepare("SELECT id FROM global WHERE variblename=? ORDER BY id ASC LIMIT 1 FOR UPDATE");
+                $stmt->bind_param('s', $name);
+                $stmt->execute();
+                $row = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+                if ($row) {
+                    $stmt = $this->db->prepare("UPDATE global SET valuribalevalue=? WHERE variblename=?");
+                    $stmt->bind_param('ss', $value, $name);
+                } else {
+                    $formuid = 'cash-custody-setting';
+                    $stmt = $this->db->prepare("INSERT INTO global (variblename, valuribalevalue, formuid) VALUES (?, ?, ?)");
+                    $stmt->bind_param('sss', $name, $value, $formuid);
+                }
+                if (!$stmt->execute()) {
+                    throw new RuntimeException('تعذر حفظ إعدادات العهد.');
+                }
+                $stmt->close();
+            }
+            $this->audit('settings', 0, 'update', null, $settings);
+            $this->db->commit();
+            return true;
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+    }
+
+    public function listUsers()
+    {
+        $rows = array();
+        $result = $this->db->query("SELECT userid, name, username FROM user ORDER BY name, username, userid");
+        if ($result) {
+            while ($row = $result->fetch_assoc()) {
+                $rows[] = $row;
+            }
+        }
+        return $rows;
+    }
+
+    public function listHolders($activeOnly = false)
+    {
+        $where = $activeOnly ? 'WHERE h.is_active=1' : '';
+        $sql = "SELECT h.*, COALESCE(NULLIF(u.name,''), u.username, CONCAT('مستخدم #', h.user_id)) AS user_name,
+                       u.username
+                FROM cash_custody_holders h
+                LEFT JOIN user u ON u.userid=h.user_id
+                {$where}
+                ORDER BY h.is_active DESC, user_name, h.holder_id";
+        $rows = array();
+        $result = $this->db->query($sql);
+        if ($result) {
+            while ($row = $result->fetch_assoc()) {
+                $rows[] = $row;
+            }
+        }
+        return $rows;
+    }
+
+    public function saveHolder($data)
+    {
+        $holderId = intval($data['holder_id'] ?? 0);
+        $userId = intval($data['user_id'] ?? 0);
+        $employeeNumber = trim((string)($data['employee_number'] ?? ''));
+        $nationalId = trim((string)($data['national_id'] ?? ''));
+        $phone = trim((string)($data['phone'] ?? ''));
+        $department = trim((string)($data['department'] ?? ''));
+        $prefix = strtoupper(trim((string)($data['number_prefix'] ?? '')));
+        $isActive = !empty($data['is_active']) ? 1 : 0;
+
+        if ($userId <= 0 || $employeeNumber === '' || $prefix === '') {
+            throw new InvalidArgumentException('المستخدم والرقم الوظيفي وبادئة الترقيم حقول مطلوبة.');
+        }
+        if (!preg_match('/^[A-Z0-9_-]{2,20}$/', $prefix)) {
+            throw new InvalidArgumentException('بادئة الترقيم تقبل الحروف الإنجليزية والأرقام والشرطة فقط.');
+        }
+        $userCheck = $this->db->prepare("SELECT userid FROM user WHERE userid=? LIMIT 1");
+        $userCheck->bind_param('i', $userId);
+        $userCheck->execute();
+        if (!$userCheck->get_result()->fetch_assoc()) {
+            $userCheck->close();
+            throw new InvalidArgumentException('المستخدم المحدد غير موجود.');
+        }
+        $userCheck->close();
+
+        $now = time();
+        $formuid = $this->uuid();
+        if ($holderId > 0) {
+            $old = $this->getHolder($holderId);
+            if (!$old) {
+                throw new RuntimeException('صاحب العهدة غير موجود.');
+            }
+            $stmt = $this->db->prepare("UPDATE cash_custody_holders
+                SET user_id=?, employee_number=?, national_id=?, phone=?, department=?, number_prefix=?, is_active=?,
+                    updated_by_userid=?, updated_at=?
+                WHERE holder_id=?");
+            $stmt->bind_param('isssssiiii', $userId, $employeeNumber, $nationalId, $phone, $department, $prefix, $isActive, $this->userId, $now, $holderId);
+        } else {
+            $stmt = $this->db->prepare("INSERT INTO cash_custody_holders
+                (user_id, employee_number, national_id, phone, department, number_prefix, is_active,
+                 created_by_userid, created_at, updated_by_userid, updated_at, formuid)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->bind_param('isssssiiiiis', $userId, $employeeNumber, $nationalId, $phone, $department, $prefix, $isActive, $this->userId, $now, $this->userId, $now, $formuid);
+        }
+        if (!$stmt->execute()) {
+            $message = $stmt->errno === 1062 ? 'المستخدم أو بادئة الترقيم مسجلة مسبقاً.' : 'تعذر حفظ صاحب العهدة.';
+            $stmt->close();
+            throw new RuntimeException($message);
+        }
+        $savedId = $holderId > 0 ? $holderId : intval($stmt->insert_id);
+        $stmt->close();
+        $this->audit('holder', $savedId, $holderId > 0 ? 'update' : 'create', $holderId > 0 ? $old : null, $this->getHolder($savedId));
+        return $savedId;
+    }
+
+    public function getHolder($holderId)
+    {
+        $stmt = $this->db->prepare("SELECT h.*, COALESCE(NULLIF(u.name,''), u.username) AS user_name, u.username
+            FROM cash_custody_holders h LEFT JOIN user u ON u.userid=h.user_id WHERE h.holder_id=? LIMIT 1");
+        $stmt->bind_param('i', $holderId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $row ?: null;
+    }
+
+    public function getHolderByUserId($userId)
+    {
+        $userId = intval($userId);
+        if ($userId <= 0) {
+            return null;
+        }
+        $stmt = $this->db->prepare("SELECT h.*, COALESCE(NULLIF(u.name,''), u.username) AS user_name, u.username
+            FROM cash_custody_holders h LEFT JOIN user u ON u.userid=h.user_id WHERE h.user_id=? LIMIT 1");
+        $stmt->bind_param('i', $userId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $row ?: null;
+    }
+
+    public function ensureHolderForUser($userId)
+    {
+        $userId = intval($userId);
+        $existing = $this->getHolderByUserId($userId);
+        if ($existing) {
+            if (intval($existing['is_active']) !== 1) {
+                throw new InvalidArgumentException('المستخدم المحدد موقوف في سجل أصحاب العهد.');
+            }
+            return intval($existing['holder_id']);
+        }
+
+        $stmt = $this->db->prepare("SELECT userid, username FROM user WHERE userid=? LIMIT 1");
+        $stmt->bind_param('i', $userId);
+        $stmt->execute();
+        $user = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if (!$user) {
+            throw new InvalidArgumentException('المستخدم المحدد غير موجود.');
+        }
+
+        $basePrefix = strtoupper(preg_replace('/[^A-Z0-9_-]/', '', (string)$this->getSetting('cash_custody_default_prefix', 'CUS')));
+        if ($basePrefix === '') {
+            $basePrefix = 'CUS';
+        }
+        $suffix = '-' . $userId;
+        $prefix = substr($basePrefix, 0, max(1, 20 - strlen($suffix))) . $suffix;
+        $attempt = 0;
+        while ($this->holderPrefixExists($prefix) && $attempt < 50) {
+            $attempt++;
+            $suffix = '-' . $userId . '-' . $attempt;
+            $prefix = substr($basePrefix, 0, max(1, 20 - strlen($suffix))) . $suffix;
+        }
+        if ($this->holderPrefixExists($prefix)) {
+            throw new RuntimeException('تعذر إنشاء بادئة ترقيم فريدة لصاحب العهدة.');
+        }
+
+        try {
+            return $this->saveHolder(array(
+                'user_id' => $userId,
+                'employee_number' => trim((string)$user['username']) !== '' ? trim((string)$user['username']) : (string)$userId,
+                'national_id' => '',
+                'phone' => '',
+                'department' => '',
+                'number_prefix' => $prefix,
+                'is_active' => 1
+            ));
+        } catch (Throwable $exception) {
+            // A concurrent request may have created the holder after our first check.
+            $existing = $this->getHolderByUserId($userId);
+            if ($existing && intval($existing['is_active']) === 1) {
+                return intval($existing['holder_id']);
+            }
+            throw $exception;
+        }
+    }
+
+    public function createRequest($data)
+    {
+        $holderId = intval($data['holder_id'] ?? 0);
+        $holderUserId = intval($data['holder_user_id'] ?? 0);
+        $type = ($data['request_type'] ?? 'new') === 'topup' ? 'topup' : 'new';
+        $targetCustodyId = $type === 'topup' ? intval($data['target_custody_id'] ?? 0) : 0;
+        $amount = $this->money($data['requested_amount'] ?? 0);
+        $purpose = trim((string)($data['purpose'] ?? ''));
+        $requiredDate = $this->date($data['required_date'] ?? '');
+        $formuid = trim((string)($data['formuid'] ?? '')) ?: $this->uuid();
+
+        if (($holderId <= 0 && $holderUserId <= 0) || $amount <= 0 || $purpose === '' || !$requiredDate) {
+            throw new InvalidArgumentException('صاحب العهدة والمبلغ والغرض والتاريخ المطلوب حقول مطلوبة.');
+        }
+        if ($holderUserId > 0) {
+            $holderId = $this->ensureHolderForUser($holderUserId);
+        }
+        if (!$this->getHolder($holderId)) {
+            throw new InvalidArgumentException('صاحب العهدة المحدد غير موجود.');
+        }
+        if ($type === 'topup' && !$this->getOpenCustody($targetCustodyId, $holderId)) {
+            throw new InvalidArgumentException('يجب اختيار عهدة مفتوحة للتعزيز.');
+        }
+
+        $this->db->begin_transaction();
+        try {
+            $existing = $this->findByFormuid('cash_custody_requests', 'request_id', $formuid);
+            if ($existing > 0) {
+                $this->db->commit();
+                return $existing;
+            }
+            $requestNumber = $this->nextDocumentNumber('request', 'REQ-' . date('Y'), 5);
+            $now = time();
+            $status = 'pending';
+            $stmt = $this->db->prepare("INSERT INTO cash_custody_requests
+                (request_number, holder_id, request_type, target_custody_id, requested_amount, purpose,
+                 required_date, status, requested_by_userid, requested_at, formuid, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->bind_param('sisidsssiisii', $requestNumber, $holderId, $type, $targetCustodyId, $amount, $purpose, $requiredDate, $status, $this->userId, $now, $formuid, $now, $now);
+            if (!$stmt->execute()) {
+                throw new RuntimeException('تعذر إنشاء طلب العهدة.');
+            }
+            $requestId = intval($stmt->insert_id);
+            $stmt->close();
+            $this->audit('request', $requestId, 'create', null, array('request_number' => $requestNumber, 'status' => $status, 'amount' => $amount));
+            $this->db->commit();
+            return $requestId;
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+    }
+
+    public function reviewRequest($requestId, $decision, $note = '')
+    {
+        $decision = $decision === 'approve' ? 'approved' : ($decision === 'reject' ? 'rejected' : 'cancelled');
+        $this->db->begin_transaction();
+        try {
+            $request = $this->lockRequest($requestId);
+            if (!$request || $request['status'] !== 'pending') {
+                throw new RuntimeException('لا يمكن تغيير حالة هذا الطلب.');
+            }
+            $now = time();
+            $stmt = $this->db->prepare("UPDATE cash_custody_requests SET status=?, reviewed_by_userid=?, reviewed_at=?, decision_note=?, updated_at=? WHERE request_id=? AND status='pending'");
+            $stmt->bind_param('siisii', $decision, $this->userId, $now, $note, $now, $requestId);
+            if (!$stmt->execute() || $stmt->affected_rows !== 1) {
+                throw new RuntimeException('تعذر تحديث الطلب.');
+            }
+            $stmt->close();
+            $this->audit('request', $requestId, $decision, $request, array('status' => $decision, 'note' => $note));
+            $this->db->commit();
+            return true;
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+    }
+
+    public function disburseRequest($requestId, $paymentMethod, $referenceNumber, $transactionDate, $formuid)
+    {
+        $paymentMethod = in_array($paymentMethod, array('cash', 'bank', 'cheque'), true) ? $paymentMethod : 'cash';
+        $transactionDate = $this->date($transactionDate);
+        $referenceNumber = trim((string)$referenceNumber);
+        $formuid = trim((string)$formuid) ?: $this->uuid();
+        if (!$transactionDate) {
+            throw new InvalidArgumentException('تاريخ الصرف غير صحيح.');
+        }
+
+        $this->db->begin_transaction();
+        try {
+            $request = $this->lockRequest($requestId);
+            if (!$request) {
+                throw new RuntimeException('طلب العهدة غير موجود.');
+            }
+            if ($request['status'] === 'disbursed') {
+                $this->db->commit();
+                return intval($request['created_custody_id'] ?: $request['target_custody_id']);
+            }
+            if ($request['status'] !== 'approved') {
+                throw new RuntimeException('يجب اعتماد الطلب قبل صرفه.');
+            }
+            $holder = $this->getHolder(intval($request['holder_id']));
+            if (!$holder || intval($holder['is_active']) !== 1) {
+                throw new RuntimeException('صاحب العهدة غير نشط.');
+            }
+
+            $custodyId = 0;
+            $transactionType = 'funding';
+            if ($request['request_type'] === 'topup') {
+                $custody = $this->getOpenCustody(intval($request['target_custody_id']), intval($request['holder_id']), true);
+                if (!$custody) {
+                    throw new RuntimeException('العهدة المطلوب تعزيزها ليست مفتوحة.');
+                }
+                $custodyId = intval($custody['custody_id']);
+                $transactionType = 'topup';
+            } else {
+                $custodyNumber = $this->nextDocumentNumber('custody:' . intval($holder['holder_id']), $holder['number_prefix'], 3);
+                $now = time();
+                $custodyFormuid = $this->uuid();
+                $status = 'open';
+                $notes = '';
+                $stmt = $this->db->prepare("INSERT INTO cash_custodies
+                    (custody_number, holder_id, request_id, status, opened_date, notes, created_by_userid, created_at, updated_by_userid, updated_at, formuid)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt->bind_param('siisssiiiis', $custodyNumber, $holder['holder_id'], $requestId, $status, $transactionDate, $notes, $this->userId, $now, $this->userId, $now, $custodyFormuid);
+                if (!$stmt->execute()) {
+                    throw new RuntimeException('تعذر إنشاء العهدة.');
+                }
+                $custodyId = intval($stmt->insert_id);
+                $stmt->close();
+                $this->audit('custody', $custodyId, 'create', null, array('custody_number' => $custodyNumber, 'request_id' => $requestId));
+            }
+
+            $documentNumber = $this->nextDocumentNumber('transaction:' . $custodyId . ':funding', $this->custodyNumber($custodyId) . '-R', 2);
+            $amount = $this->money($request['requested_amount']);
+            $status = 'approved';
+            $description = $request['request_type'] === 'topup' ? 'تعزيز عهدة' : 'صرف عهدة';
+            $now = time();
+            $zero = 0.00;
+            $stmt = $this->db->prepare("INSERT INTO cash_custody_transactions
+                (custody_id, request_id, transaction_type, document_number, transaction_date, amount,
+                 net_amount, vat_amount, vat_rate, payment_method, reference_number, description, status,
+                 created_by_userid, created_at, approved_by_userid, approved_at, formuid)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->bind_param('iisssddddssssiiiis', $custodyId, $requestId, $transactionType, $documentNumber, $transactionDate, $amount, $amount, $zero, $zero, $paymentMethod, $referenceNumber, $description, $status, $this->userId, $now, $this->userId, $now, $formuid);
+            if (!$stmt->execute()) {
+                throw new RuntimeException('تعذر تسجيل صرف العهدة.');
+            }
+            $transactionId = intval($stmt->insert_id);
+            $stmt->close();
+            $this->postAccountingForTransaction($transactionId);
+
+            $now = time();
+            $stmt = $this->db->prepare("UPDATE cash_custody_requests SET status='disbursed', disbursed_by_userid=?, disbursed_at=?, created_custody_id=?, updated_at=? WHERE request_id=? AND status='approved'");
+            $stmt->bind_param('iiiii', $this->userId, $now, $custodyId, $now, $requestId);
+            if (!$stmt->execute() || $stmt->affected_rows !== 1) {
+                throw new RuntimeException('تعذر إكمال صرف الطلب.');
+            }
+            $stmt->close();
+            $this->audit('transaction', $transactionId, 'approve', null, array('type' => $transactionType, 'amount' => $amount));
+            $this->audit('request', $requestId, 'disburse', $request, array('status' => 'disbursed', 'custody_id' => $custodyId));
+            $this->db->commit();
+            return $custodyId;
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+    }
+
+    public function addExpense($data)
+    {
+        $custodyId = intval($data['custody_id'] ?? 0);
+        $transactionDate = $this->date($data['transaction_date'] ?? '');
+        $netAmount = $this->money($data['net_amount'] ?? 0);
+        $vatAmount = $this->money($data['vat_amount'] ?? 0);
+        $amount = round($netAmount + $vatAmount, 2);
+        $vatRate = $this->money($data['vat_rate'] ?? 0);
+        $description = trim((string)($data['description'] ?? ''));
+        $categoryId = intval($data['category_id'] ?? 0);
+        $costCenterId = intval($data['cost_center_id'] ?? 0);
+        $supplierId = intval($data['supplier_id'] ?? 0);
+        $supplierName = trim((string)($data['supplier_name'] ?? ''));
+        $supplierVatNumber = trim((string)($data['supplier_vat_number'] ?? ''));
+        $invoiceNumber = trim((string)($data['invoice_number'] ?? ''));
+        $paymentMethod = in_array(($data['payment_method'] ?? ''), array('cash', 'bank', 'card', 'other'), true) ? $data['payment_method'] : 'cash';
+        $referenceNumber = trim((string)($data['reference_number'] ?? ''));
+        $formuid = trim((string)($data['formuid'] ?? '')) ?: $this->uuid();
+
+        if ($custodyId <= 0 || !$transactionDate || $amount <= 0 || $description === '' || $categoryId <= 0) {
+            throw new InvalidArgumentException('التاريخ والتصنيف والمبلغ والبيان حقول مطلوبة.');
+        }
+        $custody = $this->getOpenCustody($custodyId, 0);
+        if (!$custody) {
+            throw new RuntimeException('العهدة ليست مفتوحة.');
+        }
+
+        $this->db->begin_transaction();
+        try {
+            $existing = $this->findByFormuid('cash_custody_transactions', 'transaction_id', $formuid);
+            if ($existing > 0) {
+                $this->db->commit();
+                return $existing;
+            }
+            $documentNumber = $this->nextDocumentNumber('transaction:' . $custodyId . ':expense', $custody['custody_number'] . '-E', 2);
+            $status = 'pending';
+            $type = 'expense';
+            $now = time();
+            $stmt = $this->db->prepare("INSERT INTO cash_custody_transactions
+                (custody_id, transaction_type, document_number, transaction_date, amount, net_amount, vat_amount, vat_rate,
+                 payment_method, reference_number, category_id, cost_center_id, supplier_id, supplier_name,
+                 supplier_vat_number, invoice_number, description, status, created_by_userid, created_at, formuid)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->bind_param('isssddddssiiisssssiis', $custodyId, $type, $documentNumber, $transactionDate, $amount, $netAmount, $vatAmount, $vatRate, $paymentMethod, $referenceNumber, $categoryId, $costCenterId, $supplierId, $supplierName, $supplierVatNumber, $invoiceNumber, $description, $status, $this->userId, $now, $formuid);
+            if (!$stmt->execute()) {
+                throw new RuntimeException('تعذر تسجيل المصروف.');
+            }
+            $transactionId = intval($stmt->insert_id);
+            $stmt->close();
+            $this->audit('transaction', $transactionId, 'create_expense', null, array('amount' => $amount, 'status' => $status));
+            $this->db->commit();
+            return $transactionId;
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+    }
+
+    public function approveExpense($transactionId, $approve, $note = '')
+    {
+        $this->db->begin_transaction();
+        try {
+            $stmt = $this->db->prepare("SELECT * FROM cash_custody_transactions WHERE transaction_id=? FOR UPDATE");
+            $stmt->bind_param('i', $transactionId);
+            $stmt->execute();
+            $transaction = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            if (!$transaction || $transaction['transaction_type'] !== 'expense' || $transaction['status'] !== 'pending') {
+                throw new RuntimeException('المصروف غير متاح للاعتماد.');
+            }
+            $custody = $this->getOpenCustody(intval($transaction['custody_id']), 0, true);
+            if (!$custody) {
+                throw new RuntimeException('العهدة ليست مفتوحة.');
+            }
+            $status = $approve ? 'approved' : 'rejected';
+            if ($approve && intval($this->getSetting('cash_custody_allow_negative_balance', '0')) !== 1) {
+                $balance = $this->getBalance(intval($transaction['custody_id']));
+                if ($this->money($transaction['amount']) > $balance + 0.009) {
+                    throw new RuntimeException('قيمة المصروف أكبر من الرصيد المتاح في العهدة.');
+                }
+            }
+            $description = trim((string)$transaction['description']);
+            if ($note !== '') {
+                $description .= ' - ' . trim((string)$note);
+            }
+            $now = time();
+            $stmt = $this->db->prepare("UPDATE cash_custody_transactions SET status=?, description=?, approved_by_userid=?, approved_at=? WHERE transaction_id=? AND status='pending'");
+            $stmt->bind_param('ssiii', $status, $description, $this->userId, $now, $transactionId);
+            if (!$stmt->execute() || $stmt->affected_rows !== 1) {
+                throw new RuntimeException('تعذر تحديث المصروف.');
+            }
+            $stmt->close();
+            if ($approve) {
+                $this->postAccountingForTransaction($transactionId);
+            }
+            $this->audit('transaction', $transactionId, $approve ? 'approve_expense' : 'reject_expense', $transaction, array('status' => $status));
+            $this->db->commit();
+            return true;
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+    }
+
+    public function addReturn($data)
+    {
+        $custodyId = intval($data['custody_id'] ?? 0);
+        $amount = $this->money($data['amount'] ?? 0);
+        $transactionDate = $this->date($data['transaction_date'] ?? '');
+        $paymentMethod = in_array(($data['payment_method'] ?? ''), array('cash', 'bank'), true) ? $data['payment_method'] : 'cash';
+        $reference = trim((string)($data['reference_number'] ?? ''));
+        $description = trim((string)($data['description'] ?? '')) ?: 'رد مبلغ من العهدة';
+        $formuid = trim((string)($data['formuid'] ?? '')) ?: $this->uuid();
+        if ($custodyId <= 0 || $amount <= 0 || !$transactionDate) {
+            throw new InvalidArgumentException('التاريخ والمبلغ حقول مطلوبة.');
+        }
+
+        $this->db->begin_transaction();
+        try {
+            $custody = $this->getOpenCustody($custodyId, 0, true);
+            if (!$custody) {
+                throw new RuntimeException('العهدة ليست مفتوحة.');
+            }
+            $existing = $this->findByFormuid('cash_custody_transactions', 'transaction_id', $formuid);
+            if ($existing > 0) {
+                $this->db->commit();
+                return $existing;
+            }
+            $balance = $this->getBalance($custodyId);
+            if ($amount > $balance + 0.009) {
+                throw new RuntimeException('المبلغ المردود أكبر من رصيد العهدة.');
+            }
+            $documentNumber = $this->nextDocumentNumber('transaction:' . $custodyId . ':return', $custody['custody_number'] . '-T', 2);
+            $type = 'return';
+            $status = 'approved';
+            $now = time();
+            $zero = 0.00;
+            $stmt = $this->db->prepare("INSERT INTO cash_custody_transactions
+                (custody_id, transaction_type, document_number, transaction_date, amount, net_amount, vat_amount, vat_rate,
+                 payment_method, reference_number, description, status, created_by_userid, created_at,
+                 approved_by_userid, approved_at, formuid)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->bind_param('isssddddssssiiiis', $custodyId, $type, $documentNumber, $transactionDate, $amount, $amount, $zero, $zero, $paymentMethod, $reference, $description, $status, $this->userId, $now, $this->userId, $now, $formuid);
+            if (!$stmt->execute()) {
+                throw new RuntimeException('تعذر تسجيل المبلغ المردود.');
+            }
+            $transactionId = intval($stmt->insert_id);
+            $stmt->close();
+            $this->postAccountingForTransaction($transactionId);
+            $this->audit('transaction', $transactionId, 'return', null, array('amount' => $amount));
+            $this->db->commit();
+            return $transactionId;
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+    }
+
+    public function reverseTransaction($transactionId, $reason, $formuid)
+    {
+        $transactionId = intval($transactionId);
+        $reason = trim((string)$reason);
+        $formuid = trim((string)$formuid) ?: $this->uuid();
+        if ($transactionId <= 0 || $reason === '') {
+            throw new InvalidArgumentException('سبب العكس مطلوب.');
+        }
+        $this->db->begin_transaction();
+        try {
+            $stmt = $this->db->prepare("SELECT * FROM cash_custody_transactions WHERE transaction_id=? FOR UPDATE");
+            $stmt->bind_param('i', $transactionId);
+            $stmt->execute();
+            $original = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            if (!$original || $original['status'] !== 'approved' || floatval($original['amount']) <= 0) {
+                throw new RuntimeException('الحركة غير متاحة للعكس.');
+            }
+            if (!$this->getOpenCustody(intval($original['custody_id']), 0, true)) {
+                throw new RuntimeException('لا يمكن عكس حركة عهدة مقفلة.');
+            }
+            $existing = $this->scalar("SELECT COUNT(*) FROM cash_custody_transactions WHERE reversed_transaction_id=" . $transactionId . " AND status='approved'");
+            if ($existing > 0) {
+                throw new RuntimeException('تم عكس هذه الحركة مسبقاً.');
+            }
+            $currentBalance = $this->getBalance(intval($original['custody_id']));
+            if (in_array($original['transaction_type'], array('funding', 'topup', 'opening'), true) &&
+                intval($this->getSetting('cash_custody_allow_negative_balance', '0')) !== 1 &&
+                $currentBalance - floatval($original['amount']) < -0.009) {
+                throw new RuntimeException('لا يمكن عكس التمويل لأن الرصيد الناتج سيكون سالباً.');
+            }
+            $document = $this->nextDocumentNumber('transaction:' . intval($original['custody_id']) . ':reversal', $this->custodyNumber(intval($original['custody_id'])) . '-V', 2);
+            $date = date('Y-m-d');
+            $description = 'عكس المستند ' . $original['document_number'] . ': ' . $reason;
+            $status = 'approved';
+            $now = time();
+            $custodyId = intval($original['custody_id']);
+            $requestId = intval($original['request_id']);
+            $type = (string)$original['transaction_type'];
+            $amount = -abs(floatval($original['amount']));
+            $net = -abs(floatval($original['net_amount']));
+            $vat = -abs(floatval($original['vat_amount']));
+            $rate = floatval($original['vat_rate']);
+            $payment = (string)$original['payment_method'];
+            $reference = (string)$original['reference_number'];
+            $categoryId = intval($original['category_id']);
+            $costCenterId = intval($original['cost_center_id']);
+            $supplierId = intval($original['supplier_id']);
+            $supplierName = (string)$original['supplier_name'];
+            $supplierVat = (string)$original['supplier_vat_number'];
+            $invoice = (string)$original['invoice_number'];
+            $stmt = $this->db->prepare("INSERT INTO cash_custody_transactions
+                (custody_id, request_id, transaction_type, document_number, transaction_date, amount, net_amount, vat_amount, vat_rate,
+                 payment_method, reference_number, category_id, cost_center_id, supplier_id, supplier_name, supplier_vat_number,
+                 invoice_number, description, status, reversed_transaction_id, created_by_userid, created_at, approved_by_userid, approved_at, formuid)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->bind_param('iisssddddssiiisssssiiiiis', $custodyId, $requestId, $type, $document, $date, $amount, $net, $vat, $rate,
+                $payment, $reference, $categoryId, $costCenterId, $supplierId, $supplierName, $supplierVat, $invoice, $description,
+                $status, $transactionId, $this->userId, $now, $this->userId, $now, $formuid);
+            if (!$stmt->execute()) {
+                throw new RuntimeException('تعذر تسجيل حركة العكس.');
+            }
+            $reversalId = intval($stmt->insert_id);
+            $stmt->close();
+            $this->postAccountingForTransaction($reversalId);
+            $this->audit('transaction', $reversalId, 'reverse', $original, array('reason' => $reason, 'reversed_transaction_id' => $transactionId));
+            $this->db->commit();
+            return $reversalId;
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+    }
+
+    public function settleCustody($custodyId, $action, $settlementDate, $notes, $formuid)
+    {
+        $action = $action === 'carry' ? 'carry' : 'close';
+        $settlementDate = $this->date($settlementDate);
+        $formuid = trim((string)$formuid) ?: $this->uuid();
+        if (!$settlementDate) {
+            throw new InvalidArgumentException('تاريخ التسوية غير صحيح.');
+        }
+
+        $this->db->begin_transaction();
+        try {
+            $custody = $this->getOpenCustody($custodyId, 0, true);
+            if (!$custody) {
+                throw new RuntimeException('العهدة ليست مفتوحة.');
+            }
+            $pending = $this->scalar("SELECT COUNT(*) FROM cash_custody_transactions WHERE custody_id=" . intval($custodyId) . " AND status='pending'");
+            if ($pending > 0) {
+                throw new RuntimeException('يجب اعتماد أو رفض جميع المصروفات المعلقة قبل التسوية.');
+            }
+            $totals = $this->getCustodyTotals($custodyId);
+            $balance = $totals['balance'];
+            if ($action === 'close' && abs($balance) >= 0.01) {
+                throw new RuntimeException('يجب رد الرصيد المتبقي أو اختيار ترحيله إلى عهدة جديدة.');
+            }
+            if ($action === 'carry' && $balance < -0.009) {
+                throw new RuntimeException('لا يمكن ترحيل رصيد سالب؛ عالج العجز قبل تسوية العهدة.');
+            }
+
+            $newCustodyId = 0;
+            if ($action === 'carry' && $balance > 0.009) {
+                $holder = $this->getHolder(intval($custody['holder_id']));
+                $newCustodyNumber = $this->nextDocumentNumber('custody:' . intval($holder['holder_id']), $holder['number_prefix'], 3);
+                $status = 'open';
+                $now = time();
+                $newFormuid = $this->uuid();
+                $stmt = $this->db->prepare("INSERT INTO cash_custodies
+                    (custody_number, holder_id, status, opened_date, carried_from_custody_id, notes,
+                     created_by_userid, created_at, updated_by_userid, updated_at, formuid)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $carryNote = 'رصيد مرحل من العهدة ' . $custody['custody_number'];
+                $stmt->bind_param('sissisiiiis', $newCustodyNumber, $holder['holder_id'], $status, $settlementDate, $custodyId, $carryNote, $this->userId, $now, $this->userId, $now, $newFormuid);
+                if (!$stmt->execute()) {
+                    throw new RuntimeException('تعذر إنشاء العهدة الجديدة.');
+                }
+                $newCustodyId = intval($stmt->insert_id);
+                $stmt->close();
+                $this->insertSystemTransaction($custodyId, 'carry_out', $balance, $settlementDate, 'ترحيل الرصيد إلى ' . $newCustodyNumber);
+                $this->insertSystemTransaction($newCustodyId, 'opening', $balance, $settlementDate, $carryNote);
+            } elseif ($action === 'carry') {
+                $action = 'close';
+            }
+
+            $settlementNumber = $this->nextDocumentNumber('settlement', 'SET-' . date('Y'), 5);
+            $status = 'completed';
+            $now = time();
+            $stmt = $this->db->prepare("INSERT INTO cash_custody_settlements
+                (settlement_number, custody_id, settlement_date, total_funding, total_expenses, total_returns,
+                 closing_balance, settlement_action, new_custody_id, notes, status,
+                 created_by_userid, created_at, approved_by_userid, approved_at, formuid)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->bind_param('sisddddsissiiiis', $settlementNumber, $custodyId, $settlementDate, $totals['funding'], $totals['expenses'], $totals['returns'], $balance, $action, $newCustodyId, $notes, $status, $this->userId, $now, $this->userId, $now, $formuid);
+            if (!$stmt->execute()) {
+                throw new RuntimeException('تعذر حفظ تسوية العهدة.');
+            }
+            $settlementId = intval($stmt->insert_id);
+            $stmt->close();
+
+            $stmt = $this->db->prepare("UPDATE cash_custodies SET status='closed', closed_date=?, carried_to_custody_id=?, updated_by_userid=?, updated_at=? WHERE custody_id=? AND status='open'");
+            $stmt->bind_param('siiii', $settlementDate, $newCustodyId, $this->userId, $now, $custodyId);
+            if (!$stmt->execute() || $stmt->affected_rows !== 1) {
+                throw new RuntimeException('تعذر إغلاق العهدة.');
+            }
+            $stmt->close();
+            $this->audit('settlement', $settlementId, 'complete', null, array('custody_id' => $custodyId, 'action' => $action, 'new_custody_id' => $newCustodyId));
+            $this->audit('custody', $custodyId, 'close', $custody, array('status' => 'closed', 'settlement_id' => $settlementId));
+            $this->db->commit();
+            return array('settlement_id' => $settlementId, 'new_custody_id' => $newCustodyId);
+        } catch (Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+    }
+
+    public function getBalance($custodyId)
+    {
+        return $this->getCustodyTotals($custodyId)['balance'];
+    }
+
+    public function getCustodyTotals($custodyId)
+    {
+        $stmt = $this->db->prepare("SELECT
+            COALESCE(SUM(CASE WHEN status='approved' AND transaction_type IN ('funding','topup','opening') THEN amount ELSE 0 END),0) AS funding,
+            COALESCE(SUM(CASE WHEN status='approved' AND transaction_type='expense' THEN amount ELSE 0 END),0) AS expenses,
+            COALESCE(SUM(CASE WHEN status='approved' AND transaction_type='return' THEN amount ELSE 0 END),0) AS returns,
+            COALESCE(SUM(CASE WHEN status='approved' AND transaction_type='carry_out' THEN amount ELSE 0 END),0) AS carried,
+            COALESCE(SUM(CASE
+                WHEN status='approved' AND transaction_type IN ('funding','topup','opening') THEN amount
+                WHEN status='approved' AND transaction_type IN ('expense','return','carry_out') THEN -amount
+                ELSE 0 END),0) AS balance
+            FROM cash_custody_transactions WHERE custody_id=?");
+        $stmt->bind_param('i', $custodyId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return array(
+            'funding' => $this->money($row['funding'] ?? 0),
+            'expenses' => $this->money($row['expenses'] ?? 0),
+            'returns' => $this->money($row['returns'] ?? 0),
+            'carried' => $this->money($row['carried'] ?? 0),
+            'balance' => $this->money($row['balance'] ?? 0)
+        );
+    }
+
+    public function getCustody($custodyId)
+    {
+        $stmt = $this->db->prepare("SELECT c.*, h.employee_number, h.department, h.phone, h.number_prefix,
+                COALESCE(NULLIF(u.name,''), u.username) AS holder_name
+            FROM cash_custodies c
+            JOIN cash_custody_holders h ON h.holder_id=c.holder_id
+            LEFT JOIN user u ON u.userid=h.user_id
+            WHERE c.custody_id=? LIMIT 1");
+        $stmt->bind_param('i', $custodyId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if ($row) {
+            $row['totals'] = $this->getCustodyTotals($custodyId);
+        }
+        return $row ?: null;
+    }
+
+    public function listCustodies($filters = array())
+    {
+        $where = array('1=1');
+        if (!empty($filters['holder_id'])) {
+            $where[] = 'c.holder_id=' . intval($filters['holder_id']);
+        }
+        if (!empty($filters['status']) && in_array($filters['status'], array('open', 'closed'), true)) {
+            $where[] = "c.status='" . $this->db->real_escape_string($filters['status']) . "'";
+        }
+        $sql = "SELECT c.*, h.user_id AS holder_user_id, h.employee_number, h.department,
+                       COALESCE(NULLIF(u.name,''), u.username) AS holder_name,
+                       COALESCE(SUM(CASE
+                           WHEN t.status='approved' AND t.transaction_type IN ('funding','topup','opening') THEN t.amount
+                           WHEN t.status='approved' AND t.transaction_type IN ('expense','return','carry_out') THEN -t.amount
+                           ELSE 0 END),0) AS balance
+                FROM cash_custodies c
+                JOIN cash_custody_holders h ON h.holder_id=c.holder_id
+                LEFT JOIN user u ON u.userid=h.user_id
+                LEFT JOIN cash_custody_transactions t ON t.custody_id=c.custody_id
+                WHERE " . implode(' AND ', $where) . "
+                GROUP BY c.custody_id
+                ORDER BY c.status='open' DESC, c.opened_date DESC, c.custody_id DESC";
+        return $this->fetchAll($sql);
+    }
+
+    public function listRequests($filters = array())
+    {
+        $where = array('1=1');
+        if (!empty($filters['holder_id'])) {
+            $where[] = 'r.holder_id=' . intval($filters['holder_id']);
+        }
+        if (!empty($filters['status'])) {
+            $where[] = "r.status='" . $this->db->real_escape_string($filters['status']) . "'";
+        }
+        $sql = "SELECT r.*, h.employee_number, COALESCE(NULLIF(u.name,''), u.username) AS holder_name,
+                       COALESCE(NULLIF(requester.name,''), requester.username) AS requester_name,
+                       c.custody_number AS target_custody_number
+                FROM cash_custody_requests r
+                JOIN cash_custody_holders h ON h.holder_id=r.holder_id
+                LEFT JOIN user u ON u.userid=h.user_id
+                LEFT JOIN user requester ON requester.userid=r.requested_by_userid
+                LEFT JOIN cash_custodies c ON c.custody_id=r.target_custody_id
+                WHERE " . implode(' AND ', $where) . "
+                ORDER BY r.request_id DESC";
+        return $this->fetchAll($sql);
+    }
+
+    public function getRequest($requestId)
+    {
+        $stmt = $this->db->prepare("SELECT r.*, h.employee_number, h.department, h.phone,
+                COALESCE(NULLIF(u.name,''),u.username) AS holder_name,
+                COALESCE(NULLIF(requester.name,''),requester.username) AS requester_name
+            FROM cash_custody_requests r
+            JOIN cash_custody_holders h ON h.holder_id=r.holder_id
+            LEFT JOIN user u ON u.userid=h.user_id
+            LEFT JOIN user requester ON requester.userid=r.requested_by_userid
+            WHERE r.request_id=? LIMIT 1");
+        $requestId = intval($requestId);
+        $stmt->bind_param('i', $requestId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $row ?: null;
+    }
+
+    public function listTransactions($custodyId)
+    {
+        $costCenterSelect = $this->tableExists('acc_cost_centers') ? 'cc.cost_center_name_ar' : "'' AS cost_center_name_ar";
+        $costCenterJoin = $this->tableExists('acc_cost_centers') ? 'LEFT JOIN acc_cost_centers cc ON cc.cost_center_id=t.cost_center_id' : '';
+        $stmt = $this->db->prepare("SELECT t.*, c.masrofkind AS category_name,
+                {$costCenterSelect}, COALESCE(NULLIF(creator.name,''), creator.username) AS creator_name,
+                COALESCE(NULLIF(approver.name,''), approver.username) AS approver_name,
+                EXISTS(SELECT 1 FROM cash_custody_transactions reversal WHERE reversal.reversed_transaction_id=t.transaction_id AND reversal.status='approved') AS has_reversal
+            FROM cash_custody_transactions t
+            LEFT JOIN masrofattakweed c ON c.idmasrofcod=t.category_id
+            {$costCenterJoin}
+            LEFT JOIN user creator ON creator.userid=t.created_by_userid
+            LEFT JOIN user approver ON approver.userid=t.approved_by_userid
+            WHERE t.custody_id=? ORDER BY t.transaction_date, t.transaction_id");
+        $stmt->bind_param('i', $custodyId);
+        $stmt->execute();
+        $rows = array();
+        $result = $stmt->get_result();
+        while ($row = $result->fetch_assoc()) {
+            $rows[] = $row;
+        }
+        $stmt->close();
+        return $rows;
+    }
+
+    public function listCategories()
+    {
+        return $this->fetchAll("SELECT idmasrofcod AS category_id, masrofkind AS category_name FROM masrofattakweed ORDER BY masrofkind, idmasrofcod");
+    }
+
+    public function listSuppliers()
+    {
+        if (!$this->tableExists('acc_suppliers')) {
+            return array();
+        }
+        return $this->fetchAll("SELECT supplier_id, supplier_name, vat_number FROM acc_suppliers WHERE is_active=1 ORDER BY supplier_name, supplier_id");
+    }
+
+    public function listTypedSupplierSummary()
+    {
+        return $this->fetchAll("SELECT supplier_name, supplier_vat_number, COUNT(*) AS invoice_count,
+                COALESCE(SUM(CASE WHEN status='approved' THEN amount ELSE 0 END),0) AS approved_amount
+            FROM cash_custody_transactions
+            WHERE transaction_type='expense' AND supplier_id=0 AND TRIM(supplier_name)<>''
+            GROUP BY supplier_name, supplier_vat_number
+            ORDER BY supplier_name, supplier_vat_number");
+    }
+
+    public function listCostCenters()
+    {
+        if (!$this->tableExists('acc_cost_centers')) {
+            return array();
+        }
+        return $this->fetchAll("SELECT cost_center_id, cost_center_code, cost_center_name_ar FROM acc_cost_centers WHERE is_active=1 ORDER BY cost_center_code, cost_center_id");
+    }
+
+    public function listAccountingAccounts()
+    {
+        if (!$this->tableExists('acc_chart_of_accounts')) {
+            return array();
+        }
+        return $this->fetchAll("SELECT account_id, account_code, account_name_ar FROM acc_chart_of_accounts
+            WHERE is_active=1 AND is_leaf=1 ORDER BY account_code, account_id");
+    }
+
+    public function listAccountingJournals()
+    {
+        if (!$this->tableExists('acc_journals')) {
+            return array();
+        }
+        return $this->fetchAll("SELECT journal_id, journal_code, journal_name_ar FROM acc_journals
+            WHERE is_active=1 ORDER BY journal_code, journal_id");
+    }
+
+    public function addAttachment($entityType, $entityId, $originalName, $storedName, $storagePath, $mimeType, $fileSize)
+    {
+        if (!in_array($entityType, array('request', 'transaction', 'settlement'), true) || intval($entityId) <= 0) {
+            throw new InvalidArgumentException('مرجع المرفق غير صحيح.');
+        }
+        $now = time();
+        $stmt = $this->db->prepare("INSERT INTO cash_custody_attachments
+            (entity_type, entity_id, original_name, stored_name, storage_path, mime_type, file_size, uploaded_by_userid, uploaded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $entityId = intval($entityId);
+        $fileSize = intval($fileSize);
+        $stmt->bind_param('sissssiii', $entityType, $entityId, $originalName, $storedName, $storagePath, $mimeType, $fileSize, $this->userId, $now);
+        if (!$stmt->execute()) {
+            throw new RuntimeException('تعذر حفظ بيانات المرفق.');
+        }
+        $attachmentId = intval($stmt->insert_id);
+        $stmt->close();
+        $this->audit('attachment', $attachmentId, 'upload', null, array('entity_type' => $entityType, 'entity_id' => $entityId, 'stored_name' => $storedName));
+        return $attachmentId;
+    }
+
+    public function listAttachments($entityType, $entityIds)
+    {
+        if (!in_array($entityType, array('request', 'transaction', 'settlement'), true)) {
+            return array();
+        }
+        $ids = array_values(array_filter(array_unique(array_map('intval', (array)$entityIds))));
+        if (!$ids) {
+            return array();
+        }
+        return $this->fetchAll("SELECT * FROM cash_custody_attachments WHERE entity_type='" .
+            $this->db->real_escape_string($entityType) . "' AND entity_id IN (" . implode(',', $ids) . ") ORDER BY attachment_id");
+    }
+
+    public function reportTransactions($filters = array())
+    {
+        $where = array('1=1');
+        if (!empty($filters['holder_id'])) {
+            $where[] = 'cu.holder_id=' . intval($filters['holder_id']);
+        }
+        if (!empty($filters['custody_id'])) {
+            $where[] = 't.custody_id=' . intval($filters['custody_id']);
+        }
+        if (!empty($filters['transaction_type']) && in_array($filters['transaction_type'], array('funding', 'topup', 'opening', 'expense', 'return', 'carry_out'), true)) {
+            $where[] = "t.transaction_type='" . $this->db->real_escape_string($filters['transaction_type']) . "'";
+        }
+        if (!empty($filters['status']) && in_array($filters['status'], array('pending', 'approved', 'rejected'), true)) {
+            $where[] = "t.status='" . $this->db->real_escape_string($filters['status']) . "'";
+        }
+        if (!empty($filters['date_from']) && $this->date($filters['date_from'])) {
+            $where[] = "t.transaction_date>='" . $this->db->real_escape_string($filters['date_from']) . "'";
+        }
+        if (!empty($filters['date_to']) && $this->date($filters['date_to'])) {
+            $where[] = "t.transaction_date<='" . $this->db->real_escape_string($filters['date_to']) . "'";
+        }
+        if (!empty($filters['category_id'])) {
+            $where[] = 't.category_id=' . intval($filters['category_id']);
+        }
+        if (!empty($filters['supplier_id'])) {
+            $where[] = 't.supplier_id=' . intval($filters['supplier_id']);
+        }
+        if (!empty($filters['cost_center_id'])) {
+            $where[] = 't.cost_center_id=' . intval($filters['cost_center_id']);
+        }
+        if (($filters['vat_status'] ?? '') === 'with_vat') {
+            $where[] = 't.vat_amount<>0';
+        } elseif (($filters['vat_status'] ?? '') === 'without_vat') {
+            $where[] = 't.vat_amount=0';
+        }
+        $sql = "SELECT t.*, cu.custody_number, h.employee_number,
+                       COALESCE(NULLIF(u.name,''), u.username) AS holder_name,
+                       c.masrofkind AS category_name
+                FROM cash_custody_transactions t
+                JOIN cash_custodies cu ON cu.custody_id=t.custody_id
+                JOIN cash_custody_holders h ON h.holder_id=cu.holder_id
+                LEFT JOIN user u ON u.userid=h.user_id
+                LEFT JOIN masrofattakweed c ON c.idmasrofcod=t.category_id
+                WHERE " . implode(' AND ', $where) . "
+                ORDER BY t.transaction_date DESC, t.transaction_id DESC";
+        return $this->fetchAll($sql);
+    }
+
+    public function listAudit($entityType, $entityId)
+    {
+        $allowed = array('request', 'custody', 'transaction', 'settlement', 'holder', 'attachment');
+        if (!in_array($entityType, $allowed, true) || intval($entityId) <= 0) {
+            return array();
+        }
+        $stmt = $this->db->prepare("SELECT a.*, COALESCE(NULLIF(u.name,''),u.username) AS user_name
+            FROM cash_custody_audit_log a LEFT JOIN user u ON u.userid=a.performed_by_userid
+            WHERE a.entity_type=? AND a.entity_id=? ORDER BY a.audit_id DESC");
+        $entityId = intval($entityId);
+        $stmt->bind_param('si', $entityType, $entityId);
+        $stmt->execute();
+        $rows = array();
+        $result = $stmt->get_result();
+        while ($row = $result->fetch_assoc()) {
+            $rows[] = $row;
+        }
+        $stmt->close();
+        return $rows;
+    }
+
+    public function listCustodyAudit($custodyId)
+    {
+        $custodyId = intval($custodyId);
+        $stmt = $this->db->prepare("SELECT a.*, COALESCE(NULLIF(u.name,''),u.username) AS user_name
+            FROM cash_custody_audit_log a
+            LEFT JOIN user u ON u.userid=a.performed_by_userid
+            WHERE (a.entity_type='custody' AND a.entity_id=?)
+               OR (a.entity_type='transaction' AND a.entity_id IN (
+                    SELECT transaction_id FROM cash_custody_transactions WHERE custody_id=?
+               ))
+               OR (a.entity_type='settlement' AND a.entity_id IN (
+                    SELECT settlement_id FROM cash_custody_settlements WHERE custody_id=?
+               ))
+            ORDER BY a.audit_id DESC");
+        $stmt->bind_param('iii', $custodyId, $custodyId, $custodyId);
+        $stmt->execute();
+        $rows = array();
+        $result = $stmt->get_result();
+        while ($row = $result->fetch_assoc()) {
+            $rows[] = $row;
+        }
+        $stmt->close();
+        return $rows;
+    }
+
+    public function getSummary()
+    {
+        return array(
+            'pending_requests' => $this->scalar("SELECT COUNT(*) FROM cash_custody_requests WHERE status='pending'"),
+            'approved_requests' => $this->scalar("SELECT COUNT(*) FROM cash_custody_requests WHERE status='approved'"),
+            'open_custodies' => $this->scalar("SELECT COUNT(*) FROM cash_custodies WHERE status='open'"),
+            'pending_expenses' => $this->scalar("SELECT COUNT(*) FROM cash_custody_transactions WHERE transaction_type='expense' AND status='pending'"),
+            'open_balance' => $this->money($this->scalar("SELECT COALESCE(SUM(CASE
+                WHEN t.status='approved' AND t.transaction_type IN ('funding','topup','opening') THEN t.amount
+                WHEN t.status='approved' AND t.transaction_type IN ('expense','return','carry_out') THEN -t.amount
+                ELSE 0 END),0)
+                FROM cash_custody_transactions t
+                JOIN cash_custodies c ON c.custody_id=t.custody_id AND c.status='open'"))
+        );
+    }
+
+    public function getHolderBalanceBefore($holderId, $date)
+    {
+        $holderId = intval($holderId);
+        $validDate = $this->date($date);
+        if ($holderId <= 0 || !$validDate) {
+            return 0.0;
+        }
+        $stmt = $this->db->prepare("SELECT COALESCE(SUM(CASE
+                    WHEN t.status='approved' AND t.transaction_type IN ('funding','topup','opening') THEN t.amount
+                    WHEN t.status='approved' AND t.transaction_type IN ('expense','return','carry_out') THEN -t.amount
+                    ELSE 0 END),0) AS balance
+            FROM cash_custody_transactions t
+            JOIN cash_custodies c ON c.custody_id=t.custody_id
+            WHERE c.holder_id=? AND t.transaction_date<?");
+        $stmt->bind_param('is', $holderId, $validDate);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $this->money($row['balance'] ?? 0);
+    }
+
+    public function audit($entityType, $entityId, $action, $oldData = null, $newData = null)
+    {
+        $oldJson = $oldData === null ? null : json_encode($oldData, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $newJson = $newData === null ? null : json_encode($newData, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $now = time();
+        $stmt = $this->db->prepare("INSERT INTO cash_custody_audit_log
+            (entity_type, entity_id, action_type, old_data, new_data, performed_by_userid, performed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)");
+        $stmt->bind_param('sisssii', $entityType, $entityId, $action, $oldJson, $newJson, $this->userId, $now);
+        $stmt->execute();
+        $stmt->close();
+    }
+
+    private function nextDocumentNumber($sequenceKey, $prefix, $padding)
+    {
+        $next = 2;
+        $now = time();
+        $stmt = $this->db->prepare("INSERT INTO cash_custody_sequences (sequence_key, next_value, updated_at)
+            VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE next_value=LAST_INSERT_ID(next_value+1), updated_at=VALUES(updated_at)");
+        $stmt->bind_param('sii', $sequenceKey, $next, $now);
+        if (!$stmt->execute()) {
+            throw new RuntimeException('تعذر إنشاء رقم المستند.');
+        }
+        $number = $stmt->affected_rows === 1 ? 1 : max(1, intval($stmt->insert_id) - 1);
+        $stmt->close();
+        return $prefix . '-' . str_pad((string)$number, $padding, '0', STR_PAD_LEFT);
+    }
+
+    private function insertSystemTransaction($custodyId, $type, $amount, $date, $description)
+    {
+        $prefix = $this->custodyNumber($custodyId) . ($type === 'opening' ? '-O' : '-C');
+        $document = $this->nextDocumentNumber('transaction:' . $custodyId . ':' . $type, $prefix, 2);
+        $status = 'approved';
+        $formuid = $this->uuid();
+        $now = time();
+        $zero = 0.00;
+        $paymentMethod = 'transfer';
+        $stmt = $this->db->prepare("INSERT INTO cash_custody_transactions
+            (custody_id, transaction_type, document_number, transaction_date, amount, net_amount, vat_amount, vat_rate,
+             payment_method, description, status, created_by_userid, created_at, approved_by_userid, approved_at, formuid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $stmt->bind_param('isssddddsssiiiis', $custodyId, $type, $document, $date, $amount, $amount, $zero, $zero, $paymentMethod, $description, $status, $this->userId, $now, $this->userId, $now, $formuid);
+        if (!$stmt->execute()) {
+            throw new RuntimeException('تعذر تسجيل حركة ترحيل الرصيد.');
+        }
+        $id = intval($stmt->insert_id);
+        $stmt->close();
+        return $id;
+    }
+
+    private function postAccountingForTransaction($transactionId)
+    {
+        if (intval($this->getSetting('cash_custody_accounting_enabled', '0')) !== 1) {
+            return 0;
+        }
+        if (!$this->tableExists('acc_chart_of_accounts') || !$this->tableExists('acc_journal_entries')) {
+            throw new RuntimeException('الربط المحاسبي مفعل لكن جداول المحاسبة غير متوفرة.');
+        }
+        $transactionId = intval($transactionId);
+        $stmt = $this->db->prepare("SELECT * FROM cash_custody_transactions WHERE transaction_id=? LIMIT 1");
+        $stmt->bind_param('i', $transactionId);
+        $stmt->execute();
+        $transaction = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if (!$transaction || $transaction['status'] !== 'approved' || intval($transaction['accounting_entry_id']) > 0 || in_array($transaction['transaction_type'], array('opening', 'carry_out'), true)) {
+            return intval($transaction['accounting_entry_id'] ?? 0);
+        }
+        if (intval($transaction['reversed_transaction_id']) > 0) {
+            // Ensure a legacy transaction receives its original entry before its reversal.
+            $this->postAccountingForTransaction(intval($transaction['reversed_transaction_id']));
+        }
+
+        $custodyAccount = intval($this->getSetting('cash_custody_account_id', '0'));
+        $cashAccount = intval($this->getSetting('cash_custody_cash_account_id', '0'));
+        $bankAccount = intval($this->getSetting('cash_custody_bank_account_id', '0'));
+        $expenseAccount = intval($this->getSetting('cash_custody_expense_account_id', '0'));
+        $vatAccount = intval($this->getSetting('cash_custody_input_vat_account_id', '0'));
+        $journalId = intval($this->getSetting('cash_custody_journal_id', '0'));
+        if ($custodyAccount <= 0 || $cashAccount <= 0 || $bankAccount <= 0 || $expenseAccount <= 0 || $journalId <= 0) {
+            throw new RuntimeException('أكمل حسابات الربط المحاسبي للعهد قبل تفعيل الترحيل.');
+        }
+        $sourceAccount = in_array($transaction['payment_method'], array('bank', 'cheque', 'transfer'), true) ? $bankAccount : $cashAccount;
+        $amount = abs(floatval($transaction['amount']));
+        $net = abs(floatval($transaction['net_amount']));
+        $vat = abs(floatval($transaction['vat_amount']));
+        $description = $transaction['description'] ?: ('حركة عهدة ' . $transaction['document_number']);
+        $lines = array();
+        if (in_array($transaction['transaction_type'], array('funding', 'topup'), true)) {
+            $lines[] = array('account_id'=>$custodyAccount,'description'=>$description,'debit_amount'=>$amount,'credit_amount'=>0,'cost_center_id'=>null);
+            $lines[] = array('account_id'=>$sourceAccount,'description'=>$description,'debit_amount'=>0,'credit_amount'=>$amount,'cost_center_id'=>null);
+        } elseif ($transaction['transaction_type'] === 'expense') {
+            $lines[] = array('account_id'=>$expenseAccount,'description'=>$description,'debit_amount'=>$net,'credit_amount'=>0,'cost_center_id'=>intval($transaction['cost_center_id']) ?: null);
+            if ($vat > 0) {
+                if ($vatAccount <= 0) {
+                    throw new RuntimeException('حدد حساب ضريبة المدخلات قبل اعتماد مصروف يحتوي على ضريبة.');
+                }
+                $lines[] = array('account_id'=>$vatAccount,'description'=>$description,'debit_amount'=>$vat,'credit_amount'=>0,'cost_center_id'=>intval($transaction['cost_center_id']) ?: null);
+            }
+            $lines[] = array('account_id'=>$custodyAccount,'description'=>$description,'debit_amount'=>0,'credit_amount'=>$amount,'cost_center_id'=>intval($transaction['cost_center_id']) ?: null);
+        } elseif ($transaction['transaction_type'] === 'return') {
+            $lines[] = array('account_id'=>$sourceAccount,'description'=>$description,'debit_amount'=>$amount,'credit_amount'=>0,'cost_center_id'=>null);
+            $lines[] = array('account_id'=>$custodyAccount,'description'=>$description,'debit_amount'=>0,'credit_amount'=>$amount,'cost_center_id'=>null);
+        } else {
+            return 0;
+        }
+        if (floatval($transaction['amount']) < 0) {
+            foreach ($lines as &$line) {
+                $debit = $line['debit_amount'];
+                $line['debit_amount'] = $line['credit_amount'];
+                $line['credit_amount'] = $debit;
+            }
+            unset($line);
+        }
+
+        $duplicate = $this->scalar("SELECT entry_id FROM acc_journal_entries WHERE reference_type='cash_custody_transaction' AND reference_id=" . $transactionId . " ORDER BY entry_id LIMIT 1");
+        if ($duplicate > 0) {
+            $entryId = intval($duplicate);
+        } else {
+            require_once dirname(__DIR__, 2) . '/accounting/includes/accounting_class.hnt';
+            $manager = new AccountingManager($this->db, $this->userId);
+            if ($manager->getSchemaMigrationErrors()) {
+                throw new RuntimeException('تعذر تجهيز الربط المحاسبي للعهد.');
+            }
+            $result = $manager->createJournalEntry(array(
+                'entry_date'=>$transaction['transaction_date'], 'entry_type'=>'auto', 'journal_id'=>$journalId,
+                'reference_type'=>'cash_custody_transaction', 'reference_id'=>$transactionId,
+                'description'=>$description, 'status'=>'posted'
+            ), $lines);
+            if (empty($result['success'])) {
+                throw new RuntimeException($result['message'] ?? $result['error'] ?? 'تعذر إنشاء القيد المحاسبي للعهدة.');
+            }
+            $entryId = intval($result['entry_id']);
+        }
+        $stmt = $this->db->prepare("UPDATE cash_custody_transactions SET accounting_entry_id=? WHERE transaction_id=? AND accounting_entry_id=0");
+        $stmt->bind_param('ii', $entryId, $transactionId);
+        $stmt->execute();
+        $stmt->close();
+        return $entryId;
+    }
+
+    private function lockRequest($requestId)
+    {
+        $stmt = $this->db->prepare("SELECT * FROM cash_custody_requests WHERE request_id=? FOR UPDATE");
+        $stmt->bind_param('i', $requestId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $row ?: null;
+    }
+
+    private function getOpenCustody($custodyId, $holderId = 0, $lock = false)
+    {
+        $sql = "SELECT * FROM cash_custodies WHERE custody_id=? AND status='open'";
+        if ($holderId > 0) {
+            $sql .= " AND holder_id=" . intval($holderId);
+        }
+        if ($lock) {
+            $sql .= ' FOR UPDATE';
+        }
+        $stmt = $this->db->prepare($sql);
+        $stmt->bind_param('i', $custodyId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $row ?: null;
+    }
+
+    private function custodyNumber($custodyId)
+    {
+        $stmt = $this->db->prepare("SELECT custody_number FROM cash_custodies WHERE custody_id=? LIMIT 1");
+        $stmt->bind_param('i', $custodyId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if (!$row) {
+            throw new RuntimeException('العهدة غير موجودة.');
+        }
+        return $row['custody_number'];
+    }
+
+    private function findByFormuid($table, $idColumn, $formuid)
+    {
+        $allowed = array(
+            'cash_custody_requests' => 'request_id',
+            'cash_custody_transactions' => 'transaction_id',
+            'cash_custody_settlements' => 'settlement_id'
+        );
+        if (!isset($allowed[$table]) || $allowed[$table] !== $idColumn) {
+            return 0;
+        }
+        $stmt = $this->db->prepare("SELECT {$idColumn} FROM {$table} WHERE formuid=? LIMIT 1");
+        $stmt->bind_param('s', $formuid);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $row ? intval($row[$idColumn]) : 0;
+    }
+
+    private function holderPrefixExists($prefix)
+    {
+        $stmt = $this->db->prepare("SELECT holder_id FROM cash_custody_holders WHERE number_prefix=? LIMIT 1");
+        $stmt->bind_param('s', $prefix);
+        $stmt->execute();
+        $exists = (bool)$stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $exists;
+    }
+
+    private function tableExists($table)
+    {
+        $stmt = $this->db->prepare("SELECT COUNT(*) AS total FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?");
+        $stmt->bind_param('s', $table);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return intval($row['total'] ?? 0) > 0;
+    }
+
+    private function fetchAll($sql)
+    {
+        $rows = array();
+        $result = $this->db->query($sql);
+        if (!$result) {
+            return $rows;
+        }
+        while ($row = $result->fetch_assoc()) {
+            $rows[] = $row;
+        }
+        return $rows;
+    }
+
+    private function scalar($sql)
+    {
+        $result = $this->db->query($sql);
+        if (!$result || !($row = $result->fetch_row())) {
+            return 0;
+        }
+        return $row[0];
+    }
+
+    private function money($value)
+    {
+        return round(floatval(str_replace(',', '', (string)$value)), 2);
+    }
+
+    private function date($value)
+    {
+        $value = trim((string)$value);
+        if ($value === '') {
+            return null;
+        }
+        if (preg_match('/^(\d{2})\/(\d{2})\/(\d{4})$/', $value, $matches)) {
+            $value = $matches[3] . '-' . $matches[2] . '-' . $matches[1];
+        }
+        $parsed = DateTime::createFromFormat('!Y-m-d', $value);
+        return ($parsed && $parsed->format('Y-m-d') === $value) ? $value : null;
+    }
+
+    private function uuid()
+    {
+        try {
+            return bin2hex(random_bytes(16));
+        } catch (Throwable $exception) {
+            return sha1(uniqid((string)$this->userId, true));
+        }
+    }
+}
+

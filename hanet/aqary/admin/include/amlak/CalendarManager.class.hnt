@@ -379,6 +379,99 @@ class CalendarManager {
     }
 
     /**
+     * Calculate the cumulative increase percentage for an installment.
+     *
+     * Calendar month indexes are used instead of elapsed seconds so Hijri and
+     * Gregorian contracts both change price on their own yearly boundary. The
+     * day is deliberately ignored because day 30/31 can be clamped in a short
+     * month without moving the installment into the previous rent year.
+     *
+     * @return float Percentage applied to the original periodic base rent
+     */
+    public function calculateRentIncreasePercent(
+        $contractStartTimestamp,
+        $installmentTimestamp,
+        $calendarType,
+        $annualIncreasePercent,
+        $maximumIncreasePercent
+    ) {
+        $annualIncreasePercent = max(0, floatval($annualIncreasePercent));
+        $maximumIncreasePercent = max(0, floatval($maximumIncreasePercent));
+        if ($annualIncreasePercent <= 0 || $maximumIncreasePercent <= 0) {
+            return 0.0;
+        }
+
+        $calendarType = intval($calendarType);
+        $contractStartTimestamp = $this->normalizeLegacyTimestamp(
+            intval($contractStartTimestamp),
+            $calendarType
+        );
+        $installmentTimestamp = $this->normalizeLegacyTimestamp(
+            intval($installmentTimestamp),
+            $calendarType
+        );
+        if ($contractStartTimestamp <= 0 || $installmentTimestamp <= 0) {
+            return 0.0;
+        }
+
+        if ($calendarType === 0) {
+            $start = $this->dcal->g2u(
+                date('d', $contractStartTimestamp),
+                date('m', $contractStartTimestamp),
+                date('Y', $contractStartTimestamp)
+            );
+            $due = $this->dcal->g2u(
+                date('d', $installmentTimestamp),
+                date('m', $installmentTimestamp),
+                date('Y', $installmentTimestamp)
+            );
+            $startMonthIndex = (intval($start['year']) * 12) + intval($start['month']) - 1;
+            $dueMonthIndex = (intval($due['year']) * 12) + intval($due['month']) - 1;
+        } else {
+            $startMonthIndex = (intval(date('Y', $contractStartTimestamp)) * 12)
+                + intval(date('n', $contractStartTimestamp)) - 1;
+            $dueMonthIndex = (intval(date('Y', $installmentTimestamp)) * 12)
+                + intval(date('n', $installmentTimestamp)) - 1;
+        }
+
+        $elapsedMonths = max(0, $dueMonthIndex - $startMonthIndex);
+        $completedRentYears = intval(floor($elapsedMonths / 12));
+        return round(min(
+            $completedRentYears * $annualIncreasePercent,
+            $maximumIncreasePercent
+        ), 2);
+    }
+
+    /**
+     * Return the escalated periodic base rent and its applied percentage.
+     */
+    public function calculateEscalatedBaseRent(
+        $originalPeriodicRent,
+        $contractStartTimestamp,
+        $installmentTimestamp,
+        $calendarType,
+        $annualIncreasePercent,
+        $maximumIncreasePercent
+    ) {
+        $percentage = $this->calculateRentIncreasePercent(
+            $contractStartTimestamp,
+            $installmentTimestamp,
+            $calendarType,
+            $annualIncreasePercent,
+            $maximumIncreasePercent
+        );
+        $amount = round(
+            floatval($originalPeriodicRent) * (1 + ($percentage / 100)),
+            2
+        );
+
+        return array(
+            'amount' => $amount,
+            'percentage' => $percentage,
+        );
+    }
+
+    /**
      * Get month name in Arabic
      *
      * @param int $month Month number (1-12)

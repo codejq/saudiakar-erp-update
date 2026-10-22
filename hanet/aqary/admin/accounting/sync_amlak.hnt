@@ -16,8 +16,17 @@ include_once "../../header.hnt";
 include_once "includes/accounting_class.hnt";
 include_once "includes/amlak_integration.hnt";
 
-$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+$currentAccountingUserId = isset($_SESSION['useridv']) ? (int)$_SESSION['useridv'] : (int)($_SESSION['userid'] ?? 0);
+$accountingManager = new AccountingManager($db, $currentAccountingUserId);
 $amlakIntegration = new AmlakAccountingIntegration($db, $accountingManager);
+
+if (empty($_SESSION['accounting_sync_csrf'])) {
+    try {
+        $_SESSION['accounting_sync_csrf'] = bin2hex(random_bytes(24));
+    } catch (Throwable $exception) {
+        $_SESSION['accounting_sync_csrf'] = hash('sha256', session_id() . microtime(true) . mt_rand());
+    }
+}
 
 $syncLog = [];
 $syncStats = [
@@ -25,6 +34,10 @@ $syncStats = [
     'tenants_synced' => 0,
     'owners_synced' => 0,
     'invoices_created' => 0,
+    'receipts_synced' => 0,
+    'expenses_synced' => 0,
+    'settlements_synced' => 0,
+    'existing_linked' => 0,
     'entries_created' => 0,
     'errors' => 0
 ];
@@ -33,6 +46,13 @@ $toastMessage = '';
 // Handle sync actions
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['sync_action'])) {
     $action = $_POST['sync_action'];
+
+    $postedToken = isset($_POST['csrf_token']) ? (string)$_POST['csrf_token'] : '';
+    if ($postedToken === '' || !hash_equals((string)$_SESSION['accounting_sync_csrf'], $postedToken)) {
+        $syncLog[] = "✗ انتهت صلاحية نموذج المزامنة. أعد تحميل الصفحة.";
+        $syncStats['errors']++;
+        $action = '';
+    }
 
     switch ($action) {
         case 'sync_cost_centers':
@@ -117,6 +137,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['sync_action'])) {
                               FROM egar e
                               LEFT JOIN mostagereen m ON e.mostagerid = m.mostagerid
                               WHERE e.endegar >= UNIX_TIMESTAMP(CURDATE()) * 1000
+                              AND (e.invoice_id IS NULL OR e.invoice_id=0)
+                              ORDER BY e.rakam3akdid
                               LIMIT 50";
             $contractsResult = $db->query($contractsQuery);
 
@@ -135,37 +157,22 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['sync_action'])) {
                 $result = $amlakIntegration->createInvoiceFromEgar($contract['egarid']);
                 if ($result['success']) {
                     $syncStats['invoices_created']++;
-                    $syncLog[] = "✓ تم إنشاء فاتورة للعقد: {$contract['rakam3akdid']} - {$contract['mostagername']}";
+                    $syncLog[] = (!empty($result['existing']) ? "✓ تم ربط العقد بفاتورته: " : "✓ تم إنشاء فاتورة للعقد: ") . $contract['rakam3akd'] . ' - ' . $contract['mostagername'];
                 } else {
                     $syncStats['errors']++;
-                    $syncLog[] = "✗ فشل إنشاء فاتورة للعقد: {$contract['rakam3akdid']} - " . ($result['message'] ?? 'خطأ غير معروف');
+                    $syncLog[] = "✗ فشل إنشاء فاتورة للعقد: {$contract['rakam3akd']} - " . ($result['message'] ?? 'خطأ غير معروف');
                 }
             }
             break;
 
         case 'sync_payments':
-            // Create journal entries from recent payment vouchers
-            // Add column if not exists (compatible with older MySQL versions)
-            $checkColumn = $db->query("SHOW COLUMNS FROM sanad LIKE 'accounting_entry_id'");
-            if ($checkColumn->num_rows == 0) {
-                $alterResult = $db->query("ALTER TABLE sanad ADD COLUMN accounting_entry_id INT NULL");
-                if (!$alterResult) {
-                    $syncLog[] = "✗ فشل إضافة عمود accounting_entry_id: " . $db->error;
-                    $syncStats['errors']++;
-                    break;
-                }
-                // Add index for better performance
-                $db->query("ALTER TABLE sanad ADD INDEX idx_accounting_entry (accounting_entry_id)");
-                $syncLog[] = "✓ تمت إضافة عمود accounting_entry_id إلى جدول sanad";
-            }
-
-            // Only sync vouchers that haven't been synced yet
+            // Source columns are installed by schema_migrations.hnt from the
+            // accounting dashboard.  Process a bounded batch on every run.
             $vouchersQuery = "SELECT idsanad as sanadid, sanadrakam as sanadnumber, mybyan as sanaddescription
                              FROM sanad
-                             WHERE sanaddate >= UNIX_TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY))
-                             AND (accounting_entry_id IS NULL OR accounting_entry_id = 0)
-                             ORDER BY sanaddate DESC
-                             LIMIT 50";
+                             WHERE accounting_entry_id IS NULL OR accounting_entry_id = 0
+                             ORDER BY idsanad DESC
+                             LIMIT 100";
             $vouchersResult = $db->query($vouchersQuery);
 
             if (!$vouchersResult) {
@@ -181,60 +188,99 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['sync_action'])) {
 
             $syncLog[] = "⚙ بدء مزامنة {$vouchersResult->num_rows} سند قبض...";
 
-            // Ensure autocommit is enabled for updates
-            $db->autocommit(TRUE);
-
             while ($voucher = $vouchersResult->fetch_assoc()) {
                 $result = $amlakIntegration->createEntryFromSanad($voucher['sanadid']);
                 if ($result['success']) {
-                    // Update sanad with entry reference
                     $entryId = $result['entry_id'] ?? 0;
                     if ($entryId > 0) {
-                        $updateQuery = "UPDATE sanad SET accounting_entry_id = ? WHERE idsanad = ?";
+                        $updateQuery = "UPDATE sanad SET accounting_entry_id=? WHERE idsanad=? AND (accounting_entry_id IS NULL OR accounting_entry_id=0)";
                         $stmt = $db->prepare($updateQuery);
-
-                        if (!$stmt) {
-                            $syncLog[] = "⚠ تحذير: فشل تجهيز استعلام التحديث للسند {$voucher['sanadnumber']}: " . $db->error;
-                            $syncStats['errors']++;
-                        } else {
+                        if ($stmt) {
                             $stmt->bind_param('ii', $entryId, $voucher['sanadid']);
-
-                            if (!$stmt->execute()) {
-                                $syncLog[] = "⚠ تحذير: فشل تحديث السند {$voucher['sanadnumber']} بمعرف القيد {$entryId}: " . $stmt->error;
-                                $syncStats['errors']++;
-                            } else {
-                                $affectedRows = $stmt->affected_rows;
-                                if ($affectedRows == 0) {
-                                    $syncLog[] = "⚠ تحذير: لم يتم تحديث السند {$voucher['sanadnumber']} (السند غير موجود؟)";
-                                    $syncStats['errors']++;
-                                } else {
-                                    // Explicitly commit the update
-                                    $db->commit();
-                                }
-                            }
+                            $stmt->execute();
                             $stmt->close();
                         }
-                    } else {
-                        $syncLog[] = "⚠ تحذير: القيد المنشأ لا يحتوي على entry_id للسند {$voucher['sanadnumber']}";
-                        $syncStats['errors']++;
                     }
-
                     $syncStats['entries_created']++;
-                    $syncLog[] = "✓ تم إنشاء قيد من سند: {$voucher['sanadnumber']} (القيد رقم: {$result['entry_number']}, معرف: {$entryId})";
+                    $syncStats['receipts_synced']++;
+                    if (!empty($result['existing'])) $syncStats['existing_linked']++;
+                    $syncLog[] = (!empty($result['existing']) ? "✓ تم ربط السند بقيده الموجود: " : "✓ تم إنشاء قيد من سند: ") . $voucher['sanadnumber'];
                 } else {
                     $syncStats['errors']++;
                     $syncLog[] = "✗ فشل إنشاء قيد من سند: {$voucher['sanadnumber']} - " . ($result['message'] ?? 'خطأ غير معروف');
                 }
             }
+            break;
 
-            // Verification: Check how many vouchers are now marked as synced
-            $verifyQuery = "SELECT COUNT(*) as synced_count FROM sanad
-                           WHERE sanaddate >= UNIX_TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY))
-                           AND accounting_entry_id IS NOT NULL AND accounting_entry_id > 0";
-            $verifyResult = $db->query($verifyQuery);
-            if ($verifyResult) {
-                $verifyRow = $verifyResult->fetch_assoc();
-                $syncLog[] = "ℹ إجمالي السندات المزامنة (آخر 30 يوم): {$verifyRow['synced_count']}";
+        case 'sync_expenses':
+            $expensesResult = $db->query("SELECT idmasrof, idaqar, payeddue
+                FROM masrofat
+                WHERE fund_source=0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0)
+                ORDER BY idmasrof DESC LIMIT 100");
+            if (!$expensesResult) {
+                $syncStats['errors']++;
+                $syncLog[] = "✗ تعذر قراءة المصروفات غير المزامنة.";
+                break;
+            }
+            if ($expensesResult->num_rows === 0) {
+                $toastMessage = "لا توجد مصروفات جديدة للمزامنة";
+                break;
+            }
+            while ($expense = $expensesResult->fetch_assoc()) {
+                $result = $amlakIntegration->createEntryFromMasrofat((int)$expense['idmasrof']);
+                if (!empty($result['success']) && !empty($result['entry_id'])) {
+                    $entryId = (int)$result['entry_id'];
+                    $expenseId = (int)$expense['idmasrof'];
+                    $stmt = $db->prepare("UPDATE masrofat SET accounting_entry_id=? WHERE idmasrof=? AND (accounting_entry_id IS NULL OR accounting_entry_id=0)");
+                    if ($stmt) {
+                        $stmt->bind_param('ii', $entryId, $expenseId);
+                        $stmt->execute();
+                        $stmt->close();
+                    }
+                    $syncStats['entries_created']++;
+                    $syncStats['expenses_synced']++;
+                    if (!empty($result['existing'])) $syncStats['existing_linked']++;
+                    $syncLog[] = "✓ تمت مزامنة المصروف #{$expenseId}" . ((int)$expense['idaqar'] === 0 ? ' (مصروف مكتب)' : '');
+                } else {
+                    $syncStats['errors']++;
+                    $syncLog[] = "✗ فشلت مزامنة المصروف #" . (int)$expense['idmasrof'] . ' - ' . ($result['message'] ?? 'خطأ غير معروف');
+                }
+            }
+            break;
+
+        case 'sync_owner_settlements':
+            $settlementsResult = $db->query("SELECT sanadid, bayan
+                FROM sanadsarf
+                WHERE aqarid>0 AND iderad>0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0)
+                ORDER BY sanadid DESC LIMIT 100");
+            if (!$settlementsResult) {
+                $syncStats['errors']++;
+                $syncLog[] = "✗ تعذر قراءة تسليمات الملاك غير المزامنة.";
+                break;
+            }
+            if ($settlementsResult->num_rows === 0) {
+                $toastMessage = "لا توجد تسليمات ملاك جديدة للمزامنة";
+                break;
+            }
+            while ($settlement = $settlementsResult->fetch_assoc()) {
+                $result = $amlakIntegration->createEntryFromSanadsarf((int)$settlement['sanadid']);
+                if (!empty($result['success']) && !empty($result['entry_id'])) {
+                    $entryId = (int)$result['entry_id'];
+                    $settlementId = (int)$settlement['sanadid'];
+                    $stmt = $db->prepare("UPDATE sanadsarf SET accounting_entry_id=? WHERE sanadid=? AND (accounting_entry_id IS NULL OR accounting_entry_id=0)");
+                    if ($stmt) {
+                        $stmt->bind_param('ii', $entryId, $settlementId);
+                        $stmt->execute();
+                        $stmt->close();
+                    }
+                    $syncStats['entries_created']++;
+                    $syncStats['settlements_synced']++;
+                    if (!empty($result['existing'])) $syncStats['existing_linked']++;
+                    $syncLog[] = "✓ تمت مزامنة سند تسليم المالك #{$settlementId}";
+                } else {
+                    $syncStats['errors']++;
+                    $syncLog[] = "✗ فشلت مزامنة سند تسليم المالك #" . (int)$settlement['sanadid'] . ' - ' . ($result['message'] ?? 'خطأ غير معروف');
+                }
             }
             break;
     }
@@ -258,8 +304,16 @@ $result = $db->query("SELECT COUNT(*) as count FROM amlak");
 if ($result) $propertiesCount = $result->fetch_assoc()['count'];
 
 $sanadCount = 0;
-$result = $db->query("SELECT COUNT(*) as count FROM sanad WHERE sanaddate >= UNIX_TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY))");
+$result = $db->query("SELECT COUNT(*) as count FROM sanad WHERE accounting_entry_id IS NULL OR accounting_entry_id=0");
 if ($result) $sanadCount = $result->fetch_assoc()['count'];
+
+$expenseSyncCount = 0;
+$result = $db->query("SELECT COUNT(*) as count FROM masrofat WHERE fund_source=0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0)");
+if ($result) $expenseSyncCount = $result->fetch_assoc()['count'];
+
+$ownerSettlementSyncCount = 0;
+$result = $db->query("SELECT COUNT(*) as count FROM sanadsarf WHERE aqarid>0 AND iderad>0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0)");
+if ($result) $ownerSettlementSyncCount = $result->fetch_assoc()['count'];
 
 $customersCount = 0;
 $result = $db->query("SELECT COUNT(*) as count FROM acc_customers");
@@ -386,13 +440,25 @@ if ($result) $invoicesCount = $result->fetch_assoc()['count'];
         <div class="col-md-2">
             <div class="stats-card">
                 <div class="stats-value text-danger"><?php echo number_format($sanadCount); ?></div>
-                <div class="text-muted">سندات (30 يوم)</div>
+                <div class="text-muted">سندات قبض قيد المزامنة</div>
             </div>
         </div>
         <div class="col-md-2">
             <div class="stats-card">
                 <div class="stats-value text-success"><?php echo number_format($customersCount); ?></div>
                 <div class="text-muted">العملاء</div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value text-danger"><?php echo number_format($expenseSyncCount); ?></div>
+                <div class="text-muted">مصروفات قيد المزامنة</div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="stats-card">
+                <div class="stats-value text-warning"><?php echo number_format($ownerSettlementSyncCount); ?></div>
+                <div class="text-muted">تسليمات ملاك قيد المزامنة</div>
             </div>
         </div>
     </div>
@@ -428,6 +494,7 @@ if ($result) $invoicesCount = $result->fetch_assoc()['count'];
                 </h5>
                 <p class="text-muted">إنشاء مراكز تكلفة للعقارات تلقائياً عند عدم وجودها</p>
                 <form method="POST">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['accounting_sync_csrf'], ENT_QUOTES, 'UTF-8'); ?>">
                     <input type="hidden" name="sync_action" value="sync_cost_centers">
                     <button type="submit" class="sync-button">
                         <i class="bi bi-building-add me-2"></i>إنشاء مراكز التكلفة
@@ -443,6 +510,7 @@ if ($result) $invoicesCount = $result->fetch_assoc()['count'];
                 </h5>
                 <p class="text-muted">نقل جميع المستأجرين إلى قائمة العملاء في نظام المحاسبة</p>
                 <form method="POST">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['accounting_sync_csrf'], ENT_QUOTES, 'UTF-8'); ?>">
                     <input type="hidden" name="sync_action" value="sync_tenants">
                     <button type="submit" class="sync-button">
                         <i class="bi bi-arrow-repeat me-2"></i>مزامنة المستأجرين
@@ -458,6 +526,7 @@ if ($result) $invoicesCount = $result->fetch_assoc()['count'];
                 </h5>
                 <p class="text-muted">نقل جميع الملاك إلى قائمة العملاء في نظام المحاسبة</p>
                 <form method="POST">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['accounting_sync_csrf'], ENT_QUOTES, 'UTF-8'); ?>">
                     <input type="hidden" name="sync_action" value="sync_owners">
                     <button type="submit" class="sync-button">
                         <i class="bi bi-arrow-repeat me-2"></i>مزامنة الملاك
@@ -473,6 +542,7 @@ if ($result) $invoicesCount = $result->fetch_assoc()['count'];
                 </h5>
                 <p class="text-muted">إنشاء فواتير محاسبية من عقود الإيجار النشطة</p>
                 <form method="POST">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['accounting_sync_csrf'], ENT_QUOTES, 'UTF-8'); ?>">
                     <input type="hidden" name="sync_action" value="create_invoices">
                     <button type="submit" class="sync-button">
                         <i class="bi bi-file-earmark-plus me-2"></i>إنشاء الفواتير
@@ -486,12 +556,37 @@ if ($result) $invoicesCount = $result->fetch_assoc()['count'];
                 <h5 class="mb-3">
                     <i class="bi bi-journal-text me-2"></i>مزامنة سندات القبض
                 </h5>
-                <p class="text-muted">إنشاء قيود محاسبية من سندات القبض (آخر 30 يوم)</p>
+                <p class="text-muted">إنشاء قيود محاسبية من سندات القبض غير المزامنة (100 سند في كل تشغيل)</p>
                 <form method="POST">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['accounting_sync_csrf'], ENT_QUOTES, 'UTF-8'); ?>">
                     <input type="hidden" name="sync_action" value="sync_payments">
                     <button type="submit" class="sync-button">
                         <i class="bi bi-arrow-repeat me-2"></i>مزامنة السندات
                     </button>
+                </form>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="sync-card">
+                <h5 class="mb-3"><i class="bi bi-receipt-cutoff me-2"></i>مزامنة المصروفات</h5>
+                <p class="text-muted">مزامنة مصروفات العقارات ومصروفات المكتب المدفوعة من المكتب.</p>
+                <form method="POST">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['accounting_sync_csrf'], ENT_QUOTES, 'UTF-8'); ?>">
+                    <input type="hidden" name="sync_action" value="sync_expenses">
+                    <button type="submit" class="sync-button"><i class="bi bi-arrow-repeat me-2"></i>مزامنة المصروفات (<?php echo number_format($expenseSyncCount); ?>)</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="sync-card">
+                <h5 class="mb-3"><i class="bi bi-box-arrow-up-left me-2"></i>مزامنة تسليمات الملاك</h5>
+                <p class="text-muted">مزامنة سندات التسليم الفردية والمجمعة مع مصدر المبلغ الصحيح.</p>
+                <form method="POST">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['accounting_sync_csrf'], ENT_QUOTES, 'UTF-8'); ?>">
+                    <input type="hidden" name="sync_action" value="sync_owner_settlements">
+                    <button type="submit" class="sync-button"><i class="bi bi-arrow-repeat me-2"></i>مزامنة التسليمات (<?php echo number_format($ownerSettlementSyncCount); ?>)</button>
                 </form>
             </div>
         </div>
@@ -530,12 +625,26 @@ if ($result) $invoicesCount = $result->fetch_assoc()['count'];
                         <strong><?php echo $syncStats['entries_created']; ?></strong> قيد
                     </div>
                 </div>
+                <div class="col-md-3">
+                    <div class="alert alert-success mb-0"><strong><?php echo $syncStats['receipts_synced']; ?></strong> سند قبض</div>
+                </div>
+                <div class="col-md-3">
+                    <div class="alert alert-danger mb-0"><strong><?php echo $syncStats['expenses_synced']; ?></strong> مصروف</div>
+                </div>
+                <div class="col-md-3">
+                    <div class="alert alert-info mb-0"><strong><?php echo $syncStats['settlements_synced']; ?></strong> تسليم مالك</div>
+                </div>
+                <?php if ($syncStats['existing_linked'] > 0): ?>
+                <div class="col-md-3">
+                    <div class="alert alert-secondary mb-0"><strong><?php echo $syncStats['existing_linked']; ?></strong> ربط قائم</div>
+                </div>
+                <?php endif; ?>
             </div>
 
             <div style="max-height: 400px; overflow-y: auto;">
                 <?php foreach ($syncLog as $log): ?>
                     <div class="log-item <?php echo strpos($log, '✓') !== false ? 'success' : 'error'; ?>">
-                        <?php echo $log; ?>
+                        <?php echo htmlspecialchars($log, ENT_QUOTES, 'UTF-8'); ?>
                     </div>
                 <?php endforeach; ?>
             </div>

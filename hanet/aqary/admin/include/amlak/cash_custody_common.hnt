@@ -1,0 +1,144 @@
+<?php
+/** Presentation helpers shared by the cash-custody module. */
+function ccNormalizeLegacyUtf8($value)
+{
+    $value = (string)$value;
+    if ($value === '' || !preg_match('/(?:Ã|Â|Ø|Ù|â)/u', $value)) {
+        return $value;
+    }
+
+    // Some legacy accounting labels were saved after UTF-8 bytes were read as Windows-1252.
+    if (function_exists('mb_convert_encoding')) {
+        $converted = @mb_convert_encoding($value, 'Windows-1252', 'UTF-8');
+    } elseif (function_exists('iconv')) {
+        $converted = @iconv('UTF-8', 'Windows-1252//IGNORE', $value);
+    } else {
+        return $value;
+    }
+
+    if (!is_string($converted) || $converted === '' || !preg_match('//u', $converted)) {
+        return $value;
+    }
+
+    $beforeArabic = preg_match_all('/[\x{0600}-\x{06FF}]/u', $value, $unusedBefore);
+    $afterArabic = preg_match_all('/[\x{0600}-\x{06FF}]/u', $converted, $unusedAfter);
+    return $afterArabic > $beforeArabic ? $converted : $value;
+}
+
+function ccEsc($value)
+{
+    return htmlspecialchars(ccNormalizeLegacyUtf8($value), ENT_QUOTES, 'UTF-8');
+}
+
+function ccMoney($value)
+{
+    return number_format(floatval($value), 2);
+}
+
+function ccStatusLabel($status)
+{
+    $labels = array(
+        'pending' => 'بانتظار الاعتماد', 'approved' => 'معتمد', 'rejected' => 'مرفوض',
+        'disbursed' => 'تم الصرف', 'cancelled' => 'ملغي', 'open' => 'مفتوحة',
+        'closed' => 'مقفلة', 'completed' => 'مكتملة'
+    );
+    return $labels[$status] ?? $status;
+}
+
+function ccTypeLabel($type)
+{
+    $labels = array(
+        'new' => 'عهدة جديدة', 'topup' => 'تعزيز عهدة', 'funding' => 'صرف عهدة',
+        'opening' => 'رصيد افتتاحي', 'expense' => 'مصروف', 'return' => 'رد مبلغ',
+        'carry_out' => 'ترحيل رصيد'
+    );
+    return $labels[$type] ?? $type;
+}
+
+function ccUuid()
+{
+    try {
+        return bin2hex(random_bytes(24));
+    } catch (Throwable $exception) {
+        return hash('sha256', microtime(true) . mt_rand());
+    }
+}
+
+function ccRenderStart($title, $active = '')
+{
+    $links = array(
+        'home' => array('cash_custody.hnt', 'الرئيسية', 'bi-grid'),
+        'requests' => array('cash_custody_requests.hnt', 'الطلبات', 'bi-file-earmark-check'),
+        'custodies' => array('cash_custody_list.hnt', 'العهد', 'bi-wallet2'),
+        'holders' => array('cash_custody_holders.hnt', 'أصحاب العهد', 'bi-people'),
+        'report' => array('cash_custody_report.hnt', 'التقارير', 'bi-bar-chart'),
+        'settings' => array('cash_custody_settings.hnt', 'الإعدادات', 'bi-gear')
+    );
+    ?>
+    <style>
+        .cc-wrap{width:100%;max-width:none;margin:22px 0;padding:0 16px;box-sizing:border-box;font-family:Tahoma,Arial,sans-serif;direction:rtl}
+        .cc-head{background:linear-gradient(135deg,#087f5b,#0b7285);color:#fff;padding:20px 24px;border-radius:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;box-shadow:0 8px 22px rgba(8,127,91,.16)}
+        .cc-head h1{font-size:24px;margin:0}.cc-nav{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}
+        .cc-nav a{color:#334155;background:#fff;border:1px solid #dbe3ea;padding:9px 13px;border-radius:9px;text-decoration:none;font-weight:700}
+        .cc-nav a.active,.cc-nav a:hover{background:#087f5b;color:#fff;border-color:#087f5b}
+        .cc-card{background:#fff;border:1px solid #e3e8ef;border-radius:14px;padding:18px;margin-bottom:16px;box-shadow:0 3px 13px rgba(15,23,42,.05)}
+        .cc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.cc-stat strong{font-size:25px;color:#087f5b;display:block;margin-top:7px}
+        .cc-table{width:100%;border-collapse:collapse}.cc-table th,.cc-table td{border-bottom:1px solid #e5e7eb;padding:10px 8px;text-align:right;vertical-align:middle}.cc-table th{background:#f8fafc;color:#334155;white-space:nowrap}
+        .cc-btn{border:0;border-radius:8px;padding:9px 14px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}.cc-primary{background:#087f5b;color:#fff}.cc-secondary{background:#e2e8f0;color:#1e293b}.cc-danger{background:#dc2626;color:#fff}.cc-warning{background:#f59f00;color:#fff}.cc-info{background:#0b7285;color:#fff}
+        .cc-form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:13px}.cc-field label{display:block;font-weight:700;margin-bottom:6px;color:#334155}.cc-field input,.cc-field select,.cc-field textarea{width:100%;min-height:42px;border:1px solid #cbd5e1;border-radius:8px;padding:8px;background:#fff}.cc-field textarea{min-height:80px}
+        .cc-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.cc-badge{display:inline-block;padding:5px 9px;border-radius:20px;background:#e6fcf5;color:#087f5b;font-weight:700}.cc-badge.pending{background:#fff3bf;color:#8a5d00}.cc-badge.rejected{background:#ffe3e3;color:#c92a2a}.cc-badge.closed{background:#e2e8f0;color:#475569}
+        .cc-modal{display:none;position:fixed;z-index:99999;inset:0;background:rgba(15,23,42,.55);padding:35px 15px;overflow:auto}.cc-modal.open{display:block}.cc-modal-box{background:#fff;max-width:850px;margin:auto;border-radius:14px;padding:20px}.cc-modal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px}.cc-modal-head h2{margin:0}.cc-close{font-size:24px;border:0;background:none;cursor:pointer}
+        /* Select2 appends its dropdown to body; keep it above the custody modal overlay. */
+        body>.select2-container--open{z-index:100001!important}.select2-container--open .select2-dropdown{z-index:100002!important}
+        .cc-alert{padding:12px 15px;border-radius:9px;margin-bottom:14px;background:#e7f5ff;color:#075985}.cc-alert.error{background:#fee2e2;color:#991b1b}.cc-empty{text-align:center;color:#64748b;padding:28px}.cc-scroll{overflow:auto}
+        @media(max-width:700px){.cc-head{align-items:flex-start;flex-direction:column}.cc-table{min-width:850px}.cc-wrap{padding:0 8px}.cc-nav a{flex:1;text-align:center}}
+        @media print{header,.cc-nav,.cc-no-print{display:none!important}.cc-wrap{max-width:none;margin:0}.cc-card{box-shadow:none;border:0}}
+    </style>
+    <main class="cc-wrap">
+        <div class="cc-head"><h1><i class="bi bi-wallet2"></i> <?= ccEsc($title) ?></h1><a class="cc-btn cc-secondary cc-no-print" href="/aqary/admin/amlak.hnt"><i class="bi bi-arrow-right"></i> إدارة الأملاك</a></div>
+        <nav class="cc-nav cc-no-print">
+            <?php foreach ($links as $key => $link): ?>
+                <a class="<?= $active === $key ? 'active' : '' ?>" href="<?= ccEsc($link[0]) ?>"><i class="bi <?= ccEsc($link[2]) ?>"></i> <?= ccEsc($link[1]) ?></a>
+            <?php endforeach; ?>
+        </nav>
+    <?php
+}
+
+function ccRenderEnd($csrfToken)
+{
+    ?>
+    </main>
+    <script>
+    window.ccCsrf = <?= json_encode($csrfToken, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+    function ccOpen(id){ document.getElementById(id).classList.add('open'); }
+    function ccClose(id){ document.getElementById(id).classList.remove('open'); }
+    function ccNewUid(){ return Date.now().toString(16) + Math.random().toString(16).slice(2) + Math.random().toString(16).slice(2); }
+    function ccSubmit(form, confirmText){
+        let submitted=false;
+        const send=function(){
+            if(submitted) return;
+            submitted=true;
+            const button=form.querySelector('[type="submit"]'); if(button) button.disabled=true;
+            const data=new FormData(form); data.set('csrf_token',window.ccCsrf);
+            (async function(){
+            try{
+                const response=await fetch('cash_custody.api.hnt',{method:'POST',body:data,credentials:'same-origin'});
+                const result=await response.json();
+                if(!response.ok || !result.success) throw new Error(result.message || 'تعذر تنفيذ العملية');
+                alert(result.message); window.location.href=result.redirect || window.location.href;
+            }catch(error){ submitted=false; alert(error.message || 'تعذر الاتصال بالخادم'); if(button) button.disabled=false; }
+            })();
+        };
+        if(confirmText){
+            const answer=window.confirm(confirmText,'تأكيد',send);
+            if(answer===true) send();
+            return false;
+        }
+        send();
+        return false;
+    }
+    document.addEventListener('click',function(event){if(event.target.classList.contains('cc-modal')) event.target.classList.remove('open');});
+    </script>
+    <?php
+}
+

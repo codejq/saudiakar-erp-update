@@ -113,6 +113,8 @@ $sqlNoInstallmentsAtAll = "SELECT
             e.fixed_payment_day,
             e.duration,
             e.depositeamount,
+            e.annual_rent_increase_percent,
+            e.max_rent_increase_percent,
             e.secondsa3e,
             e.water,
             e.services,
@@ -177,6 +179,8 @@ $sqlNoInstallments = "SELECT
             e.fixed_payment_day,
             e.duration,
             e.depositeamount,
+            e.annual_rent_increase_percent,
+            e.max_rent_increase_percent,
             e.secondsa3e,
             e.water,
             e.services,
@@ -236,6 +240,8 @@ $sqlNeedingExtension = "SELECT
             e.fixed_payment_day,
             e.duration,
             e.depositeamount,
+            e.annual_rent_increase_percent,
+            e.max_rent_increase_percent,
             e.secondsa3e,
             e.water,
             e.services,
@@ -447,6 +453,8 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
 
     // Get contract payment details
     $depositeamount = floatval($contract['depositeamount']);
+    $annualRentIncreasePercent = floatval($contract['annual_rent_increase_percent'] ?? 0);
+    $maxRentIncreasePercent = floatval($contract['max_rent_increase_percent'] ?? 0);
     $secondsa3e = floatval($contract['secondsa3e'] ?? 0);
     $water = floatval($contract['water'] ?? 0);
     $services = floatval($contract['services'] ?? 0);
@@ -551,6 +559,16 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
                 $calendarType,
                 $fixedPaymentDay
             );
+            $rentEscalation = $calendar->calculateEscalatedBaseRent(
+                $depositeamount,
+                intval($contract['startegar']),
+                $nextDate,
+                $calendarType,
+                $annualRentIncreasePercent,
+                $maxRentIncreasePercent
+            );
+            $baseRentAmount = $rentEscalation['amount'];
+            $appliedRentIncreasePercent = $rentEscalation['percentage'];
 
             // Determine installment status
             $installmentStatus = $nextDate < $now ? 'overdue' : 'pending';
@@ -577,7 +595,7 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
                 $services_value = ($services_duration ? $services : 0);
             }
 
-            $kastvalue = floatval($depositeamount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
+            $kastvalue = floatval($baseRentAmount) + floatval($sa3e_value) + floatval($water_value) + floatval($services_value);
 
             // Idempotency guard: a repeated or concurrent service run must not
             // insert the same due date for the same contract and active unit.
@@ -602,6 +620,8 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
                 idsubaqar,
                 kastdate,
                 kastvalue,
+                base_rent_amount,
+                rent_increase_percent,
                 water,
                 sa3ee,
                 services,
@@ -620,6 +640,8 @@ function processContract($contract, $monthsToGenerate, $type, &$report, $link, $
                 '{$idsubaqar}',
                 '{$nextDate}',
                 '{$kastvalue}',
+                '{$baseRentAmount}',
+                '{$appliedRentIncreasePercent}',
                 '{$water_value}',
                 '{$sa3e_value}',
                 '{$services_value}',

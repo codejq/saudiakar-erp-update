@@ -1,0 +1,222 @@
+<?php
+/** Maintenance request dashboard, lifecycle, logistics and audit trail. */
+$sc_title = 'طلبات الصيانة';
+require_once __DIR__ . '/maintenance_requests_bootstrap.hnt';
+
+$lookups = $maintenanceService->getLookups();
+$allStatuses = array('new','assigned','scheduled','in_progress','waiting_parts','on_hold','completed','verified','cancelled');
+$statusTransitions = array(
+    'new'=>array('assigned','scheduled','cancelled'),
+    'assigned'=>array('scheduled','in_progress','on_hold','cancelled'),
+    'scheduled'=>array('in_progress','on_hold','cancelled'),
+    'in_progress'=>array('waiting_parts','on_hold','completed','cancelled'),
+    'waiting_parts'=>array('in_progress','on_hold','cancelled'),
+    'on_hold'=>array('assigned','scheduled','in_progress','cancelled'),
+    'completed'=>array('verified','in_progress'), 'verified'=>array(), 'cancelled'=>array('new')
+);
+$requestId = intval($_GET['id'] ?? 0);
+$request = $requestId > 0 ? $maintenanceService->getRequestDetails($requestId) : null;
+if ($requestId > 0 && !$request) {
+    http_response_code(404);
+}
+
+function mrSelectOptions($rows, $valueKey, $labelKeys, $selected, $extraAttributes = null)
+{
+    foreach ($rows as $row) {
+        $parts = array();
+        foreach ($labelKeys as $key) {
+            $value = trim((string)($row[$key] ?? ''));
+            if ($value !== '') $parts[] = $value;
+        }
+        $attributes = $extraAttributes ? call_user_func($extraAttributes, $row) : '';
+        $value = intval($row[$valueKey] ?? 0);
+        echo '<option value="' . $value . '" ' . ($value === intval($selected) ? 'selected' : '') . ' ' . $attributes . '>' . mrEsc(implode(' - ', $parts)) . '</option>';
+    }
+}
+
+function mrRenderRequestFields($lookups, $record, $prefix, $isEdit)
+{
+    $record = is_array($record) ? $record : array();
+    $propertyId = intval($record['idaqar'] ?? 0);
+    $unitId = intval($record['idsubaqar'] ?? 0);
+    $tenantId = intval($record['mostagerid'] ?? 0);
+    $assignedId = intval($record['assigned_userid'] ?? 0);
+?>
+<div class="mr-form-grid">
+    <div class="mr-field mr-span-2"><label>عنوان الطلب *</label><input name="title" maxlength="255" value="<?= mrEsc($record['title'] ?? '') ?>" required></div>
+    <div class="mr-field"><label>التصنيف</label><select name="category">
+        <?php foreach(array('plumbing','electricity','air_conditioning','carpentry','elevator','appliance','structural','cleaning','safety','other') as $category): ?>
+        <option value="<?= $category ?>" <?= ($record['category'] ?? 'other')===$category?'selected':'' ?>><?= mrEsc(mrCategoryLabel($category)) ?></option><?php endforeach; ?>
+    </select></div>
+    <div class="mr-field"><label>الأولوية</label><select name="priority">
+        <?php foreach(array('low','normal','high','urgent') as $priority): ?><option value="<?= $priority ?>" <?= ($record['priority'] ?? 'normal')===$priority?'selected':'' ?>><?= mrEsc(mrPriorityLabel($priority)) ?></option><?php endforeach; ?>
+    </select></div>
+    <div class="mr-field mr-span-4"><label>وصف المشكلة *</label><textarea name="description" rows="3" required><?= mrEsc($record['description'] ?? '') ?></textarea></div>
+
+    <div class="mr-field"><label>العقار</label><select name="idaqar" id="<?= $prefix ?>_property" class="mr-property-select" data-unit-id="<?= $prefix ?>_unit"><option value="0">غير محدد</option><?php mrSelectOptions($lookups['properties'], 'idaqar', array('aqarname','aqaraddress'), $propertyId); ?></select></div>
+    <div class="mr-field"><label>الوحدة</label><select name="idsubaqar" id="<?= $prefix ?>_unit" class="mr-unit-select" data-property-id="<?= $prefix ?>_property" data-tenant-id="<?= $prefix ?>_tenant"><option value="0" data-tenant="0">غير محددة</option><?php if($unitId>0): ?><option value="<?= $unitId ?>" data-property="<?= $propertyId ?>" data-tenant="<?= $tenantId ?>" selected><?= mrEsc(trim(($record['aqarsubtypename'] ?? '').' - '.($record['unit_number'] ?? $unitId),' -')) ?></option><?php endif; ?></select></div>
+    <div class="mr-field"><label>المستأجر</label><select name="mostagerid" id="<?= $prefix ?>_tenant"><option value="0">غير محدد</option><?php mrSelectOptions($lookups['tenants'], 'mostagerid', array('mostagername','mostagertel'), $tenantId); ?></select></div>
+    <div class="mr-field"><label>المستخدم المكلف</label><select name="assigned_userid"><option value="0">غير مسند</option><?php mrSelectOptions($lookups['users'], 'userid', array('name','username'), $assignedId); ?></select></div>
+
+    <div class="mr-field"><label>مصدر البلاغ</label><select name="reported_by_type"><?php foreach(array('tenant'=>'المستأجر','user'=>'موظف','owner'=>'المالك','other'=>'أخرى') as $key=>$label): ?><option value="<?= $key ?>" <?= ($record['reported_by_type'] ?? 'tenant')===$key?'selected':'' ?>><?= $label ?></option><?php endforeach; ?></select></div>
+    <div class="mr-field"><label>اسم المبلّغ</label><input name="reported_by_name" maxlength="244" value="<?= mrEsc($record['reported_by_name'] ?? '') ?>"></div>
+    <div class="mr-field"><label>وسيلة التواصل</label><input name="reported_by_contact" maxlength="150" value="<?= mrEsc($record['reported_by_contact'] ?? '') ?>"></div>
+    <div class="mr-field"><label>الموقع داخل العقار</label><input name="location_details" maxlength="500" value="<?= mrEsc($record['location_details'] ?? '') ?>"></div>
+
+    <div class="mr-field"><label>موعد الزيارة المفضل</label><input type="datetime-local" name="preferred_visit_at" value="<?= mrEsc(mrDateTimeLocal($record['preferred_visit_at'] ?? '')) ?>"></div>
+    <div class="mr-field"><label>الموعد المجدول</label><input type="datetime-local" name="scheduled_at" value="<?= mrEsc(mrDateTimeLocal($record['scheduled_at'] ?? '')) ?>"></div>
+    <div class="mr-field"><label>الموعد المستهدف للإنجاز</label><input type="datetime-local" name="due_at" value="<?= mrEsc(mrDateTimeLocal($record['due_at'] ?? '')) ?>"></div>
+    <div class="mr-field mr-check"><label><input type="checkbox" name="requires_tenant_presence" value="1" <?= !empty($record['requires_tenant_presence'])?'checked':'' ?>> يتطلب حضور المستأجر</label></div>
+
+    <div class="mr-field"><label>المورد / المقاول</label><input name="vendor_name" maxlength="244" value="<?= mrEsc($record['vendor_name'] ?? '') ?>"></div>
+    <div class="mr-field"><label>هاتف المورد</label><input name="vendor_phone" maxlength="100" value="<?= mrEsc($record['vendor_phone'] ?? '') ?>"></div>
+    <div class="mr-field"><label>التكلفة التقديرية</label><input type="number" min="0" step="0.01" name="estimated_cost" value="<?= mrEsc($record['estimated_cost'] ?? 0) ?>"></div>
+    <?php if ($isEdit): ?><div class="mr-field"><label>التكلفة الفعلية</label><input type="number" min="0" step="0.01" name="actual_cost" value="<?= mrEsc($record['actual_cost'] ?? 0) ?>"></div><?php endif; ?>
+
+    <div class="mr-field mr-span-2"><label>تعليمات الدخول والوصول</label><textarea name="access_instructions" rows="2"><?= mrEsc($record['access_instructions'] ?? '') ?></textarea></div>
+    <div class="mr-field"><label>مرفق اختياري</label><input type="file" name="attachment" accept=".pdf,.jpg,.jpeg,.png,.webp,.doc,.docx,.xls,.xlsx"></div>
+    <?php if ($isEdit): ?><div class="mr-field"><label>ملاحظة التحديث</label><input name="update_note" maxlength="500" placeholder="سبب أو ملخص التعديل"></div><?php endif; ?>
+</div>
+<?php
+}
+?>
+<style>
+.mr-wrap{direction:rtl;padding:18px;max-width:1800px;margin:auto;color:#172033}.mr-hero{background:linear-gradient(105deg,#087f5b,#0f758c);color:#fff;border-radius:15px;padding:20px 24px;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}.mr-hero h1{font-size:25px;margin:0}.mr-hero p{margin:5px 0 0;opacity:.9}.mr-card{background:#fff;border:1px solid #dce4ec;border-radius:14px;padding:17px;margin-bottom:16px;box-shadow:0 3px 12px rgba(15,23,42,.04)}.mr-card h2{font-size:19px;margin:0 0 15px}.mr-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.mr-btn{border:0;border-radius:8px;padding:9px 14px;text-decoration:none;display:inline-flex;gap:7px;align-items:center;justify-content:center;cursor:pointer;font-weight:700}.mr-primary{background:#07845f;color:#fff}.mr-secondary{background:#e8eef4;color:#24364b}.mr-danger{background:#c92a2a;color:#fff}.mr-warning{background:#f59f00;color:#172033}.mr-info{background:#087f9c;color:#fff}.mr-stats{display:grid;grid-template-columns:repeat(6,minmax(125px,1fr));gap:10px;margin-bottom:16px}.mr-stat{background:#fff;border:1px solid #dce4ec;border-radius:12px;padding:14px}.mr-stat strong{display:block;font-size:25px;color:#087f5b}.mr-stat span{color:#667085}.mr-form-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px}.mr-field{min-width:0}.mr-field label{display:block;font-weight:700;margin-bottom:6px}.mr-field input,.mr-field select,.mr-field textarea{width:100%;border:1px solid #ccd6e0;border-radius:8px;padding:9px 10px;background:#fff;min-height:42px}.mr-field textarea{resize:vertical}.mr-span-2{grid-column:span 2}.mr-span-4{grid-column:1/-1}.mr-check{display:flex;align-items:end;padding-bottom:9px}.mr-check label{margin:0;display:flex;gap:8px;align-items:center}.mr-check input{width:auto;min-height:auto}.mr-table-wrap{overflow:auto}.mr-table{width:100%;border-collapse:collapse;min-width:900px}.mr-table th,.mr-table td{padding:11px;border-bottom:1px solid #e4e9ef;text-align:right;vertical-align:middle}.mr-table th{background:#f4f7f9;white-space:nowrap}.mr-badge{display:inline-block;border-radius:999px;padding:5px 10px;font-weight:700;background:#e9ecef}.mr-badge.primary{background:#dbeafe;color:#1d4ed8}.mr-badge.info{background:#cff4fc;color:#055160}.mr-badge.warning{background:#fff3cd;color:#664d03}.mr-badge.dark{background:#343a40;color:#fff}.mr-badge.danger{background:#f8d7da;color:#842029}.mr-badge.success{background:#d1e7dd;color:#0f5132}.mr-priority-urgent{color:#c92a2a;font-weight:800}.mr-priority-high{color:#e67700;font-weight:700}.mr-detail-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(310px,1fr);gap:16px}.mr-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.mr-summary div{background:#f7f9fb;border-radius:9px;padding:11px}.mr-summary small{display:block;color:#667085;margin-bottom:4px}.mr-timeline{border-right:3px solid #cfe5de;margin-right:8px;padding-right:20px}.mr-event{position:relative;padding:0 0 18px}.mr-event:before{content:'';position:absolute;right:-27px;top:5px;width:11px;height:11px;background:#07845f;border-radius:50%}.mr-event small{color:#667085}.mr-empty{text-align:center;color:#667085;padding:30px!important}.mr-pagination{display:flex;gap:5px;justify-content:center;margin-top:15px}.mr-modal{display:none;position:fixed;inset:0;background:rgba(15,23,42,.65);z-index:10050;padding:20px;overflow:auto;align-items:flex-start;justify-content:center}.mr-modal.open{display:flex}.mr-modal-box{width:min(1150px,100%);background:#fff;border-radius:15px;padding:20px;margin:auto;direction:rtl}.mr-modal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px}.mr-close{border:0;background:transparent;font-size:28px;cursor:pointer}.mr-flash{display:none;padding:12px;border-radius:9px;margin-bottom:12px}.mr-flash.error{display:block;background:#fee2e2;color:#991b1b}.mr-flash.success{display:block;background:#dcfce7;color:#166534}.mr-section-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}.mr-cost{font-weight:800;color:#087f5b}.select2-container{width:100%!important}.mr-modal .select2-container--open,.mr-modal .select2-dropdown{z-index:10070!important}
+@media(max-width:1100px){.mr-stats{grid-template-columns:repeat(3,1fr)}.mr-form-grid{grid-template-columns:repeat(2,1fr)}.mr-detail-grid{grid-template-columns:1fr}}@media(max-width:650px){.mr-wrap{padding:10px}.mr-hero{align-items:flex-start;flex-direction:column}.mr-stats{grid-template-columns:repeat(2,1fr)}.mr-form-grid,.mr-summary{grid-template-columns:1fr}.mr-span-2,.mr-span-4{grid-column:auto}.mr-btn{width:100%}}
+</style>
+
+<main class="mr-wrap">
+<div class="mr-hero"><div><h1><i class="bi bi-tools"></i> طلبات الصيانة</h1><p>تسجيل البلاغ، الإسناد، الجدولة، التنفيذ، المواد والتكاليف مع أثر كامل لكل إجراء.</p></div><div class="mr-actions"><a class="mr-btn mr-secondary" href="/aqary/admin/amlak.hnt"><i class="bi bi-arrow-right"></i> إدارة الأملاك</a><?php if($request): ?><a class="mr-btn mr-warning" target="_blank" href="maintenance_request_print.hnt?id=<?= intval($request['request_id']) ?>"><i class="bi bi-printer"></i> طباعة التقرير</a><a class="mr-btn mr-secondary" href="maintenance_requests.hnt"><i class="bi bi-list-ul"></i> كل الطلبات</a><?php elseif($maintenanceCanAdd): ?><button class="mr-btn mr-warning" type="button" onclick="mrOpenModal('mrCreateModal')"><i class="bi bi-plus-circle"></i> طلب جديد</button><?php endif; ?></div></div>
+<div id="mrFlash" class="mr-flash"></div>
+
+<?php if ($requestId > 0 && !$request): ?>
+<section class="mr-card mr-empty">طلب الصيانة غير موجود. <a href="maintenance_requests.hnt">العودة إلى القائمة</a></section>
+<?php elseif ($request): ?>
+<section class="mr-card">
+    <div class="mr-section-title"><div><h2><?= mrEsc($request['request_number']) ?> — <?= mrEsc($request['title']) ?></h2><span class="mr-badge <?= mrEsc(mrStatusClass($request['status'])) ?>"><?= mrEsc(mrStatusLabel($request['status'])) ?></span> <span class="mr-priority-<?= mrEsc($request['priority']) ?>"><?= mrEsc(mrPriorityLabel($request['priority'])) ?></span></div><div>آخر تحديث: <?= $request['updated_at'] ? date('Y-m-d H:i', intval($request['updated_at'])) : '-' ?></div></div>
+    <div class="mr-summary">
+        <div><small>العقار / الوحدة</small><?= mrEsc(($request['aqarname'] ?: 'غير محدد') . ($request['unit_number'] ? ' - ' . $request['aqarsubtypename'] . ' ' . $request['unit_number'] : '')) ?></div>
+        <div><small>المستأجر</small><?= mrEsc($request['tenant_name_snapshot'] ?: 'غير محدد') ?><?= $request['tenant_phone_snapshot'] ? '<br>'.mrEsc($request['tenant_phone_snapshot']) : '' ?></div>
+        <div><small>المستخدم المكلف</small><?= mrEsc($request['assigned_name'] ?: $request['assigned_username'] ?: 'غير مسند') ?></div>
+        <div><small>الموعد المجدول / المستهدف</small><?= mrEsc($request['scheduled_at'] ?: '-') ?><br><?= mrEsc($request['due_at'] ?: '-') ?></div>
+        <div><small>المورد</small><?= mrEsc($request['vendor_name'] ?: 'غير محدد') ?><?= $request['vendor_phone'] ? '<br>'.mrEsc($request['vendor_phone']) : '' ?></div>
+        <div><small>التكاليف</small>تقديري: <span class="mr-cost"><?= mrMoney($request['estimated_cost']) ?></span><br>فعلي: <span class="mr-cost"><?= mrMoney($request['actual_cost']) ?></span></div>
+    </div>
+</section>
+
+<div class="mr-detail-grid">
+<div>
+<?php if ($maintenanceCanEdit): ?>
+<section class="mr-card"><h2><i class="bi bi-arrow-repeat"></i> دورة حياة الطلب</h2>
+<?php if (!empty($statusTransitions[$request['status']])): ?><form class="mr-ajax-form" data-confirm="هل تريد تحديث حالة طلب الصيانة؟"><input type="hidden" name="action" value="change_status"><input type="hidden" name="request_id" value="<?= $requestId ?>"><input type="hidden" name="csrf_token" value="<?= mrEsc($maintenanceCsrf) ?>"><div class="mr-form-grid"><div class="mr-field"><label>الحالة التالية</label><select name="status" required><option value="">اختر</option><?php foreach($statusTransitions[$request['status']] as $status): ?><option value="<?= $status ?>"><?= mrEsc(mrStatusLabel($status)) ?></option><?php endforeach; ?></select></div><div class="mr-field mr-span-2"><label>ملاحظة / ملخص الإجراء</label><input name="note" maxlength="2000" placeholder="إلزامي عند الإكمال أو التعليق أو الإلغاء"></div><div class="mr-field"><label>&nbsp;</label><button class="mr-btn mr-primary" type="submit">حفظ الحالة</button></div></div></form><?php else: ?><div class="mr-empty">لا توجد انتقالات لاحقة لهذه الحالة.</div><?php endif; ?>
+</section>
+<section class="mr-card"><div class="mr-section-title"><h2><i class="bi bi-pencil-square"></i> بيانات الطلب والإسناد</h2><button class="mr-btn mr-secondary" type="button" onclick="mrToggle('mrEditForm')">إظهار / إخفاء</button></div><form id="mrEditForm" class="mr-ajax-form" enctype="multipart/form-data"><input type="hidden" name="action" value="update_request"><input type="hidden" name="request_id" value="<?= $requestId ?>"><input type="hidden" name="csrf_token" value="<?= mrEsc($maintenanceCsrf) ?>"><?php mrRenderRequestFields($lookups,$request,'edit',true); ?><div class="mr-actions" style="margin-top:15px"><button class="mr-btn mr-primary" type="submit"><i class="bi bi-check-circle"></i> حفظ التعديلات</button></div></form></section>
+<?php endif; ?>
+
+<section class="mr-card" id="logistics"><div class="mr-section-title"><h2><i class="bi bi-box-seam"></i> المواد والخدمات واللوجستيات</h2><strong>الإجمالي: <?= mrMoney(array_sum(array_map(function($item){return floatval($item['quantity'])*floatval($item['unit_cost']);},$request['items']))) ?></strong></div>
+<div class="mr-table-wrap"><table class="mr-table"><thead><tr><th>النوع</th><th>البند</th><th>الكمية</th><th>التكلفة</th><th>المورد</th><th>الحالة</th><th>ملاحظات</th><?php if($maintenanceCanEdit): ?><th>تحديث</th><?php endif; ?></tr></thead><tbody>
+<?php foreach($request['items'] as $item): ?><tr><td><?= mrEsc(array('material'=>'مادة','service'=>'خدمة','transport'=>'نقل','other'=>'أخرى')[$item['item_type']] ?? $item['item_type']) ?></td><td><?= mrEsc($item['item_name']) ?></td><td><?= mrEsc($item['quantity'].' '.$item['unit']) ?></td><td><?= mrMoney(floatval($item['quantity'])*floatval($item['unit_cost'])) ?></td><td><?= mrEsc($item['supplier_name']) ?></td><td><?= mrEsc(mrItemStatusLabel($item['status'])) ?></td><td><?= nl2br(mrEsc($item['notes'])) ?></td><?php if($maintenanceCanEdit): ?><td><form class="mr-ajax-form"><input type="hidden" name="action" value="update_item_status"><input type="hidden" name="request_id" value="<?= $requestId ?>"><input type="hidden" name="item_id" value="<?= intval($item['item_id']) ?>"><input type="hidden" name="csrf_token" value="<?= mrEsc($maintenanceCsrf) ?>"><select name="item_status"><?php foreach(array('requested','ordered','received','used','returned','cancelled') as $itemStatus): ?><option value="<?= $itemStatus ?>" <?= $itemStatus===$item['status']?'selected':'' ?>><?= mrEsc(mrItemStatusLabel($itemStatus)) ?></option><?php endforeach; ?></select><input name="note" placeholder="ملاحظة"><button class="mr-btn mr-secondary" type="submit">تحديث</button></form></td><?php endif; ?></tr><?php endforeach; ?>
+<?php if(!$request['items']): ?><tr><td colspan="8" class="mr-empty">لم تضاف مواد أو خدمات بعد.</td></tr><?php endif; ?></tbody></table></div>
+<?php if($maintenanceCanEdit): ?><form class="mr-ajax-form" style="margin-top:15px"><input type="hidden" name="action" value="add_item"><input type="hidden" name="request_id" value="<?= $requestId ?>"><input type="hidden" name="csrf_token" value="<?= mrEsc($maintenanceCsrf) ?>"><div class="mr-form-grid"><div class="mr-field"><label>النوع</label><select name="item_type"><option value="material">مادة</option><option value="service">خدمة</option><option value="transport">نقل</option><option value="other">أخرى</option></select></div><div class="mr-field"><label>اسم البند *</label><input name="item_name" required></div><div class="mr-field"><label>الكمية</label><input type="number" name="quantity" min="0.01" step="0.01" value="1"></div><div class="mr-field"><label>الوحدة</label><input name="unit" value="قطعة"></div><div class="mr-field"><label>تكلفة الوحدة</label><input type="number" name="unit_cost" min="0" step="0.01" value="0"></div><div class="mr-field"><label>المورد</label><input name="supplier_name"></div><div class="mr-field mr-span-2"><label>ملاحظات</label><input name="notes"></div></div><div class="mr-actions" style="margin-top:12px"><button class="mr-btn mr-primary" type="submit"><i class="bi bi-plus-circle"></i> إضافة البند</button></div></form><?php endif; ?>
+</section>
+</div>
+
+<aside>
+<section class="mr-card" id="attachments"><h2><i class="bi bi-paperclip"></i> المرفقات</h2><?php foreach($request['attachments'] as $attachment): ?><div style="padding:8px 0;border-bottom:1px solid #e6ebef"><a target="_blank" href="maintenance_request_attachment.hnt?id=<?= intval($attachment['attachment_id']) ?>"><i class="bi bi-file-earmark"></i> <?= mrEsc($attachment['original_name']) ?></a><small style="display:block;color:#667085"><?= number_format(intval($attachment['file_size'])/1024,1) ?> KB</small></div><?php endforeach; ?><?php if(!$request['attachments']): ?><div class="mr-empty">لا توجد مرفقات.</div><?php endif; ?><?php if($maintenanceCanEdit): ?><form class="mr-ajax-form" enctype="multipart/form-data" style="margin-top:12px"><input type="hidden" name="action" value="upload_attachment"><input type="hidden" name="request_id" value="<?= $requestId ?>"><input type="hidden" name="csrf_token" value="<?= mrEsc($maintenanceCsrf) ?>"><div class="mr-field"><label>إضافة مرفق</label><input type="file" name="attachment" required accept=".pdf,.jpg,.jpeg,.png,.webp,.doc,.docx,.xls,.xlsx"></div><button class="mr-btn mr-primary" type="submit" style="margin-top:8px">رفع</button></form><?php endif; ?></section>
+<section class="mr-card" id="timeline"><h2><i class="bi bi-clock-history"></i> سجل المتابعة الكامل</h2><?php if($maintenanceCanEdit): ?><form class="mr-ajax-form" style="margin-bottom:18px"><input type="hidden" name="action" value="add_note"><input type="hidden" name="request_id" value="<?= $requestId ?>"><input type="hidden" name="csrf_token" value="<?= mrEsc($maintenanceCsrf) ?>"><div class="mr-field"><label>نوع المتابعة</label><select name="note_type"><option value="note">ملاحظة داخلية</option><option value="tenant_contact">تواصل مع المستأجر</option><option value="vendor_contact">تواصل مع المورد</option><option value="visit">زيارة ميدانية</option></select></div><div class="mr-field" style="margin-top:8px"><label>التفاصيل *</label><textarea name="note" rows="3" required></textarea></div><button class="mr-btn mr-primary" type="submit" style="margin-top:8px">إضافة متابعة</button></form><?php endif; ?><div class="mr-timeline"><?php foreach($request['events'] as $event): ?><div class="mr-event"><strong><?= mrEsc(array('created'=>'إنشاء الطلب','updated'=>'تحديث البيانات','status_changed'=>'تغيير الحالة','item_added'=>'إضافة بند','item_status_changed'=>'تحديث بند','attachment_added'=>'إضافة مرفق','note'=>'ملاحظة داخلية','tenant_contact'=>'تواصل مع المستأجر','vendor_contact'=>'تواصل مع المورد','visit'=>'زيارة ميدانية')[$event['event_type']] ?? $event['event_type']) ?></strong><?php if($event['from_status'] || $event['to_status']): ?><div><?= mrEsc($event['from_status'] ? mrStatusLabel($event['from_status']) : '') ?><?= $event['to_status'] && $event['to_status']!==$event['from_status'] ? ' ← '.mrEsc(mrStatusLabel($event['to_status'])) : '' ?></div><?php endif; ?><div><?= nl2br(mrEsc($event['note'])) ?></div><small><?= date('Y-m-d H:i',intval($event['event_at'])) ?> — <?= mrEsc($event['user_name'] ?: $event['username'] ?: 'النظام') ?></small><?php if(trim((string)$event['event_data']) !== '' && $event['event_data'] !== '[]'): ?><details><summary>تفاصيل فنية</summary><pre style="white-space:pre-wrap"><?= mrEsc(json_encode(json_decode($event['event_data'],true),JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT)) ?></pre></details><?php endif; ?></div><?php endforeach; ?></div></section>
+</aside></div>
+
+<?php else:
+$stats = $maintenanceService->getStats();
+$filters = array('search'=>trim((string)($_GET['search'] ?? '')),'status'=>trim((string)($_GET['status'] ?? '')),'priority'=>trim((string)($_GET['priority'] ?? '')),'assigned_userid'=>intval($_GET['assigned_userid'] ?? 0),'idaqar'=>intval($_GET['idaqar'] ?? 0),'mostagerid'=>intval($_GET['mostagerid'] ?? 0));
+$list = $maintenanceService->listRequests($filters,intval($_GET['page'] ?? 1),25);
+?>
+<div class="mr-stats"><div class="mr-stat"><strong><?= intval($stats['total'] ?? 0) ?></strong><span>كل الطلبات</span></div><div class="mr-stat"><strong><?= intval($stats['open_count'] ?? 0) ?></strong><span>جديدة ومجدولة</span></div><div class="mr-stat"><strong><?= intval($stats['in_progress_count'] ?? 0) ?></strong><span>قيد التنفيذ</span></div><div class="mr-stat"><strong><?= intval($stats['waiting_parts_count'] ?? 0) ?></strong><span>بانتظار قطع</span></div><div class="mr-stat"><strong><?= intval($stats['completed_count'] ?? 0) ?></strong><span>مكتملة</span></div><div class="mr-stat"><strong><?= intval($stats['urgent_count'] ?? 0) ?></strong><span>عاجلة مفتوحة</span></div></div>
+<section class="mr-card"><h2><i class="bi bi-funnel"></i> البحث والتصفية</h2><form method="get" class="mr-form-grid"><div class="mr-field mr-span-2"><label>بحث شامل</label><input name="search" value="<?= mrEsc($filters['search']) ?>" placeholder="رقم الطلب، المشكلة، المستأجر، العقار، الوحدة، المورد أو المستخدم"></div><div class="mr-field"><label>الحالة</label><select name="status"><option value="">كل الحالات</option><?php foreach($allStatuses as $status): ?><option value="<?= $status ?>" <?= $filters['status']===$status?'selected':'' ?>><?= mrEsc(mrStatusLabel($status)) ?></option><?php endforeach; ?></select></div><div class="mr-field"><label>الأولوية</label><select name="priority"><option value="">كل الأولويات</option><?php foreach(array('low','normal','high','urgent') as $priority): ?><option value="<?= $priority ?>" <?= $filters['priority']===$priority?'selected':'' ?>><?= mrEsc(mrPriorityLabel($priority)) ?></option><?php endforeach; ?></select></div><div class="mr-field"><label>المستخدم المكلف</label><select name="assigned_userid"><option value="0">الكل</option><?php mrSelectOptions($lookups['users'],'userid',array('name','username'),$filters['assigned_userid']); ?></select></div><div class="mr-field"><label>العقار</label><select name="idaqar"><option value="0">الكل</option><?php mrSelectOptions($lookups['properties'],'idaqar',array('aqarname','aqaraddress'),$filters['idaqar']); ?></select></div><div class="mr-field"><label>المستأجر</label><select name="mostagerid"><option value="0">الكل</option><?php mrSelectOptions($lookups['tenants'],'mostagerid',array('mostagername','mostagertel'),$filters['mostagerid']); ?></select></div><div class="mr-field"><label>&nbsp;</label><div class="mr-actions"><button class="mr-btn mr-primary" type="submit">بحث</button><a class="mr-btn mr-secondary" href="maintenance_requests.hnt">مسح</a></div></div></form></section>
+<section class="mr-card"><div class="mr-section-title"><h2>الطلبات (<?= intval($list['total']) ?>)</h2></div><div class="mr-table-wrap"><table class="mr-table"><thead><tr><th>رقم الطلب</th><th>العنوان</th><th>العقار / الوحدة</th><th>المستأجر</th><th>المكلف</th><th>الأولوية</th><th>الحالة</th><th>الموعد</th><th></th></tr></thead><tbody><?php foreach($list['rows'] as $row): ?><tr><td><?= mrEsc($row['request_number']) ?></td><td><strong><?= mrEsc($row['title']) ?></strong><br><small><?= mrEsc(mrCategoryLabel($row['category'])) ?></small></td><td><?= mrEsc(($row['aqarname'] ?: '-') . ($row['unit_number'] ? ' - '.$row['aqarsubtypename'].' '.$row['unit_number'] : '')) ?></td><td><?= mrEsc($row['tenant_name_snapshot'] ?: '-') ?></td><td><?= mrEsc($row['assigned_name'] ?: $row['assigned_username'] ?: 'غير مسند') ?></td><td class="mr-priority-<?= mrEsc($row['priority']) ?>"><?= mrEsc(mrPriorityLabel($row['priority'])) ?></td><td><span class="mr-badge <?= mrEsc(mrStatusClass($row['status'])) ?>"><?= mrEsc(mrStatusLabel($row['status'])) ?></span></td><td><?= mrEsc($row['scheduled_at'] ?: $row['due_at'] ?: '-') ?></td><td><a class="mr-btn mr-secondary" href="maintenance_requests.hnt?id=<?= intval($row['request_id']) ?>">فتح</a></td></tr><?php endforeach; ?><?php if(!$list['rows']): ?><tr><td colspan="9" class="mr-empty">لا توجد طلبات مطابقة.</td></tr><?php endif; ?></tbody></table></div><?php if($list['pages']>1): ?><div class="mr-pagination"><?php for($page=max(1,$list['page']-3);$page<=min($list['pages'],$list['page']+3);$page++): ?><a class="mr-btn <?= $page===$list['page']?'mr-primary':'mr-secondary' ?>" href="<?= mrEsc(mrPageUrl(array('page'=>$page))) ?>"><?= $page ?></a><?php endfor; ?></div><?php endif; ?></section>
+
+<?php if($maintenanceCanAdd): ?><div class="mr-modal" id="mrCreateModal"><div class="mr-modal-box"><div class="mr-modal-head"><h2>إنشاء طلب صيانة</h2><button class="mr-close" type="button" onclick="mrCloseModal('mrCreateModal')">×</button></div><form class="mr-ajax-form" enctype="multipart/form-data"><input type="hidden" name="action" value="create_request"><input type="hidden" name="csrf_token" value="<?= mrEsc($maintenanceCsrf) ?>"><input type="hidden" name="formuid" value="<?= mrEsc(bin2hex(random_bytes(16))) ?>"><?php mrRenderRequestFields($lookups,array(),'create',false); ?><div class="mr-actions" style="margin-top:15px"><button class="mr-btn mr-primary" type="submit"><i class="bi bi-check-circle"></i> إنشاء الطلب</button><button class="mr-btn mr-secondary" type="button" onclick="mrCloseModal('mrCreateModal')">إلغاء</button></div></form></div></div><?php endif; ?>
+<?php endif; ?>
+</main>
+
+<script>
+(function(){
+    const api='maintenance_requests.api.hnt';
+    const csrfToken=<?= json_encode($maintenanceCsrf, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+    function flash(message,type){const box=document.getElementById('mrFlash');box.textContent=message;box.className='mr-flash '+type;box.scrollIntoView({behavior:'smooth',block:'center'});}
+    function execute(form){
+        const button=form.querySelector('button[type="submit"]'); if(button) button.disabled=true;
+        fetch(api,{method:'POST',body:new FormData(form),credentials:'same-origin'}).then(function(response){return response.json();}).then(function(result){
+            if(!result.success) throw new Error(result.message||'تعذر تنفيذ العملية.');
+            flash(result.message||'تم الحفظ.','success');
+            if(result.redirect) window.location.href=result.redirect; else window.location.reload();
+        }).catch(function(error){flash(error.message||'حدث خطأ غير متوقع.','error');if(button) button.disabled=false;});
+    }
+    window.mrSubmit=function(form){
+        const question=form.dataset.confirm||'';
+        if(question){
+            if(typeof window.confirm==='function' && window.confirm.length>=3){window.confirm(question,'تأكيد',function(){execute(form);});}
+            else if(window.confirm(question)){execute(form);}
+        } else execute(form);
+        return false;
+    };
+    document.querySelectorAll('.mr-ajax-form').forEach(function(form){form.addEventListener('submit',function(event){event.preventDefault();window.mrSubmit(form);});});
+    window.mrOpenModal=function(id){const modal=document.getElementById(id);if(modal){modal.classList.add('open');document.body.style.overflow='hidden';setTimeout(function(){mrInitSelect2(modal,true);},0);}};
+    window.mrCloseModal=function(id){const modal=document.getElementById(id);if(modal){modal.classList.remove('open');document.body.style.overflow='';}};
+    window.mrToggle=function(id){const el=document.getElementById(id);if(el) el.style.display=el.style.display==='none'?'block':'none';};
+    function triggerSelect(select){if(window.jQuery && jQuery.fn.select2) jQuery(select).trigger('change.select2');}
+    function triggerSelectChange(select){
+        if(window.jQuery)jQuery(select).trigger('change');
+        else select.dispatchEvent(new Event('change',{bubbles:true}));
+    }
+    function syncTenantFromUnit(unit,unitData){
+        const option=unit.selectedOptions[0],tenant=document.getElementById(unit.dataset.tenantId);
+        if(!tenant)return;
+        const tenantId=unitData&&typeof unitData.tenant_id!=='undefined'?String(unitData.tenant_id):(option?(option.dataset.tenant||'0'):'0');
+        if(option&&unitData){option.dataset.tenant=tenantId;option.dataset.property=String(unitData.property_id||'');}
+        tenant.value=tenantId;
+        tenant.disabled=unit.value!=='0';
+        triggerSelectChange(tenant);
+    }
+    function resetUnitForProperty(propertySelect,clearSelection){
+        const unit=document.getElementById(propertySelect.dataset.unitId);if(!unit)return;
+        unit.disabled=propertySelect.value==='0';
+        if(clearSelection){unit.value='0';triggerSelectChange(unit);}
+        triggerSelect(unit);
+    }
+    document.querySelectorAll('.mr-property-select').forEach(function(select){resetUnitForProperty(select,false);select.addEventListener('change',function(){resetUnitForProperty(select,true);});});
+    document.querySelectorAll('.mr-unit-select').forEach(function(select){select.addEventListener('change',function(){
+        let unitData=null;
+        if(window.jQuery&&jQuery.fn.select2&&jQuery(select).hasClass('select2-hidden-accessible')){
+            const selectedData=jQuery(select).select2('data');unitData=selectedData&&selectedData.length?selectedData[0]:null;
+        }
+        syncTenantFromUnit(select,unitData);
+    });syncTenantFromUnit(select);});
+    function mrInitSelect2(scope,forceModal){
+        if(!(window.jQuery&&jQuery.fn.select2))return;
+        jQuery(scope).find('select').each(function(){
+            const selectElement=this,$select=jQuery(selectElement),modal=$select.closest('.mr-modal'),insideModal=modal.length>0;
+            if($select.hasClass('select2-hidden-accessible')){
+                const needsAjaxUnit=$select.hasClass('mr-unit-select');
+                if(!needsAjaxUnit&&(!insideModal||!forceModal))return;
+                $select.select2('destroy');
+            }
+            const options={theme:'bootstrap-5',width:'100%',dir:'rtl',dropdownParent:insideModal?modal.find('.mr-modal-box').first():jQuery(document.body),language:{noResults:function(){return 'لا توجد وحدات مطابقة في العقار المحدد';},searching:function(){return 'جاري البحث...';},inputTooShort:function(){return 'اكتب للبحث';}}};
+            if($select.hasClass('mr-unit-select')){
+                options.ajax={url:api,type:'POST',dataType:'json',delay:250,data:function(params){const property=document.getElementById(selectElement.dataset.propertyId);return {action:'lookup_units',csrf_token:csrfToken,idaqar:property?property.value:0,q:params.term||'',page:params.page||1};},processResults:function(data){return {results:data&&data.success?data.results:[],pagination:data&&data.pagination?data.pagination:{more:false}};},cache:true};
+                options.minimumInputLength=0;
+            }
+            $select.select2(options);
+            if($select.hasClass('mr-unit-select')){
+                $select.off('select2:select.mrUnit').on('select2:select.mrUnit',function(event){syncTenantFromUnit(selectElement,event.params.data||null);});
+            }
+            $select.trigger('change.select2');
+        });
+    }
+    window.mrInitSelect2=mrInitSelect2;
+    if(window.jQuery){jQuery(function(){setTimeout(function(){mrInitSelect2(document,true);},0);});}
+    else{document.addEventListener('DOMContentLoaded',function(){mrInitSelect2(document,true);});}
+    document.querySelectorAll('.mr-modal').forEach(function(modal){modal.addEventListener('click',function(event){if(event.target===modal)window.mrCloseModal(modal.id);});});
+})();
+</script>
+<?php require_once dirname(__DIR__, 3) . '/foter.hnt'; ?>

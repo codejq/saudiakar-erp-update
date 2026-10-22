@@ -1,0 +1,174 @@
+<?php
+/** AJAX mutation endpoint for the cash-custody module. */
+$is_ajax_request = true;
+require_once dirname(__DIR__, 3) . '/reqloginajax.hnt';
+require_once __DIR__ . '/CashCustodyService.class.hnt';
+date_default_timezone_set('Asia/Riyadh');
+
+header('Content-Type: application/json; charset=utf-8');
+
+function ccApiReply($success, $message, $data = array(), $status = 200)
+{
+    http_response_code($status);
+    echo json_encode(array_merge(array('success' => $success, 'message' => $message), $data), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+function ccApiPermission($db, $screenId, $operation)
+{
+    $userId = intval($_SESSION['useridv'] ?? 0);
+    $stmt = $db->prepare("SELECT g.allprevilage, COALESCE(p.adds,0) AS adds, COALESCE(p.edits,0) AS edits,
+                                COALESCE(p.deleetes,0) AS deleetes, COALESCE(p.prints,0) AS prints, COALESCE(p.sees,0) AS sees
+                         FROM user u
+                         LEFT JOIN usergroups g ON g.groupid=u.groupid
+                         LEFT JOIN ugroupscreen p ON p.groupid=u.groupid AND p.screenid=?
+                         WHERE u.userid=? LIMIT 1");
+    $stmt->bind_param('ii', $screenId, $userId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    if (!$row) {
+        return false;
+    }
+    if (!empty($row['allprevilage'])) {
+        return true;
+    }
+    return !empty($row[$operation]);
+}
+
+function ccApiStoreAttachment($service, $entityType, $entityId, $file)
+{
+    if (!isset($file['error']) || intval($file['error']) === UPLOAD_ERR_NO_FILE) {
+        return 0;
+    }
+    if (intval($file['size'] ?? 0) > 10 * 1024 * 1024) {
+        throw new InvalidArgumentException('حجم المرفق يجب ألا يتجاوز 10 ميجابايت.');
+    }
+    require_once dirname(__DIR__, 3) . '/lib/storage/helpers.php';
+    $validator = validate_upload($file, array('pdf', 'jpg', 'jpeg', 'png'));
+    $extension = $validator->getExtension();
+    $storedName = date('Ymd-His') . '-' . bin2hex(random_bytes(10)) . '.' . $extension;
+    $relativeDirectory = 'uploads' . DIRECTORY_SEPARATOR . 'cash-custody' . DIRECTORY_SEPARATOR;
+    $directory = storage_path($relativeDirectory);
+    if (!ensure_dir($directory) || !move_uploaded_file($file['tmp_name'], $directory . $storedName)) {
+        throw new RuntimeException('تعذر حفظ المرفق في التخزين.');
+    }
+    $mimeType = function_exists('mime_content_type') ? (string)mime_content_type($directory . $storedName) : (string)($file['type'] ?? '');
+    try {
+        return $service->addAttachment($entityType, $entityId, basename((string)$file['name']), $storedName,
+            str_replace(DIRECTORY_SEPARATOR, '/', $relativeDirectory . $storedName), $mimeType, intval($file['size'] ?? 0));
+    } catch (Throwable $exception) {
+        @unlink($directory . $storedName);
+        throw $exception;
+    }
+}
+
+try {
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        ccApiReply(false, 'طريقة الطلب غير مسموحة.', array(), 405);
+    }
+    $postedToken = (string)($_POST['csrf_token'] ?? '');
+    if (empty($_SESSION['cash_custody_csrf']) || $postedToken === '' || !hash_equals((string)$_SESSION['cash_custody_csrf'], $postedToken)) {
+        ccApiReply(false, 'انتهت صلاحية النموذج. أعد تحميل الصفحة.', array(), 403);
+    }
+    if (isset($qdb_db, $dbSuffix) && $db instanceof mysqli) {
+        mysqli_select_db($db, $qdb_db . $dbSuffix);
+        $db->set_charset('utf8mb4');
+    }
+    $screenId = CashCustodyService::resolveScreenId($db);
+    $service = new CashCustodyService($db, intval($_SESSION['useridv'] ?? 0));
+    $action = (string)($_POST['action'] ?? '');
+    $permission = in_array($action, array('create_request', 'add_expense', 'add_return'), true) ||
+        ($action === 'save_holder' && intval($_POST['holder_id'] ?? 0) <= 0) ? 'adds' : 'edits';
+    if (!ccApiPermission($db, $screenId, $permission)) {
+        ccApiReply(false, 'ليس لديك الصلاحية لتنفيذ هذه العملية.', array(), 403);
+    }
+
+    switch ($action) {
+        case 'save_holder':
+            $id = $service->saveHolder($_POST);
+            ccApiReply(true, 'تم حفظ بيانات صاحب العهدة.', array('holder_id' => $id, 'redirect' => 'cash_custody_holders.hnt'));
+
+        case 'create_request':
+            $id = $service->createRequest($_POST);
+            if (!empty($_FILES['attachment'])) {
+                ccApiStoreAttachment($service, 'request', $id, $_FILES['attachment']);
+            }
+            ccApiReply(true, 'تم إنشاء طلب العهدة وإرساله للاعتماد.', array('request_id' => $id, 'redirect' => 'cash_custody_requests.hnt'));
+
+        case 'review_request':
+            $service->reviewRequest(intval($_POST['request_id'] ?? 0), (string)($_POST['decision'] ?? ''), trim((string)($_POST['decision_note'] ?? '')));
+            ccApiReply(true, 'تم تحديث حالة الطلب.', array('redirect' => 'cash_custody_requests.hnt'));
+
+        case 'disburse_request':
+            $custodyId = $service->disburseRequest(intval($_POST['request_id'] ?? 0), (string)($_POST['payment_method'] ?? ''),
+                trim((string)($_POST['reference_number'] ?? '')), (string)($_POST['transaction_date'] ?? ''), (string)($_POST['formuid'] ?? ''));
+            ccApiReply(true, 'تم صرف الطلب وتسجيل العهدة.', array('custody_id' => $custodyId, 'redirect' => 'cash_custody_view.hnt?id=' . $custodyId));
+
+        case 'add_expense':
+            if (intval($service->getSetting('cash_custody_require_expense_attachment', '0')) === 1 &&
+                (empty($_FILES['attachment']) || intval($_FILES['attachment']['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE)) {
+                throw new InvalidArgumentException('يجب إرفاق الفاتورة قبل حفظ المصروف.');
+            }
+            $transactionId = $service->addExpense($_POST);
+            if (!empty($_FILES['attachment'])) {
+                ccApiStoreAttachment($service, 'transaction', $transactionId, $_FILES['attachment']);
+            }
+            ccApiReply(true, 'تم تسجيل المصروف وإرساله للاعتماد.', array('transaction_id' => $transactionId, 'redirect' => 'cash_custody_view.hnt?id=' . intval($_POST['custody_id'] ?? 0)));
+
+        case 'review_expense':
+            $service->approveExpense(intval($_POST['transaction_id'] ?? 0), (string)($_POST['decision'] ?? '') === 'approve', trim((string)($_POST['note'] ?? '')));
+            ccApiReply(true, 'تم تحديث حالة المصروف.', array('redirect' => 'cash_custody_view.hnt?id=' . intval($_POST['custody_id'] ?? 0)));
+
+        case 'add_return':
+            $transactionId = $service->addReturn($_POST);
+            ccApiReply(true, 'تم تسجيل رد المبلغ.', array('transaction_id' => $transactionId, 'redirect' => 'cash_custody_view.hnt?id=' . intval($_POST['custody_id'] ?? 0)));
+
+        case 'reverse_transaction':
+            $transactionId = $service->reverseTransaction(intval($_POST['transaction_id'] ?? 0), trim((string)($_POST['reason'] ?? '')), (string)($_POST['formuid'] ?? ''));
+            ccApiReply(true, 'تم تسجيل حركة العكس دون تعديل المستند الأصلي.', array('transaction_id' => $transactionId, 'redirect' => 'cash_custody_view.hnt?id=' . intval($_POST['custody_id'] ?? 0)));
+
+        case 'settle':
+            $result = $service->settleCustody(intval($_POST['custody_id'] ?? 0), (string)($_POST['settlement_action'] ?? ''),
+                (string)($_POST['settlement_date'] ?? ''), trim((string)($_POST['notes'] ?? '')), (string)($_POST['formuid'] ?? ''));
+            $redirectId = !empty($result['new_custody_id']) ? intval($result['new_custody_id']) : intval($_POST['custody_id'] ?? 0);
+            ccApiReply(true, 'تمت تسوية العهدة بنجاح.', array('redirect' => 'cash_custody_view.hnt?id=' . $redirectId));
+
+        case 'save_settings':
+            $allowed = array(
+                'cash_custody_default_prefix' => preg_replace('/[^A-Z0-9_-]/', '', strtoupper((string)($_POST['cash_custody_default_prefix'] ?? 'CUS'))),
+                'cash_custody_default_vat_rate' => number_format(max(0, min(100, floatval($_POST['cash_custody_default_vat_rate'] ?? 15))), 2, '.', ''),
+                'cash_custody_allow_negative_balance' => !empty($_POST['cash_custody_allow_negative_balance']) ? '1' : '0',
+                'cash_custody_require_expense_attachment' => !empty($_POST['cash_custody_require_expense_attachment']) ? '1' : '0',
+                'cash_custody_accounting_enabled' => !empty($_POST['cash_custody_accounting_enabled']) ? '1' : '0',
+                'cash_custody_account_id' => (string)max(0, intval($_POST['cash_custody_account_id'] ?? 0)),
+                'cash_custody_cash_account_id' => (string)max(0, intval($_POST['cash_custody_cash_account_id'] ?? 0)),
+                'cash_custody_bank_account_id' => (string)max(0, intval($_POST['cash_custody_bank_account_id'] ?? 0)),
+                'cash_custody_expense_account_id' => (string)max(0, intval($_POST['cash_custody_expense_account_id'] ?? 0)),
+                'cash_custody_input_vat_account_id' => (string)max(0, intval($_POST['cash_custody_input_vat_account_id'] ?? 0)),
+                'cash_custody_journal_id' => (string)max(0, intval($_POST['cash_custody_journal_id'] ?? 0))
+            );
+            if ($allowed['cash_custody_default_prefix'] === '') {
+                throw new InvalidArgumentException('بادئة الترقيم غير صحيحة.');
+            }
+            if ($allowed['cash_custody_accounting_enabled'] === '1') {
+                foreach (array('cash_custody_account_id','cash_custody_cash_account_id','cash_custody_bank_account_id','cash_custody_expense_account_id','cash_custody_input_vat_account_id','cash_custody_journal_id') as $requiredSetting) {
+                    if (intval($allowed[$requiredSetting]) <= 0) {
+                        throw new InvalidArgumentException('أكمل جميع حسابات ودفتر الربط المحاسبي قبل التفعيل.');
+                    }
+                }
+            }
+            $service->saveSettings($allowed);
+            ccApiReply(true, 'تم حفظ إعدادات العهد.', array('redirect' => 'cash_custody_settings.hnt'));
+
+        default:
+            ccApiReply(false, 'العملية المطلوبة غير معروفة.', array(), 400);
+    }
+} catch (InvalidArgumentException $exception) {
+    ccApiReply(false, $exception->getMessage(), array(), 422);
+} catch (Throwable $exception) {
+    error_log('Cash custody API: ' . $exception->getMessage());
+    $message = $exception instanceof mysqli_sql_exception ? 'تعذر تنفيذ العملية بسبب خطأ في قاعدة البيانات.' : $exception->getMessage();
+    ccApiReply(false, $message, array(), 500);
+}
+

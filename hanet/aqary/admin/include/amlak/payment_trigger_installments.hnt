@@ -28,6 +28,8 @@ function checkAndAddInstallmentsAfterPayment($kastid, $link) {
                 e.fixed_payment_day,
                 e.installments_extended_to,
                 e.depositeamount,
+                e.annual_rent_increase_percent,
+                e.max_rent_increase_percent,
                 e.secondsa3e,
                 e.water,
                 e.services,
@@ -123,6 +125,8 @@ function checkAndAddInstallmentsAfterPayment($kastid, $link) {
     $numInstallments = max(1, intval(ceil(12 / $duration)));
     $baseInstallmentNumber = intval($checkData['last_installment_number']);
     $depositeamount = floatval($installment['depositeamount']);
+    $annualRentIncreasePercent = floatval($installment['annual_rent_increase_percent'] ?? 0);
+    $maxRentIncreasePercent = floatval($installment['max_rent_increase_percent'] ?? 0);
     $secondsa3e = floatval($installment['secondsa3e']);
     $water = floatval($installment['water']);
     $services = floatval($installment['services']);
@@ -143,6 +147,16 @@ function checkAndAddInstallmentsAfterPayment($kastid, $link) {
                 $hnt_dll,
                 $fixedPaymentDay
             );
+            $rentEscalation = $calendar->calculateEscalatedBaseRent(
+                $depositeamount,
+                intval($installment['startegar']),
+                $nextDate,
+                $hnt_dll,
+                $annualRentIncreasePercent,
+                $maxRentIncreasePercent
+            );
+            $baseRentAmount = $rentEscalation['amount'];
+            $appliedRentIncreasePercent = $rentEscalation['percentage'];
 
             $duplicateSql = "SELECT kastid
                              FROM aksat
@@ -170,7 +184,7 @@ function checkAndAddInstallmentsAfterPayment($kastid, $link) {
                 $servicesValue = intval($installment['services_duration']) ? $services : 0;
             }
 
-            $kastvalue = $depositeamount + $sa3eValue + $waterValue + $servicesValue;
+            $kastvalue = $baseRentAmount + $sa3eValue + $waterValue + $servicesValue;
             $effectiveDueDate = $nextDate + ($gracePeriod * 24 * 60 * 60);
             $installmentStatus = $nextDate < $now ? 'overdue' : 'pending';
 
@@ -179,6 +193,8 @@ function checkAndAddInstallmentsAfterPayment($kastid, $link) {
                 idsubaqar,
                 kastdate,
                 kastvalue,
+                base_rent_amount,
+                rent_increase_percent,
                 water,
                 sa3ee,
                 services,
@@ -197,6 +213,8 @@ function checkAndAddInstallmentsAfterPayment($kastid, $link) {
                 '{$idsubaqar}',
                 '{$nextDate}',
                 '{$kastvalue}',
+                '{$baseRentAmount}',
+                '{$appliedRentIncreasePercent}',
                 '{$waterValue}',
                 '{$sa3eValue}',
                 '{$servicesValue}',

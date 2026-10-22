@@ -1,0 +1,490 @@
+<?php
+/**
+ * Daily, monthly and yearly rental income report.
+ *
+ * Office percentage commission follows the same property-level formula used by
+ * the owner and multi-property statements. Representative commission uses the
+ * immutable snapshot saved on each receipt when the column is available.
+ */
+$sc_title = 'تقرير الدخل اليومي والشهري والسنوي';
+$sc_id = '49';
+
+include_once '../../../nocash.hnt';
+
+$reportMode = isset($_GET['report']) ? intval($_GET['report']) : 0;
+if ($reportMode === 1) {
+    include_once '../../../report_header.hnt';
+} else {
+    include_once '../../../header.hnt';
+}
+
+date_default_timezone_set('Asia/Riyadh');
+
+function incomePeriodEsc($value) {
+    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+}
+
+function incomePeriodMoney($value) {
+    return number_format(floatval($value), 2);
+}
+
+function incomePeriodValidDate($value, $format, DateTimeZone $timezone) {
+    $date = DateTimeImmutable::createFromFormat('!' . $format, (string)$value, $timezone);
+    $errors = DateTimeImmutable::getLastErrors();
+    if ($date === false || ($errors !== false && ($errors['warning_count'] || $errors['error_count']))) {
+        return false;
+    }
+    return $date->format($format) === $value ? $date : false;
+}
+
+function incomePeriodPaymentLabel($paymentType) {
+    $labels = array(1 => 'نقدي', 2 => 'شيك', 3 => 'أخرى', 4 => 'تحويل', 5 => 'شبكة');
+    $paymentType = intval($paymentType);
+    return isset($labels[$paymentType]) ? $labels[$paymentType] : 'غير محدد';
+}
+
+function incomePeriodTotalsDefaults() {
+    return array(
+        'transaction_count' => 0,
+        'gross_amount' => 0,
+        'renewal_commission' => 0,
+        'services_amount' => 0,
+        'office_water' => 0,
+        'office_insurance' => 0,
+        'commission_base' => 0,
+        'office_percentage_commission' => 0,
+        'office_direct_income' => 0,
+        'office_total_income' => 0,
+        'representative_commission' => 0,
+        'office_net_income' => 0,
+        'owner_net_amount' => 0,
+    );
+}
+
+$timezone = new DateTimeZone('Asia/Riyadh');
+$now = new DateTimeImmutable('now', $timezone);
+$periodType = isset($_GET['period_type']) && in_array($_GET['period_type'], array('day', 'month', 'year'), true)
+    ? $_GET['period_type']
+    : 'month';
+$detailLevel = isset($_GET['detail_level']) && in_array($_GET['detail_level'], array('summary', 'property', 'transactions'), true)
+    ? $_GET['detail_level']
+    : 'summary';
+$selectedProperty = isset($_GET['idaqar']) ? max(0, intval($_GET['idaqar'])) : 0;
+$page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
+$perPage = isset($_GET['per_page']) && in_array(intval($_GET['per_page']), array(50, 100, 250), true)
+    ? intval($_GET['per_page'])
+    : 100;
+$inputWarning = '';
+
+$dayValue = isset($_GET['day']) ? trim($_GET['day']) : $now->format('Y-m-d');
+$monthValue = isset($_GET['month']) ? trim($_GET['month']) : $now->format('Y-m');
+$yearValue = isset($_GET['year']) ? intval($_GET['year']) : intval($now->format('Y'));
+
+if ($periodType === 'day') {
+    $periodStart = incomePeriodValidDate($dayValue, 'Y-m-d', $timezone);
+    if ($periodStart === false) {
+        $periodStart = new DateTimeImmutable('today', $timezone);
+        $dayValue = $periodStart->format('Y-m-d');
+        $inputWarning = 'تم استخدام تاريخ اليوم لأن التاريخ المحدد غير صحيح.';
+    }
+    $periodEnd = $periodStart->modify('+1 day');
+    $periodLabel = 'يوم ' . $periodStart->format('d/m/Y');
+} elseif ($periodType === 'year') {
+    if ($yearValue < 2000 || $yearValue > 2100) {
+        $yearValue = intval($now->format('Y'));
+        $inputWarning = 'تم استخدام السنة الحالية لأن السنة المحددة غير صحيحة.';
+    }
+    $periodStart = new DateTimeImmutable($yearValue . '-01-01 00:00:00', $timezone);
+    $periodEnd = $periodStart->modify('+1 year');
+    $periodLabel = 'سنة ' . $yearValue;
+} else {
+    $periodStart = incomePeriodValidDate($monthValue, 'Y-m', $timezone);
+    if ($periodStart === false) {
+        $periodStart = new DateTimeImmutable($now->format('Y-m-01') . ' 00:00:00', $timezone);
+        $monthValue = $periodStart->format('Y-m');
+        $inputWarning = 'تم استخدام الشهر الحالي لأن الشهر المحدد غير صحيح.';
+    }
+    $periodEnd = $periodStart->modify('+1 month');
+    $periodLabel = 'شهر ' . $periodStart->format('m/Y');
+}
+
+$startTimestamp = $periodStart->getTimestamp();
+$endTimestamp = $periodEnd->getTimestamp();
+
+$propertyOptions = array();
+$propertyResult = mysql_query('SELECT idaqar, aqarname FROM amlak ORDER BY aqarname, idaqar', $link);
+if ($propertyResult) {
+    while ($property = mysql_fetch_assoc($propertyResult)) {
+        $propertyOptions[] = $property;
+    }
+}
+
+$hasRepresentativeCommission = false;
+$columnResult = mysql_query("SHOW COLUMNS FROM sanad LIKE 'sales_commission_amount'", $link);
+if ($columnResult && mysql_num_rows($columnResult) > 0) {
+    $hasRepresentativeCommission = true;
+}
+
+$grossExpr = 'COALESCE(e.amount, 0)';
+$renewalExpr = 'COALESCE(e.mysa3ee, 0)';
+$servicesExpr = 'COALESCE(e.services, 0)';
+$officeWaterExpr = "CASE WHEN COALESCE(a.addwaterto, '') NOT IN ('', 'malek') THEN COALESCE(e.mywater, 0) ELSE 0 END";
+$officeInsuranceExpr = "CASE WHEN COALESCE(a.addtameento, '') NOT IN ('', 'malek') THEN COALESCE(e.tamen, 0) ELSE 0 END";
+$rawRateExpr = "CAST(COALESCE(NULLIF(a.persentage, ''), '0') AS DECIMAL(12,4))";
+$rateExpr = "CASE WHEN {$rawRateExpr} < 100 THEN {$rawRateExpr} ELSE {$rawRateExpr} / 100 END";
+$commissionBaseExpr = "({$grossExpr} - {$renewalExpr} - {$servicesExpr} - {$officeWaterExpr} - {$officeInsuranceExpr})";
+$percentageCommissionExpr = "({$commissionBaseExpr} * {$rateExpr} / 100)";
+$directOfficeExpr = "({$renewalExpr} + {$servicesExpr} + {$officeWaterExpr} + {$officeInsuranceExpr})";
+$officeTotalExpr = "({$directOfficeExpr} + {$percentageCommissionExpr})";
+$representativeCommissionExpr = $hasRepresentativeCommission ? 'COALESCE(s.sales_commission_amount, 0)' : '0';
+$officeNetExpr = "({$officeTotalExpr} - {$representativeCommissionExpr})";
+$ownerNetExpr = "({$grossExpr} - {$officeTotalExpr})";
+
+$aggregateColumns = "
+    COUNT(*) AS transaction_count,
+    COALESCE(SUM({$grossExpr}), 0) AS gross_amount,
+    COALESCE(SUM({$renewalExpr}), 0) AS renewal_commission,
+    COALESCE(SUM({$servicesExpr}), 0) AS services_amount,
+    COALESCE(SUM({$officeWaterExpr}), 0) AS office_water,
+    COALESCE(SUM({$officeInsuranceExpr}), 0) AS office_insurance,
+    COALESCE(SUM({$commissionBaseExpr}), 0) AS commission_base,
+    COALESCE(SUM({$percentageCommissionExpr}), 0) AS office_percentage_commission,
+    COALESCE(SUM({$directOfficeExpr}), 0) AS office_direct_income,
+    COALESCE(SUM({$officeTotalExpr}), 0) AS office_total_income,
+    COALESCE(SUM({$representativeCommissionExpr}), 0) AS representative_commission,
+    COALESCE(SUM({$officeNetExpr}), 0) AS office_net_income,
+    COALESCE(SUM({$ownerNetExpr}), 0) AS owner_net_amount";
+
+$sanadJoin = 'LEFT JOIN sanad s ON s.idsanad = CAST(e.sanadrakam AS UNSIGNED)';
+$whereSql = "e.paymentdate >= '" . intval($startTimestamp) . "' AND e.paymentdate < '" . intval($endTimestamp) . "'";
+if ($selectedProperty > 0) {
+    $whereSql .= " AND e.idaqar='" . intval($selectedProperty) . "'";
+}
+$baseFromSql = "FROM eradat e LEFT JOIN amlak a ON a.idaqar=e.idaqar {$sanadJoin} WHERE {$whereSql}";
+
+$reportError = '';
+$totals = incomePeriodTotalsDefaults();
+$totalsResult = mysql_query("SELECT {$aggregateColumns} {$baseFromSql}", $link);
+if ($totalsResult) {
+    $totalsRow = mysql_fetch_assoc($totalsResult);
+    if ($totalsRow) {
+        $totals = array_merge($totals, $totalsRow);
+    }
+} else {
+    $reportError = mysql_error($link);
+}
+
+$rows = array();
+$totalPages = 1;
+if ($reportError === '') {
+    if ($detailLevel === 'property') {
+        $sql = "SELECT e.idaqar,
+                       COALESCE(NULLIF(a.aqarname, ''), CONCAT('عقار #', e.idaqar)) AS aqarname,
+                       MAX({$rateExpr}) AS configured_rate,
+                       {$aggregateColumns}
+                {$baseFromSql}
+                GROUP BY e.idaqar, a.aqarname
+                ORDER BY a.aqarname, e.idaqar";
+    } elseif ($detailLevel === 'transactions') {
+        $totalPages = max(1, intval(ceil(intval($totals['transaction_count']) / $perPage)));
+        if ($page > $totalPages) {
+            $page = $totalPages;
+        }
+        $offset = ($page - 1) * $perPage;
+        $sql = "SELECT e.iderad, e.idaqar, e.idsubaqar, e.mostagername,
+                       e.pymentdesription, e.paymentdate, e.sanadrakam,
+                       COALESCE(NULLIF(a.aqarname, ''), CONCAT('عقار #', e.idaqar)) AS aqarname,
+                       s.idsanad, s.payment_type,
+                       {$rateExpr} AS configured_rate,
+                       {$grossExpr} AS gross_amount,
+                       {$renewalExpr} AS renewal_commission,
+                       {$servicesExpr} AS services_amount,
+                       {$officeWaterExpr} AS office_water,
+                       {$officeInsuranceExpr} AS office_insurance,
+                       {$commissionBaseExpr} AS commission_base,
+                       {$percentageCommissionExpr} AS office_percentage_commission,
+                       {$directOfficeExpr} AS office_direct_income,
+                       {$officeTotalExpr} AS office_total_income,
+                       {$representativeCommissionExpr} AS representative_commission,
+                       {$officeNetExpr} AS office_net_income,
+                       {$ownerNetExpr} AS owner_net_amount
+                {$baseFromSql}
+                ORDER BY e.paymentdate DESC, e.iderad DESC
+                LIMIT " . intval($offset) . ', ' . intval($perPage);
+    } else {
+        if ($periodType === 'day') {
+            $bucketExpr = "DATE_FORMAT(FROM_UNIXTIME(e.paymentdate), '%Y-%m-%d')";
+        } elseif ($periodType === 'year') {
+            $bucketExpr = "DATE_FORMAT(FROM_UNIXTIME(e.paymentdate), '%Y-%m')";
+        } else {
+            $bucketExpr = "DATE_FORMAT(FROM_UNIXTIME(e.paymentdate), '%Y-%m-%d')";
+        }
+        $sql = "SELECT {$bucketExpr} AS bucket_key, MIN(e.paymentdate) AS bucket_sort,
+                       {$aggregateColumns}
+                {$baseFromSql}
+                GROUP BY bucket_key
+                ORDER BY bucket_sort";
+    }
+
+    $dataResult = mysql_query($sql, $link);
+    if ($dataResult) {
+        while ($row = mysql_fetch_assoc($dataResult)) {
+            $rows[] = $row;
+        }
+    } else {
+        $reportError = mysql_error($link);
+    }
+}
+
+$monthNames = array(
+    '01' => 'يناير', '02' => 'فبراير', '03' => 'مارس', '04' => 'أبريل',
+    '05' => 'مايو', '06' => 'يونيو', '07' => 'يوليو', '08' => 'أغسطس',
+    '09' => 'سبتمبر', '10' => 'أكتوبر', '11' => 'نوفمبر', '12' => 'ديسمبر'
+);
+
+$currency = isset($myomla) && trim((string)$myomla) !== '' ? $myomla : 'ريال';
+$baseQuery = array(
+    'period_type' => $periodType,
+    'day' => $dayValue,
+    'month' => $monthValue,
+    'year' => $yearValue,
+    'detail_level' => $detailLevel,
+    'idaqar' => $selectedProperty,
+    'per_page' => $perPage,
+);
+$printQuery = $baseQuery;
+$printQuery['page'] = $page;
+$printQuery['report'] = 1;
+?>
+
+<style>
+.income-filter-card,.income-table-card,.income-kpi{border:0;box-shadow:0 2px 12px rgba(15,23,42,.08)}
+.income-kpi{height:100%;border-inline-start:4px solid var(--income-color,#0f766e)}
+.income-kpi .income-value{font-size:1.45rem;font-weight:800;color:#0f172a}
+.income-kpi .income-label{color:#64748b;font-size:.88rem}
+.income-title-bar{background:linear-gradient(135deg,#0f766e,#15803d);color:#fff;border-radius:.75rem;padding:1rem 1.25rem}
+.income-table-card thead th{white-space:nowrap;background:#f1f5f9}
+.income-table-card td{white-space:nowrap}
+.income-formula{border-inline-start:4px solid #0ea5e9;background:#f0f9ff}
+@media print{.income-screen-only{display:none!important}.income-table-card,.income-kpi{box-shadow:none}.container-fluid{max-width:none!important}.income-table-card td,.income-table-card th{font-size:10px!important;padding:4px!important}}
+</style>
+
+<div class="container-fluid py-4" dir="rtl">
+    <div class="income-title-bar d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h3 class="mb-1"><i class="bi bi-bar-chart-line-fill me-2"></i><?= incomePeriodEsc($sc_title) ?></h3>
+            <div class="opacity-75"><?= incomePeriodEsc($periodLabel) ?></div>
+        </div>
+        <?php if ($reportMode !== 1) { ?>
+        <div class="d-flex flex-wrap gap-2 income-screen-only">
+            <a class="btn btn-light" target="_blank" href="income_period_report.hnt?<?= incomePeriodEsc(http_build_query($printQuery)) ?>">
+                <i class="bi bi-printer me-1"></i>طباعة
+            </a>
+            <a class="btn btn-outline-light" href="reports.hnt"><i class="bi bi-arrow-return-right me-1"></i>التقارير</a>
+        </div>
+        <?php } ?>
+    </div>
+
+    <?php if ($inputWarning !== '') { ?><div class="alert alert-warning"><?= incomePeriodEsc($inputWarning) ?></div><?php } ?>
+    <?php if (!$hasRepresentativeCommission) { ?>
+        <div class="alert alert-warning">أعمدة عمولات مندوبي المبيعات غير مطبقة على قاعدة البيانات الحالية؛ لذلك تظهر عمولة المندوب بصفر، بينما تبقى حسابات دخل وعمولة المكتب متاحة.</div>
+    <?php } ?>
+    <?php if ($reportError !== '') { ?>
+        <div class="alert alert-danger">تعذر تحميل التقرير: <?= incomePeriodEsc($reportError) ?></div>
+    <?php } ?>
+
+    <?php if ($reportMode !== 1) { ?>
+    <form method="get" class="card income-filter-card mb-4 income-screen-only" id="incomePeriodFilters">
+        <div class="card-body row g-3 align-items-end">
+            <div class="col-sm-6 col-lg-2">
+                <label class="form-label" for="period_type">الفترة</label>
+                <select class="form-select" name="period_type" id="period_type">
+                    <option value="day" <?= $periodType === 'day' ? 'selected' : '' ?>>يومي</option>
+                    <option value="month" <?= $periodType === 'month' ? 'selected' : '' ?>>شهري</option>
+                    <option value="year" <?= $periodType === 'year' ? 'selected' : '' ?>>سنوي</option>
+                </select>
+            </div>
+            <div class="col-sm-6 col-lg-2 income-period-input" data-period="day">
+                <label class="form-label" for="day">اليوم</label>
+                <input class="form-control" type="date" name="day" id="day" value="<?= incomePeriodEsc($dayValue) ?>">
+            </div>
+            <div class="col-sm-6 col-lg-2 income-period-input" data-period="month">
+                <label class="form-label" for="month">الشهر</label>
+                <input class="form-control" type="month" name="month" id="month" value="<?= incomePeriodEsc($monthValue) ?>">
+            </div>
+            <div class="col-sm-6 col-lg-2 income-period-input" data-period="year">
+                <label class="form-label" for="year">السنة</label>
+                <input class="form-control" type="number" min="2000" max="2100" name="year" id="year" value="<?= intval($yearValue) ?>">
+            </div>
+            <div class="col-sm-6 col-lg-2">
+                <label class="form-label" for="detail_level">مستوى التفاصيل</label>
+                <select class="form-select" name="detail_level" id="detail_level">
+                    <option value="summary" <?= $detailLevel === 'summary' ? 'selected' : '' ?>>ملخص الفترة</option>
+                    <option value="property" <?= $detailLevel === 'property' ? 'selected' : '' ?>>حسب العقار</option>
+                    <option value="transactions" <?= $detailLevel === 'transactions' ? 'selected' : '' ?>>تفاصيل العمليات</option>
+                </select>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <label class="form-label" for="idaqar">العقار</label>
+                <select class="form-select" name="idaqar" id="idaqar">
+                    <option value="0">جميع العقارات</option>
+                    <?php foreach ($propertyOptions as $property) { ?>
+                        <option value="<?= intval($property['idaqar']) ?>" <?= intval($property['idaqar']) === $selectedProperty ? 'selected' : '' ?>>
+                            <?= incomePeriodEsc($property['aqarname']) ?>
+                        </option>
+                    <?php } ?>
+                </select>
+            </div>
+            <div class="col-sm-6 col-lg-1" id="perPageContainer">
+                <label class="form-label" for="per_page">لكل صفحة</label>
+                <select class="form-select" name="per_page" id="per_page">
+                    <?php foreach (array(50,100,250) as $size) { ?><option value="<?= $size ?>" <?= $size === $perPage ? 'selected' : '' ?>><?= $size ?></option><?php } ?>
+                </select>
+            </div>
+            <div class="col-sm-6 col-lg-2">
+                <button class="btn btn-success w-100" type="submit"><i class="bi bi-search me-1"></i>عرض التقرير</button>
+            </div>
+        </div>
+    </form>
+    <?php } ?>
+
+    <div class="row g-3 mb-4">
+        <div class="col-6 col-md-4 col-xl-2"><div class="card income-kpi" style="--income-color:#2563eb"><div class="card-body"><div class="income-label">إجمالي التحصيل</div><div class="income-value"><?= incomePeriodMoney($totals['gross_amount']) ?></div><small><?= incomePeriodEsc($currency) ?></small></div></div></div>
+        <div class="col-6 col-md-4 col-xl-2"><div class="card income-kpi" style="--income-color:#7c3aed"><div class="card-body"><div class="income-label">عمولة المكتب بالنسبة</div><div class="income-value"><?= incomePeriodMoney($totals['office_percentage_commission']) ?></div><small><?= incomePeriodEsc($currency) ?></small></div></div></div>
+        <div class="col-6 col-md-4 col-xl-2"><div class="card income-kpi" style="--income-color:#0891b2"><div class="card-body"><div class="income-label">دخل المكتب المباشر</div><div class="income-value"><?= incomePeriodMoney($totals['office_direct_income']) ?></div><small><?= incomePeriodEsc($currency) ?></small></div></div></div>
+        <div class="col-6 col-md-4 col-xl-2"><div class="card income-kpi" style="--income-color:#16a34a"><div class="card-body"><div class="income-label">إجمالي دخل المكتب</div><div class="income-value"><?= incomePeriodMoney($totals['office_total_income']) ?></div><small><?= incomePeriodEsc($currency) ?></small></div></div></div>
+        <div class="col-6 col-md-4 col-xl-2"><div class="card income-kpi" style="--income-color:#dc2626"><div class="card-body"><div class="income-label">عمولات المندوبين</div><div class="income-value"><?= incomePeriodMoney($totals['representative_commission']) ?></div><small><?= incomePeriodEsc($currency) ?></small></div></div></div>
+        <div class="col-6 col-md-4 col-xl-2"><div class="card income-kpi" style="--income-color:#0f766e"><div class="card-body"><div class="income-label">صافي دخل المكتب</div><div class="income-value"><?= incomePeriodMoney($totals['office_net_income']) ?></div><small><?= incomePeriodEsc($currency) ?></small></div></div></div>
+    </div>
+
+    <div class="alert income-formula mb-4">
+        <strong>طريقة الحساب:</strong>
+        عمولة المكتب بالنسبة تعتمد على النسبة الحالية المضبوطة داخل بيانات كل عقار.
+        إجمالي دخل المكتب = العمولة بالنسبة + السعي/التجديد + الخدمات + المياه والتأمين المخصصان للمكتب.
+        صافي دخل المكتب يطرح عمولات مندوبي المبيعات المحفوظة على سندات القبض.
+    </div>
+
+    <div class="card income-table-card">
+        <div class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2 py-3">
+            <strong><i class="bi bi-table me-1"></i><?= incomePeriodEsc($periodLabel) ?></strong>
+            <span class="badge bg-primary"><?= number_format(intval($totals['transaction_count'])) ?> عملية</span>
+        </div>
+        <div class="table-responsive">
+            <?php if ($detailLevel === 'transactions') { ?>
+            <table class="table table-hover table-striped align-middle mb-0">
+                <thead><tr>
+                    <th>السند</th><th>التاريخ</th><th>العقار / الوحدة</th><th>المستأجر</th><th>البيان</th><th>الدفع</th>
+                    <th>المحصل</th><th>نسبة المكتب</th><th>عمولة النسبة</th><th>الدخل المباشر</th><th>إجمالي المكتب</th><th>عمولة المندوب</th><th>صافي المكتب</th><th>صافي المالك</th>
+                </tr></thead>
+                <tbody>
+                <?php foreach ($rows as $row) { ?>
+                    <tr>
+                        <td><?php if (intval($row['idsanad']) > 0) { ?><a target="_blank" href="read_recive_voucher_template.hnt?idsanad=<?= intval($row['idsanad']) ?>&paymentvou=0&voucer_type=">#<?= intval($row['idsanad']) ?></a><?php } else { ?><?= incomePeriodEsc($row['sanadrakam']) ?><?php } ?></td>
+                        <td><?= date('d/m/Y', intval($row['paymentdate'])) ?></td>
+                        <td><?= incomePeriodEsc($row['aqarname']) ?> / <?= intval($row['idsubaqar']) ?></td>
+                        <td><?= incomePeriodEsc($row['mostagername']) ?></td>
+                        <td title="<?= incomePeriodEsc($row['pymentdesription']) ?>"><?= incomePeriodEsc(mb_strimwidth($row['pymentdesription'], 0, 45, '…', 'UTF-8')) ?></td>
+                        <td><?= incomePeriodEsc(incomePeriodPaymentLabel($row['payment_type'])) ?></td>
+                        <td><?= incomePeriodMoney($row['gross_amount']) ?></td>
+                        <td><?= incomePeriodMoney($row['configured_rate']) ?>%</td>
+                        <td><?= incomePeriodMoney($row['office_percentage_commission']) ?></td>
+                        <td><?= incomePeriodMoney($row['office_direct_income']) ?></td>
+                        <td class="fw-bold text-success"><?= incomePeriodMoney($row['office_total_income']) ?></td>
+                        <td class="text-danger"><?= incomePeriodMoney($row['representative_commission']) ?></td>
+                        <td class="fw-bold"><?= incomePeriodMoney($row['office_net_income']) ?></td>
+                        <td><?= incomePeriodMoney($row['owner_net_amount']) ?></td>
+                    </tr>
+                <?php } ?>
+                <?php if (empty($rows)) { ?><tr><td colspan="14" class="text-center text-muted py-5">لا توجد عمليات في الفترة المحددة.</td></tr><?php } ?>
+                </tbody>
+            </table>
+            <?php } else { ?>
+            <table class="table table-hover table-striped align-middle mb-0">
+                <thead><tr>
+                    <th><?= $detailLevel === 'property' ? 'العقار' : 'الفترة' ?></th>
+                    <?php if ($detailLevel === 'property') { ?><th>نسبة المكتب</th><?php } ?>
+                    <th>العمليات</th><th>المحصل</th><th>السعي/التجديد</th><th>الخدمات</th><th>مياه وتأمين المكتب</th>
+                    <th>عمولة النسبة</th><th>إجمالي المكتب</th><th>عمولة المندوب</th><th>صافي المكتب</th><th>صافي المالك</th>
+                </tr></thead>
+                <tbody>
+                <?php foreach ($rows as $row) {
+                    if ($detailLevel === 'property') {
+                        $rowLabel = $row['aqarname'];
+                    } elseif ($periodType === 'year') {
+                        $parts = explode('-', $row['bucket_key']);
+                        $rowLabel = (isset($parts[1], $monthNames[$parts[1]]) ? $monthNames[$parts[1]] : $row['bucket_key']) . ' ' . (isset($parts[0]) ? $parts[0] : '');
+                    } else {
+                        $rowLabel = date('d/m/Y', intval($row['bucket_sort']));
+                    }
+                ?>
+                    <tr>
+                        <td class="fw-bold"><?= incomePeriodEsc($rowLabel) ?></td>
+                        <?php if ($detailLevel === 'property') { ?><td><?= incomePeriodMoney($row['configured_rate']) ?>%</td><?php } ?>
+                        <td><?= number_format(intval($row['transaction_count'])) ?></td>
+                        <td><?= incomePeriodMoney($row['gross_amount']) ?></td>
+                        <td><?= incomePeriodMoney($row['renewal_commission']) ?></td>
+                        <td><?= incomePeriodMoney($row['services_amount']) ?></td>
+                        <td><?= incomePeriodMoney(floatval($row['office_water']) + floatval($row['office_insurance'])) ?></td>
+                        <td><?= incomePeriodMoney($row['office_percentage_commission']) ?></td>
+                        <td class="fw-bold text-success"><?= incomePeriodMoney($row['office_total_income']) ?></td>
+                        <td class="text-danger"><?= incomePeriodMoney($row['representative_commission']) ?></td>
+                        <td class="fw-bold"><?= incomePeriodMoney($row['office_net_income']) ?></td>
+                        <td><?= incomePeriodMoney($row['owner_net_amount']) ?></td>
+                    </tr>
+                <?php } ?>
+                <?php if (empty($rows)) { ?><tr><td colspan="<?= $detailLevel === 'property' ? 12 : 11 ?>" class="text-center text-muted py-5">لا توجد عمليات في الفترة المحددة.</td></tr><?php } ?>
+                </tbody>
+                <tfoot class="table-dark"><tr>
+                    <th>الإجمالي</th>
+                    <?php if ($detailLevel === 'property') { ?><th>—</th><?php } ?>
+                    <th><?= number_format(intval($totals['transaction_count'])) ?></th>
+                    <th><?= incomePeriodMoney($totals['gross_amount']) ?></th>
+                    <th><?= incomePeriodMoney($totals['renewal_commission']) ?></th>
+                    <th><?= incomePeriodMoney($totals['services_amount']) ?></th>
+                    <th><?= incomePeriodMoney(floatval($totals['office_water']) + floatval($totals['office_insurance'])) ?></th>
+                    <th><?= incomePeriodMoney($totals['office_percentage_commission']) ?></th>
+                    <th><?= incomePeriodMoney($totals['office_total_income']) ?></th>
+                    <th><?= incomePeriodMoney($totals['representative_commission']) ?></th>
+                    <th><?= incomePeriodMoney($totals['office_net_income']) ?></th>
+                    <th><?= incomePeriodMoney($totals['owner_net_amount']) ?></th>
+                </tr></tfoot>
+            </table>
+            <?php } ?>
+        </div>
+    </div>
+
+    <?php if ($detailLevel === 'transactions' && $totalPages > 1 && $reportMode !== 1) { ?>
+    <nav class="mt-4 income-screen-only" aria-label="صفحات التقرير"><ul class="pagination justify-content-center flex-wrap">
+        <?php for ($pageNumber = max(1, $page - 3); $pageNumber <= min($totalPages, $page + 3); $pageNumber++) {
+            $pageQuery = $baseQuery;
+            $pageQuery['page'] = $pageNumber;
+        ?>
+            <li class="page-item <?= $pageNumber === $page ? 'active' : '' ?>"><a class="page-link" href="income_period_report.hnt?<?= incomePeriodEsc(http_build_query($pageQuery)) ?>"><?= $pageNumber ?></a></li>
+        <?php } ?>
+    </ul></nav>
+    <?php } ?>
+
+    <?php if ($detailLevel === 'transactions' && $reportMode === 1 && $totalPages > 1) { ?>
+        <div class="alert alert-warning mt-3">نسخة الطباعة تعرض الصفحة الحالية فقط (<?= intval($page) ?> من <?= intval($totalPages) ?>).</div>
+    <?php } ?>
+</div>
+
+<?php if ($reportMode !== 1) { ?>
+<script>
+(function () {
+    const periodType = document.getElementById('period_type');
+    const detailLevel = document.getElementById('detail_level');
+    const perPageContainer = document.getElementById('perPageContainer');
+    function refreshIncomeFilters() {
+        document.querySelectorAll('.income-period-input').forEach(function (element) {
+            element.style.display = element.getAttribute('data-period') === periodType.value ? '' : 'none';
+        });
+        perPageContainer.style.display = detailLevel.value === 'transactions' ? '' : 'none';
+    }
+    periodType.addEventListener('change', refreshIncomeFilters);
+    detailLevel.addEventListener('change', refreshIncomeFilters);
+    refreshIncomeFilters();
+})();
+</script>
+<?php require '../../../foter.hnt'; ?>
+<?php } else { require '../../../reportfooter.hnt'; } ?>

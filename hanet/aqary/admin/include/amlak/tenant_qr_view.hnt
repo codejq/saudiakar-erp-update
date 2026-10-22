@@ -1,0 +1,63 @@
+<?php
+/** Read-only tenant record opened from a printed QR card. */
+$tenantId = max(0, intval($_GET['mostagerid'] ?? 0));
+$sc_title = 'بيانات بطاقة المستأجر';
+include_once dirname(__DIR__, 3) . '/connectdb.hnt';
+require_once __DIR__ . '/tenant_qr_common.hnt';
+if (isset($qdb_db, $dbSuffix) && $db instanceof mysqli) {
+    mysqli_select_db($db, $qdb_db . $dbSuffix);
+    $db->set_charset('utf8mb4');
+}
+$screenId = tenantQrResolveScreenId($db);
+$sc_id = $screenId > 0 ? $screenId : 36;
+include_once dirname(__DIR__, 3) . '/header.hnt';
+$access = tenantQrAccess($db, $screenId, intval($_SESSION['useridv'] ?? 0));
+if (!$access['allowed']) {
+    http_response_code(403);
+    echo '<div class="alert alert-danger m-4" dir="rtl">ليس لديك صلاحية لعرض بطاقة المستأجر.</div>';
+    exit;
+}
+
+$tenant = null;
+if ($tenantId > 0) {
+    $stmt = $db->prepare("SELECT mostagerid,mostagername,mostagertel,mostageridnumber,mostageremail,mostageraddress,mostagergensia,work,workaddress FROM mostagereen WHERE mostagerid=? LIMIT 1");
+    if ($stmt) {
+        $stmt->bind_param('i', $tenantId);
+        $stmt->execute();
+        $tenant = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+    }
+}
+if (!$tenant) {
+    http_response_code(404);
+    echo '<div class="alert alert-warning m-4" dir="rtl">سجل المستأجر غير موجود.</div>';
+    exit;
+}
+$unitMap = tenantQrLoadUnits($db, array($tenantId));
+$units = $unitMap[$tenantId] ?? array();
+?>
+<style>
+.tqrv-shell{direction:rtl;padding:20px;max-width:1050px;margin:0 auto}.tqrv-head{background:linear-gradient(135deg,#0f766e,#0e7490);color:#fff;border-radius:14px;padding:20px;display:flex;align-items:center;justify-content:space-between;gap:15px}.tqrv-head h1{margin:0;font-size:1.5rem}.tqrv-head p{margin:6px 0 0;opacity:.9}.tqrv-actions{display:flex;gap:8px;flex-wrap:wrap}.tqrv-btn{border:0;border-radius:8px;padding:10px 14px;text-decoration:none;font-weight:700;display:inline-flex;align-items:center;gap:7px;background:#fff;color:#0f766e}.tqrv-card{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:20px;margin-top:18px;box-shadow:0 3px 12px rgba(15,23,42,.06)}.tqrv-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.tqrv-field{border:1px solid #e2e8f0;border-radius:10px;padding:12px;min-width:0}.tqrv-field label{display:block;color:#64748b;font-size:.85rem;margin-bottom:5px}.tqrv-field strong{display:block;overflow-wrap:anywhere}.tqrv-title{font-size:1.1rem;font-weight:800;margin:0 0 14px}.tqrv-table{width:100%;border-collapse:collapse}.tqrv-table th,.tqrv-table td{padding:11px;border-bottom:1px solid #e2e8f0;text-align:right}.tqrv-table th{background:#f8fafc}.tqrv-link{color:#0369a1;text-decoration:none;font-weight:700}@media(max-width:760px){.tqrv-grid{grid-template-columns:1fr}.tqrv-head{align-items:flex-start;flex-direction:column}.tqrv-shell{padding:10px}}
+</style>
+<main class="tqrv-shell">
+    <header class="tqrv-head">
+        <div><h1><i class="bi bi-person-vcard"></i> <?= tenantQrEsc($tenant['mostagername']) ?></h1><p>بطاقة المستأجر رقم T-<?= $tenantId ?></p></div>
+        <div class="tqrv-actions"><a class="tqrv-btn" href="tenant_qr_cards.hnt"><i class="bi bi-arrow-right"></i> البطاقات</a><?php if($access['print']): ?><a class="tqrv-btn" target="_blank" href="tenant_qr_cards_print.hnt?ids[]=<?= $tenantId ?>"><i class="bi bi-printer"></i> طباعة البطاقة</a><?php endif; ?></div>
+    </header>
+    <section class="tqrv-card">
+        <h2 class="tqrv-title">بيانات المستأجر</h2>
+        <div class="tqrv-grid">
+            <div class="tqrv-field"><label>الاسم</label><strong><?= tenantQrEsc($tenant['mostagername']) ?></strong></div>
+            <div class="tqrv-field"><label>الهاتف</label><strong style="direction:ltr;text-align:right"><?= tenantQrEsc($tenant['mostagertel'] ?: '-') ?></strong></div>
+            <div class="tqrv-field"><label>رقم الهوية</label><strong><?= tenantQrEsc($tenant['mostageridnumber'] ?: '-') ?></strong></div>
+            <div class="tqrv-field"><label>البريد الإلكتروني</label><strong><?= tenantQrEsc($tenant['mostageremail'] ?: '-') ?></strong></div>
+            <div class="tqrv-field"><label>العنوان</label><strong><?= tenantQrEsc($tenant['mostageraddress'] ?: '-') ?></strong></div>
+            <div class="tqrv-field"><label>العمل</label><strong><?= tenantQrEsc($tenant['work'] ?: '-') ?></strong></div>
+        </div>
+    </section>
+    <section class="tqrv-card">
+        <h2 class="tqrv-title">الوحدات الحالية</h2>
+        <div style="overflow:auto"><table class="tqrv-table"><thead><tr><th>العقار والوحدة</th><th>رقم العقد</th><th>الإجراءات</th></tr></thead><tbody><?php foreach($units as $unit): ?><tr><td><?= tenantQrEsc($unit['label']) ?></td><td><?= intval($unit['rakam3akdid']) ?: '-' ?></td><td><a class="tqrv-link" href="editaksat.hnt?idsubaqar=<?= intval($unit['idsubaqar']) ?>">الأقساط والعقد</a><?php if(intval($unit['rakam3akdid'])>0): ?> · <a class="tqrv-link" href="show3akd.hnt?rakam3akdid=<?= intval($unit['rakam3akdid']) ?>">عرض العقد</a><?php endif; ?></td></tr><?php endforeach; ?><?php if(!$units): ?><tr><td colspan="3" class="text-center text-muted">لا توجد وحدة مؤجرة حالياً لهذا السجل.</td></tr><?php endif; ?></tbody></table></div>
+    </section>
+</main>
+

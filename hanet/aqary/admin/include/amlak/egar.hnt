@@ -121,6 +121,20 @@ if (isset($_REQUEST['idsubaqar']) && $_REQUEST['idsubaqar']) {
         var x = floatval(document.getElementById('annualprice').value);
         var p = floatval(document.getElementById('duration').value);
         document.getElementById('depositeamount').value = floatval((x / 12) * p);
+        updateRentIncreasePreview();
+    }
+
+    function updateRentIncreasePreview() {
+        var annualRent = parseFloat(String($('#annualprice').val() || '0').replace(/,/g, '')) || 0;
+        var yearlyStep = parseFloat($('#annual_rent_increase_percent').val()) || 0;
+        var maximum = parseFloat($('#max_rent_increase_percent').val()) || 0;
+        var preview = [];
+        for (var year = 1; year <= 5; year++) {
+            var applied = Math.min(Math.max(0, (year - 1) * yearlyStep), Math.max(0, maximum));
+            var value = annualRent * (1 + applied / 100);
+            preview.push('السنة ' + year + ': ' + value.toFixed(2) + ' (' + applied.toFixed(2) + '%)');
+        }
+        $('#rentIncreasePreview').text(preview.join(' — '));
     }
 
     function calculateEndDate() {
@@ -319,6 +333,22 @@ if (!$is_ajax_request) {
                                     </select>
                                 </div>
                                 <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-person-badge text-success me-1"></i>مندوب المبيعات</label>
+                                    <select name="sales_representative_userid" id="sales_representative_userid" class="form-select">
+                                        <option value="0">النظام / بدون مندوب</option>
+                                        <?php
+                                        $salesUsersResult = mysql_query("SELECT userid, username, name FROM user ORDER BY name, username", $link);
+                                        while ($salesUser = $salesUsersResult ? mysql_fetch_assoc($salesUsersResult) : false) {
+                                            $salesUserLabel = trim($salesUser['name']) !== '' ? $salesUser['name'] : $salesUser['username'];
+                                            echo '<option value="' . intval($salesUser['userid']) . '">'
+                                                . htmlspecialchars($salesUserLabel, ENT_QUOTES, 'UTF-8')
+                                                . '</option>';
+                                        }
+                                        ?>
+                                    </select>
+                                    <div class="form-text">يُستخدم تلقائياً في سندات قبض هذا العقد ويمكن تغييره عند إنشاء السند.</div>
+                                </div>
+                                <div class="col-md-4">
                                     <label class="form-label"><i class="bi bi-person-fill text-primary me-1"></i>اسم المستأجر <span class="required-mark">*</span></label>
                                     <input type="text" name="mostagername" class="form-control" required value="<?= isset($mos['mostagername']) ? $mos['mostagername'] : '' ?>"
                                         onkeyup="createCookie(this.name +'coc', this.value, 1);">
@@ -404,6 +434,29 @@ if (!$is_ajax_request) {
                                         onkeypress="return ValidateNumberKeyPress(this, event);"
                                         onkeyup="ValidateNumberKeyUp(this);calculaterent();createCookie(this.name +'coc', this.value, 1);"
                                         onBlur="ValidateAndFormatNumber(this);calculaterent();">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-graph-up-arrow text-success me-1"></i>الزيادة السنوية من الإيجار الأساسي</label>
+                                    <div class="input-group">
+                                        <input type="number" name="annual_rent_increase_percent" id="annual_rent_increase_percent"
+                                            class="form-control" value="0" min="0" max="100" step="0.01"
+                                            oninput="updateRentIncreasePreview();">
+                                        <span class="input-group-text">%</span>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label"><i class="bi bi-speedometer2 text-warning me-1"></i>الحد الأعلى للزيادة التراكمية</label>
+                                    <div class="input-group">
+                                        <input type="number" name="max_rent_increase_percent" id="max_rent_increase_percent"
+                                            class="form-control" value="0" min="0" max="100" step="0.01"
+                                            oninput="updateRentIncreasePreview();">
+                                        <span class="input-group-text">%</span>
+                                    </div>
+                                </div>
+                                <div class="col-12">
+                                    <small class="text-muted d-block" id="rentIncreasePreview">
+                                        السنة الأولى بالقيمة الأساسية، ثم تطبق الزيادة السنوية حتى الحد الأعلى. الرسوم الأخرى لا تزيد.
+                                    </small>
                                 </div>
                                 <div class="col-md-4">
                                     <label class="form-label"><i class="bi bi-calendar-event text-info me-1"></i>الإيجار يدفع كل <span class="required-mark">*</span></label>
@@ -593,29 +646,31 @@ if (!$is_ajax_request) {
                                 onBlur="ValidateAndFormatNumber(this)">
                         </div>
                         <div class="col-md-12">
-                            <label class="form-label"><i class="bi bi-file-earmark-text text-primary me-1"></i>نموذج شروط العقد</label>
-                            <select class="form-select" id="contractTemplateSelector" onchange="loadContractTemplate();createCookie('contractTemplateSelector_coc', this.value, 365);">
+                            <label class="form-label"><i class="bi bi-file-earmark-text text-primary me-1"></i>نموذج شروط العقد (اختياري)</label>
+                            <select class="form-select" name="contract_template" id="contractTemplateSelector" onchange="loadContractTemplate();">
                                 <option value="">-- اختر نموذج شروط العقد --</option>
                                 <?php
                                 // Get contract templates from 3akd directory
                                 $template_path = __DIR__ . '/';
                                 $templates = glob($template_path . '*.contratotemplate');
                                 if ($templates && count($templates) > 0) {
-                                    $first_template = true;
                                     foreach ($templates as $template_file) {
                                         $template_name = basename($template_file, '.contratotemplate');
                                         if (empty(trim($template_name))) continue;
-                                        $selected = $first_template ? ' selected' : '';
-                                        echo '<option value="' . htmlspecialchars(basename($template_file)) . '"' . $selected . '>' . htmlspecialchars($template_name) . '</option>';
-                                        $first_template = false;
+                                        echo '<option value="' . htmlspecialchars(basename($template_file)) . '">' . htmlspecialchars($template_name) . '</option>';
                                     }
                                 }
                                 ?>
                             </select>
                         </div>
                         <div class="col-md-12">
-                            <label class="form-label"><i class="bi bi-chat-dots text-info me-1"></i>شروط إضافية وملحوظات</label>
-                            <textarea name="notes" id="contractNotes" class="form-control" rows="4" style="resize: vertical; min-height: 150px;"></textarea>
+                            <label class="form-label"><i class="bi bi-file-text text-primary me-1"></i>شروط العقد</label>
+                            <textarea name="txtcash_word" id="contractConditions" class="form-control" rows="6" style="resize: vertical; min-height: 180px;"></textarea>
+                            <div class="form-text">لن تتم إضافة شروط تلقائياً. اختر نموذجاً أعلاه أو اكتب شروط العقد مباشرة.</div>
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label"><i class="bi bi-chat-dots text-info me-1"></i>ملاحظات إضافية</label>
+                            <textarea name="notes" id="contractNotes" class="form-control" rows="3" style="resize: vertical; min-height: 110px;"></textarea>
                         </div>
                     </div>
 
@@ -785,8 +840,6 @@ if (!$is_ajax_request) {
                 var correctOldDatesVal = readCookie("correct_old_dates_coc");
                 if (correctOldDatesVal) document.getElementById('correct_old_dates').value = correctOldDatesVal;
                 
-                var contractTemplateVal = readCookie("contractTemplateSelector_coc");
-                if (contractTemplateVal) document.getElementById('contractTemplateSelector').value = contractTemplateVal;
             </script>
         <?php
         } // End if/else for mostagerid
@@ -1171,14 +1224,28 @@ if (!$is_ajax_request) {
             $('#correct_old_dates').on('change', function(e) {
                 calculatEndDate();
             });
+            updateRentIncreasePreview();
 
             // AJAX Form Submission
             $('#mainform').on('submit', function(e) {
                 e.preventDefault();
 
+                if (contractTemplateLoading) {
+                    alert('يرجى الانتظار حتى يكتمل تحميل شروط العقد.');
+                    return false;
+                }
+
                 // Validate required fields
                 if (!$('#mainform')[0].checkValidity()) {
                     $('#mainform')[0].reportValidity();
+                    return false;
+                }
+
+                var yearlyStep = parseFloat($('#annual_rent_increase_percent').val()) || 0;
+                var maximumIncrease = parseFloat($('#max_rent_increase_percent').val()) || 0;
+                if (yearlyStep > 0 && maximumIncrease < yearlyStep) {
+                    alert('الحد الأعلى للزيادة يجب ألا يقل عن نسبة الزيادة السنوية.');
+                    $('#max_rent_increase_percent').focus();
                     return false;
                 }
 
@@ -1285,43 +1352,51 @@ if (!$is_ajax_request) {
             });
         });
 
-        // Load contract template function
+        var contractTemplateLoading = false;
+        var contractTemplateLoadSequence = 0;
+
+        // Load a contract conditions template only after an explicit selection.
         function loadContractTemplate() {
             const selector = document.getElementById('contractTemplateSelector');
             const templateFile = selector.value;
-            const notesTextarea = document.getElementById('contractNotes');
+            const conditionsTextarea = document.getElementById('contractConditions');
+            const loadSequence = ++contractTemplateLoadSequence;
 
             if (!templateFile) {
+                contractTemplateLoading = false;
+                conditionsTextarea.value = '';
+                conditionsTextarea.disabled = false;
+                $('#submitBtn').prop('disabled', false);
                 return;
             }
 
             // Show loading state
-            notesTextarea.disabled = true;
-            notesTextarea.value = 'جاري التحميل...';
+            contractTemplateLoading = true;
+            conditionsTextarea.disabled = true;
+            conditionsTextarea.value = 'جاري التحميل...';
+            $('#submitBtn').prop('disabled', true);
 
             // Load template content via AJAX
             $.post('/aqary/admin/include/amlak/' + templateFile, {
                 userid: '<?= $_SESSION['useridv'] ?? '' ?>'
             })
             .done(function(data) {
-                notesTextarea.value = data;
+                if (loadSequence !== contractTemplateLoadSequence) return;
+                conditionsTextarea.value = data;
             })
             .fail(function() {
+                if (loadSequence !== contractTemplateLoadSequence) return;
                 alert('فشل تحميل النموذج. الرجاء المحاولة مرة أخرى.');
-                notesTextarea.value = '';
+                conditionsTextarea.value = '';
+                selector.value = '';
             })
             .always(function() {
-                notesTextarea.disabled = false;
+                if (loadSequence !== contractTemplateLoadSequence) return;
+                contractTemplateLoading = false;
+                conditionsTextarea.disabled = false;
+                $('#submitBtn').prop('disabled', false);
             });
         }
-
-        // Auto-load first template on page load
-        $(document).ready(function() {
-            const selector = document.getElementById('contractTemplateSelector');
-            if (selector && selector.value) {
-                loadContractTemplate();
-            }
-        });
 
         // Load tenant data via AJAX
         function loadTenantData(tenantId) {

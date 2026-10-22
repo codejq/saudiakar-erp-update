@@ -1203,7 +1203,7 @@ function ajaxfillcombox(combobj, sqlstr, defaultsel) {
     "Content-type",
     "application/x-www-form-urlencoded;charset=utf-8"
   );
-  xmlHttp.send("sqlstr=" + sqlstr);
+  xmlHttp.send("sqlstr=" + encodeURIComponent(sqlstr));
   //xmlDoc=xmlHttp.responseText;
   //xmlHttp.open("POST", "demo_dom_http.asp", false);
   //xmlHttp.send(xmlDoc);
@@ -1296,7 +1296,12 @@ function ajaxfilldiv(
     "Content-type",
     "application/x-www-form-urlencoded;charset=utf-8"
   );
-  xmlHttp.send("sqlstr=" + sqlstr + "&ajpagenumv=" + ajpagenumv);
+  xmlHttp.send(
+    "sqlstr=" +
+      encodeURIComponent(sqlstr) +
+      "&ajpagenumv=" +
+      encodeURIComponent(ajpagenumv)
+  );
 
   function stateChanged() {
     if (xmlHttp.readyState == 4) {
@@ -1333,7 +1338,12 @@ function ajaxfillgrid(sqlstr, containerid, incremental, ajdpagenumv, mylink) {
     "application/x-www-form-urlencoded;charset=utf-8"
   );
   xmlHttp.send(
-    "sqlstr=" + sqlstr + "&ajpagenumv=" + ajdpagenumv + "&mylink=" + mylink
+    "sqlstr=" +
+      encodeURIComponent(sqlstr) +
+      "&ajpagenumv=" +
+      encodeURIComponent(ajdpagenumv) +
+      "&mylink=" +
+      encodeURIComponent(mylink)
   );
 
   function stateChanged() {
@@ -1371,7 +1381,9 @@ function ajaxmysql(sqlstr, returntxtid, mylink) {
     "Content-type",
     "application/x-www-form-urlencoded;charset=utf-8"
   );
-  xmlHttp.send("sqlstr=" + sqlstr + "&mylink=" + mylink);
+  xmlHttp.send(
+    "sqlstr=" + encodeURIComponent(sqlstr) + "&mylink=" + encodeURIComponent(mylink)
+  );
 
   function stateChanged() {
     if (xmlHttp.readyState == 4) {
@@ -1402,7 +1414,9 @@ function ajaxmysqlrow(sqlstr, returntxtid, mylink) {
     "Content-type",
     "application/x-www-form-urlencoded;charset=utf-8"
   );
-  xmlHttp.send("sqlstr=" + sqlstr + "&mylink=" + mylink);
+  xmlHttp.send(
+    "sqlstr=" + encodeURIComponent(sqlstr) + "&mylink=" + encodeURIComponent(mylink)
+  );
 
   //xmlDoc=xmlHttp.responseText;
   //xmlHttp.open("POST", "demo_dom_http.asp", false);

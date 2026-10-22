@@ -1,0 +1,34 @@
+<?php
+/** Authenticated download for maintenance-request attachments. */
+$is_ajax_request = false;
+require_once dirname(__DIR__, 3) . '/reqloginajax.hnt';
+require_once dirname(__DIR__, 3) . '/lib/storage/helpers.php';
+if (empty($_SESSION['useridv'])) { http_response_code(401); exit('يجب تسجيل الدخول.'); }
+if (isset($qdb_db, $dbSuffix) && $db instanceof mysqli) mysqli_select_db($db, $qdb_db . $dbSuffix);
+$screenResult = $db->query("SELECT screenid FROM screens WHERE screen_id='maintenance_requests' ORDER BY screenid LIMIT 1");
+$screen = $screenResult ? $screenResult->fetch_assoc() : null;
+$screenId = intval($screen['screenid'] ?? 0);
+$userId = intval($_SESSION['useridv']);
+$accessStmt = $db->prepare("SELECT g.allprevilage,COALESCE(p.sees,0) sees FROM user u LEFT JOIN usergroups g ON g.groupid=u.groupid LEFT JOIN ugroupscreen p ON p.groupid=u.groupid AND p.screenid=? WHERE u.userid=? LIMIT 1");
+$accessStmt->bind_param('ii', $screenId, $userId);
+$accessStmt->execute();
+$access = $accessStmt->get_result()->fetch_assoc();
+$accessStmt->close();
+if (!$access || (empty($access['allprevilage']) && empty($access['sees']))) { http_response_code(403); exit('ليس لديك الصلاحية لعرض المرفق.'); }
+$attachmentId = intval($_GET['id'] ?? 0);
+$stmt = $db->prepare("SELECT * FROM maintenance_request_attachments WHERE attachment_id=? LIMIT 1");
+$stmt->bind_param('i', $attachmentId);
+$stmt->execute();
+$attachment = $stmt->get_result()->fetch_assoc();
+$stmt->close();
+if (!$attachment) { http_response_code(404); exit('المرفق غير موجود.'); }
+$storageRoot = realpath(storage_path(''));
+$filePath = realpath(storage_path($attachment['storage_path']));
+if (!$storageRoot || !$filePath || stripos($filePath, $storageRoot . DIRECTORY_SEPARATOR) !== 0 || !is_file($filePath)) { http_response_code(404); exit('المرفق غير موجود.'); }
+header('Content-Type: ' . ($attachment['mime_type'] ?: 'application/octet-stream'));
+header('Content-Length: ' . filesize($filePath));
+header("Content-Disposition: inline; filename*=UTF-8''" . rawurlencode($attachment['original_name']));
+header('X-Content-Type-Options: nosniff');
+readfile($filePath);
+exit;
+

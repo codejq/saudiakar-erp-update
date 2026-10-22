@@ -1,6 +1,7 @@
 <?php
 function runAccountingSchemaMigrations($db) {
     $errors = [];
+    $applied = [];
 
     $invoiceColumnMigrations = [
         'journal_id' => "ALTER TABLE acc_invoices ADD COLUMN journal_id INT NULL AFTER due_date",
@@ -140,8 +141,10 @@ function runAccountingSchemaMigrations($db) {
         'subaqar_id' => "ALTER TABLE acc_journal_entries ADD COLUMN subaqar_id INT(11) NULL AFTER aqar_id",
         'egar_id' => "ALTER TABLE acc_journal_entries ADD COLUMN egar_id INT(11) NULL AFTER subaqar_id",
         'sanad_id' => "ALTER TABLE acc_journal_entries ADD COLUMN sanad_id INT(11) NULL AFTER egar_id",
-        'masrofat_id' => "ALTER TABLE acc_journal_entries ADD COLUMN masrofat_id INT(11) NULL AFTER sanad_id",
-        'invoice_id' => "ALTER TABLE acc_journal_entries ADD COLUMN invoice_id INT(11) NULL AFTER masrofat_id"
+        'sanadsarf_id' => "ALTER TABLE acc_journal_entries ADD COLUMN sanadsarf_id INT(11) NULL AFTER sanad_id",
+        'masrofat_id' => "ALTER TABLE acc_journal_entries ADD COLUMN masrofat_id INT(11) NULL AFTER sanadsarf_id",
+        'invoice_id' => "ALTER TABLE acc_journal_entries ADD COLUMN invoice_id INT(11) NULL AFTER masrofat_id",
+        'sales_representative_userid' => "ALTER TABLE acc_journal_entries ADD COLUMN sales_representative_userid INT(11) NULL AFTER invoice_id"
     ];
 
     foreach ($journalEntryColumnMigrations as $columnName => $alterSql) {
@@ -152,6 +155,50 @@ function runAccountingSchemaMigrations($db) {
         }
         if ($columnCheck->num_rows == 0 && !$db->query($alterSql)) {
             $errors[] = 'فشل في تحديث جدول القيود اليومية: ' . $db->error;
+        } elseif ($columnCheck->num_rows == 0) {
+            $applied[] = 'تمت إضافة حقل ' . $columnName . ' للقيود المحاسبية.';
+        }
+    }
+
+    // The original enum did not include the values already used by payment
+    // and expense code.  On installations without strict SQL mode those rows
+    // were silently stored with an empty entry_type.
+    if (!$db->query("UPDATE acc_journal_entries SET entry_type='manual' WHERE entry_type IS NULL")) {
+        $errors[] = 'فشل في تصحيح القيود التي لا تحمل نوعاً: ' . $db->error;
+    }
+    $entryTypeCheck = $db->query("SHOW COLUMNS FROM acc_journal_entries LIKE 'entry_type'");
+    if (!$entryTypeCheck) {
+        $errors[] = 'فشل في فحص نوع القيد المحاسبي: ' . $db->error;
+    } else {
+        $entryTypeDefinition = $entryTypeCheck->fetch_assoc();
+        if (strpos((string)($entryTypeDefinition['Type'] ?? ''), "'owner_settlement'") === false) {
+            $entryTypeSql = "ALTER TABLE acc_journal_entries MODIFY COLUMN entry_type
+                ENUM('','manual','auto','opening','closing','adjustment','invoice','payment','receipt','expense','owner_settlement','commission')
+                NOT NULL DEFAULT 'manual'";
+            if (!$db->query($entryTypeSql)) {
+                $errors[] = 'فشل في توسيع أنواع القيود المحاسبية: ' . $db->error;
+            } else {
+                $applied[] = 'تم توسيع أنواع القيود لتشمل المقبوضات والمصروفات وتسليمات الملاك.';
+            }
+        }
+    }
+
+    if (!$db->query("UPDATE acc_journal_entries SET entry_type='receipt' WHERE entry_type='' AND reference_type='sanad'")) {
+        $errors[] = 'فشل في تصحيح أنواع قيود سندات القبض: ' . $db->error;
+    }
+    if (!$db->query("UPDATE acc_journal_entries SET entry_type='payment' WHERE entry_type='' AND reference_type='invoice'")) {
+        $errors[] = 'فشل في تصحيح أنواع قيود دفعات الفواتير: ' . $db->error;
+    }
+    $emptyEntryTypes = $db->query("SELECT COUNT(*) AS total FROM acc_journal_entries WHERE entry_type='' ");
+    $emptyEntryTypeRow = $emptyEntryTypes ? $emptyEntryTypes->fetch_assoc() : ['total' => 1];
+    if ((int)($emptyEntryTypeRow['total'] ?? 1) === 0) {
+        $finalEntryTypeSql = "ALTER TABLE acc_journal_entries MODIFY COLUMN entry_type
+            ENUM('manual','auto','opening','closing','adjustment','invoice','payment','receipt','expense','owner_settlement','commission')
+            NOT NULL DEFAULT 'manual'";
+        $currentTypeCheck = $db->query("SHOW COLUMNS FROM acc_journal_entries LIKE 'entry_type'");
+        $currentTypeRow = $currentTypeCheck ? $currentTypeCheck->fetch_assoc() : [];
+        if (strpos((string)($currentTypeRow['Type'] ?? ''), "enum('','manual'") !== false && !$db->query($finalEntryTypeSql)) {
+            $errors[] = 'فشل في إنهاء تصحيح نوع القيد المحاسبي: ' . $db->error;
         }
     }
 
@@ -162,6 +209,10 @@ function runAccountingSchemaMigrations($db) {
         'idx_journal_entries_aqar_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_aqar_id (aqar_id)",
         'idx_journal_entries_subaqar_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_subaqar_id (subaqar_id)",
         'idx_journal_entries_egar_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_egar_id (egar_id)",
+        'idx_journal_entries_sanad_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_sanad_id (sanad_id)",
+        'idx_journal_entries_sanadsarf_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_sanadsarf_id (sanadsarf_id)",
+        'idx_journal_entries_masrofat_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_masrofat_id (masrofat_id)",
+        'idx_journal_entries_sales_rep' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_sales_rep (sales_representative_userid, entry_date)",
         'idx_journal_entries_reference' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_reference (reference_type, reference_id)"
     ];
 
@@ -183,9 +234,171 @@ function runAccountingSchemaMigrations($db) {
         $errors[] = 'فشل في إضافة فهرس مراكز التكلفة في بنود القيود: ' . $db->error;
     }
 
+    // Source markers keep synchronization repeatable.  They are intentionally
+    // installed from the accounting dashboard rather than mutating schemas in
+    // every receipt or expense page.
+    $sourceMigrations = [
+        'sanad' => [
+            'column' => "ALTER TABLE sanad ADD COLUMN accounting_entry_id INT(11) NULL",
+            'index' => 'idx_sanad_accounting_entry'
+        ],
+        'masrofat' => [
+            'column' => "ALTER TABLE masrofat ADD COLUMN accounting_entry_id INT(11) NULL",
+            'index' => 'idx_masrofat_accounting_entry'
+        ],
+        'sanadsarf' => [
+            'column' => "ALTER TABLE sanadsarf ADD COLUMN accounting_entry_id INT(11) NULL",
+            'index' => 'idx_sanadsarf_accounting_entry'
+        ]
+    ];
+
+    foreach ($sourceMigrations as $tableName => $migration) {
+        $tableCheck = $db->query("SHOW TABLES LIKE '" . $db->real_escape_string($tableName) . "'");
+        if (!$tableCheck || $tableCheck->num_rows === 0) {
+            continue;
+        }
+        $columnCheck = $db->query("SHOW COLUMNS FROM `{$tableName}` LIKE 'accounting_entry_id'");
+        if (!$columnCheck) {
+            $errors[] = 'فشل في فحص ربط ' . $tableName . ' بالمحاسبة: ' . $db->error;
+            continue;
+        }
+        if ($columnCheck->num_rows === 0) {
+            if (!$db->query($migration['column'])) {
+                $errors[] = 'فشل في إضافة ربط ' . $tableName . ' بالمحاسبة: ' . $db->error;
+                continue;
+            }
+            $applied[] = 'تم ربط جدول ' . $tableName . ' بالقيود المحاسبية.';
+        }
+        $indexName = $migration['index'];
+        $indexCheck = $db->query("SHOW INDEX FROM `{$tableName}` WHERE Column_name='accounting_entry_id'");
+        if ($indexCheck && $indexCheck->num_rows === 0) {
+            if (!$db->query("ALTER TABLE `{$tableName}` ADD INDEX `{$indexName}` (accounting_entry_id)")) {
+                $errors[] = 'فشل في إضافة فهرس الربط المحاسبي لجدول ' . $tableName . ': ' . $db->error;
+            }
+        }
+    }
+
+    $contractTableCheck = $db->query("SHOW TABLES LIKE 'egar'");
+    if ($contractTableCheck && $contractTableCheck->num_rows > 0) {
+        $contractInvoiceColumn = $db->query("SHOW COLUMNS FROM egar LIKE 'invoice_id'");
+        if ($contractInvoiceColumn && $contractInvoiceColumn->num_rows === 0) {
+            if (!$db->query("ALTER TABLE egar ADD COLUMN invoice_id INT(11) NULL")) {
+                $errors[] = 'فشل في إضافة ربط العقد بالفاتورة المحاسبية: ' . $db->error;
+            } else {
+                $applied[] = 'تم ربط العقود بالفواتير المحاسبية.';
+            }
+        }
+        $contractInvoiceIndex = $db->query("SHOW INDEX FROM egar WHERE Column_name='invoice_id'");
+        if ($contractInvoiceIndex && $contractInvoiceIndex->num_rows === 0) {
+            if (!$db->query("ALTER TABLE egar ADD INDEX idx_egar_accounting_invoice (invoice_id)")) {
+                $errors[] = 'فشل في إضافة فهرس ربط العقود بالفواتير: ' . $db->error;
+            }
+        }
+    }
+
+    // Accounts required by the newer Amlak flows.  Codes are stable across
+    // customers; IDs are resolved after insertion and stored in settings.
+    $defaultIntegrationAccounts = [
+        ['1130', 'تحصيلات مودعة في حسابات الملاك', 'Owner-held collections', 'asset', 'owner_clearing', '1100'],
+        ['2111', 'ذمم الملاك', 'Property owner payables', 'liability', 'owner_payable', '2000'],
+        ['2112', 'عمولات مندوبي المبيعات المستحقة', 'Sales commissions payable', 'liability', 'commission_payable', '2000'],
+        ['5120', 'عمولات مندوبي المبيعات', 'Sales representative commissions', 'expense', 'sales_commission', '5000'],
+        ['5190', 'مصروفات تشغيلية عامة', 'General operating expenses', 'expense', 'operating_expense', '5000'],
+        ['5210', 'مبالغ مسلمة للملاك', 'Property owner settlements', 'expense', 'owner_settlement', '5000']
+    ];
+
+    foreach ($defaultIntegrationAccounts as $account) {
+        [$code, $nameAr, $nameEn, $type, $category, $parentCode] = $account;
+        $accountCheck = $db->prepare("SELECT account_id FROM acc_chart_of_accounts WHERE account_code=? LIMIT 1");
+        if (!$accountCheck) {
+            $errors[] = 'فشل في فحص حساب التكامل ' . $code . ': ' . $db->error;
+            continue;
+        }
+        $accountCheck->bind_param('s', $code);
+        $accountCheck->execute();
+        $existingAccount = $accountCheck->get_result()->fetch_assoc();
+        $accountCheck->close();
+        if ($existingAccount) {
+            continue;
+        }
+
+        $parentId = null;
+        $accountLevel = 2;
+        $parentCheck = $db->prepare("SELECT account_id, account_level FROM acc_chart_of_accounts WHERE account_code=? LIMIT 1");
+        if ($parentCheck) {
+            $parentCheck->bind_param('s', $parentCode);
+            $parentCheck->execute();
+            $parentRow = $parentCheck->get_result()->fetch_assoc();
+            $parentId = $parentRow ? (int)$parentRow['account_id'] : null;
+            $accountLevel = $parentRow ? ((int)$parentRow['account_level'] + 1) : 2;
+            $parentCheck->close();
+        }
+        $createdBy = isset($_SESSION['useridv']) ? (int)$_SESSION['useridv'] : 0;
+        $insertAccount = $db->prepare("INSERT INTO acc_chart_of_accounts
+            (account_code, account_name_ar, account_name_en, parent_account_id, account_type,
+             account_category, account_level, is_leaf, is_active, created_by, formuid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, UUID())");
+        if (!$insertAccount) {
+            $errors[] = 'فشل في تجهيز حساب التكامل ' . $code . ': ' . $db->error;
+            continue;
+        }
+        $insertAccount->bind_param('sssissii', $code, $nameAr, $nameEn, $parentId, $type, $category, $accountLevel, $createdBy);
+        if (!$insertAccount->execute()) {
+            $errors[] = 'فشل في إضافة حساب التكامل ' . $code . ': ' . $insertAccount->error;
+        } else {
+            $applied[] = 'تم إضافة الحساب ' . $code . ' - ' . $nameAr . '.';
+        }
+        $insertAccount->close();
+    }
+
+    $integrationSettings = [
+        'default_receipt_cash_account_id' => '1111',
+        'default_receipt_bank_account_id' => '1112',
+        'default_receivable_account_id' => '1121',
+        'default_expense_account_id' => '5190',
+        'default_payment_cash_account_id' => '1111',
+        'default_payment_bank_account_id' => '1112',
+        'default_owner_funds_clearing_account_id' => '1130',
+        'default_owner_payable_account_id' => '2111',
+        'default_sales_commission_payable_account_id' => '2112',
+        'default_sales_commission_expense_account_id' => '5120',
+        'default_owner_settlement_account_id' => '5210'
+    ];
+
+    foreach ($integrationSettings as $settingKey => $accountCode) {
+        $accountResult = $db->prepare("SELECT account_id FROM acc_chart_of_accounts WHERE account_code=? LIMIT 1");
+        if (!$accountResult) {
+            continue;
+        }
+        $accountResult->bind_param('s', $accountCode);
+        $accountResult->execute();
+        $accountRow = $accountResult->get_result()->fetch_assoc();
+        $accountResult->close();
+        if (!$accountRow) {
+            continue;
+        }
+        $settingValue = (string)(int)$accountRow['account_id'];
+        $settingCategory = 'amlak_integration';
+        $description = 'حساب افتراضي لتكامل إدارة الأملاك';
+        $settingInsert = $db->prepare("INSERT INTO acc_system_settings
+            (setting_key, setting_value, setting_category, description_ar, formuid)
+            VALUES (?, ?, ?, ?, UUID())
+            ON DUPLICATE KEY UPDATE setting_value=IF(TRIM(COALESCE(setting_value,''))='', VALUES(setting_value), setting_value)");
+        if (!$settingInsert) {
+            $errors[] = 'فشل في تجهيز إعداد التكامل ' . $settingKey . ': ' . $db->error;
+            continue;
+        }
+        $settingInsert->bind_param('ssss', $settingKey, $settingValue, $settingCategory, $description);
+        if (!$settingInsert->execute()) {
+            $errors[] = 'فشل في حفظ إعداد التكامل ' . $settingKey . ': ' . $settingInsert->error;
+        }
+        $settingInsert->close();
+    }
+
     return [
         'success' => count($errors) === 0,
         'message' => count($errors) === 0 ? '' : implode("\n", $errors),
-        'errors' => $errors
+        'errors' => $errors,
+        'applied' => $applied
     ];
 }
