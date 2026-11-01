@@ -1,0 +1,28 @@
+<?php
+require_once __DIR__ . '/voucher_report_common.hnt';
+if (!defined('VOUCHER_REPORT_KEY')) { http_response_code(404); exit; }
+$voucherReportRoute=voucherReportRoutes()[VOUCHER_REPORT_KEY] ?? null;
+if (!$voucherReportRoute) { http_response_code(404); exit; }
+$sc_title=$voucherReportRoute['title'];
+$sc_id=0; // The dedicated permission is checked after the shared authentication shell.
+include_once '../../nocash.hnt';
+if (isset($_GET['report']) && is_scalar($_GET['report']) && (int)$_GET['report']===1) include_once '../../report_header.hnt';
+else include_once '../../header.hnt';
+date_default_timezone_set('Asia/Riyadh');
+$voucherPrintMode=isset($_GET['report']) && is_scalar($_GET['report']) && (int)$_GET['report']===1;
+$footer=$voucherPrintMode ? '../../reportfooter.hnt' : '../../foter.hnt';
+if (!receiptCommissionCan($link,'voucher_reports',$voucherPrintMode ? 'prints' : 'sees')) {
+    echo '<div class="alert alert-danger">ليس لديك صلاحية عرض أو طباعة تقارير السندات.</div>';
+    require $footer; exit;
+}
+$voucherReport=null;
+try {
+    $voucherReport=voucherReportState(VOUCHER_REPORT_KEY,$_GET,$voucherPrintMode);
+    voucherReportValidateDates($voucherReport);
+    $voucherReport['scope']=receiptCommissionScope($link);
+    $voucherReport['ready']=receiptCommissionReady($link);
+} catch (Throwable $error) {
+    if (!isset($voucherReport)) $voucherReport=voucherReportState(VOUCHER_REPORT_KEY,array(),$voucherPrintMode);
+    error_log('Voucher report input: '.$error->getMessage());
+    $voucherReport['error']=$error instanceof RuntimeException ? $error->getMessage() : 'تعذر تحميل التقرير.';
+}

@@ -1,0 +1,65 @@
+<?php
+/** Shared form: set $receiptCommissionFormRows and include inside the voucher form. */
+require_once __DIR__ . '/receipt_commission_helpers.hnt';
+$receiptCommissionUsers = receiptCommissionRows($link, "SELECT userid,COALESCE(NULLIF(TRIM(name),''),username) label FROM user ORDER BY label,userid");
+$receiptCommissionFormRows = $receiptCommissionFormRows ?? array(array('representative_userid'=>0,'commission_type'=>'percentage','commission_value'=>0));
+?>
+<div class="col-12 mb-3" id="receiptCommissionEditor">
+    <div class="card border-success">
+        <div class="card-header bg-success text-white"><i class="bi bi-people me-1"></i>المندوبون وتوزيع العمولات</div>
+        <div class="card-body">
+            <p class="text-muted">النسبة من كامل مبلغ السند، أو مبلغ ثابت لكل مندوب. النظام بدون عمولة. لا يجوز تكرار المندوب أو تجاوز مجموع العمولات مبلغ السند.</p>
+            <input type="hidden" name="receipt_commission_token" value="<?= receiptCommissionEsc(receiptCommissionToken()) ?>">
+            <div class="table-responsive"><table class="table align-middle"><thead><tr><th>المندوب</th><th>طريقة العمولة</th><th>النسبة / المبلغ</th><th>العمولة المتوقعة</th><th></th></tr></thead><tbody id="receiptCommissionRows"></tbody></table></div>
+            <button type="button" class="btn btn-outline-success" id="addReceiptCommission"><i class="bi bi-person-plus me-1"></i>إضافة مندوب</button>
+            <strong class="ms-3">إجمالي العمولات: <span id="receiptCommissionTotal">0.00</span></strong>
+        </div>
+    </div>
+</div>
+<script>
+(function () {
+    var users = <?= json_encode($receiptCommissionUsers, JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_INVALID_UTF8_SUBSTITUTE) ?>;
+    var initial = <?= json_encode($receiptCommissionFormRows, JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_INVALID_UTF8_SUBSTITUTE) ?>;
+    var body = document.getElementById('receiptCommissionRows');
+    function recalculate() {
+        var amountInput = document.getElementById('depositeamount');
+        var amount = parseFloat(amountInput ? amountInput.value : 0) || 0, total = 0;
+        body.querySelectorAll('tr').forEach(function (row) {
+            var system = row.querySelector('select[name="commission_userid[]"]').value === '0';
+            var input = row.querySelector('input');
+            if (system) input.value = '0';
+            input.readOnly = system;
+            var value = parseFloat(input.value)||0;
+            var result = system ? 0 : (row.querySelector('select[name="commission_type[]"]').value === 'fixed' ? value : amount*value/100);
+            result = Math.round(result*100)/100; total += result;
+            row.querySelector('.commission-preview').textContent = result.toFixed(2);
+        });
+        document.getElementById('receiptCommissionTotal').textContent = total.toFixed(2);
+    }
+    function add(rowData) {
+        if (body.children.length >= 20) return;
+        var row = document.createElement('tr');
+        row.innerHTML = '<td><select class="form-select" name="commission_userid[]"></select></td><td><select class="form-select" name="commission_type[]"><option value="percentage">نسبة %</option><option value="fixed">مبلغ ثابت</option></select></td><td><input class="form-control" name="commission_value[]" type="number" min="0" max="99999999.99" step="0.01" required></td><td class="commission-preview"></td><td><button type="button" class="btn btn-outline-danger" aria-label="حذف المندوب"><i class="bi bi-trash"></i></button></td>';
+        var select = row.querySelector('select');
+        select.add(new Option('النظام / بدون مندوب','0'));
+        users.forEach(function (user) { select.add(new Option(user.label,user.userid)); });
+        select.value = String(rowData.representative_userid || 0);
+        row.querySelectorAll('select')[1].value = rowData.commission_type === 'fixed' ? 'fixed' : 'percentage';
+        row.querySelector('input').value = rowData.commission_value || 0;
+        row.querySelector('button').addEventListener('click',function () {
+            if (body.children.length > 1) { if (window.jQuery && jQuery.fn.select2) jQuery(row).find('select.select2-hidden-accessible').select2('destroy'); row.remove(); recalculate(); }
+        });
+        body.appendChild(row);
+        row.addEventListener('input',recalculate); row.addEventListener('change',recalculate);
+        if (window.jQuery) {
+            jQuery(row).find('select').on('change select2:select select2:clear',recalculate);
+            if (jQuery.fn.select2) jQuery(row).find('select').select2({dir:'rtl',width:'100%',theme:'bootstrap-5'});
+        }
+        recalculate();
+    }
+    document.getElementById('addReceiptCommission').addEventListener('click',function () { add({}); });
+    initial.forEach(add);
+    var amountInput = document.getElementById('depositeamount');
+    if (amountInput) amountInput.addEventListener('input',recalculate);
+})();
+</script>

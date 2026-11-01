@@ -18,6 +18,13 @@ if ($is_ajax_request) {
 }
 
 include_once "../../connectdb.hnt";
+require __DIR__.'/includes/active_database.hnt';
+// The legacy backup batch covers the base company only. Never reset a customer
+// database using a backup of another company.
+if (!empty($_SESSION['dbAddPerfix'])) {
+    echo '<div class="alert alert-danger">أداة إعادة التعيين الحالية لا تنشئ نسخة احتياطية لقاعدة الشركة المختارة؛ لا يمكن تنفيذ إعادة التعيين منها.</div>';
+    require '../../foter.hnt'; exit;
+}
 
 // All resettable accounting tables
 $allTables = [
@@ -107,6 +114,12 @@ if (isset($_POST['codeacc']) && isset($_POST['selected_tables'])) {
 
         if ($backupSuccess) {
             $failedTables = [];
+            if (in_array('acc_customers',$selectedTables,true)) {
+                $identityTable=$db->query("SHOW TABLES LIKE 'acc_customer_tenants'");
+                if ($identityTable && $identityTable->num_rows>0 && !$db->query('DELETE FROM acc_customer_tenants')) {
+                    throw new RuntimeException('تعذر إزالة روابط العملاء القديمة؛ لم يبدأ مسح الجداول.');
+                }
+            }
             $db->query("SET FOREIGN_KEY_CHECKS = 0");
             foreach ($selectedTables as $table) {
                 if (!$db->query("TRUNCATE TABLE `$table`")) {

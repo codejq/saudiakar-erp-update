@@ -1,0 +1,51 @@
+<?php
+/** Explicit issue/reprint action for existing office expenses; GET never creates records. */
+ob_start();
+$is_ajax_request=isset($_POST['ajax_submit']) && $_POST['ajax_submit']==='1';
+require_once '../../../reqloginajax.hnt';
+require_once __DIR__ . '/expense_payment_voucher_helpers.hnt';
+$is_ajax_request=isset($_POST['ajax_submit']) && $_POST['ajax_submit']==='1';
+$inTransaction=false;
+try {
+    if (($_SERVER['REQUEST_METHOD'] ?? '')!=='POST') throw new RuntimeException('استخدم زر إصدار السند من قائمة مصروفات المكتب.');
+    if (!receiptCommissionCan($link,'40','adds')) throw new RuntimeException('ليس لديك صلاحية إصدار سند صرف لمصروف مكتب.');
+    expensePaymentVoucherCheckToken($_POST['expense_payment_token'] ?? '');
+    if (!expensePaymentVoucherReady($link)) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث سندات صرف المصروفات.');
+    $expenseId=max(0,intval($_POST['expense_id'] ?? 0));
+    $expense=receiptCommissionRows($link,'SELECT * FROM masrofat WHERE idmasrof=? AND idaqar=0',array($expenseId));
+    if (!$expense) throw new RuntimeException('مصروف المكتب غير موجود.');
+    $beneficiary=trim((string)($_POST['beneficiary_name'] ?? ''));
+    if (trim((string)$expense[0]['beneficiary_name'])==='' && $beneficiary==='' && empty($expense[0]['payment_voucher_id'])) {
+        if ($is_ajax_request) throw new RuntimeException('أدخل اسم المستفيد لإصدار سند المصروف القديم.');
+        ob_end_clean();
+        header('Content-Type: text/html; charset=utf-8');
+        ?>
+        <!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>إصدار سند صرف</title><link rel="stylesheet" href="/aqary/css/bootstrap-5.3.8-dist/css/bootstrap.rtl.min.css"></head>
+        <body class="bg-light"><main class="container py-4" style="max-width:640px"><div class="card shadow-sm border-0"><div class="card-header bg-success text-white">إصدار سند صرف للمصروف #<?= $expenseId ?></div><div class="card-body">
+            <p><?= receiptCommissionEsc($expense[0]['payeddue']) ?> — <?= number_format($expense[0]['amount'],2) ?></p><p class="text-muted">اسم المستفيد غير مسجل في هذا المصروف القديم. أكمله لإصدار السند.</p>
+            <form method="post"><input type="hidden" name="expense_id" value="<?= $expenseId ?>"><input type="hidden" name="expense_payment_token" value="<?= receiptCommissionEsc(expensePaymentVoucherToken()) ?>"><label class="form-label" for="beneficiary_name">اسم المستفيد</label><input class="form-control mb-3" id="beneficiary_name" name="beneficiary_name" maxlength="245" required autofocus><button class="btn btn-success" type="submit">إصدار السند وطباعته</button></form>
+        </div></div></main></body></html>
+        <?php exit;
+    }
+    mysqli_begin_transaction($link); $inTransaction=true;
+    $voucherId=expensePaymentVoucherEnsure($link,$expenseId,array('beneficiary_name'=>$beneficiary));
+    mysqli_commit($link); $inTransaction=false;
+    ob_end_clean();
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(array('success'=>true,'voucher_id'=>$voucherId,'print_url'=>expensePaymentVoucherPrintUrl($voucherId)),JSON_UNESCAPED_UNICODE);
+    } else header('Location: '.expensePaymentVoucherPrintUrl($voucherId),true,303);
+} catch (Throwable $error) {
+    if ($inTransaction) mysqli_rollback($link);
+    error_log('Issue expense voucher: '.$error->getMessage());
+    $message=$error instanceof RuntimeException ? $error->getMessage() : 'تعذر إصدار سند الصرف. راجع سجل الخادم.';
+    ob_end_clean(); http_response_code(400);
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(array('success'=>false,'message'=>$message),JSON_UNESCAPED_UNICODE);
+    } else {
+        header('Content-Type: text/html; charset=utf-8');
+        echo '<div dir="rtl" style="padding:2rem;font-family:Tahoma"><p>'.receiptCommissionEsc($message).'</p><a href="office_expense.hnt">العودة إلى مصروفات المكتب</a></div>';
+    }
+}
+exit;

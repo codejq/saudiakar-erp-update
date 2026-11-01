@@ -1,0 +1,50 @@
+<?php
+require_once __DIR__ . '/../../include/amlak/receipt_commission_helpers.hnt';
+
+function accountingCustomerLinksReady($db) {
+    static $ready=[];
+    $key=spl_object_id($db);
+    if (!array_key_exists($key,$ready)) {
+        $ready[$key]=!empty(receiptCommissionRows($db,"SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='acc_customer_tenants' LIMIT 1"));
+    }
+    return $ready[$key];
+}
+
+/** Read-only fallback for older installations. Never choose among duplicate names. */
+function accountingLegacyCustomerTenants($db,$customerId) {
+    return receiptCommissionRows($db,"SELECT t.mostagerid tenant_id FROM mostagereen t
+        JOIN acc_customers c ON c.customer_name=t.mostagername
+        WHERE c.customer_id=? AND TRIM(c.customer_name)<>''
+          AND NOT EXISTS (SELECT 1 FROM acc_customers other_c WHERE other_c.customer_name=c.customer_name AND other_c.customer_id<>c.customer_id)
+          AND NOT EXISTS (SELECT 1 FROM mostagereen other_t WHERE other_t.mostagername=t.mostagername AND other_t.mostagerid<>t.mostagerid)",[(int)$customerId]);
+}
+
+function accountingCustomerTenantIds($db,$customerId) {
+    if (accountingCustomerLinksReady($db)) {
+        $rows=receiptCommissionRows($db,'SELECT tenant_id FROM acc_customer_tenants WHERE customer_id=?',[(int)$customerId]);
+        if ($rows) return array_map('intval',array_column($rows,'tenant_id'));
+    }
+    $rows=accountingLegacyCustomerTenants($db,$customerId);
+    if (accountingCustomerLinksReady($db)) {
+        $rows=array_filter($rows,function($row) use ($db) {
+            return !receiptCommissionRows($db,'SELECT tenant_id FROM acc_customer_tenants WHERE tenant_id=?',[(int)$row['tenant_id']]);
+        });
+    }
+    return array_map('intval',array_column($rows,'tenant_id'));
+}
+
+/** One source row and one invoice row per journal; allocations cannot duplicate credits. */
+function accountingCustomerReceiptScope($db,$customerId) {
+    $tenants=accountingCustomerTenantIds($db,$customerId);
+    $condition='inv.customer_id=?'; $params=[(int)$customerId];
+    if ($tenants) {
+        $condition='('.$condition.' OR (COALESCE(je.invoice_id,0)=0 AND
+            COALESCE(NULLIF(je.tenant_id,0),s.mostagerid) IN ('.implode(',',array_fill(0,count($tenants),'?')).')))';
+        $params=array_merge($params,$tenants);
+    }
+    $needsLink=!$tenants && !empty(receiptCommissionRows($db,'SELECT 1 FROM mostagereen t JOIN acc_customers c ON c.customer_name=t.mostagername WHERE c.customer_id=? LIMIT 1',[(int)$customerId]));
+    return ['needs_link'=>$needsLink,'joins'=>"LEFT JOIN acc_invoices inv ON je.invoice_id=inv.invoice_id
+        LEFT JOIN sanad s ON s.idsanad=COALESCE(NULLIF(je.sanad_id,0),CASE WHEN je.reference_type='sanad' THEN je.reference_id ELSE NULL END)",
+        'condition'=>$condition,'params'=>$params,'types'=>str_repeat('i',count($params))];
+}

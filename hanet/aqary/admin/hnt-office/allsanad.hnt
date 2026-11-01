@@ -1,0 +1,274 @@
+<?php
+/**
+ * All Vouchers - View and Manage Vouchers
+ * Modern refactored version
+ */
+
+// Extract POST variables
+extract($_REQUEST);
+
+// Initialize variables
+$paymentvou = isset($paymentvou) ? intval($paymentvou) : 0;
+$search = isset($search) ? trim($search) : '';
+$page = isset($page) ? intval($page) : 1;
+$deletevou = isset($deletevou) ? intval($deletevou) : 0;
+$pincodeval = isset($pincodeval) ? trim($pincodeval) : '';
+
+// Set page variables
+if ($paymentvou == 1) {
+    $sc_title = "سندات الصرف";
+    $sc_id = "135";
+    $table = "payment_voucher";
+} else {
+    $sc_title = "سندات القبض";
+    $sc_id = "135";
+    $table = "recive_voucher";
+}
+
+include_once "../../nocash.hnt";
+include_once "../../header.hnt";
+require_once __DIR__ . '/../include/amlak/expense_payment_voucher_helpers.hnt';
+$paymentvou=intval($_REQUEST['paymentvou'] ?? 0);
+$table=$paymentvou===1 ? 'payment_voucher' : 'recive_voucher';
+$voucherExpenseLinksReady=$paymentvou===1 && expensePaymentVoucherReady($link);
+$voucherCategories=$paymentvou===1 ? expensePaymentVoucherCategories($link) : array();
+$voucherCategory=max(-1,intval($_GET['idmasrofcod'] ?? -1));
+
+// Load global variables
+$result = mysql_query("SELECT * FROM global", $link);
+if ($result) {
+    while ($gl = mysql_fetch_array($result)) {
+        if (isset($gl['variblename']) && isset($gl['valuribalevalue'])) {
+            $GLOBALS[$gl['variblename']] = $gl['valuribalevalue'];
+        }
+    }
+}
+
+// Set defaults
+if (!isset($sharwidth) || !$sharwidth) {
+    $sharwidth = "99";
+    $sharheight = "89";
+}
+
+if (!isset($passcode) || !$passcode) {
+    $passcode = "2255";
+}
+
+require "../../hjerymelady.ip";
+
+// Handle delete
+if ($deletevou) {
+    $linkedExpense=$voucherExpenseLinksReady ? receiptCommissionRows($link,'SELECT expense_id FROM payment_voucher WHERE id=? AND expense_id IS NOT NULL',array(intval($deletevou))) : array();
+    if ($linkedExpense) {
+        echo '<div class="alert alert-warning">هذا السند مرتبط بمصروف مكتب؛ لا يمكن حذفه منفرداً.</div>';
+    } else {
+    $sql = "SELECT id, ryial, halala, sanaddate, receivedfrom, thrsumof, dueto FROM $table WHERE id='" . intval($deletevou) . "'";
+    $row = mysql_fetch_array(mysql_query($sql, $link));
+    if ($row['id']) {
+        loginfo("critical", "delete", "تم حذف السند الحر رقم: {$row['id']}
+        <br>البيان: {$row['thrsumof']} {$row['receivedfrom']}
+        <br>المبلغ: {$row['ryial']} {$row['halala']}
+        <br>التاريخ: {$row['dueto']}
+        <br>المستخدم: " . $_SESSION['usernamev'], "", $table, $row['id'], $link);
+    }
+    mysql_query("DELETE FROM $table WHERE id='" . intval($deletevou) . "'", $link);
+    echo "<script>showBootstrapNotification('تم حذف السند بنجاح', 'success', 3000);</script>";
+    }
+}
+?>
+
+<!-- Main Content -->
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <!-- Page Header -->
+            <div class="card mb-4 shadow-sm border-0">
+                <div class="card-header text-white" style="background: <?= $paymentvou ? 'linear-gradient(135deg, #29a0f0ff 0%, #146594ff 100%)' : 'linear-gradient(135deg, #0a7047 0%, #0d9488 100%)' ?>;">
+                    <h4 class="mb-0">
+                        <i class="<?= $paymentvou ? 'bi bi-file-earmark-text' : 'bi bi-receipt' ?> me-2"></i>
+                        <?= $sc_title ?>
+                    </h4>
+                </div>
+                <div class="card-body p-4">
+                    <!-- Search Form -->
+                    <form action="?" method="get" class="row g-3">
+                        <input type="hidden" name="paymentvou" value="<?= $paymentvou ?>">
+                        <input type="hidden" name="pincodeval" id="pincodeval" value="">
+
+                        <div class="col-md-6">
+                            <label for="search" class="form-label fw-bold">
+                                <i class="bi bi-search me-1"></i>
+                                بحث في السندات
+                            </label>
+                            <input type="text" class="form-control" name="search" id="search"
+                                   value="<?= htmlspecialchars($search) ?>"
+                                   placeholder="ابحث برقم السند، الاسم، المبلغ، التاريخ...">
+                        </div>
+
+                        <?php if ($voucherExpenseLinksReady) { ?><div class="col-md-3"><label class="form-label" for="idmasrofcod">تصنيف المصروف</label><select class="form-select" name="idmasrofcod" id="idmasrofcod"><option value="-1">جميع التصنيفات</option><option value="0" <?= $voucherCategory===0 ? 'selected' : '' ?>>سندات قديمة غير مصنفة</option><?php foreach ($voucherCategories as $voucherCategoryRow) { ?><option value="<?= intval($voucherCategoryRow['idmasrofcod']) ?>" <?= $voucherCategory===intval($voucherCategoryRow['idmasrofcod']) ? 'selected' : '' ?>><?= receiptCommissionEsc($voucherCategoryRow['masrofkind']) ?></option><?php } ?></select></div><?php } ?>
+                        <div class="<?= $voucherExpenseLinksReady ? 'col-md-3' : 'col-md-6' ?> d-flex align-items-end gap-2">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="bi bi-search me-1"></i>
+                                بحث
+                            </button>
+                            <button type="button" class="btn btn-secondary" onclick="document.getElementById('search').value=''; if(this.form.elements.idmasrofcod) $(this.form.elements.idmasrofcod).val('-1').trigger('change'); this.form.submit();">
+                                <i class="bi bi-arrow-clockwise me-1"></i>
+                                عرض الكل
+                            </button>
+                            <button type="button" class="btn btn-warning" onclick="window.location.href='voucherhome.hnt';">
+                                <i class="bi bi-arrow-left me-1"></i>
+                                عودة
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+<script>
+function updatecode() {
+    $('#pincodeval').val($('#pincode').val());
+}
+</script>
+
+<?php
+// Build WHERE clause for search
+$where = "";
+if ($search) {
+    $where = " WHERE
+        id LIKE '%" . addslashes($search) . "%' OR
+        ryial LIKE '%" . addslashes($search) . "%' OR
+        halala LIKE '%" . addslashes($search) . "%' OR
+        sanaddate LIKE '%" . addslashes($search) . "%' OR
+        receivedfrom LIKE '%" . addslashes($search) . "%' OR
+        chekorcash LIKE '%" . addslashes($search) . "%' OR
+        checknumber LIKE '%" . addslashes($search) . "%' OR
+        bankname LIKE '%" . addslashes($search) . "%' OR
+        checknumberen LIKE '%" . addslashes($search) . "%' OR
+        banknameen LIKE '%" . addslashes($search) . "%' OR
+        thrsumof LIKE '%" . addslashes($search) . "%' OR
+        dueto LIKE '%" . addslashes($search) . "%' OR
+        fmanger LIKE '%" . addslashes($search) . "%' OR
+        accountant LIKE '%" . addslashes($search) . "%' OR
+        casher LIKE '%" . addslashes($search) . "%' OR
+        receivedby LIKE '%" . addslashes($search) . "%' ";
+}
+
+// Pagination
+if ($voucherExpenseLinksReady && $voucherCategory>=0) {
+    $searchCondition=trim($where);
+    $where=$searchCondition!=='' ? ' WHERE ('.preg_replace('/^WHERE\s+/i','',$searchCondition).') AND idmasrofcod='.intval($voucherCategory) : ' WHERE idmasrofcod='.intval($voucherCategory);
+}
+$sql = "SELECT COUNT(id) as dd FROM $table $where";
+$rownum = mysql_fetch_array(mysql_query($sql, $link));
+$rownum = $rownum['dd'];
+$rowperpage = isset($rowperpage) ? intval($rowperpage) : 100;
+$pagenum = ceil($rownum / $rowperpage);
+
+// Display pagination
+echo '<div class="alert alert-info mb-3">';
+echo '<i class="bi bi-info-circle me-2"></i>';
+echo 'عدد السندات: <strong>' . $rownum . '</strong> سند';
+echo '</div>';
+
+if ($pagenum > 1) {
+    echo '<nav aria-label="Page navigation"><ul class="pagination justify-content-center">';
+    $serchquerystring = "&search=" . urlencode($search) . "&paymentvou=" . $paymentvou . '&idmasrofcod=' . $voucherCategory;
+
+    for ($xi = 1; $xi <= $pagenum; $xi++) {
+        $active = ($page == $xi) ? 'active' : '';
+        if (($xi > ($page - 4) && $xi < ($page + 4)) || $xi == 1 || $xi == $pagenum || $xi < 4 || $xi > ($pagenum - 4)) {
+            echo '<li class="page-item ' . $active . '"><a class="page-link" href="allsanad.hnt?page=' . $xi . $serchquerystring . '">' . $xi . '</a></li>';
+        } elseif ($xi == ($page - 4) || $xi == ($page + 4)) {
+            echo '<li class="page-item disabled"><span class="page-link">...</span></li>';
+        }
+    }
+    echo '</ul></nav>';
+}
+
+// Calculate limit
+$limit = ($page - 1) * $rowperpage;
+$limit = $limit . "," . $rowperpage;
+if ($page == 1 || $page == '') {
+    $limit = $rowperpage;
+}
+
+// Get vouchers
+$voucherExtraColumns=$voucherExpenseLinksReady ? ",expense_id,idmasrofcod,COALESCE((SELECT c.masrofkind FROM masrofattakweed c WHERE c.idmasrofcod=payment_voucher.idmasrofcod LIMIT 1),'غير مصنف') category_name" : '';
+$sql = "SELECT id, ryial, halala, sanaddate, receivedfrom, thrsumof, dueto {$voucherExtraColumns} FROM $table $where ORDER BY id DESC LIMIT $limit";
+$result = mysql_query($sql, $link);
+?>
+
+            <!-- Vouchers Table -->
+            <div class="card shadow-sm">
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-hover table-striped align-middle">
+                            <thead class="table-light">
+                                <tr>
+                                    <th><i class="bi bi-hash me-1"></i>رقم السند</th>
+                                    <th>جزء</th>
+                                    <th><i class="bi bi-currency-exchange me-1"></i><?= isset($myomla) ? $myomla : 'ريال' ?></th>
+                                    <th><i class="bi bi-calendar me-1"></i>التاريخ</th>
+                                    <th><i class="bi bi-person me-1"></i>الاسم</th>
+                                    <?php if ($voucherExpenseLinksReady) { ?><th>تصنيف المصروف</th><?php } ?>
+                                    <th><i class="bi bi-file-text me-1"></i>البيان</th>
+                                    <th>المبلغ حروف</th>
+                                    <th class="text-center">الإجراءات</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+<?php
+while ($row = mysql_fetch_array($result)) {
+?>
+                                <tr>
+                                    <td><strong><?= htmlspecialchars($row['id']) ?></strong></td>
+                                    <td><?= htmlspecialchars($row['halala']) ?></td>
+                                    <td><?= htmlspecialchars($row['ryial']) ?></td>
+                                    <td><?= htmlspecialchars($row['sanaddate']) ?></td>
+                                    <td><?= htmlspecialchars($row['receivedfrom']) ?></td>
+                                    <?php if ($voucherExpenseLinksReady) { ?><td><?= receiptCommissionEsc($row['category_name']) ?><?php if (!empty($row['expense_id'])) { ?><small class="d-block text-muted">مصروف #<?= intval($row['expense_id']) ?></small><?php } ?></td><?php } ?>
+                                    <td><?= htmlspecialchars($row['dueto']) ?></td>
+                                    <td><?= htmlspecialchars($row['thrsumof']) ?></td>
+                                    <td class="text-center">
+                                        <div class="btn-group btn-group-sm" role="group">
+                                            <button type="button" class="btn btn-primary"
+                                                    onclick="window.location.href='../../admin/include/amlak/selectprintform.hnt?formtype=recivevoucher&id=<?= $row['id'] ?>&paymentvou=<?= $paymentvou ?>&voucer_type=free';"
+                                                    title="طباعة">
+                                                <i class="bi bi-printer"></i>
+                                            </button>
+                                            <button type="button" class="btn btn-info"
+                                                    onclick="openvbs('<?= isset($server) ? $server : '' ?>/aqary/admin/hnt-office/read_word_voucher.hnt?id=<?= $row['id'] ?>&paymentvou=<?= $paymentvou ?>');"
+                                                    title="وورد">
+                                                <i class="bi bi-file-word"></i>
+                                            </button>
+                                            <?php if (empty($row['expense_id'])) { ?><button type="button" class="btn btn-danger <?= "policy_" . $sc_id . "_deleetes" ?>"
+                                                    onclick="confirm('ادخل كلمة المرور الخاصة بالحذف <br> <input type=password name=pincode id=pincode onkeyup=\'updatecode();\'>', 'صلاحية الحذف', function() {
+                                                        if($('#pincodeval').val() !='<?= $passcode ?>') {
+                                                            alert('كود خاطئ');
+                                                            return;
+                                                        }
+                                                        window.location.href ='allsanad.hnt?paymentvou=<?= $paymentvou ?>&deletevou=<?= $row['id'] ?>';
+                                                    });"
+                                                    title="حذف">
+                                                <i class="bi bi-trash"></i>
+                                            </button><?php } ?>
+                                        </div>
+                                    </td>
+                                </tr>
+<?php
+}
+?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<iframe style="display:none" name="wordd" id="wordd"></iframe>
+
+<?php
+include_once "../../footer.hnt";
+?>

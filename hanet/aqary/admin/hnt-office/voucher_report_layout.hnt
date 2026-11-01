@@ -1,0 +1,78 @@
+<?php
+if (!defined('VOUCHER_REPORT_KEY') || !isset($voucherReport)) { http_response_code(404); exit; }
+extract($voucherReport,EXTR_OVERWRITE);
+$reportRoutes=voucherReportRoutes();
+$views=array_column($reportRoutes,'title');
+$views=array_combine(array_keys($reportRoutes),$views);
+$printQuery=$_GET; $printQuery['report']=1; unset($printQuery['page'],$printQuery['view']);
+$filterLabels=array('from'=>'من','to'=>'إلى','representative'=>'رقم المندوب (0 النظام)','idaqar'=>'رقم العقار','idsubaqar'=>'الوحدة',
+    'mostagerid'=>'رقم العميل','idsanad'=>'رقم السند','bankid'=>'رقم الحساب','payment_type'=>'طريقة الدفع','source'=>'المصدر',
+    'posting'=>'الترحيل','settlement'=>'التسوية','rule'=>'نوع العمولة','vat'=>'الضريبة','keyword'=>'البحث','receiver'=>'المحصل','min'=>'المبلغ من','max'=>'المبلغ إلى');
+?>
+<style>
+.voucher-report-title{background:linear-gradient(135deg,#15803d,#0e7490);color:white;border-radius:12px;padding:1.25rem}
+.voucher-report-kpi{border:0;border-inline-start:4px solid #0d9488;box-shadow:0 2px 12px #0f172a12}
+.voucher-report-table th{white-space:nowrap;background:#f1f5f9}.voucher-report-table td{vertical-align:middle}
+@media print{.voucher-screen{display:none!important}.voucher-report-table td,.voucher-report-table th{font-size:10px!important;padding:4px!important}.card{box-shadow:none!important}}
+</style>
+<div class="container-fluid py-4" dir="rtl">
+    <div class="voucher-report-title d-flex flex-wrap justify-content-between gap-3 mb-3">
+        <div><h3><i class="bi bi-bar-chart-line me-1"></i><?= receiptCommissionEsc($views[$view]) ?></h3><div><?= receiptCommissionEsc($startValue) ?> — <?= receiptCommissionEsc($endValue) ?></div></div>
+        <?php if (!$printMode) { ?><div class="voucher-screen"><a class="btn btn-light" target="_blank" href="?<?= receiptCommissionEsc(http_build_query($printQuery)) ?>"><i class="bi bi-printer"></i> طباعة / PDF</a> <a class="btn btn-outline-light" href="voucherhome.hnt">السندات</a></div><?php } ?>
+    </div>
+    <?php if ($error!=='') { ?><div class="alert alert-danger"><?= receiptCommissionEsc($error) ?></div><?php } ?>
+    <?php if ($warning!=='') { ?><div class="alert alert-warning"><?= receiptCommissionEsc($warning) ?></div><?php } ?>
+    <div class="small text-muted mb-3">المدفوع والمتبقي محسوبان حتى نهاية الفترة المختارة. هذه تقارير تحصيل وعمولات وليست قائمة أرباح. <?= $view==='representatives' ? 'مبلغ التحصيل أمام كل مندوب هو السندات التي شارك فيها؛ السند المشترك يحتسب مرة واحدة فقط في إجمالي المقبوضات.' : '' ?></div>
+    <?php if (!$printMode) { ?>
+    <form method="get" action="<?= receiptCommissionEsc($reportFile) ?>" id="voucherReportFilters" class="card shadow-sm border-0 mb-4 voucher-screen"><div class="card-body row g-3 align-items-end">
+        <div class="col-md-4"><label class="form-label">التقرير</label><select class="form-select" id="voucherReportSelect"><?php foreach ($reportRoutes as $key=>$route) { ?><option value="<?= receiptCommissionEsc($route['file']) ?>" <?= $view===$key ? 'selected' : '' ?>><?= receiptCommissionEsc($route['title']) ?></option><?php } ?></select></div>
+        <div class="col-md-2"><label class="form-label">من تاريخ</label><input class="form-control" type="date" name="from" value="<?= receiptCommissionEsc($startValue) ?>" required></div>
+        <div class="col-md-2"><label class="form-label">إلى تاريخ</label><input class="form-control" type="date" name="to" value="<?= receiptCommissionEsc($endValue) ?>" required></div>
+        <div class="col-md-4"><label class="form-label">المندوب</label><select class="form-select" name="representative"><option value="">الجميع</option><option value="0" <?= $representative==='0' ? 'selected' : '' ?>>النظام</option><?php foreach ($users as $u) { ?><option value="<?= intval($u['userid']) ?>" <?= $representative===(string)$u['userid'] ? 'selected' : '' ?>><?= receiptCommissionEsc($u['label']) ?></option><?php } ?></select></div>
+        <div class="col-md-4"><label class="form-label">العقار</label><select class="form-select" name="idaqar"><option value="0">جميع العقارات</option><?php foreach ($properties as $p) { ?><option value="<?= intval($p['idaqar']) ?>" <?= $property===intval($p['idaqar']) ? 'selected' : '' ?>><?= receiptCommissionEsc($p['aqarname']) ?></option><?php } ?></select></div>
+        <?php foreach (array('idsubaqar'=>array('رقم الوحدة',$unit),'mostagerid'=>array('رقم العميل',$tenant),'idsanad'=>array('رقم السند',$receiptId)) as $name=>$field) { ?><div class="col-md-2"><label class="form-label"><?= $field[0] ?></label><input class="form-control" type="number" min="0" name="<?= $name ?>" value="<?= $field[1] ?: '' ?>"></div><?php } ?>
+        <div class="col-md-2"><label class="form-label">المصدر</label><select class="form-select" name="source"><option value="">الكل</option><option value="free" <?= $source==='free' ? 'selected' : '' ?>>سندات حرة</option><option value="rental" <?= $source==='rental' ? 'selected' : '' ?>>عقارات وإيجارات</option></select></div>
+        <div class="col-md-3"><label class="form-label">طريقة الدفع</label><select class="form-select" name="payment_type"><option value="">الجميع</option><?php foreach ($methods as $id=>$label) { ?><option value="<?= $id ?>" <?= $method===(string)$id ? 'selected' : '' ?>><?= $label ?></option><?php } ?></select></div>
+        <div class="col-md-3"><label class="form-label">الحساب البنكي</label><select class="form-select" name="bankid"><option value="">الجميع</option><option value="0" <?= $bank==='0' ? 'selected' : '' ?>>بدون حساب</option><?php foreach ($banks as $b) { ?><option value="<?= intval($b['id']) ?>" <?= $bank===(string)$b['id'] ? 'selected' : '' ?>><?= receiptCommissionEsc($b['bankname'].' '.$b['acountnumber']) ?></option><?php } ?></select></div>
+        <?php foreach (array('posting'=>array('الترحيل',$posting,array('posted'=>'مرتبط بقيد','pending'=>'لم يرحل')),
+            'settlement'=>array('تسوية العمولة',$settlement,array('unpaid'=>'لم تصرف','partial'=>'صرف جزئي','paid'=>'مصروفة بالكامل','none'=>'بدون عمولة')),
+            'rule'=>array('طريقة العمولة',$rule,array('percentage'=>'نسبة','fixed'=>'ثابت')),
+            'vat'=>array('ضريبة',$vatFilter,array('yes'=>'بضريبة','no'=>'بدون ضريبة'))) as $name=>$field) { ?>
+        <div class="col-md-2"><label class="form-label"><?= $field[0] ?></label><select class="form-select" name="<?= $name ?>"><option value="">الكل</option><?php foreach ($field[2] as $key=>$label) { ?><option value="<?= $key ?>" <?= $field[1]===$key ? 'selected' : '' ?>><?= $label ?></option><?php } ?></select></div><?php } ?>
+        <div class="col-md-4"><label class="form-label">العميل / البيان / الملاحظات / مسلسل السند</label><input class="form-control" name="keyword" value="<?= receiptCommissionEsc($keyword) ?>"></div>
+        <div class="col-md-2"><label class="form-label">المحصل</label><input class="form-control" name="receiver" value="<?= receiptCommissionEsc($receiver) ?>"></div>
+        <?php foreach (array('min'=>array('المبلغ من',$min),'max'=>array('المبلغ إلى',$max)) as $name=>$field) { ?><div class="col-md-2"><label class="form-label"><?= $field[0] ?></label><input class="form-control" type="number" min="0" step="0.01" name="<?= $name ?>" value="<?= receiptCommissionEsc($field[1]) ?>"></div><?php } ?>
+        <div class="col-md-2"><label class="form-label">لكل صفحة</label><select name="per_page" class="form-select"><?php foreach (array(50,100,250) as $size) { ?><option <?= $perPage===$size ? 'selected' : '' ?>><?= $size ?></option><?php } ?></select></div>
+        <div class="col-md-2"><button class="btn btn-success w-100"><i class="bi bi-search"></i> عرض التقرير</button></div>
+        <div class="col-md-2"><a class="btn btn-outline-secondary w-100" href="<?= receiptCommissionEsc($reportFile) ?>">مسح الفلاتر</a></div>
+    </div></form>
+    <?php } else { ?><p class="small"><?php foreach ($filterLabels as $key=>$label) { if (isset($_GET[$key]) && is_scalar($_GET[$key]) && (string)$_GET[$key]!=='') echo receiptCommissionEsc($label.': '.$_GET[$key]).' | '; } ?></p><?php } ?>
+    <div class="row g-3 mb-4"><?php foreach (array('receipts'=>'عدد السندات','gross'=>'إجمالي المقبوضات','vat'=>'الضريبة','commission'=>'عمولات مستحقة','paid'=>'المصروف منها','outstanding'=>'الرصيد المتبقي') as $key=>$label) { ?><div class="col-6 col-lg-2"><div class="card voucher-report-kpi h-100"><div class="card-body"><small><?= $label ?></small><div class="fs-5 fw-bold"><?= number_format((float)$totals[$key],$key==='receipts' ? 0 : 2) ?></div></div></div></div><?php } ?></div>
+    <div class="card shadow-sm border-0"><div class="card-header bg-white"><strong><?= receiptCommissionEsc($views[$view]) ?></strong> — <?= number_format($totalRows) ?> صف</div><div class="table-responsive voucher-report-table">
+    <?php if ($shareView && $detailView) { ?>
+        <table class="table table-striped mb-0"><thead><tr><th>السند</th><th>التاريخ</th><th>المندوب</th><th>قاعدة العمولة</th><th>مبلغ السند</th><th>العمولة</th><th>المصروف</th><th>المتبقي</th><th class="voucher-screen">إجراء</th></tr></thead><tbody>
+        <?php foreach ($rows as $r) { ?><tr><td>#<?= intval($r['idsanad']) ?></td><td><?= date('d/m/Y',intval($r['sanaddate'])) ?></td><td><?= receiptCommissionEsc($r['representative_name']) ?></td><td><?= number_format($r['commission_value'],2) ?> <?= $r['commission_type']==='fixed' ? 'ثابت' : '%' ?></td><td><?= number_format($r['depositeamount'],2) ?></td><td><?= number_format($r['share_commission'],2) ?></td><td><?= number_format($r['share_paid'],2) ?></td><td><?= number_format($r['share_outstanding'],2) ?></td><td class="voucher-screen"><?php if ($r['share_outstanding']>0 && $r['split_id']>0) { ?><a class="btn btn-sm btn-outline-success" href="../include/amlak/office_expense.hnt?commission_split_id=<?= intval($r['split_id']) ?>">صرف</a><?php } ?> <a class="btn btn-sm btn-outline-primary" href="receipt_commissions.hnt?idsanad=<?= intval($r['idsanad']) ?>">تفاصيل</a></td></tr><?php } ?>
+        </tbody></table>
+    <?php } elseif ($detailView) { ?>
+        <table class="table table-striped mb-0"><thead><tr><th>السند / التاريخ</th><th>العميل / البيان</th><th>العقار</th><th>الدفع</th><th>المبلغ</th><th>الضريبة</th><th>العمولة</th><th>المصروف</th><th>المتبقي</th><th>قيد المحاسبة</th><th class="voucher-screen">إجراء</th></tr></thead><tbody>
+        <?php foreach ($rows as $r) { ?><tr><td>#<?= intval($r['idsanad']) ?><br><small><?= date('d/m/Y',intval($r['sanaddate'])) ?></small></td><td><?= receiptCommissionEsc($r['mostagername']) ?><br><small><?= receiptCommissionEsc($r['mybyan']) ?></small></td><td><?= receiptCommissionEsc($r['property_name']) ?> / <?= intval($r['idsubaqar']) ?></td><td><?= $methods[intval($r['payment_type'])] ?? 'أخرى' ?></td><td><?= number_format($r['depositeamount'],2) ?></td><td><?= number_format($r['depositeamount_vat'],2) ?></td><td><?= number_format($r['commission'],2) ?></td><td><?= number_format($r['paid'],2) ?></td><td><?= number_format($r['outstanding'],2) ?></td><td><?= intval($r['accounting_entry_id']) ?: 'لم يرحل' ?></td><td class="voucher-screen"><a class="btn btn-sm btn-outline-success" href="receipt_commissions.hnt?idsanad=<?= intval($r['idsanad']) ?>">المندوبون</a> <a class="btn btn-sm btn-outline-primary" target="_blank" href="../include/amlak/selectprintform.hnt?formtype=recivevoucher&amp;id=<?= intval($r['idsanad']) ?>"><i class="bi bi-printer"></i></a></td></tr><?php } ?>
+        </tbody></table>
+    <?php } else { ?>
+        <table class="table table-striped mb-0"><thead><tr><th>التجميع</th><th>السندات</th><th><?= $view==='representatives' ? 'تحصيل السندات المشتركة' : 'المقبوضات' ?></th><th>العمولات</th><th>المصروف</th><th>المتبقي</th></tr></thead><tbody>
+        <?php foreach ($rows as $r) { ?><tr><td><?= receiptCommissionEsc($view==='method' ? ($methods[intval($r['label'])] ?? 'أخرى') : $r['label']) ?><?php if ($view==='representatives' && intval($r['representative_userid'])>0) { ?> <a class="btn btn-sm btn-outline-success voucher-screen" href="representative_statement.hnt?<?= receiptCommissionEsc(http_build_query(array('representative'=>intval($r['representative_userid']),'from'=>$startValue,'to'=>$endValue))) ?>">كشف الحساب والصرف</a><?php } ?></td><td><?= intval($r['receipts']) ?></td><td><?= number_format($r['gross'],2) ?></td><td><?= number_format($r['commission'],2) ?></td><td><?= number_format($r['paid'],2) ?></td><td><?= number_format($r['outstanding'],2) ?></td></tr><?php } ?>
+        </tbody></table>
+    <?php } ?>
+    <?php if (!$rows && $error==='') { ?><p class="text-center text-muted p-5">لا توجد بيانات مطابقة للفلاتر.</p><?php } ?>
+    </div></div>
+    <?php if (!$printMode && $detailView && $pages>1) { ?><nav class="d-flex justify-content-center align-items-center gap-3 mt-4 voucher-screen"><?php if ($pageNumber>1) { $q=$_GET; $q['page']=$pageNumber-1; ?><a class="btn btn-outline-success" href="?<?= receiptCommissionEsc(http_build_query($q)) ?>">السابق</a><?php } ?><span>صفحة <?= $pageNumber ?> من <?= $pages ?></span><?php if ($pageNumber<$pages) { $q=$_GET; $q['page']=$pageNumber+1; ?><a class="btn btn-outline-success" href="?<?= receiptCommissionEsc(http_build_query($q)) ?>">التالي</a><?php } ?></nav><?php } ?>
+</div>
+<?php if (!$printMode) { ?>
+<script>
+(function () {
+    var form=document.getElementById('voucherReportFilters');
+    var report=document.getElementById('voucherReportSelect');
+    if (form && report) form.addEventListener('submit',function () { form.action=report.value; });
+})();
+</script>
+<?php } ?>
+<?php require $footer; ?>

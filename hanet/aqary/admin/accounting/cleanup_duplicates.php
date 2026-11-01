@@ -8,6 +8,7 @@ $sc_id = "211";
 include_once "../../nocash.hnt";
 include_once "../../connectdb.hnt";
 include_once "../../header.hnt";
+require __DIR__.'/includes/active_database.hnt';
 
 $cleanupLog = [];
 $stats = [

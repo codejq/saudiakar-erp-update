@@ -3,6 +3,7 @@
 // This file handles the payment submission and contract renewal
 
 require_once __DIR__ . '/sales_representative_helpers.hnt';
+require_once __DIR__ . '/receipt_commission_helpers.hnt';
 
 if (!isset($maksanad)) $maksanad = isset($_POST['maksanad']) ? intval($_POST['maksanad']) : 0;
 if (!isset($renewfromoutside)) $renewfromoutside = false;
@@ -42,6 +43,8 @@ if (isset($rowegar["vat_type"])) {
 
 // Process payment submission
 if ($maksanad == 2) {
+    $receiptCommissionTransaction = false;
+    try {
     // Extract and sanitize POST data
     $depositeamount = isset($_POST['depositeamount']) ? floatval($_POST['depositeamount']) : 0;
     $kastid = isset($_POST['kastid']) ? intval($_POST['kastid']) : 0;
@@ -61,6 +64,7 @@ if ($maksanad == 2) {
     $oldsanad = isset($_POST['oldsanad']) ? intval($_POST['oldsanad']) : 0;
     $total_vat = isset($_POST['total_vat']) ? floatval($_POST['total_vat']) : 0;
     $bankid = isset($_POST['bankid']) ? intval($_POST['bankid']) : 0;
+    $receiptFormUid = mysql_real_escape_string((string)($_REQUEST['formuid'] ?? ''),$link);
     $salesRepresentativeUserId = amlakValidateSalesRepresentativeId(
         isset($_POST['sales_representative_userid']) ? intval($_POST['sales_representative_userid']) : 0,
         $link
@@ -70,6 +74,19 @@ if ($maksanad == 2) {
         $salesRepresentativeUserId,
         $link
     );
+    $receiptCommissionShares = null;
+    if (isset($_POST['commission_userid']) && !$renewfromoutside) {
+        if (!receiptCommissionCan($link,'41','adds')) throw new RuntimeException('ليس لديك صلاحية إضافة سند قبض.');
+        receiptCommissionCheckToken($_POST['receipt_commission_token'] ?? '');
+        if (!receiptCommissionReady($link)) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث العمولات.');
+        $receiptCommissionShares = receiptCommissionParse($_POST,$depositeamount,$link);
+        $salesCommission = receiptCommissionSummary($receiptCommissionShares);
+        $scope = receiptCommissionScope($link,'s');
+        $allowedUnit = receiptCommissionRows($link,"SELECT s.idaqar FROM amlak s WHERE s.idaqar=? AND {$scope}",array($idaqar));
+        if (!$allowedUnit) throw new RuntimeException('العقار خارج صلاحيات المستخدم.');
+        mysqli_begin_transaction($link);
+        $receiptCommissionTransaction = true;
+    }
     // Update installment payment
     $sql = "SELECT dof3at_tafsel, dof3at FROM aksat WHERE kastid='$kastid'";
     $dof3at_tafsel = mysql_fetch_array(mysql_query($sql, $link));
@@ -89,7 +106,7 @@ if ($maksanad == 2) {
         abs($totalPidAmount  - ($commesion_vat + $depositeamount_vat + $rowks['kastvalue'])) < 0.2) {
         $sql = "UPDATE aksat SET iscomplete=1 WHERE kastid='$kastid'";
         if (!$renewfromoutside) {
-            mysql_query($sql, $link);
+            if (!mysql_query($sql, $link)) throw new RuntimeException('تعذر تحديث حالة القسط.');
 
             // Check if we need to add more installments (backup trigger)
             if (file_exists(__DIR__ . '/payment_trigger_installments.hnt')) {
@@ -123,7 +140,7 @@ if ($maksanad == 2) {
         WHERE kastid='$kastid'";
 
     if (!$renewfromoutside) {
-        mysql_query($sql, $link);
+        if (!mysql_query($sql, $link)) throw new RuntimeException('تعذر تسجيل دفعة القسط.');
     }
 
 
@@ -155,10 +172,10 @@ if ($maksanad == 2) {
         mywater='$mywater',
         services='$services',
         bankid='$bankid',
-        formuid='" . $_REQUEST['formuid'] . "'";
+        formuid='" . $receiptFormUid . "'";
 
     if (!$renewfromoutside && $oldsanad != 1) {
-        mysql_query($sql, $link);
+        if (!mysql_query($sql, $link)) throw new RuntimeException('تعذر تسجيل حركة الإيراد.');
     }
 
     // Insert receipt voucher
@@ -187,16 +204,20 @@ if ($maksanad == 2) {
         sales_commission_value='" . $salesCommission['value'] . "',
         sales_commission_amount='" . $salesCommission['amount'] . "',
         notes='" . addslashes($notes) . "',
-        formuid='" . $_REQUEST['formuid'] . "'";
+        formuid='" . $receiptFormUid . "'";
 
     if (!$renewfromoutside) {
-        mysql_query($sql, $link);
+        if (!mysql_query($sql, $link)) throw new RuntimeException('تعذر حفظ سند القبض.');
         $idsanad = mysql_insert_id();
+
+        if ($receiptCommissionShares !== null) receiptCommissionSave($link,$idsanad,$receiptCommissionShares);
 
         if ($idsanad > 0) {
             if (strlen($_REQUEST['formuid']) > 5) {
-                mysql_query("UPDATE eradat SET sanadrakam = '$idsanad' WHERE formuid = '" . $_REQUEST['formuid'] . "'", $link);
-                mysql_query("UPDATE sanad SET sanadrakam = '$idsanad' WHERE formuid = '" . $_REQUEST['formuid'] . "'", $link);
+                if (!mysql_query("UPDATE eradat SET sanadrakam = '$idsanad' WHERE formuid = '" . $receiptFormUid . "'", $link)
+                    || !mysql_query("UPDATE sanad SET sanadrakam = '$idsanad' WHERE formuid = '" . $receiptFormUid . "'", $link)) {
+                    throw new RuntimeException('تعذر ربط حركة الإيراد بالسند.');
+                }
             }
 
             // Generate QR code
@@ -239,8 +260,13 @@ if ($maksanad == 2) {
             created_by_userid = " . ($userid ?? 1) . ",
             created_at = " . time();
 
-    mysql_query($sql, $link);
+    if (!mysql_query($sql, $link)) throw new RuntimeException('تعذر تسجيل تاريخ الدفعة.');
     $paymentHistoryId = mysql_insert_id();
+
+    if ($receiptCommissionTransaction) {
+        mysqli_commit($link);
+        $receiptCommissionTransaction = false;
+    }
 
 
     if (function_exists('loginfo')) {
@@ -285,6 +311,17 @@ if ($maksanad == 2) {
 
     if ($renewfromoutside) {
         exit();
+    }
+    } catch (Throwable $receiptCommissionError) {
+        if ($receiptCommissionTransaction) mysqli_rollback($link);
+        error_log('Receipt payment: ' . $receiptCommissionError->getMessage());
+        $receiptCommissionMessage = $receiptCommissionError instanceof RuntimeException
+            ? $receiptCommissionError->getMessage() : 'تعذر حفظ سند القبض. راجع سجل الخادم.';
+        if ($is_ajax_request) {
+            echo json_encode(array('success'=>false,'message'=>$receiptCommissionMessage),JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        $mytitile = '<div class="alert alert-danger">' . receiptCommissionEsc($receiptCommissionMessage) . '</div>';
     }
 }
 ?>

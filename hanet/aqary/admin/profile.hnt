@@ -1,0 +1,83 @@
+<?php
+if (session_status()===PHP_SESSION_NONE) session_start();
+if ((int)($_SESSION['useridv'] ?? 0)<=0 || empty($_SESSION['usernamev'])) {
+    header('Location: /aqary/admin/login.hnt'); exit;
+}
+// Legacy includes extract request variables. Restrict this self-service endpoint
+// before loading them: actor, company, permissions and session are never inputs.
+$profileAllowed=array_fill_keys(['action','name','phone','email','current_password','new_password','confirm_password','csrf_token'],true);
+$_POST=array_intersect_key($_POST,$profileAllowed); $_GET=[]; $_REQUEST=$_POST;
+$sc_title='الملف الشخصي'; $sc_id=0;
+require_once __DIR__.'/../reqlogin.hnt';
+require_once __DIR__.'/include/profile_helpers.hnt';
+header('Cache-Control: no-store');
+$profileError=''; $profileReady=userProfileReady($link);
+if ($_SERVER['REQUEST_METHOD']==='POST') {
+    try {
+        $action=$_POST['action'] ?? '';
+        if ($action==='details') userProfileSaveDetails($link,$_POST);
+        elseif ($action==='photo') userProfileSavePhoto($link,$_POST,$_FILES['photo'] ?? []);
+        elseif ($action==='remove_photo') userProfileRemovePhoto($link,$_POST);
+        elseif ($action==='password') {
+            userProfileChangePassword($link,$_POST);
+            session_regenerate_id(true);
+            $cookie=session_get_cookie_params();
+            setcookie(session_name(),session_id(),['expires'=>!empty($_SESSION['remember_me']) ? time()+94608000 : 0,
+                'path'=>$cookie['path'] ?: '/','domain'=>$cookie['domain'],
+                'secure'=>!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS']!=='off','httponly'=>true,'samesite'=>'Lax']);
+        } else throw new RuntimeException('اختر عملية صحيحة.');
+        userProfileSyncCookies();
+        $_SESSION['profile_flash']=$action==='password' ? 'تم تغيير كلمة المرور بنجاح.' : 'تم تحديث ملفك الشخصي بنجاح.';
+        header('Location: /aqary/admin/profile.hnt',true,303); exit;
+    } catch (Throwable $error) {
+        error_log('Self-service profile: '.$error->getMessage());
+        $profileError=$error instanceof RuntimeException ? $error->getMessage() : 'تعذر تحديث الملف الشخصي. حاول مجدداً.';
+    }
+}
+$profileRows=userProfileRows($link,'SELECT * FROM user WHERE userid=?',[(int)$_SESSION['useridv']]);
+if (!$profileRows) { header('Location: /aqary/admin/login.hnt'); exit; }
+$profile=$profileRows[0]; unset($profile['password']);
+$profileSuccess=(string)($_SESSION['profile_flash'] ?? ''); unset($_SESSION['profile_flash']);
+$profilePhoto=userProfilePhotoUrl($profile['profile_photo'] ?? '');
+$profileCsrf=userProfileToken();
+require_once __DIR__.'/../header.hnt';
+?>
+<div class="container py-4" dir="rtl" style="max-width:1100px">
+    <div class="d-flex align-items-center gap-2 mb-4"><i class="bi bi-person-circle fs-2 text-success"></i><h3 class="mb-0">الملف الشخصي</h3></div>
+    <?php if (!$profileReady) { ?><div class="alert alert-warning">افتح إدارة الأملاك لتثبيت تحديث الملف الشخصي قبل حفظ التعديلات.</div><?php } ?>
+    <?php if ($profileError!=='') { ?><div class="alert alert-danger" role="alert"><?= userProfileEsc($profileError) ?></div><?php } ?>
+    <?php if ($profileSuccess!=='') { ?><div class="alert alert-success" role="status"><?= userProfileEsc($profileSuccess) ?></div><?php } ?>
+    <div class="row g-4">
+        <div class="col-lg-4"><div class="card border-0 shadow-sm"><div class="card-body text-center p-4">
+            <?php if ($profilePhoto!=='') { ?><img src="<?= userProfileEsc($profilePhoto) ?>" alt="الصورة الشخصية" class="rounded-circle border mb-3" width="128" height="128" style="object-fit:cover"><?php } else { ?><div class="rounded-circle bg-light text-success d-inline-flex align-items-center justify-content-center mb-3" style="width:128px;height:128px"><i class="bi bi-person-fill" style="font-size:4rem"></i></div><?php } ?>
+            <h5><?= userProfileEsc(userProfileDisplayName($profile)) ?></h5><p class="text-muted" dir="ltr"><?= userProfileEsc($profile['username']) ?></p>
+            <form method="post" enctype="multipart/form-data" class="text-start">
+                <input type="hidden" name="action" value="photo"><input type="hidden" name="csrf_token" value="<?= userProfileEsc($profileCsrf) ?>">
+                <label class="form-label" for="profilePhoto">تغيير الصورة الشخصية</label>
+                <input class="form-control" id="profilePhoto" name="photo" type="file" accept="image/jpeg,image/png,image/gif,image/webp" required <?= !$profileReady ? 'disabled' : '' ?>>
+                <div class="form-text mb-3">JPG أو PNG أو GIF أو WEBP، حتى 10 ميغابايت. يتم ضبط الصورة تلقائياً.</div>
+                <button class="btn btn-outline-success w-100" <?= !$profileReady ? 'disabled' : '' ?>><i class="bi bi-upload me-1"></i>حفظ الصورة</button>
+            </form>
+            <?php if ($profilePhoto!=='' && $profileReady) { ?><form method="post" class="mt-2"><input type="hidden" name="action" value="remove_photo"><input type="hidden" name="csrf_token" value="<?= userProfileEsc($profileCsrf) ?>"><button class="btn btn-link text-danger btn-sm">حذف الصورة</button></form><?php } ?>
+        </div></div></div>
+        <div class="col-lg-8">
+            <div class="card border-0 shadow-sm mb-4"><div class="card-header bg-white py-3"><strong><i class="bi bi-person-vcard me-1"></i>بياناتي الشخصية</strong></div><div class="card-body p-4">
+                <form method="post"><input type="hidden" name="action" value="details"><input type="hidden" name="csrf_token" value="<?= userProfileEsc($profileCsrf) ?>">
+                    <div class="row g-3"><div class="col-12"><label for="profileName" class="form-label">الاسم الحقيقي</label><input class="form-control" id="profileName" name="name" maxlength="244" autocomplete="name" value="<?= userProfileEsc($profile['name']) ?>" required></div>
+                    <div class="col-md-6"><label for="profilePhone" class="form-label">رقم الهاتف / الجوال</label><input class="form-control" id="profilePhone" name="phone" type="tel" maxlength="50" autocomplete="tel" dir="ltr" value="<?= userProfileEsc($profile['phone'] ?? '') ?>"></div>
+                    <div class="col-md-6"><label for="profileEmail" class="form-label">البريد الإلكتروني</label><input class="form-control" id="profileEmail" name="email" type="email" maxlength="254" autocomplete="email" dir="ltr" value="<?= userProfileEsc($profile['email'] ?? '') ?>"></div></div>
+                    <button class="btn btn-success mt-3" <?= !$profileReady ? 'disabled' : '' ?>><i class="bi bi-check-lg me-1"></i>حفظ البيانات</button>
+                </form>
+            </div></div>
+            <div class="card border-0 shadow-sm"><div class="card-header bg-white py-3"><strong><i class="bi bi-shield-lock me-1"></i>تغيير كلمة المرور</strong></div><div class="card-body p-4">
+                <form method="post"><input type="hidden" name="action" value="password"><input type="hidden" name="csrf_token" value="<?= userProfileEsc($profileCsrf) ?>">
+                    <div class="mb-3"><label for="currentPassword" class="form-label">كلمة المرور الحالية</label><input class="form-control" id="currentPassword" name="current_password" type="password" autocomplete="current-password" required></div>
+                    <div class="row g-3"><div class="col-md-6"><label for="newPassword" class="form-label">كلمة المرور الجديدة</label><input class="form-control" id="newPassword" name="new_password" type="password" minlength="8" autocomplete="new-password" required><div class="form-text">استخدم 8 أحرف على الأقل.</div></div>
+                    <div class="col-md-6"><label for="confirmPassword" class="form-label">تأكيد كلمة المرور الجديدة</label><input class="form-control" id="confirmPassword" name="confirm_password" type="password" minlength="8" autocomplete="new-password" required></div></div>
+                    <button class="btn btn-outline-primary mt-3" <?= !$profileReady ? 'disabled' : '' ?>><i class="bi bi-key me-1"></i>تغيير كلمة المرور</button>
+                </form>
+            </div></div>
+        </div>
+    </div>
+</div>
+<?php require __DIR__.'/../foter.hnt'; ?>

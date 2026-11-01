@@ -1,0 +1,61 @@
+<?php
+/** Normalize an uploaded logo while retaining the path used by every legacy report. */
+function resizeCompanyLogoGif($sourcePath,$targetPath,$maxWidth=400) {
+    if (!function_exists('imagecreatetruecolor') || !function_exists('imagegif')) {
+        throw new RuntimeException('معالجة صور الشعار غير متاحة على الخادم.');
+    }
+    $info=@getimagesize($sourcePath);
+    $decoders=[IMAGETYPE_JPEG=>'imagecreatefromjpeg',IMAGETYPE_PNG=>'imagecreatefrompng',IMAGETYPE_GIF=>'imagecreatefromgif',IMAGETYPE_WEBP=>'imagecreatefromwebp'];
+    if (!$info || empty($info[0]) || empty($info[1]) || !isset($decoders[$info[2]]) || !function_exists($decoders[$info[2]])) {
+        throw new RuntimeException('اختر صورة شعار صحيحة من نوع JPG أو PNG أو GIF أو WEBP.');
+    }
+    $source=null; $scaled=null; $output=null; $temporary=null;
+    try {
+        $source=@($decoders[$info[2]])($sourcePath);
+        if (!$source) throw new RuntimeException('تعذر قراءة صورة الشعار. اختر ملف صورة صالحاً.');
+        $originalWidth=imagesx($source); $originalHeight=imagesy($source);
+        $width=min(max(1,(int)$maxWidth),$originalWidth);
+        $height=max(1,(int)round($originalHeight*$width/$originalWidth));
+        $temporary=@tempnam(dirname($targetPath),'logo-');
+        if ($temporary===false) throw new RuntimeException('تعذر تجهيز ملف الشعار الجديد.');
+
+        if ($info[2]===IMAGETYPE_GIF && $width===$originalWidth) {
+            // Preserve existing animation and palette when a GIF needs no resizing.
+            if (!@copy($sourcePath,$temporary)) throw new RuntimeException('تعذر حفظ الشعار الجديد.');
+        } else {
+            // GD resizes the first frame of oversized animated GIFs.
+            $scaled=imagecreatetruecolor($width,$height);
+            imagealphablending($scaled,false); imagesavealpha($scaled,true);
+            imagefill($scaled,0,0,imagecolorallocatealpha($scaled,255,255,255,127));
+            if (!imagecopyresampled($scaled,$source,0,0,0,0,$width,$height,$originalWidth,$originalHeight)) {
+                throw new RuntimeException('تعذر تصغير صورة الشعار.');
+            }
+            // GIF has binary transparency. Composite soft edges over white, then
+            // reserve one palette entry for the fully transparent background.
+            $output=imagecreatetruecolor($width,$height);
+            imagefill($output,0,0,imagecolorallocate($output,255,255,255));
+            imagealphablending($output,true);
+            imagecopy($output,$scaled,0,0,0,0,$width,$height);
+            if (!imagetruecolortopalette($output,true,255)) throw new RuntimeException('تعذر تجهيز ألوان الشعار.');
+            $transparent=imagecolorallocate($output,1,2,3);
+            if ($transparent===false) throw new RuntimeException('تعذر تجهيز شفافية الشعار.');
+            imagecolortransparent($output,$transparent);
+            for ($y=0;$y<$height;$y++) {
+                for ($x=0;$x<$width;$x++) {
+                    if (((imagecolorat($scaled,$x,$y)>>24)&127)>=64) imagesetpixel($output,$x,$y,$transparent);
+                }
+            }
+            if (!@imagegif($output,$temporary)) throw new RuntimeException('تعذر حفظ الشعار الجديد.');
+        }
+        // Write beside the destination and replace only after processing succeeds.
+        // An invalid upload or failed conversion cannot truncate the current logo.
+        $existingPermissions=@fileperms($targetPath);
+        @chmod($temporary,$existingPermissions!==false ? ($existingPermissions&0777) : 0644);
+        if (!@rename($temporary,$targetPath)) throw new RuntimeException('تعذر استبدال الشعار الحالي. حاول مجدداً.');
+        $temporary=null;
+        return ['width'=>$width,'height'=>$height,'resized'=>$width<$originalWidth];
+    } finally {
+        unset($source,$scaled,$output);
+        if ($temporary!==null && is_file($temporary)) @unlink($temporary);
+    }
+}

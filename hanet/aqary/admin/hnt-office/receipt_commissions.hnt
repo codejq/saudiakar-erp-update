@@ -1,0 +1,75 @@
+<?php
+$sc_title = 'مندوبو سند القبض وعمولاته';
+$sc_id = 0; // Dedicated screen permission is checked below, after authentication.
+include_once '../../nocash.hnt';
+include_once '../../header.hnt';
+require_once __DIR__ . '/../include/amlak/receipt_commission_helpers.hnt';
+$receiptId = max(0,intval($_GET['idsanad'] ?? $_POST['idsanad'] ?? 0));
+$error=''; $success=false; $receipt=null; $shares=array(); $payments=array(); $audit=array(); $locked=true;
+try {
+    if (!receiptCommissionCan($link,'voucher_commissions')) throw new RuntimeException('ليس لديك صلاحية عرض عمولات السندات.');
+    $scope=receiptCommissionScope($link);
+    $receipts=receiptCommissionRows($link,"SELECT s.* FROM sanad s WHERE s.idsanad=? AND {$scope}",array($receiptId));
+    if (!$receipts) throw new RuntimeException('السند غير موجود أو خارج صلاحيات المستخدم.');
+    $receipt=$receipts[0];
+    if (!receiptCommissionReady($link)) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث العمولات.');
+    if (($_SERVER['REQUEST_METHOD'] ?? '')==='POST') {
+        if (!receiptCommissionCan($link,'voucher_commissions','edits')) throw new RuntimeException('ليس لديك صلاحية تعديل توزيع العمولات.');
+        receiptCommissionCheckToken($_POST['receipt_commission_token'] ?? '');
+        mysqli_begin_transaction($link);
+        try {
+            if (($_POST['action'] ?? '')==='materialize_legacy') {
+                $lockedReceipt=receiptCommissionRows($link,'SELECT * FROM sanad WHERE idsanad=? FOR UPDATE',array($receiptId));
+                receiptCommissionMaterializeLegacy($link,$lockedReceipt[0]);
+            } else {
+                $newShares=receiptCommissionParse($_POST,$receipt['depositeamount'],$link);
+                receiptCommissionSave($link,$receiptId,$newShares);
+            }
+            mysqli_commit($link); $success=true;
+        }
+        catch (Throwable $saveError) { mysqli_rollback($link); throw $saveError; }
+        $receipt=receiptCommissionRows($link,'SELECT * FROM sanad WHERE idsanad=?',array($receiptId))[0];
+    }
+    $shares=receiptCommissionLoad($link,$receipt);
+    $payments=receiptCommissionRows($link,'SELECT m.*,c.representative_userid FROM masrofat m
+        JOIN sanad_commission_splits c ON c.split_id=m.commission_split_id WHERE c.idsanad=? ORDER BY m.payeddate,m.idmasrof',array($receiptId));
+    $audit=receiptCommissionRows($link,"SELECT a.*,COALESCE(NULLIF(u.name,''),u.username,'ترحيل قديم') changed_by
+        FROM sanad_commission_audit a LEFT JOIN user u ON u.userid=a.changed_by_userid
+        WHERE a.idsanad=? ORDER BY a.audit_id DESC LIMIT 20",array($receiptId));
+    $locked=!empty($receipt['accounting_entry_id']) || !empty($payments) || !receiptCommissionCan($link,'voucher_commissions','edits');
+} catch (Throwable $exception) {
+    $error=$exception instanceof RuntimeException ? $exception->getMessage() : 'تعذر تحميل تفاصيل العمولة.';
+    error_log('Receipt commission editor: '.$exception->getMessage());
+}
+?>
+<div class="container-fluid py-4" dir="rtl">
+    <div class="card border-0 shadow-sm mb-4"><div class="card-header text-white" style="background:linear-gradient(135deg,#15803d,#0e7490)"><h4><i class="bi bi-people"></i> مندوبو السند #<?= $receiptId ?></h4></div><div class="card-body d-flex flex-wrap justify-content-between gap-3">
+        <span><?= receiptCommissionEsc($receipt['mostagername'] ?? '') ?> — المبلغ <?= number_format($receipt['depositeamount'] ?? 0,2) ?></span>
+        <div><a class="btn btn-outline-success" href="voucher_commissions_report.hnt?idsanad=<?= $receiptId ?>&amp;from=2000-01-01&amp;to=<?= date('Y-m-d') ?>">تقرير وطباعة</a> <a class="btn btn-outline-secondary" href="voucherhome.hnt">السندات</a></div>
+    </div></div>
+    <?php if ($error!=='') { ?><div class="alert alert-danger"><?= receiptCommissionEsc($error) ?></div><?php } ?>
+    <?php if ($success) { ?><div class="alert alert-success">تم حفظ توزيع العمولات.</div><?php } ?>
+    <?php if ($receipt && $shares) { ?>
+    <?php if (!$locked) { ?>
+    <form method="post"><input type="hidden" name="idsanad" value="<?= $receiptId ?>"><input type="hidden" id="depositeamount" value="<?= receiptCommissionEsc($receipt['depositeamount']) ?>">
+        <?php $receiptCommissionFormRows=$shares; require __DIR__ . '/../include/amlak/receipt_commission_form.hnt'; ?>
+        <button class="btn btn-success mb-4" type="submit"><i class="bi bi-check-circle"></i> حفظ التوزيع</button>
+    </form>
+    <?php } else { ?><div class="alert alert-info">التوزيع للقراءة فقط عند وجود صرف أو ترحيل محاسبي، أو عدم امتلاك صلاحية التعديل.</div><?php } ?>
+    <?php if (empty($shares[0]['split_id']) && receiptCommissionCan($link,'voucher_commissions','edits')) { ?>
+    <form method="post" class="mb-4"><input type="hidden" name="idsanad" value="<?= $receiptId ?>"><input type="hidden" name="action" value="materialize_legacy"><input type="hidden" name="receipt_commission_token" value="<?= receiptCommissionEsc(receiptCommissionToken()) ?>"><button class="btn btn-outline-success">تجهيز العمولة القديمة للصرف بنفس قيمتها المحفوظة</button></form>
+    <?php } ?>
+    <div class="card shadow-sm border-0 mb-4"><div class="table-responsive"><table class="table table-striped mb-0"><thead><tr><th>المندوب</th><th>القاعدة</th><th>العمولة</th><th>المصروف</th><th>المتبقي</th><th></th></tr></thead><tbody>
+    <?php foreach ($shares as $share) {
+        $id=intval($share['representative_userid']); $paid=0;
+        foreach ($payments as $payment) if (intval($payment['commission_split_id'])===intval($share['split_id'] ?? 0)) $paid+=(float)$payment['amount'];
+        $user=$id>0 ? receiptCommissionRows($link,"SELECT COALESCE(NULLIF(name,''),username) label FROM user WHERE userid=?",array($id)) : array();
+        $name=$id===0 ? 'النظام' : ($user[0]['label'] ?? 'مندوب #'.$id);
+        $remaining=max(0,(float)$share['commission_amount']-$paid);
+    ?><tr><td><?= receiptCommissionEsc($name) ?></td><td><?= number_format($share['commission_value'],2) ?> <?= $share['commission_type']==='fixed' ? 'ثابت' : '%' ?></td><td><?= number_format($share['commission_amount'],2) ?></td><td><?= number_format($paid,2) ?></td><td><?= number_format($remaining,2) ?></td><td><?php if ($remaining>0 && !empty($share['split_id'])) { ?><a class="btn btn-sm btn-outline-success" href="../include/amlak/office_expense.hnt?commission_split_id=<?= intval($share['split_id']) ?>">تسجيل صرف</a><?php } ?></td></tr><?php } ?>
+    </tbody></table></div></div>
+    <div class="card shadow-sm border-0 mb-4"><div class="card-header bg-white">سجل صرف العمولات</div><div class="table-responsive"><table class="table mb-0"><thead><tr><th>المصروف</th><th>التاريخ</th><th>المستفيد</th><th>دفع بواسطة</th><th>البيان</th><th>المبلغ</th></tr></thead><tbody><?php foreach ($payments as $p) { ?><tr><td>#<?= intval($p['idmasrof']) ?></td><td><?= date('d/m/Y',intval($p['payeddate'])) ?></td><td><?= receiptCommissionEsc($p['beneficiary_name']) ?></td><td><?= receiptCommissionEsc($p['payedby']) ?></td><td><?= receiptCommissionEsc($p['payeddue']) ?></td><td><?= number_format($p['amount'],2) ?></td></tr><?php } ?><?php if (!$payments) { ?><tr><td colspan="6" class="text-center text-muted">لم تسجل دفعات للعمولات.</td></tr><?php } ?></tbody></table></div></div>
+    <div class="card shadow-sm border-0"><div class="card-header bg-white">آخر تعديلات التوزيع</div><div class="card-body"><?php foreach ($audit as $entry) { ?><details class="mb-2"><summary><?= date('d/m/Y H:i',intval($entry['changed_at'])) ?> — <?= receiptCommissionEsc($entry['changed_by']) ?></summary><pre dir="ltr" class="text-wrap"><?= receiptCommissionEsc($entry['after_json']) ?></pre></details><?php } ?><?php if (!$audit) { ?><span class="text-muted">لا توجد تعديلات مسجلة.</span><?php } ?></div></div>
+    <?php } ?>
+</div>
+<?php require '../../foter.hnt'; ?>

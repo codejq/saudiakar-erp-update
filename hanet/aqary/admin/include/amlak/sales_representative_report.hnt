@@ -7,7 +7,7 @@ $sc_id = '49';
 
 include_once '../../../nocash.hnt';
 include_once '../../../header.hnt';
-require_once __DIR__ . '/sales_representative_helpers.hnt';
+require_once __DIR__ . '/receipt_commission_helpers.hnt';
 
 $selectedYear = isset($_GET['year']) ? intval($_GET['year']) : intval(date('Y'));
 if ($selectedYear < 2000 || $selectedYear > 2100) {
@@ -27,6 +27,9 @@ for ($month = 1; $month <= 12; $month++) {
 }
 
 $reportError = '';
+$commissionSource = receiptCommissionSource($link);
+$receiptScope = receiptCommissionScope($link);
+$monthlySeenReceipts = array();
 $sql = "SELECT
             s.idsanad,
             s.sanadrakam,
@@ -35,17 +38,19 @@ $sql = "SELECT
             s.depositeamount,
             s.mybyan,
             s.payment_type,
-            s.sales_representative_userid,
-            s.sales_commission_type,
-            s.sales_commission_value,
-            s.sales_commission_amount,
+            rc.representative_userid AS sales_representative_userid,
+            rc.commission_type AS sales_commission_type,
+            rc.commission_value AS sales_commission_value,
+            rc.commission_amount AS sales_commission_amount,
             u.name AS representative_name,
             u.username AS representative_username
         FROM sanad s
-        LEFT JOIN user u ON u.userid = s.sales_representative_userid
+        JOIN {$commissionSource} rc ON rc.idsanad=s.idsanad
+        LEFT JOIN user u ON u.userid = rc.representative_userid
         WHERE s.sanaddate >= '{$yearStart}'
           AND s.sanaddate < '{$yearEnd}'
           AND s.depositeamount > 0
+          AND {$receiptScope}
         ORDER BY s.sanaddate, s.idsanad";
 $result = mysql_query($sql, $link);
 if (!$result) {
@@ -74,9 +79,12 @@ if (!$result) {
 
         $collectedAmount = floatval($row['depositeamount']);
         $commissionAmount = floatval($row['sales_commission_amount']);
-        $months[$monthNumber]['collected'] += $collectedAmount;
+        if (!isset($monthlySeenReceipts[$row['idsanad']])) {
+            $months[$monthNumber]['collected'] += $collectedAmount;
+            $months[$monthNumber]['receipts']++;
+            $monthlySeenReceipts[$row['idsanad']] = true;
+        }
         $months[$monthNumber]['commission'] += $commissionAmount;
-        $months[$monthNumber]['receipts']++;
         $months[$monthNumber]['representatives'][$representativeKey]['collected'] += $collectedAmount;
         $months[$monthNumber]['representatives'][$representativeKey]['commission'] += $commissionAmount;
         $months[$monthNumber]['representatives'][$representativeKey]['receipts'][] = $row;
@@ -93,6 +101,10 @@ foreach ($months as $monthData) {
 }
 
 $currentSettings = amlakGetSalesCommissionSettings($link);
+if ($reportError!=='') {
+    error_log('Sales representative report: '.$reportError);
+    $reportError='تعذر تحميل التقرير. راجع سجل الخادم.';
+}
 function salesRepresentativePaymentTypeLabel($paymentType) {
     $labels = array(1 => 'نقدي', 2 => 'شيك', 3 => 'أخرى', 4 => 'تحويل', 5 => 'شبكة');
     return isset($labels[intval($paymentType)]) ? $labels[intval($paymentType)] : 'غير محدد';

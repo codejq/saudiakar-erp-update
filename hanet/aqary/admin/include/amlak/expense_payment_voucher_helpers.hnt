@@ -1,0 +1,161 @@
+<?php
+/** One payment voucher per office expense; all writes use the caller's customer transaction. */
+require_once __DIR__ . '/receipt_commission_helpers.hnt';
+
+function expensePaymentVoucherReady($link) {
+    static $ready=array();
+    $key=spl_object_id($link);
+    if (!array_key_exists($key,$ready)) {
+        $rows=receiptCommissionRows($link,"SELECT COUNT(*) n FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE()
+            AND ((TABLE_NAME='payment_voucher' AND COLUMN_NAME IN ('expense_id','idmasrofcod','cheqdate1'))
+                OR (TABLE_NAME='masrofat' AND COLUMN_NAME='payment_voucher_id'))");
+        $ready[$key]=intval($rows[0]['n'])===4;
+    }
+    return $ready[$key];
+}
+
+function expensePaymentVoucherCategories($link) {
+    return receiptCommissionRows($link,'SELECT idmasrofcod,masrofkind FROM masrofattakweed ORDER BY masrofkind,idmasrofcod');
+}
+
+function expensePaymentVoucherToken() {
+    if (empty($_SESSION['expense_payment_voucher_csrf'])) $_SESSION['expense_payment_voucher_csrf']=bin2hex(random_bytes(24));
+    return $_SESSION['expense_payment_voucher_csrf'];
+}
+
+function expensePaymentVoucherCheckToken($token) {
+    if (!is_string($token) || $token==='' || !hash_equals(expensePaymentVoucherToken(),$token)) {
+        throw new RuntimeException('انتهت صلاحية النموذج. أعد تحميل الصفحة.');
+    }
+}
+
+function expensePaymentVoucherPrintUrl($voucherId) {
+    return '/aqary/admin/include/amlak/selectprintform.hnt?formtype=recivevoucher&id='.intval($voucherId).'&paymentvou=1&voucer_type=free';
+}
+
+function expensePaymentVoucherLock($link,$uid) {
+    $database=receiptCommissionRows($link,'SELECT DATABASE() db')[0]['db'];
+    $name='office-expense:'.substr(hash('sha256',$database.':'.$uid),0,45);
+    $result=receiptCommissionRows($link,'SELECT GET_LOCK(?,5) acquired',array($name));
+    if (empty($result[0]['acquired'])) throw new RuntimeException('المصروف قيد الحفظ، حاول بعد لحظات.');
+    return $name;
+}
+
+/** Pure mapping, also used to verify amounts and printing without writing to the database. */
+function expensePaymentVoucherData($expense,$details=array()) {
+    if (intval($expense['idaqar'] ?? -1)!==0) throw new RuntimeException('الإصدار التلقائي خاص بمصروفات المكتب فقط.');
+    $amount=receiptCommissionCents(number_format((float)($expense['amount'] ?? 0),2,'.',''))/100;
+    $vatInput=$details['vat'] ?? '0';
+    $vat=receiptCommissionCents($vatInput==='' ? '0' : $vatInput)/100;
+    if ($amount<=0 || $vat>$amount) throw new RuntimeException('مبلغ المصروف أو ضريبته غير صحيح.');
+    $beneficiary=trim((string)($expense['beneficiary_name'] ?? ''));
+    if ($beneficiary==='') throw new RuntimeException('اسم المستفيد غير مسجل في المصروف. أدخله لإصدار السند.');
+    if (intval($expense['payeddate'] ?? 0)<=0) throw new RuntimeException('تاريخ المصروف غير صحيح؛ صححه قبل إصدار السند.');
+    $method=intval($details['payment_type'] ?? 1);
+    if (!in_array($method,array(1,2,3,4,5),true)) throw new RuntimeException('طريقة الدفع غير صحيحة.');
+    $chequeDate=trim((string)($details['cheqdate1'] ?? ''));
+    $parts=array('','','');
+    if ($chequeDate!=='') {
+        $date=DateTimeImmutable::createFromFormat('!d/m/Y',$chequeDate,new DateTimeZone('Asia/Riyadh'));
+        if (!$date || $date->format('d/m/Y')!==$chequeDate) throw new RuntimeException($method===4 ? 'تاريخ التحويل غير صحيح؛ استخدم يوم/شهر/سنة.' : 'تاريخ الشيك غير صحيح.');
+        $parts=explode('/',$chequeDate);
+    }
+    $note=(string)($details['notes'] ?? '');
+    if ($method===3 && trim((string)($details['chekorcashother'] ?? ''))!=='') {
+        $note='طريقة الدفع: '.trim((string)$details['chekorcashother']).($note!=='' ? "\n".$note : '');
+    }
+    if (mb_strlen($beneficiary,'UTF-8')>200) $note='المستفيد: '.$beneficiary.($note!=='' ? "\n".$note : '');
+    return array(
+        'ryial'=>$amount,'halala'=>'0','sanaddate'=>(new DateTimeImmutable('@'.intval($expense['payeddate'])))->setTimezone(new DateTimeZone('Asia/Riyadh'))->format('d/m/Y'),
+        'receivedfrom'=>mb_substr($beneficiary,0,200,'UTF-8'),'chekorcash'=>$method,'payment_type'=>$method,
+        'checknumber'=>mb_substr((string)($details['cheqnumber'] ?? ''),0,40,'UTF-8'),
+        'checknumberen'=>mb_substr((string)($details['cheqnumber'] ?? ''),0,40,'UTF-8'),
+        'bankname'=>mb_substr((string)($details['cheqon'] ?? ''),0,120,'UTF-8'),
+        'banknameen'=>mb_substr((string)($details['cheqon'] ?? ''),0,120,'UTF-8'),
+        'cheqdate1'=>$chequeDate,'ddd'=>$parts[0],'mmm'=>$parts[1],'yyy'=>$parts[2],
+        'dddd'=>$parts[0],'mmmm'=>$parts[1],'yyyy'=>$parts[2],
+        'thrsumof'=>number_format($amount,2,'.',''),'dueto'=>mb_substr(trim((string)($expense['payeddue'] ?? ''))!=='' ? (string)$expense['payeddue'] : (string)($expense['category_name'] ?? 'مصروف مكتب'),0,240,'UTF-8'),
+        'fmanger'=>mb_substr((string)($expense['payedby'] ?? ''),0,120,'UTF-8'),
+        'accountant'=>mb_substr((string)($expense['payedby'] ?? ''),0,120,'UTF-8'),
+        'casher'=>mb_substr((string)($expense['payedby'] ?? ''),0,120,'UTF-8'),
+        'receivedby'=>mb_substr($beneficiary,0,120,'UTF-8'),
+        'vat'=>$vat,'notes'=>mb_substr($note,0,500,'UTF-8'),
+        'mostagervatnumber'=>mb_substr((string)($details['mostagervatnumber'] ?? ''),0,100,'UTF-8'),
+        'suppliername'=>mb_substr((string)($details['suppliername'] ?? ''),0,100,'UTF-8'),
+        'suppliervatnumber'=>mb_substr((string)($details['suppliervatnumber'] ?? ''),0,100,'UTF-8'),
+        'formuid'=>'office-expense-'.intval($expense['idmasrof']),
+        'expense_id'=>intval($expense['idmasrof']),'idmasrofcod'=>intval($expense['idmasrofcod']),
+    );
+}
+
+function expensePaymentVoucherEnsure($link,$expenseId,$details=array()) {
+    if (!expensePaymentVoucherReady($link)) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث سندات صرف المصروفات.');
+    $expense=receiptCommissionRows($link,'SELECT m.*,c.masrofkind category_name FROM masrofat m
+        LEFT JOIN masrofattakweed c ON c.idmasrofcod=m.idmasrofcod WHERE m.idmasrof=? AND m.idaqar=0 FOR UPDATE',array(intval($expenseId)));
+    if (!$expense) throw new RuntimeException('مصروف المكتب غير موجود.');
+    $expense=$expense[0];
+    $existing=receiptCommissionRows($link,'SELECT id FROM payment_voucher WHERE expense_id=? FOR UPDATE',array(intval($expenseId)));
+    if ($existing) {
+        $voucherId=intval($existing[0]['id']);
+        if (!empty($expense['payment_voucher_id']) && intval($expense['payment_voucher_id'])!==$voucherId) throw new RuntimeException('تعذر التحقق من ربط المصروف بسند الصرف.');
+        receiptCommissionQuery($link,'UPDATE masrofat SET payment_voucher_id=? WHERE idmasrof=?',array($voucherId,intval($expenseId)))->close();
+        return $voucherId;
+    }
+    if (!empty($expense['payment_voucher_id'])) throw new RuntimeException('سند المصروف المرتبط غير موجود؛ راجع مسؤول النظام.');
+    if (trim((string)$expense['beneficiary_name'])==='' && !empty($details['beneficiary_name'])) {
+        $name=trim((string)$details['beneficiary_name']);
+        if (mb_strlen($name,'UTF-8')>245) throw new RuntimeException('اسم المستفيد يتجاوز الطول المسموح.');
+        receiptCommissionQuery($link,'UPDATE masrofat SET beneficiary_name=? WHERE idmasrof=?',array($name,intval($expenseId)))->close();
+        $expense['beneficiary_name']=$name;
+    }
+    $fields=expensePaymentVoucherData($expense,$details);
+    $columns=implode(',',array_keys($fields));
+    $placeholders=implode(',',array_fill(0,count($fields),'?'));
+    receiptCommissionQuery($link,"INSERT INTO payment_voucher ({$columns}) VALUES ({$placeholders})",array_values($fields))->close();
+    $voucherId=mysqli_insert_id($link);
+    receiptCommissionQuery($link,'UPDATE masrofat SET payment_voucher_id=? WHERE idmasrof=?',array($voucherId,intval($expenseId)))->close();
+    return $voucherId;
+}
+
+function expensePaymentVoucherCreateManual($link,$data) {
+    if (!receiptCommissionCan($link,'135','adds') || !receiptCommissionCan($link,'40','adds')) throw new RuntimeException('ليس لديك صلاحية إضافة سند صرف ومصروف مكتب.');
+    expensePaymentVoucherCheckToken($data['expense_payment_token'] ?? '');
+    if (!expensePaymentVoucherReady($link)) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث سندات صرف المصروفات.');
+    $uid=(string)($data['formuid'] ?? '');
+    if (!preg_match('/^[a-zA-Z0-9]{20,100}$/D',$uid)) throw new RuntimeException('تعذر التحقق من النموذج. أعد تحميل الصفحة.');
+    $amount=receiptCommissionCents($data['depositeamount'] ?? '')/100;
+    $category=intval($data['idmasrofcod'] ?? 0);
+    if ($category<=0 || !receiptCommissionRows($link,'SELECT idmasrofcod FROM masrofattakweed WHERE idmasrofcod=?',array($category))) throw new RuntimeException('اختر تصنيف المصروف من القائمة.');
+    $name=trim((string)($data['mostagername'] ?? '')); $description=trim((string)($data['mybyan'] ?? ''));
+    if ($name==='' || mb_strlen($name,'UTF-8')>245 || mb_strlen($description,'UTF-8')>245) throw new RuntimeException('اسم المستفيد أو البيان غير صحيح.');
+    $dateValue=trim((string)($data['period'] ?? ''));
+    $date=DateTimeImmutable::createFromFormat('!d/m/Y',$dateValue,new DateTimeZone('Asia/Riyadh'));
+    if (!$date || $date->format('d/m/Y')!==$dateValue || intval($date->format('Y'))<1900) throw new RuntimeException('تاريخ السند غير صحيح.');
+    $userid=intval($_SESSION['useridv'] ?? 0);
+    $user=receiptCommissionRows($link,"SELECT COALESCE(NULLIF(name,''),username) label FROM user WHERE userid=?",array($userid));
+    $details=array('vat'=>$data['depositeamount_vat'] ?? '0','payment_type'=>$data['payment_type'] ?? 1,
+        'chekorcashother'=>$data['chekorcashother'] ?? '',
+        'cheqnumber'=>$data['cheqnumber'] ?? '','cheqon'=>$data['cheqon'] ?? '','cheqdate1'=>$data['cheqdate1'] ?? '',
+        'notes'=>$data['notes'] ?? '','mostagervatnumber'=>$data['mostagervatnumber'] ?? '',
+        'suppliername'=>$data['suppliername'] ?? '','suppliervatnumber'=>$data['suppliervatnumber'] ?? '');
+    // Validate all voucher details before touching the expense ledger.
+    expensePaymentVoucherData(array('idaqar'=>0,'idmasrof'=>0,'amount'=>$amount,'beneficiary_name'=>$name,
+        'payeddate'=>$date->getTimestamp(),'payeddue'=>$description,'payedby'=>$user[0]['label'] ?? '','idmasrofcod'=>$category),$details);
+    $lock=expensePaymentVoucherLock($link,$uid);
+    try {
+        mysqli_begin_transaction($link);
+        $existing=receiptCommissionRows($link,'SELECT idmasrof FROM masrofat WHERE idaqar=0 AND formuid=? LIMIT 1 FOR UPDATE',array($uid));
+        if ($existing) $expenseId=intval($existing[0]['idmasrof']);
+        else {
+            receiptCommissionQuery($link,"INSERT INTO masrofat (idaqar,idsubaqar,idmasrofcod,amount,payedby,paid_by_userid,
+                beneficiary_userid,beneficiary_name,created_by_userid,created_at,payeddue,payeddate,tasfia,formuid,fund_source)
+                VALUES (0,0,?,?,?,?,0,?,?,?,?,?,'',?,0)",array($category,$amount,$user[0]['label'] ?? '',$userid,
+                $name,$userid,time(),$description,$date->getTimestamp(),$uid))->close();
+            $expenseId=mysqli_insert_id($link);
+        }
+        $voucherId=expensePaymentVoucherEnsure($link,$expenseId,$details);
+        mysqli_commit($link);
+        return array('expense_id'=>$expenseId,'voucher_id'=>$voucherId,'print_url'=>expensePaymentVoucherPrintUrl($voucherId),'duplicate'=>!empty($existing));
+    } catch (Throwable $error) { mysqli_rollback($link); throw $error; }
+    finally { receiptCommissionRows($link,'SELECT RELEASE_LOCK(?) released',array($lock)); }
+}

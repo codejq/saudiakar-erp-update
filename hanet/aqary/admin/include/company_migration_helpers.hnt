@@ -1,0 +1,51 @@
+<?php
+require_once __DIR__.'/../../lib/company_helpers.hnt';
+
+function aqaryCompanyCanMigrate($link) {
+    $id = (int)($_SESSION['useridv'] ?? 0);
+    $username = $_SESSION['usernamev'] ?? '';
+    if ($id <= 0 || !is_string($username) || $username === '') return false;
+    $stmt = $link->prepare("SELECT g.allprevilage,MAX(COALESCE(p.edits,0)) permitted
+        FROM user u JOIN usergroups g ON g.groupid=u.groupid
+        LEFT JOIN ugroupscreen p ON p.groupid=u.groupid AND p.screenid=84
+        WHERE u.userid=? AND u.username=? GROUP BY g.allprevilage");
+    if (!$stmt || !$stmt->execute([$id,$username])) return false;
+    $row = $stmt->get_result()->fetch_assoc(); $stmt->close();
+    return $row && (!empty($row['allprevilage']) || !empty($row['permitted']));
+}
+
+function aqaryCompanyMigrationToken() {
+    if (empty($_SESSION['company_migration_csrf'])) $_SESSION['company_migration_csrf'] = bin2hex(random_bytes(32));
+    return $_SESSION['company_migration_csrf'];
+}
+
+function aqaryCompanyMigrationConnection($database) {
+    $connection = null;
+    try {
+        $connection = @new mysqli($GLOBALS['qdb_server'], $GLOBALS['qdb_user'], $GLOBALS['qdb_pass'], $database, (int)$GLOBALS['qdb_port']);
+        if ($connection->connect_errno || !$connection->set_charset('utf8mb4')) throw new RuntimeException('Company migration connection failed');
+        return $connection;
+    } catch (Throwable $error) {
+        error_log('Company migration connection: '.$error->getMessage());
+        if ($connection && !$connection->connect_errno) $connection->close();
+        throw new RuntimeException('تعذر الاتصال بقاعدة بيانات الشركة المختارة.');
+    }
+}
+
+function aqaryRunCompanyMigration($sourceLink, array $data) {
+    if (!aqaryCompanyCanMigrate($sourceLink)) throw new RuntimeException('ليس لديك صلاحية تحديث الشركات.');
+    $token = $data['company_migration_csrf'] ?? '';
+    if (!is_string($token) || !hash_equals(aqaryCompanyMigrationToken(), $token)) throw new RuntimeException('انتهت صلاحية النموذج. أعد تحميل الصفحة وحاول مجدداً.');
+    $database = $data['company_database'] ?? '';
+    if (!is_string($database) || !in_array($database, aqaryCompanyDatabases($sourceLink), true)) throw new RuntimeException('الشركة المختارة غير موجودة أو غير مسموح بتحديثها.');
+    // A separate connection keeps the signed-in company, session and header intact.
+    $target = aqaryCompanyMigrationConnection($database);
+    try {
+        require_once __DIR__.'/amlak/migrations.hnt';
+        if (!AmlakMigrations::run($target, true)) throw new RuntimeException('لم يكتمل تحديث الشركة. راجع سجل الخادم وأعد المحاولة.');
+    } finally {
+        $target->close();
+    }
+    return preg_match('/_company_([0-9]+)$/D', $database, $match)
+        ? 'تم تحديث الشركة رقم '.$match[1].' بنجاح.' : 'تم تحديث الشركة الرئيسية بنجاح.';
+}

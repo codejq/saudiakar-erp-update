@@ -8,7 +8,8 @@
  * @author Real Estate System
  */
 
-include_once dirname(__DIR__) . "/schema_migrations.hnt";
+require __DIR__ . '/active_database.hnt';
+require_once __DIR__ . '/customer_identity.hnt';
 
 class AccountingManager {
     private $db;
@@ -24,10 +25,7 @@ class AccountingManager {
         }
         $this->db = $db;
         $this->userId = $userId;
-        $migrationResult = runAccountingSchemaMigrations($this->db);
-        if (!$migrationResult['success']) {
-            $this->schemaMigrationErrors = $migrationResult['errors'] ?? [$migrationResult['message'] ?? 'Schema migration error'];
-        }
+        // Schema updates run through the shared versioned migration entry points.
         $this->fiscalYear = $this->getCurrentFiscalYear();
     }
 
@@ -1996,7 +1994,14 @@ class AccountingManager {
             return $result;
         }
 
-        $dimensionClause = $this->buildDimensionFilterClause($filters);
+        $paymentFilters=$filters;
+        unset($paymentFilters['tenant_id']);
+        $dimensionClause = $this->buildDimensionFilterClause($paymentFilters);
+        if (!empty($filters['tenant_id'])) {
+            $dimensionClause['sql'].=' AND COALESCE(NULLIF(je.tenant_id,0),s.mostagerid)=?';
+            $dimensionClause['params'][]=(int)$filters['tenant_id'];
+            $dimensionClause['types'].='i';
+        }
         $this->ensureInvoiceDimensionColumnsExist();
         $invoiceDimensionClause = $this->buildInvoiceDimensionFilterClause($filters);
 
@@ -2051,6 +2056,9 @@ class AccountingManager {
         $openingInvoiceStmt->close();
 
         $receivableCode = '1121';
+        $receiptScope=accountingCustomerReceiptScope($this->db,$customerId);
+        $result['needs_tenant_link']=$receiptScope['needs_link'];
+        $receivableId=(int)$this->getSetting('default_receivable_account_id',0);
         $paymentSql = "SELECT
                 je.entry_id,
                 je.entry_number,
@@ -2062,21 +2070,21 @@ class AccountingManager {
                 MAX(cc.cost_center_code) AS cost_center_code,
                 MAX(cc.cost_center_name_ar) AS cost_center_name_ar
             FROM acc_journal_entries je
-            INNER JOIN acc_invoices inv ON je.invoice_id = inv.invoice_id
+            " . $receiptScope['joins'] . "
             INNER JOIN acc_journal_entry_lines jel ON je.entry_id = jel.entry_id
             INNER JOIN acc_chart_of_accounts acc ON jel.account_id = acc.account_id
             LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
             LEFT JOIN acc_journals j ON je.journal_id = j.journal_id
             WHERE je.status = 'posted'
-              AND inv.customer_id = ?
-              AND acc.account_code = ?
+              AND " . $receiptScope['condition'] . "
+              AND (acc.account_code = ? OR acc.account_id = ?)
               AND (jel.credit_amount - jel.debit_amount) > 0
               AND je.entry_date BETWEEN ? AND ?" . $dimensionClause['sql'] . "
             GROUP BY je.entry_id
             ORDER BY je.entry_date, je.entry_id";
         $paymentStmt = $this->db->prepare($paymentSql);
-        $paymentParams = array_merge([$customerId, $receivableCode, $dateFrom, $dateTo], $dimensionClause['params']);
-        $paymentTypes = 'isss' . $dimensionClause['types'];
+        $paymentParams = array_merge($receiptScope['params'],[$receivableCode,$receivableId,$dateFrom,$dateTo],$dimensionClause['params']);
+        $paymentTypes = $receiptScope['types'].'siss'.$dimensionClause['types'];
         $paymentStmt->bind_param($paymentTypes, ...$paymentParams);
         $paymentStmt->execute();
         $payments = $paymentStmt->get_result()->fetch_all(MYSQLI_ASSOC);
@@ -2086,20 +2094,20 @@ class AccountingManager {
             FROM (
                 SELECT je.entry_id, SUM(jel.credit_amount - jel.debit_amount) AS amount
                 FROM acc_journal_entries je
-                INNER JOIN acc_invoices inv ON je.invoice_id = inv.invoice_id
+                " . $receiptScope['joins'] . "
                 INNER JOIN acc_journal_entry_lines jel ON je.entry_id = jel.entry_id
                 INNER JOIN acc_chart_of_accounts acc ON jel.account_id = acc.account_id
                 LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
                 WHERE je.status = 'posted'
-                  AND inv.customer_id = ?
-                  AND acc.account_code = ?
+                  AND " . $receiptScope['condition'] . "
+                  AND (acc.account_code = ? OR acc.account_id = ?)
                   AND (jel.credit_amount - jel.debit_amount) > 0
                   AND je.entry_date < ?" . $dimensionClause['sql'] . "
                 GROUP BY je.entry_id
             ) payment_rows";
         $openingPaymentStmt = $this->db->prepare($openingPaymentSql);
-        $openingPaymentParams = array_merge([$customerId, $receivableCode, $dateFrom], $dimensionClause['params']);
-        $openingPaymentTypes = 'iss' . $dimensionClause['types'];
+        $openingPaymentParams = array_merge($receiptScope['params'],[$receivableCode,$receivableId,$dateFrom],$dimensionClause['params']);
+        $openingPaymentTypes = $receiptScope['types'].'sis'.$dimensionClause['types'];
         $openingPaymentStmt->bind_param($openingPaymentTypes, ...$openingPaymentParams);
         $openingPaymentStmt->execute();
         $openingPaymentTotal = (float)($openingPaymentStmt->get_result()->fetch_assoc()['total_amount'] ?? 0);

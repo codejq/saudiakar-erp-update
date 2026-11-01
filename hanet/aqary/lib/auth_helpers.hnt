@@ -1,0 +1,37 @@
+<?php
+require_once __DIR__.'/company_helpers.hnt';
+/** Shared credential checks: existing plaintext accounts remain valid until changed. */
+function aqaryPasswordMatches($plain,$stored) {
+    if (!is_string($plain) || !is_string($stored) || $plain==='') return false;
+    if ((password_get_info($stored)['algoName'] ?? 'unknown')!=='unknown') return password_verify($plain,$stored);
+    return hash_equals($stored,$plain);
+}
+
+function aqaryAuthenticateUser($link,$username,$password,$company=null) {
+    if (!is_string($username) || !is_string($password) || $username==='' || $password==='') return null;
+    if ($company!==null) {
+        if (aqarySelectCompanyDatabase($link,$company)===null) return null;
+    }
+    $stmt=mysqli_prepare($link,'SELECT * FROM user WHERE username=? LIMIT 1');
+    if (!$stmt || !$stmt->execute([$username])) return null;
+    $user=$stmt->get_result()->fetch_assoc(); $stmt->close();
+    return $user && aqaryPasswordMatches($password,$user['password']) ? $user : null;
+}
+
+/** Legacy print/mail integrations still relay the signed-in credentials. Encode once. */
+function aqaryLegacyAuthQuery() {
+    return http_build_query(['username'=>(string)($_SESSION['usernamev'] ?? ''),
+        'password'=>(string)($_SESSION['passwordv'] ?? ''),'company'=>(string)($_SESSION['dbAddPerfix'] ?? '')], '', '&', PHP_QUERY_RFC3986);
+}
+
+function aqaryUserManagementAllowed($link,$operation='sees') {
+    if (!in_array($operation,['sees','adds','edits','deleetes'],true)) return false;
+    $id=(int)($_SESSION['useridv'] ?? 0);
+    if ($id<=0) return false;
+    $stmt=mysqli_prepare($link,"SELECT g.allprevilage,MAX(COALESCE(p.{$operation},0)) permitted FROM user u
+        JOIN usergroups g ON g.groupid=u.groupid LEFT JOIN ugroupscreen p ON p.groupid=u.groupid AND p.screenid=92
+        WHERE u.userid=? GROUP BY g.allprevilage");
+    if (!$stmt || !$stmt->execute([$id])) return false;
+    $row=$stmt->get_result()->fetch_assoc(); $stmt->close();
+    return $row && (!empty($row['allprevilage']) || !empty($row['permitted']));
+}

@@ -7,6 +7,10 @@
  * @version 1.0
  */
 
+require_once __DIR__ . '/../../include/amlak/receipt_commission_helpers.hnt';
+require_once __DIR__ . '/../../include/amlak/expense_payment_voucher_helpers.hnt';
+require_once __DIR__ . '/customer_identity.hnt';
+
 class AmlakAccountingIntegration {
     private $db;
     private $accountingManager;
@@ -22,17 +26,22 @@ class AmlakAccountingIntegration {
             return null;
         }
 
-        $stmt = $this->db->prepare("SELECT entry_id, entry_number FROM acc_journal_entries
+        $stmt = $this->db->prepare("SELECT entry_id, entry_number, status FROM acc_journal_entries
             WHERE {$column}=? OR (reference_type=? AND reference_id=?)
-            ORDER BY entry_id DESC LIMIT 1");
+            ORDER BY entry_id DESC LIMIT 2");
         if (!$stmt) {
-            return null;
+            throw new RuntimeException('تعذر التحقق من القيد المرتبط بالحركة.');
         }
         $sourceId = (int)$sourceId;
         $stmt->bind_param('isi', $sourceId, $referenceType, $sourceId);
         $stmt->execute();
-        $entry = $stmt->get_result()->fetch_assoc();
+        $matches = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
         $stmt->close();
+        if (count($matches)>1) throw new RuntimeException('للحركة أكثر من قيد مرتبط؛ راجع القيود قبل إعادة المزامنة.');
+        $entry=$matches[0] ?? null;
+        if ($entry && $entry['status']!=='posted') {
+            throw new RuntimeException('القيد المرتبط بالحركة مسودة أو ملغى. سوّ حالته في المحاسبة قبل إعادة المزامنة.');
+        }
         return $entry ?: null;
     }
 
@@ -206,6 +215,11 @@ class AmlakAccountingIntegration {
         $context['cost_center_id'] = $propertyContext['cost_center_id'];
         $context['owner_id'] = $context['owner_id'] ?: $propertyContext['owner_id'];
 
+        // Allocate only when a contract identifies exactly one invoice.
+        if (!$context['invoice_id'] && $context['egar_id']) {
+            $invoices=receiptCommissionRows($this->db,'SELECT invoice_id FROM acc_invoices WHERE egar_id=? ORDER BY invoice_id LIMIT 2',[(int)$context['egar_id']]);
+            if (count($invoices)===1) $context['invoice_id']=(int)$invoices[0]['invoice_id'];
+        }
         return $context;
     }
 
@@ -275,6 +289,8 @@ class AmlakAccountingIntegration {
 
         $propertyContext = $this->buildPropertyContext($egar['idaqar'] ?? 0, $egar['idsubaqar'] ?? null);
         $salesJournalId = $this->accountingManager->getDefaultJournalIdByCode('SAL');
+        $customer=$this->syncMostagerAsCustomer((int)$egar['mostagerid']);
+        if (empty($customer['success'])) return $customer;
 
         // Calculate amounts
         $annualPrice = $egar['annualprice'] ?? 0;
@@ -285,7 +301,7 @@ class AmlakAccountingIntegration {
         $invoiceData = [
             'invoice_type' => 'standard',
             'customer_type' => 'tenant',
-            'customer_id' => $egar['mostagerid'] ?? 0,
+            'customer_id' => (int)$customer['customer_id'],
             'customer_name' => $egar['mostagername'] ?? 'مستأجر',
             'customer_vat_number' => $egar['mostagervatnumber'] ?? null,
             'customer_address' => null,
@@ -332,6 +348,26 @@ class AmlakAccountingIntegration {
      * إنشاء قيد من سند القبض
      */
     public function createEntryFromSanad($sanadId) {
+        $this->db->begin_transaction();
+        try {
+            // The same row lock is used by the share editor and payout recorder.
+            $lockedReceipt=receiptCommissionRows($this->db,'SELECT * FROM sanad WHERE idsanad=? FOR UPDATE',array((int)$sanadId));
+            if ($lockedReceipt && receiptCommissionReady($this->db)) receiptCommissionMaterializeLegacy($this->db,$lockedReceipt[0]);
+            $result = $this->buildEntryFromSanad($sanadId);
+            if (!empty($result['success'])) {
+                receiptCommissionQuery($this->db,'UPDATE sanad SET accounting_entry_id=? WHERE idsanad=?',
+                    array((int)$result['entry_id'],(int)$sanadId))->close();
+                $this->db->commit();
+            } else $this->db->rollback();
+            return $result;
+        } catch (Throwable $error) {
+            $this->db->rollback();
+            error_log('Receipt accounting sync: '.$error->getMessage());
+            return ['success'=>false,'message'=>$error instanceof RuntimeException ? $error->getMessage() : 'تعذر ترحيل سند القبض. راجع سجل الخادم.'];
+        }
+    }
+
+    private function buildEntryFromSanad($sanadId) {
         $sanadId = (int)$sanadId;
         $existingEntry = $this->sourceEntry('sanad_id', $sanadId, 'sanad');
         if ($existingEntry) {
@@ -389,7 +425,7 @@ class AmlakAccountingIntegration {
             'egar_id' => $sanadContext['egar_id'],
             'sanad_id' => $sanadId,
             'invoice_id' => $sanadContext['invoice_id'],
-            'sales_representative_userid' => !empty($sanad['sales_representative_userid'])
+            'sales_representative_userid' => ($sanad['sales_commission_type'] ?? '')!=='split' && !empty($sanad['sales_representative_userid'])
                 ? (int)$sanad['sales_representative_userid'] : null,
             'reference_type' => 'sanad',
             'reference_id' => $sanadId,
@@ -430,14 +466,17 @@ class AmlakAccountingIntegration {
             ]
         ];
 
-        $commissionAmount = max(0, round((float)($sanad['sales_commission_amount'] ?? 0), 2));
-        if ($commissionAmount > 0 && !empty($sanad['sales_representative_userid'])) {
+        $commissionShares = receiptCommissionLoad($this->db,$sanad);
+        foreach ($commissionShares as $commissionShare) {
+            $commissionAmount = max(0,round((float)$commissionShare['commission_amount'],2));
+            if ($commissionAmount<=0 || empty($commissionShare['representative_userid'])) continue;
             $commissionExpenseId = $this->accountId('default_sales_commission_expense_account_id', '5120');
             $commissionPayableId = $this->accountId('default_sales_commission_payable_account_id', '2112');
             if ($commissionExpenseId <= 0 || $commissionPayableId <= 0) {
                 return ['success' => false, 'message' => 'حسابات عمولة مندوب المبيعات غير مهيأة.'];
             }
-            $representativeLabel = 'عمولة مندوب المبيعات #' . (int)$sanad['sales_representative_userid'];
+            $representativeLabel = 'عمولة مندوب #' . (int)$commissionShare['representative_userid']
+                . ' / سند #' . $sanadId . ' / حصة #' . (int)($commissionShare['split_id'] ?? 0);
             $lines[] = [
                 'account_id' => $commissionExpenseId,
                 'description' => $representativeLabel,
@@ -462,6 +501,33 @@ class AmlakAccountingIntegration {
      * إنشاء قيد من المصروفات
      */
     public function createEntryFromMasrofat($masrofatId) {
+        try {
+            $sourceExpense=receiptCommissionRows($this->db,'SELECT * FROM masrofat WHERE idmasrof=?',array((int)$masrofatId));
+            if (!empty($sourceExpense[0]['commission_split_id'])) {
+                $share=receiptCommissionRows($this->db,'SELECT idsanad FROM sanad_commission_splits WHERE split_id=?',
+                    array((int)$sourceExpense[0]['commission_split_id']));
+                if (!$share) return ['success'=>false,'message'=>'حصة عمولة المصروف غير موجودة.'];
+                // Finish receipt accrual before starting the payout transaction.
+                $accrual=$this->createEntryFromSanad((int)$share[0]['idsanad']);
+                if (empty($accrual['success'])) return $accrual;
+            }
+            $this->db->begin_transaction();
+            receiptCommissionRows($this->db,'SELECT idmasrof FROM masrofat WHERE idmasrof=? FOR UPDATE',array((int)$masrofatId));
+            $result=$this->buildEntryFromMasrofat($masrofatId);
+            if (!empty($result['success'])) {
+                receiptCommissionQuery($this->db,'UPDATE masrofat SET accounting_entry_id=? WHERE idmasrof=?',
+                    array((int)$result['entry_id'],(int)$masrofatId))->close();
+                $this->db->commit();
+            } else $this->db->rollback();
+            return $result;
+        } catch (Throwable $error) {
+            $this->db->rollback();
+            error_log('Expense accounting sync: '.$error->getMessage());
+            return ['success'=>false,'message'=>$error instanceof RuntimeException ? $error->getMessage() : 'تعذر ترحيل مصروف المكتب. راجع سجل الخادم.'];
+        }
+    }
+
+    private function buildEntryFromMasrofat($masrofatId) {
         $masrofatId = (int)$masrofatId;
         $existingEntry = $this->sourceEntry('masrofat_id', $masrofatId, 'masrofat');
         if (!$existingEntry) {
@@ -518,7 +584,23 @@ class AmlakAccountingIntegration {
             'status' => 'posted'
         ];
 
-        $cashAccountId = $this->accountId('default_payment_cash_account_id', '1111');
+        $paymentMethod=(int)($masrofat['payment_type'] ?? 1);
+        if ((int)($masrofat['idaqar'] ?? 0)===0 && expensePaymentVoucherReady($this->db)) {
+            $paymentVouchers=receiptCommissionRows($this->db,'SELECT id,payment_type,chekorcash FROM payment_voucher WHERE expense_id=? FOR UPDATE',array($masrofatId));
+            if ($paymentVouchers) {
+                $voucher=$paymentVouchers[0];
+                if (!empty($masrofat['payment_voucher_id']) && (int)$masrofat['payment_voucher_id']!==(int)$voucher['id']) {
+                    throw new RuntimeException('ربط سند الصرف بالمصروف غير متطابق.');
+                }
+                $paymentMethod=(int)($voucher['payment_type'] ?: $voucher['chekorcash']);
+            } elseif (!empty($masrofat['payment_voucher_id'])) {
+                throw new RuntimeException('سند صرف المصروف المرتبط غير موجود.');
+            }
+        }
+        if (!in_array($paymentMethod,[1,2,3,4,5],true)) throw new RuntimeException('طريقة دفع المصروف غير صحيحة؛ صحح سند الصرف قبل الترحيل.');
+        $usesBank=(int)($masrofat['bankid'] ?? 0)>0 || in_array($paymentMethod,[2,4,5],true);
+        $paymentAccountId=$usesBank ? $this->accountId('default_payment_bank_account_id','1112')
+            : $this->accountId('default_payment_cash_account_id','1111');
         $expenseAccountId = $this->accountId('default_expense_account_id', '5190');
         if (strpos((string)($masrofat['category_name'] ?? ''), 'رواتب') !== false) {
             $salaryAccountId = $this->accountId('default_salary_expense_account_id', '5110');
@@ -526,8 +608,19 @@ class AmlakAccountingIntegration {
                 $expenseAccountId = $salaryAccountId;
             }
         }
-        if ($cashAccountId <= 0 || $expenseAccountId <= 0) {
-            return ['success' => false, 'message' => 'حساب المصروفات أو الصندوق غير مهيأ.'];
+        if (!empty($masrofat['commission_split_id'])) {
+            $commissionPayout = receiptCommissionRows($this->db,'SELECT idsanad,representative_userid
+                FROM sanad_commission_splits WHERE split_id=?',array((int)$masrofat['commission_split_id']));
+            if (!$commissionPayout) return ['success'=>false,'message'=>'حصة عمولة المصروف غير موجودة.'];
+            if (!$this->sourceEntry('sanad_id',(int)$commissionPayout[0]['idsanad'],'sanad')) {
+                return ['success'=>false,'message'=>'يجب ترحيل استحقاق العمولة قبل تسويتها.'];
+            }
+            $expenseAccountId = $this->accountId('default_sales_commission_payable_account_id','2112');
+            $entryData['sales_representative_userid'] = (int)$commissionPayout[0]['representative_userid'];
+            $entryData['description'] = 'تسوية عمولة سند #' . (int)$commissionPayout[0]['idsanad'] . ' - ' . $description;
+        }
+        if ($paymentAccountId <= 0 || $expenseAccountId <= 0) {
+            return ['success' => false, 'message' => 'حساب المصروفات أو حساب الدفع غير مهيأ.'];
         }
 
         $lines = [
@@ -539,7 +632,7 @@ class AmlakAccountingIntegration {
                 'cost_center_id' => $propertyContext['cost_center_id']
             ],
             [
-                'account_id' => $cashAccountId,
+                'account_id' => $paymentAccountId,
                 'description' => "صرف - {$description}",
                 'debit_amount' => 0,
                 'credit_amount' => $amount,
@@ -557,6 +650,23 @@ class AmlakAccountingIntegration {
      * account, so no office cash is invented.
      */
     public function createEntryFromSanadsarf($sanadsarfId) {
+        try {
+            $this->db->begin_transaction();
+            receiptCommissionRows($this->db,'SELECT sanadid FROM sanadsarf WHERE sanadid=? FOR UPDATE',[(int)$sanadsarfId]);
+            $result=$this->buildEntryFromSanadsarf($sanadsarfId);
+            if (!empty($result['success'])) {
+                receiptCommissionQuery($this->db,'UPDATE sanadsarf SET accounting_entry_id=? WHERE sanadid=?',[(int)$result['entry_id'],(int)$sanadsarfId])->close();
+                $this->db->commit();
+            } else $this->db->rollback();
+            return $result;
+        } catch (Throwable $error) {
+            $this->db->rollback();
+            error_log('Owner settlement sync: '.$error->getMessage());
+            return ['success'=>false,'message'=>$error instanceof RuntimeException ? $error->getMessage() : 'تعذر ترحيل سند التسليم.'];
+        }
+    }
+
+    private function buildEntryFromSanadsarf($sanadsarfId) {
         $sanadsarfId = (int)$sanadsarfId;
         $existingEntry = $this->sourceEntry('sanadsarf_id', $sanadsarfId, 'sanadsarf');
         if ($existingEntry) {
@@ -686,44 +796,46 @@ class AmlakAccountingIntegration {
      * مزامنة المستأجر كعميل
      */
     public function syncMostagerAsCustomer($mostagerId) {
-        // Get mostager details
-        $mostagerQuery = "SELECT * FROM mostagereen WHERE mostagerid = ?";
-        $stmt = $this->db->prepare($mostagerQuery);
-        $stmt->bind_param('i', $mostagerId);
-        $stmt->execute();
-        $mostager = $stmt->get_result()->fetch_assoc();
-
-        if (!$mostager) {
-            return ['success' => false, 'error' => 'Tenant not found'];
+        if (!accountingCustomerLinksReady($this->db)) return ['success'=>false,'message'=>'افتح إدارة الأملاك لتثبيت ربط المستأجرين بعملاء المحاسبة.'];
+        $mostagerId=(int)$mostagerId;
+        $tenant=receiptCommissionRows($this->db,'SELECT * FROM mostagereen WHERE mostagerid=?',[$mostagerId]);
+        if (!$tenant) return ['success'=>false,'message'=>'المستأجر غير موجود.'];
+        $tenant=$tenant[0];
+        $database=receiptCommissionRows($this->db,'SELECT DATABASE() db')[0]['db'];
+        $lockName='acc-customer:'.substr(hash('sha256',$database.':'.$mostagerId),0,45);
+        $lock=receiptCommissionRows($this->db,'SELECT GET_LOCK(?,5) acquired',[$lockName]);
+        if (empty($lock[0]['acquired'])) return ['success'=>false,'message'=>'ربط العميل قيد المعالجة. حاول مجدداً.'];
+        try {
+            $this->db->begin_transaction();
+            $linked=receiptCommissionRows($this->db,'SELECT c.customer_id FROM acc_customer_tenants t JOIN acc_customers c ON c.customer_id=t.customer_id WHERE t.tenant_id=? FOR UPDATE',[$mostagerId]);
+            if ($linked) {
+                $this->db->commit();
+                return ['success'=>true,'customer_id'=>(int)$linked[0]['customer_id'],'existing'=>true];
+            }
+            $candidates=receiptCommissionRows($this->db,'SELECT customer_id FROM acc_customers WHERE customer_name=? ORDER BY customer_id LIMIT 2',[$tenant['mostagername']]);
+            $customerId=0;
+            if (count($candidates)===1) {
+                $candidate=(int)$candidates[0]['customer_id'];
+                foreach (accountingLegacyCustomerTenants($this->db,$candidate) as $possible) {
+                    if ((int)$possible['tenant_id']===$mostagerId) $customerId=$candidate;
+                }
+                if (receiptCommissionRows($this->db,'SELECT tenant_id FROM acc_customer_tenants WHERE customer_id=? AND tenant_id<>?',[$candidate,$mostagerId])) $customerId=0;
+            }
+            if (!$customerId) {
+                receiptCommissionQuery($this->db,'INSERT INTO acc_customers (customer_name,vat_number,phone,email,address,is_active,created_at) VALUES (?,?,?,?,?,1,NOW())',
+                    [$tenant['mostagername'],$tenant['mostagervatnumber'] ?? null,$tenant['mostagerphone'] ?? null,$tenant['mostageremail'] ?? null,$tenant['mostageraddress'] ?? null])->close();
+                $customerId=(int)$this->db->insert_id;
+            }
+            receiptCommissionQuery($this->db,'INSERT INTO acc_customer_tenants (tenant_id,customer_id) VALUES (?,?)',[$mostagerId,$customerId])->close();
+            $this->db->commit();
+            return ['success'=>true,'customer_id'=>$customerId];
+        } catch (Throwable $error) {
+            $this->db->rollback();
+            error_log('Accounting customer link: '.$error->getMessage());
+            return ['success'=>false,'message'=>'تعذر ربط المستأجر بعميل المحاسبة.'];
+        } finally {
+            receiptCommissionRows($this->db,'SELECT RELEASE_LOCK(?) released',[$lockName]);
         }
-
-        // Check if customer already exists
-        $checkQuery = "SELECT customer_id FROM acc_customers WHERE customer_name = ?";
-        $stmt = $this->db->prepare($checkQuery);
-        $mostagerName = $mostager['mostagername'];
-        $stmt->bind_param('s', $mostagerName);
-        $stmt->execute();
-        $existing = $stmt->get_result()->fetch_assoc();
-
-        if ($existing) {
-            return ['success' => true, 'customer_id' => $existing['customer_id'], 'message' => 'Customer already exists'];
-        }
-
-        // Create customer
-        $insertQuery = "INSERT INTO acc_customers (customer_name, vat_number, phone, email, address, is_active, created_at)
-                       VALUES (?, ?, ?, ?, ?, 1, NOW())";
-        $stmt = $this->db->prepare($insertQuery);
-        $vatNumber = $mostager['mostagervatnumber'] ?? null;
-        $phone = $mostager['mostagerphone'] ?? null;
-        $email = $mostager['mostageremail'] ?? null;
-        $address = $mostager['mostageraddress'] ?? null;
-        $stmt->bind_param('sssss', $mostagerName, $vatNumber, $phone, $email, $address);
-
-        if ($stmt->execute()) {
-            return ['success' => true, 'customer_id' => $this->db->insert_id];
-        }
-
-        return ['success' => false, 'error' => 'Failed to create customer'];
     }
 
     /**

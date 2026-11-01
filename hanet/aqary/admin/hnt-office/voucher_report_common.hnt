@@ -1,0 +1,223 @@
+<?php
+/** Shared validation and small query builders. No report is executed by including this file. */
+require_once __DIR__ . '/voucher_report_routes.hnt';
+require_once __DIR__ . '/../include/amlak/receipt_commission_helpers.hnt';
+
+function voucherReportInput($input,$key,$default='') {
+    if (!isset($input[$key])) return (string)$default;
+    if (!is_scalar($input[$key])) throw new RuntimeException('إحدى قيم فلاتر التقرير غير صحيحة.');
+    return trim((string)$input[$key]);
+}
+
+function voucherReportEmptyTotals() {
+    return array('receipts'=>0,'gross'=>0,'vat'=>0,'commission'=>0,'paid'=>0,'outstanding'=>0);
+}
+
+function voucherReportState($key,$input,$printMode) {
+    $routes=voucherReportRoutes();
+    if (!isset($routes[$key])) throw new InvalidArgumentException('Unknown voucher report');
+    $route=$routes[$key];
+    $state=array('view'=>$key,'reportFile'=>$route['file'],'shareView'=>$route['shares'],'detailView'=>$route['detail'],
+        'printMode'=>$printMode,'error'=>'','warning'=>'','rows'=>array(),'totals'=>voucherReportEmptyTotals(),
+        'users'=>array(),'properties'=>array(),'banks'=>array(),'totalRows'=>0,'pages'=>1,
+        'pageNumber'=>max(1,(int)voucherReportInput($input,'page','1')),
+        'perPage'=>(int)voucherReportInput($input,'per_page','100'),
+        'startValue'=>voucherReportInput($input,'from',date('Y-m-01')),
+        'endValue'=>voucherReportInput($input,'to',date('Y-m-d')),
+        'representative'=>voucherReportInput($input,'representative'),
+        'property'=>max(0,(int)voucherReportInput($input,'idaqar','0')),
+        'unit'=>max(0,(int)voucherReportInput($input,'idsubaqar','0')),
+        'tenant'=>max(0,(int)voucherReportInput($input,'mostagerid','0')),
+        'receiptId'=>max(0,(int)voucherReportInput($input,'idsanad','0')),
+        'bank'=>voucherReportInput($input,'bankid'),'method'=>voucherReportInput($input,'payment_type'),
+        'keyword'=>voucherReportInput($input,'keyword'),'receiver'=>voucherReportInput($input,'receiver'),
+        'min'=>voucherReportInput($input,'min'),'max'=>voucherReportInput($input,'max'),
+        'methods'=>array(1=>'نقدي',2=>'شيك',3=>'أخرى',4=>'تحويل',5=>'شبكة'));
+    if (!in_array($state['perPage'],array(50,100,250),true)) $state['perPage']=100;
+    foreach (array('source'=>array('free','rental'),'posting'=>array('posted','pending'),
+        'settlement'=>array('unpaid','partial','paid','none'),'rule'=>array('percentage','fixed'),
+        'vatFilter'=>array('yes','no')) as $name=>$allowed) {
+        $value=voucherReportInput($input,$name==='vatFilter' ? 'vat' : $name);
+        $state[$name]=in_array($value,$allowed,true) ? $value : '';
+    }
+    return $state;
+}
+
+function voucherReportValidateDates(&$state) {
+    $tz=new DateTimeZone('Asia/Riyadh');
+    $start=DateTimeImmutable::createFromFormat('!Y-m-d',$state['startValue'],$tz);
+    $end=DateTimeImmutable::createFromFormat('!Y-m-d',$state['endValue'],$tz);
+    if (!$start || !$end || $start->format('Y-m-d')!==$state['startValue'] || $end->format('Y-m-d')!==$state['endValue'] || $start>$end) {
+        throw new RuntimeException('اختر فترة صحيحة، وتاريخ بداية لا يتجاوز النهاية.');
+    }
+    $state['startTime']=$start->getTimestamp();
+    $state['endTime']=$end->modify('+1 day')->getTimestamp();
+    foreach (array('representative','method','bank') as $key) {
+        if ($state[$key]!=='' && !ctype_digit($state[$key])) throw new RuntimeException('المندوب أو طريقة الدفع أو الحساب غير صحيح.');
+    }
+    foreach (array('min','max') as $key) if ($state[$key]!=='') receiptCommissionCents($state[$key]);
+    if ($state['min']!=='' && $state['max']!=='' && (float)$state['min']>(float)$state['max']) throw new RuntimeException('الحد الأدنى أكبر من الحد الأعلى.');
+}
+
+/** Common receipt restrictions, parameterized once; never build unrelated report data. */
+function voucherReportReceiptWhere($state) {
+    $where=array('s.sanaddate>=?','s.sanaddate<?',$state['scope']);
+    $params=array($state['startTime'],$state['endTime']);
+    foreach (array('idaqar'=>'property','idsubaqar'=>'unit','mostagerid'=>'tenant','idsanad'=>'receiptId') as $column=>$key) {
+        if ($state[$key]>0) { $where[]="s.{$column}=?"; $params[]=$state[$key]; }
+    }
+    foreach (array('payment_type'=>'method','bankid'=>'bank') as $column=>$key) {
+        if ($state[$key]!=='') { $where[]="s.{$column}=?"; $params[]=(int)$state[$key]; }
+    }
+    if ($state['source']!=='') $where[]=$state['source']==='free' ? '(s.idaqar=0 AND s.idsubaqar=0)' : '(s.idaqar>0 OR s.idsubaqar>0)';
+    if ($state['posting']!=='') $where[]=$state['posting']==='posted' ? 'COALESCE(s.accounting_entry_id,0)>0' : 'COALESCE(s.accounting_entry_id,0)=0';
+    if ($state['vatFilter']!=='') $where[]=$state['vatFilter']==='yes' ? 's.depositeamount_vat>0' : 's.depositeamount_vat=0';
+    if ($state['keyword']!=='') {
+        $where[]='(s.mostagername LIKE ? OR s.mybyan LIKE ? OR s.notes LIKE ? OR s.sanadrakam LIKE ?)';
+        for ($i=0;$i<4;$i++) $params[]='%'.$state['keyword'].'%';
+    }
+    if ($state['receiver']!=='') { $where[]='s.recivername LIKE ?'; $params[]='%'.$state['receiver'].'%'; }
+    if ($state['min']!=='') { $where[]='s.depositeamount>=?'; $params[]=receiptCommissionCents($state['min'])/100; }
+    if ($state['max']!=='') { $where[]='s.depositeamount<=?'; $params[]=receiptCommissionCents($state['max'])/100; }
+    return array('where'=>$where,'params'=>$params);
+}
+
+function voucherReportBalanceCondition($settlement,$commission,$paid,$outstanding) {
+    if ($settlement==='unpaid') return "{$commission}>0 AND {$paid}=0";
+    if ($settlement==='partial') return "{$paid}>0 AND {$outstanding}>0";
+    if ($settlement==='paid') return "{$commission}>0 AND {$outstanding}=0";
+    if ($settlement==='none') return "{$commission}=0";
+    return '1=1';
+}
+
+function voucherReportReceiptColumns() {
+    // Do not fetch ZATCA XML, signatures, attachments, or other large unused fields.
+    return 's.idsanad,s.sanaddate,s.mostagername,s.mybyan,s.depositeamount,s.depositeamount_vat,
+        s.payment_type,s.accounting_entry_id,s.idaqar,s.idsubaqar,s.mostagerid,s.recivername,s.bankid,s.sanadrakam';
+}
+
+function voucherReportReceiptDataset($state,$includeProperty=false) {
+    $filter=voucherReportReceiptWhere($state); $where=$filter['where']; $params=$filter['params'];
+    if ($state['representative']!=='' || $state['rule']!=='') {
+        $normal=array('c.idsanad=s.idsanad'); $legacy=array(); $values=array();
+        if ($state['representative']!=='') {
+            $normal[]='c.representative_userid=?'; $legacy[]='s.sales_representative_userid=?'; $values[]=(int)$state['representative'];
+        }
+        if ($state['rule']!=='') { $normal[]='c.commission_type=?'; $legacy[]='s.sales_commission_type=?'; $values[]=$state['rule']; }
+        if ($state['ready']) {
+            $where[]='(EXISTS (SELECT 1 FROM sanad_commission_splits c WHERE '.implode(' AND ',$normal).')
+                OR (NOT EXISTS (SELECT 1 FROM sanad_commission_splits c WHERE c.idsanad=s.idsanad) AND '.implode(' AND ',$legacy).'))';
+            $params=array_merge($params,$values,$values);
+        } else { $where[]=implode(' AND ',$legacy); $params=array_merge($params,$values); }
+    }
+    $paidJoin=''; $paid='0';
+    if ($state['ready']) {
+        $paidJoin='LEFT JOIN (SELECT c.idsanad,SUM(m.amount) paid FROM masrofat m
+            JOIN sanad_commission_splits c ON c.split_id=m.commission_split_id
+            WHERE m.idaqar=0 AND m.commission_split_id>0 AND m.payeddate<'.(int)$state['endTime'].'
+            GROUP BY c.idsanad) p ON p.idsanad=s.idsanad';
+        $paid='COALESCE(p.paid,0)';
+    }
+    $property=$includeProperty ? "COALESCE(NULLIF(a.aqarname,''),'سند حر')" : "''";
+    $propertyJoin=$includeProperty ? 'LEFT JOIN amlak a ON a.idaqar=s.idaqar' : '';
+    $commission='COALESCE(s.sales_commission_amount,0)';
+    $sql='SELECT '.voucherReportReceiptColumns().",{$property} property_name,{$commission} commission,{$paid} paid,
+        GREATEST(0,{$commission}-{$paid}) outstanding FROM sanad s {$propertyJoin} {$paidJoin}
+        WHERE ".implode(' AND ',$where);
+    if ($state['settlement']!=='') $sql='SELECT r.* FROM ('.$sql.') r WHERE '.voucherReportBalanceCondition($state['settlement'],'r.commission','r.paid','r.outstanding');
+    return array('sql'=>$sql,'params'=>$params);
+}
+
+/** Indexed joins replace the old full-ledger UNION plus repeated receipt aggregates. */
+function voucherReportShareDataset($state,$extraCondition='') {
+    $filter=voucherReportReceiptWhere($state); $where=$filter['where']; $params=$filter['params'];
+    $join=''; $split='0'; $paid='0';
+    $rep='s.sales_representative_userid'; $type='s.sales_commission_type';
+    $value='s.sales_commission_value'; $amount='COALESCE(s.sales_commission_amount,0)';
+    if ($state['ready']) {
+        $join='LEFT JOIN sanad_commission_splits c ON c.idsanad=s.idsanad
+            LEFT JOIN (SELECT commission_split_id,SUM(amount) paid FROM masrofat
+                WHERE idaqar=0 AND commission_split_id>0 AND payeddate<'.(int)$state['endTime'].'
+                GROUP BY commission_split_id) p ON p.commission_split_id=c.split_id';
+        $split='COALESCE(c.split_id,0)'; $paid='COALESCE(p.paid,0)';
+        $rep='COALESCE(c.representative_userid,s.sales_representative_userid)';
+        $type='COALESCE(c.commission_type,s.sales_commission_type)';
+        $value='COALESCE(c.commission_value,s.sales_commission_value)';
+        $amount='COALESCE(c.commission_amount,s.sales_commission_amount,0)';
+    }
+    if ($state['representative']!=='') { $where[]="{$rep}=?"; $params[]=(int)$state['representative']; }
+    if ($state['rule']!=='') { $where[]="{$type}=?"; $params[]=$state['rule']; }
+    $sql='SELECT '.voucherReportReceiptColumns().",{$split} split_id,{$rep} representative_userid,
+        {$type} commission_type,{$value} commission_value,{$amount} share_commission,{$paid} share_paid,
+        GREATEST(0,{$amount}-{$paid}) share_outstanding,
+        CASE WHEN {$rep}=0 THEN 'النظام' ELSE COALESCE(NULLIF(u.name,''),u.username,CONCAT('مندوب #',{$rep})) END representative_name
+        FROM sanad s {$join} LEFT JOIN user u ON u.userid={$rep} WHERE ".implode(' AND ',$where);
+    $balances=array();
+    if ($state['settlement']!=='') $balances[]=voucherReportBalanceCondition($state['settlement'],'x.share_commission','x.share_paid','x.share_outstanding');
+    if ($extraCondition!=='') $balances[]=$extraCondition;
+    if ($balances) $sql='SELECT x.* FROM ('.$sql.') x WHERE '.implode(' AND ',$balances);
+    return array('sql'=>$sql,'params'=>$params);
+}
+
+function voucherReportRows($link,$sql,$params=array()) {
+    return receiptCommissionRows($link,$sql,$params);
+}
+
+function voucherReportReceiptTotals($link,$dataset) {
+    return voucherReportRows($link,'SELECT COUNT(*) receipts,COUNT(*) row_count,
+        COALESCE(SUM(r.depositeamount),0) gross,COALESCE(SUM(r.depositeamount_vat),0) vat,
+        COALESCE(SUM(r.commission),0) commission,COALESCE(SUM(r.paid),0) paid,
+        COALESCE(SUM(r.outstanding),0) outstanding FROM ('.$dataset['sql'].') r',$dataset['params'])[0];
+}
+
+function voucherReportShareTotals($link,$dataset) {
+    // Group once per receipt to count gross/VAT once even when several people share it.
+    return voucherReportRows($link,'SELECT COUNT(*) receipts,COALESCE(SUM(v.share_count),0) row_count,
+        COALESCE(SUM(v.gross),0) gross,COALESCE(SUM(v.vat),0) vat,COALESCE(SUM(v.commission),0) commission,
+        COALESCE(SUM(v.paid),0) paid,COALESCE(SUM(v.outstanding),0) outstanding FROM (
+        SELECT r.idsanad,COUNT(*) share_count,MAX(r.depositeamount) gross,MAX(r.depositeamount_vat) vat,
+            SUM(r.share_commission) commission,SUM(r.share_paid) paid,SUM(r.share_outstanding) outstanding
+        FROM ('.$dataset['sql'].') r GROUP BY r.idsanad) v',$dataset['params'])[0];
+}
+
+function voucherReportDetails($link,$state,$dataset,$totals) {
+    $total=(int)$totals['row_count']; $pages=max(1,(int)ceil($total/$state['perPage']));
+    $page=min($state['pageNumber'],$pages); $limit=$state['printMode'] ? 5000 : $state['perPage'];
+    $offset=$state['printMode'] ? 0 : ($page-1)*$state['perPage'];
+    $rows=voucherReportRows($link,'SELECT r.* FROM ('.$dataset['sql'].') r ORDER BY r.sanaddate DESC,r.idsanad DESC'.
+        ($state['shareView'] ? ',r.split_id DESC' : '').' LIMIT '.(int)$limit.' OFFSET '.(int)$offset,$dataset['params']);
+    return array('totals'=>$totals,'rows'=>$rows,'totalRows'=>$total,'pages'=>$pages,'pageNumber'=>$page,
+        'warning'=>$state['printMode'] && $total>5000 ? 'الطباعة تعرض أول 5000 حركة فقط؛ ضيق الفترة لطباعة تقرير كامل. الإجماليات تشمل كل النتائج.' : '');
+}
+
+function voucherReportReceiptSummary($link,$dataset,$groupExpression) {
+    $rows=voucherReportRows($link,"SELECT {$groupExpression} label,COUNT(*) receipts,SUM(r.depositeamount) gross,
+        SUM(r.depositeamount_vat) vat,SUM(r.commission) commission,SUM(r.paid) paid,SUM(r.outstanding) outstanding
+        FROM ({$dataset['sql']}) r GROUP BY {$groupExpression} ORDER BY label",$dataset['params']);
+    $totals=voucherReportEmptyTotals();
+    foreach ($rows as $row) foreach ($totals as $key=>$unused) $totals[$key]+=(float)$row[$key];
+    return array('rows'=>$rows,'totals'=>$totals,'totalRows'=>count($rows));
+}
+
+function voucherReportTimeBucket($period) {
+    $formats=array('day'=>'%Y-%m-%d','month'=>'%Y-%m','year'=>'%Y');
+    if (!isset($formats[$period])) throw new InvalidArgumentException('Invalid period');
+    // Saudi Arabia's UTC+3 offset, independent of the database server's timezone.
+    return "DATE_FORMAT(DATE_ADD('1970-01-01 03:00:00',INTERVAL r.sanaddate SECOND),'".$formats[$period]."')";
+}
+
+function voucherReportLoad($link,$state,$loader) {
+    try {
+        if ($state['error']==='') $state=array_merge($state,$loader($link,$state));
+        if (!$state['printMode']) {
+            $scope=$state['scope'] ?? '0=1';
+            $state['users']=receiptCommissionRows($link,"SELECT userid,COALESCE(NULLIF(name,''),username) label FROM user ORDER BY label");
+            $state['properties']=receiptCommissionRows($link,"SELECT s.idaqar,s.aqarname FROM amlak s WHERE {$scope} ORDER BY s.aqarname");
+            $state['banks']=receiptCommissionRows($link,'SELECT id,bankname,acountnumber FROM bankacounts ORDER BY bankname,id');
+        }
+    } catch (Throwable $error) {
+        error_log('Voucher report '.$state['view'].': '.$error->getMessage());
+        $state['error']=$error instanceof RuntimeException ? $error->getMessage() : 'تعذر تحميل التقرير. راجع سجل الخادم.';
+    }
+    return $state;
+}

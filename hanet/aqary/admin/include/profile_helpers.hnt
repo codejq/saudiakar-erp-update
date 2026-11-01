@@ -1,0 +1,158 @@
+<?php
+require_once __DIR__.'/../../lib/auth_helpers.hnt';
+
+function userProfileEsc($value) { return htmlspecialchars((string)$value,ENT_QUOTES,'UTF-8'); }
+function userProfileDisplayName($user) {
+    return trim((string)($user['name'] ?? '')) ?: (trim((string)($user['username'] ?? '')) ?: 'مستخدم');
+}
+function userProfileQuery($link,$sql,$params=[]) {
+    try {
+        $stmt=mysqli_prepare($link,$sql);
+        if (!$stmt || !$stmt->execute($params)) throw new RuntimeException('Database operation failed');
+        return $stmt;
+    } catch (Throwable $error) {
+        error_log('User profile database: '.$error->getMessage());
+        throw new RuntimeException('تعذر حفظ الملف الشخصي. تحقق من تثبيت تحديث إدارة الأملاك ثم حاول مجدداً.');
+    }
+}
+function userProfileRows($link,$sql,$params=[]) {
+    $stmt=userProfileQuery($link,$sql,$params); $rows=$stmt->get_result()->fetch_all(MYSQLI_ASSOC); $stmt->close(); return $rows;
+}
+function userProfileReady($link) {
+    $row=userProfileRows($link,"SELECT SUM(COLUMN_NAME IN ('phone','email','profile_photo','profile_updated_at')) fields_ready,
+        MAX(CASE WHEN COLUMN_NAME='password' THEN CHARACTER_MAXIMUM_LENGTH ELSE 0 END) password_size
+        FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='user'")[0];
+    return (int)$row['fields_ready']===4 && (int)$row['password_size']>=255;
+}
+function userProfileToken() {
+    if (empty($_SESSION['profile_csrf'])) $_SESSION['profile_csrf']=bin2hex(random_bytes(32));
+    return $_SESSION['profile_csrf'];
+}
+function userProfileActor($link,$data) {
+    $id=(int)($_SESSION['useridv'] ?? 0);
+    $token=$data['csrf_token'] ?? '';
+    if ($id<=0 || empty($_SESSION['usernamev'])) throw new RuntimeException('سجل الدخول لفتح ملفك الشخصي.');
+    if (!is_string($token) || !hash_equals(userProfileToken(),$token)) throw new RuntimeException('انتهت صلاحية النموذج. أعد تحميل الصفحة.');
+    if (!userProfileReady($link)) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث الملف الشخصي.');
+    $rows=userProfileRows($link,'SELECT * FROM user WHERE userid=?',[$id]);
+    if (!$rows) throw new RuntimeException('المستخدم غير موجود. سجل الدخول مجدداً.');
+    return $rows[0];
+}
+function userProfileText($data,$key) {
+    $value=$data[$key] ?? '';
+    if (!is_string($value)) throw new RuntimeException('إحدى قيم النموذج غير صحيحة.');
+    return trim($value);
+}
+function userProfileValidateDetails($data) {
+    $name=userProfileText($data,'name'); $phone=userProfileText($data,'phone'); $email=userProfileText($data,'email');
+    if ($name==='' || mb_strlen($name,'UTF-8')>244 || preg_match('/[<>\x00-\x1f\x7f]/u',$name)) throw new RuntimeException('أدخل اسماً حقيقياً صحيحاً بطول لا يتجاوز 244 حرفاً.');
+    if (mb_strlen($phone,'UTF-8')>50 || ($phone!=='' && !preg_match('/^[+\p{N}\s().-]+$/uD',$phone))) throw new RuntimeException('رقم الهاتف غير صحيح.');
+    if (strlen($email)>254 || ($email!=='' && !filter_var($email,FILTER_VALIDATE_EMAIL))) throw new RuntimeException('البريد الإلكتروني غير صحيح.');
+    return ['name'=>$name,'phone'=>$phone,'email'=>$email];
+}
+function userProfileSaveDetails($link,$data) {
+    $user=userProfileActor($link,$data); $values=userProfileValidateDetails($data);
+    userProfileQuery($link,'UPDATE user SET name=?,phone=?,email=?,profile_updated_at=? WHERE userid=?',
+        [$values['name'],$values['phone'],$values['email'],time(),(int)$user['userid']])->close();
+    $_SESSION['namev']=$values['name']; return $values;
+}
+function userProfileValidatePassword($data) {
+    $current=$data['current_password'] ?? ''; $new=$data['new_password'] ?? ''; $confirm=$data['confirm_password'] ?? '';
+    if (!is_string($current) || !is_string($new) || !is_string($confirm)) throw new RuntimeException('بيانات كلمة المرور غير صحيحة.');
+    if (mb_strlen($new,'UTF-8')<8 || trim($new)==='') throw new RuntimeException('استخدم كلمة مرور جديدة من 8 أحرف على الأقل.');
+    if (strlen($new)>72 || strpos($new,"\0")!==false) throw new RuntimeException('كلمة المرور طويلة جداً أو تحتوي محارف غير مدعومة.');
+    if (!hash_equals($new,$confirm)) throw new RuntimeException('تأكيد كلمة المرور الجديدة غير مطابق.');
+    return ['current'=>$current,'new'=>$new];
+}
+function userProfileChangePassword($link,$data) {
+    $user=userProfileActor($link,$data); $passwords=userProfileValidatePassword($data);
+    $attempts=$_SESSION['profile_password_attempts'] ?? ['count'=>0,'since'=>time()];
+    if (time()-(int)$attempts['since']>=900) $attempts=['count'=>0,'since'=>time()];
+    if ((int)$attempts['count']>=5) throw new RuntimeException('محاولات كثيرة. انتظر 15 دقيقة ثم حاول مجدداً.');
+    if (!aqaryPasswordMatches($passwords['current'],(string)$user['password'])) {
+        $attempts['count']++; $_SESSION['profile_password_attempts']=$attempts;
+        throw new RuntimeException('كلمة المرور الحالية غير صحيحة.');
+    }
+    $hash=password_hash($passwords['new'],PASSWORD_DEFAULT);
+    $stmt=userProfileQuery($link,'UPDATE user SET password=?,profile_updated_at=? WHERE userid=? AND BINARY password=?',
+        [$hash,time(),(int)$user['userid'],(string)$user['password']]);
+    $changed=$stmt->affected_rows; $stmt->close();
+    if ($changed!==1) throw new RuntimeException('تغيرت بيانات الحساب أثناء الحفظ. أعد تحميل الصفحة.');
+    $_SESSION['passwordv']=$passwords['new'];
+    unset($_SESSION['profile_password_attempts']);
+    $_SESSION['profile_csrf']=bin2hex(random_bytes(32));
+}
+function userProfilePhotoValid($filename) {
+    return is_string($filename) && (bool)preg_match('/^[a-f0-9]{16}\/[1-9][0-9]*-[a-f0-9]{32}\.jpg$/D',$filename);
+}
+function userProfilePhotoUrl($filename) {
+    if (!userProfilePhotoValid($filename)) return '';
+    $url=upload_url('users.avatars',$filename);
+    return defined('APP_BASE_PATH') ? $url : '/aqary'.$url;
+}
+function userProfileDatabaseKey($link) {
+    return substr(hash('sha256',userProfileRows($link,'SELECT DATABASE() db')[0]['db']),0,16);
+}
+function userProfileDeletePhoto($link,$userId,$filename) {
+    if (!userProfilePhotoValid($filename) || strpos($filename,userProfileDatabaseKey($link).'/'.(int)$userId.'-')!==0) return;
+    $path=upload_path('users.avatars',$filename);
+    if (is_file($path)) @unlink($path);
+}
+function userProfileResizePhoto($sourcePath,$targetPath) {
+    $info=@getimagesize($sourcePath);
+    $decoders=[IMAGETYPE_JPEG=>'imagecreatefromjpeg',IMAGETYPE_PNG=>'imagecreatefrompng',IMAGETYPE_GIF=>'imagecreatefromgif',IMAGETYPE_WEBP=>'imagecreatefromwebp'];
+    if (!$info || !isset($decoders[$info[2]]) || !function_exists($decoders[$info[2]])) throw new RuntimeException('اختر صورة JPG أو PNG أو GIF أو WEBP صحيحة.');
+    if (filesize($sourcePath)>10*1024*1024) throw new RuntimeException('اختر صورة بحجم لا يتجاوز 10 ميغابايت.');
+    $limit=trim(ini_get('memory_limit')); $bytes=(float)$limit;
+    if (preg_match('/([KMG])$/i',$limit,$match)) $bytes*=1024**(['K'=>1,'M'=>2,'G'=>3][strtoupper($match[1])]);
+    if ($bytes>0 && (float)$info[0]*$info[1]*8+16*1024*1024>$bytes-memory_get_usage(true)) throw new RuntimeException('أبعاد الصورة كبيرة جداً. اختر صورة أصغر.');
+    $image=null; $output=null; $temporary=null;
+    try {
+        $image=@($decoders[$info[2]])($sourcePath);
+        if (!$image) throw new RuntimeException('تعذر قراءة الصورة المختارة.');
+        if ($info[2]===IMAGETYPE_JPEG && function_exists('exif_read_data')) {
+            $exif=@exif_read_data($sourcePath); $orientation=(int)($exif['Orientation'] ?? 1);
+            if (in_array($orientation,[2,5,7],true)) imageflip($image,IMG_FLIP_HORIZONTAL);
+            if ($orientation===4) imageflip($image,IMG_FLIP_VERTICAL);
+            $angle=[3=>180,5=>90,6=>-90,7=>-90,8=>90][$orientation] ?? 0;
+            if ($angle) $image=imagerotate($image,$angle,0xffffff);
+        }
+        $width=imagesx($image); $height=imagesy($image); $scale=min(1,512/$width,512/$height);
+        $newWidth=max(1,(int)round($width*$scale)); $newHeight=max(1,(int)round($height*$scale));
+        $output=imagecreatetruecolor($newWidth,$newHeight);
+        imagefill($output,0,0,imagecolorallocate($output,255,255,255));
+        if (!imagecopyresampled($output,$image,0,0,0,0,$newWidth,$newHeight,$width,$height)) throw new RuntimeException('تعذر معالجة الصورة.');
+        $temporary=@tempnam(dirname($targetPath),'avatar-');
+        if (!$temporary || !@imagejpeg($output,$temporary,88)) throw new RuntimeException('تعذر حفظ الصورة.');
+        @chmod($temporary,0644);
+        if (!@rename($temporary,$targetPath)) throw new RuntimeException('تعذر حفظ الصورة.');
+        $temporary=null;
+    } finally { unset($image,$output); if ($temporary && is_file($temporary)) @unlink($temporary); }
+}
+function userProfileSavePhoto($link,$data,$file) {
+    $user=userProfileActor($link,$data);
+    if (($file['error'] ?? UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_OK || !is_uploaded_file($file['tmp_name'] ?? '')) throw new RuntimeException('لم يكتمل رفع الصورة. اختر صورة بحجم لا يتجاوز 10 ميغابايت.');
+    $key=userProfileDatabaseKey($link);
+    if (!ensure_dir(upload_path('users.avatars',$key))) throw new RuntimeException('تعذر تجهيز مجلد الصور.');
+    $filename=$key.'/'.(int)$user['userid'].'-'.bin2hex(random_bytes(16)).'.jpg';
+    $path=upload_path('users.avatars',$filename); $old=(string)($user['profile_photo'] ?? '');
+    userProfileResizePhoto($file['tmp_name'],$path);
+    try {
+        $stmt=userProfileQuery($link,"UPDATE user SET profile_photo=?,profile_updated_at=? WHERE userid=? AND BINARY COALESCE(profile_photo,'')=?",[$filename,time(),(int)$user['userid'],$old]);
+        $changed=$stmt->affected_rows; $stmt->close();
+        if ($changed!==1) throw new RuntimeException('تغيرت صورة الحساب أثناء الحفظ. أعد تحميل الصفحة.');
+    } catch (Throwable $error) { if (is_file($path)) @unlink($path); throw $error; }
+    userProfileDeletePhoto($link,(int)$user['userid'],$old); return $filename;
+}
+function userProfileRemovePhoto($link,$data) {
+    $user=userProfileActor($link,$data); $old=(string)($user['profile_photo'] ?? '');
+    $stmt=userProfileQuery($link,"UPDATE user SET profile_photo='',profile_updated_at=? WHERE userid=? AND BINARY COALESCE(profile_photo,'')=?",[time(),(int)$user['userid'],$old]);
+    $changed=$stmt->affected_rows; $stmt->close();
+    if ($changed===1) userProfileDeletePhoto($link,(int)$user['userid'],$old);
+}
+function userProfileSyncCookies() {
+    $expires=!empty($_SESSION['remember_me']) ? time()+94608000 : 0;
+    $options=['expires'=>$expires,'path'=>'/','secure'=>!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS']!=='off','samesite'=>'Lax'];
+    foreach (['username'=>'usernamev','password'=>'passwordv','namev'=>'namev','company'=>'dbAddPerfix'] as $cookie=>$session) setcookie($cookie,(string)($_SESSION[$session] ?? ''),$options);
+    setcookie('auth_cookie_encoding','uri',$options);
+}

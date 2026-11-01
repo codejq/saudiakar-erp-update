@@ -1,0 +1,43 @@
+<?php
+/** Resolve historical company names without changing the configured main DB. */
+function aqaryCompanyDatabaseCandidates($company, $base = null) {
+    $base = $base ?? ($GLOBALS['qdb_db'] ?? 'aqary_utf');
+    if (!is_string($base) || !preg_match('/^[a-zA-Z0-9_]{1,64}$/D', $base) || !is_string($company)) return [];
+    if ($company === '' || $company === 'aqary' || $company === $base) return [$base];
+    if (preg_match('/^aqary(?:_utf)?_company_[0-9]+$/D', $company)) return strlen($company) <= 64 ? [$company] : [];
+    if (!preg_match('/^_[a-zA-Z0-9_]{1,80}$/D', $company)) return [];
+    $historical = 'aqary' . $company;
+    // reqlogin historically removes "aqary" before storing the company selector.
+    if ($historical === $base || preg_match('/^aqary_utf_company_[0-9]+$/D', $historical)) return [$historical];
+    $candidates = preg_match('/^_company_[0-9]+$/D', $company)
+        ? [$historical, $base . $company] : [$base . $company, $historical];
+    return array_values(array_unique(array_filter($candidates, static function ($name) { return strlen($name) <= 64; })));
+}
+
+function aqarySelectCompanyDatabase($link, $company, $base = null) {
+    foreach (aqaryCompanyDatabaseCandidates($company, $base) as $database) {
+        try {
+            if (@$link->select_db($database)) {
+                if (isset($GLOBALS['link']) && $GLOBALS['link'] === $link) $GLOBALS['companyDatabaseName'] = $database;
+                return $database;
+            }
+        } catch (Throwable $error) {
+            // A missing candidate may be an older/newer naming convention.
+        }
+    }
+    return null;
+}
+
+/** Only the configured main DB and actual company databases are management targets. */
+function aqaryCompanyDatabases($link, $base = null) {
+    $base = $base ?? ($GLOBALS['qdb_db'] ?? 'aqary_utf');
+    $result = $link->query('SHOW DATABASES');
+    if (!$result) throw new RuntimeException('تعذر تحميل قائمة الشركات.');
+    $databases = [];
+    while ($row = $result->fetch_row()) {
+        $name = $row[0];
+        if ($name === $base || (strlen($name) <= 64 && preg_match('/^aqary(?:_utf)?_company_[0-9]+$/D', $name))) $databases[] = $name;
+    }
+    sort($databases, SORT_NATURAL);
+    return $databases;
+}

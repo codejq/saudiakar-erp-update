@@ -1,0 +1,94 @@
+<?php
+$sc_title='كشف حساب مندوب';
+$sc_id=0; // Dedicated screen permission is checked below, after authentication.
+include_once '../../nocash.hnt';
+if (intval($_GET['report'] ?? 0)===1) include_once '../../report_header.hnt';
+else include_once '../../header.hnt';
+require_once __DIR__ . '/../include/amlak/receipt_commission_helpers.hnt';
+date_default_timezone_set('Asia/Riyadh');
+$printMode=intval($_GET['report'] ?? 0)===1;
+$footer=$printMode ? '../../reportfooter.hnt' : '../../foter.hnt';
+$representative=max(0,intval($_GET['representative'] ?? 0));
+$property=max(0,intval($_GET['idaqar'] ?? 0));
+$receiptId=max(0,intval($_GET['idsanad'] ?? 0));
+$from=(string)($_GET['from'] ?? date('Y-m-01'));
+$to=(string)($_GET['to'] ?? date('Y-m-d'));
+$error=''; $name=''; $users=array(); $movements=array(); $unpaid=array(); $opening=0; $earned=0; $paid=0; $closing=0;
+try {
+    if (!receiptCommissionCan($link,'voucher_reports',$printMode ? 'prints' : 'sees')) throw new RuntimeException('ليس لديك صلاحية عرض أو طباعة كشف المندوب.');
+    $users=receiptCommissionRows($link,"SELECT userid,COALESCE(NULLIF(name,''),username) label FROM user ORDER BY label");
+    if ($representative>0) {
+        $user=receiptCommissionRows($link,"SELECT COALESCE(NULLIF(name,''),username) label FROM user WHERE userid=?",array($representative));
+        $name=$user[0]['label'] ?? 'مندوب #'.$representative;
+        $tz=new DateTimeZone('Asia/Riyadh');
+        $start=DateTimeImmutable::createFromFormat('!Y-m-d',$from,$tz);
+        $end=DateTimeImmutable::createFromFormat('!Y-m-d',$to,$tz);
+        if (!$start || !$end || $start->format('Y-m-d')!==$from || $end->format('Y-m-d')!==$to || $start>$end) throw new RuntimeException('اختر فترة صحيحة لكشف الحساب.');
+        $startTime=$start->getTimestamp(); $endTime=$end->modify('+1 day')->getTimestamp();
+        $scope=receiptCommissionScope($link);
+        $commissionSource=receiptCommissionSource($link);
+        $conditions=array('c.representative_userid=?',$scope);
+        $params=array($representative);
+        if ($property>0) { $conditions[]='s.idaqar=?'; $params[]=$property; }
+        if ($receiptId>0) { $conditions[]='s.idsanad=?'; $params[]=$receiptId; }
+        $eligible="SELECT c.*,s.sanaddate,s.mostagername,s.mybyan,s.depositeamount
+            FROM {$commissionSource} c JOIN sanad s ON s.idsanad=c.idsanad WHERE ".implode(' AND ',$conditions);
+        $ledger="SELECT c.sanaddate movement_date,0 movement_kind,c.idsanad,c.split_id,0 expense_id,
+            c.mostagername description,c.commission_amount earned,0 paid FROM ({$eligible}) c";
+        $ledgerParams=$params;
+        if (receiptCommissionReady($link)) {
+            $ledger.=" UNION ALL SELECT m.payeddate,1,c.idsanad,c.split_id,m.idmasrof,m.payeddue,0,m.amount
+                FROM masrofat m JOIN ({$eligible}) c ON c.split_id=m.commission_split_id
+                WHERE m.idaqar=0 AND m.commission_split_id>0";
+            $ledgerParams=array_merge($params,$params);
+        }
+        $openingRow=receiptCommissionRows($link,"SELECT COALESCE(SUM(x.earned-x.paid),0) balance FROM ({$ledger}) x WHERE x.movement_date<?",array_merge($ledgerParams,array($startTime)));
+        $opening=(float)$openingRow[0]['balance'];
+        $periodRows=receiptCommissionRows($link,"SELECT x.* FROM ({$ledger}) x WHERE x.movement_date>=? AND x.movement_date<?
+            ORDER BY x.movement_date,x.movement_kind,x.idsanad,x.expense_id",array_merge($ledgerParams,array($startTime,$endTime)));
+        $movements=$periodRows;
+        foreach ($movements as $movement) { $earned+=(float)$movement['earned']; $paid+=(float)$movement['paid']; }
+        $closing=round($opening+$earned-$paid,2);
+        $paymentSql=receiptCommissionReady($link) ? 'SELECT commission_split_id,SUM(amount) paid FROM masrofat
+            WHERE idaqar=0 AND payeddate<'.intval($endTime).' GROUP BY commission_split_id' : 'SELECT 0 commission_split_id,0 paid';
+        $unpaid=receiptCommissionRows($link,"SELECT c.*,COALESCE(p.paid,0) paid,c.commission_amount-COALESCE(p.paid,0) remaining
+            FROM ({$eligible}) c LEFT JOIN ({$paymentSql}) p ON p.commission_split_id=c.split_id
+            WHERE c.sanaddate<? AND c.commission_amount>COALESCE(p.paid,0) ORDER BY c.sanaddate,c.idsanad",array_merge($params,array($endTime)));
+    }
+} catch (Throwable $exception) {
+    $error=$exception instanceof RuntimeException ? $exception->getMessage() : 'تعذر تحميل كشف الحساب.';
+    error_log('Representative statement: '.$exception->getMessage());
+}
+$printQuery=$_GET; $printQuery['report']=1;
+?>
+<style>
+.representative-statement-title{background:linear-gradient(135deg,#15803d,#0e7490);color:white;padding:1.25rem;border-radius:12px}
+.representative-statement-table th{background:#f1f5f9;white-space:nowrap}.representative-statement-table td{vertical-align:middle}
+@media print{.statement-screen{display:none!important}.representative-statement-table th,.representative-statement-table td{font-size:10px!important;padding:4px!important}.card{box-shadow:none!important}}
+</style>
+<div class="container-fluid py-4" dir="rtl">
+    <div class="representative-statement-title d-flex flex-wrap justify-content-between gap-3 mb-4"><div><h3><i class="bi bi-person-lines-fill"></i> كشف حساب المندوب <?= receiptCommissionEsc($name) ?></h3><div><?= receiptCommissionEsc($from) ?> — <?= receiptCommissionEsc($to) ?><?php if ($property) echo ' | عقار #'.$property; if ($receiptId) echo ' | سند #'.$receiptId; ?></div></div>
+        <?php if (!$printMode) { ?><div class="statement-screen"><?php if ($representative) { ?><a class="btn btn-light" target="_blank" href="?<?= receiptCommissionEsc(http_build_query($printQuery)) ?>"><i class="bi bi-printer"></i> طباعة الكشف / PDF</a><?php } ?> <a class="btn btn-outline-light" href="voucherhome.hnt">السندات</a></div><?php } ?>
+    </div>
+    <?php if ($error!=='') { ?><div class="alert alert-danger"><?= receiptCommissionEsc($error) ?></div><?php } ?>
+    <?php if (!$printMode) { ?><form method="get" class="card shadow-sm border-0 mb-4 statement-screen"><div class="card-body row g-3 align-items-end">
+        <div class="col-md-4"><label class="form-label">المندوب</label><select name="representative" class="form-select" required><option value="">اختر المندوب</option><?php foreach ($users as $u) { ?><option value="<?= intval($u['userid']) ?>" <?= $representative===intval($u['userid']) ? 'selected' : '' ?>><?= receiptCommissionEsc($u['label']) ?></option><?php } ?></select></div>
+        <div class="col-md-2"><label class="form-label">من</label><input type="date" class="form-control" name="from" value="<?= receiptCommissionEsc($from) ?>" required></div>
+        <div class="col-md-2"><label class="form-label">إلى</label><input type="date" class="form-control" name="to" value="<?= receiptCommissionEsc($to) ?>" required></div>
+        <div class="col-md-2"><label class="form-label">رقم العقار (اختياري)</label><input type="number" min="0" class="form-control" name="idaqar" value="<?= $property ?: '' ?>"></div>
+        <div class="col-md-2"><label class="form-label">رقم السند (اختياري)</label><input type="number" min="0" class="form-control" name="idsanad" value="<?= $receiptId ?: '' ?>"></div>
+        <div class="col-md-2"><button class="btn btn-success w-100"><i class="bi bi-search"></i> عرض الكشف</button></div>
+    </div></form><?php } ?>
+    <?php if ($representative && $error==='') { ?>
+    <div class="row g-3 mb-4"><?php foreach (array('رصيد أول المدة'=>$opening,'عمولات خلال الفترة'=>$earned,'مدفوع خلال الفترة'=>$paid,'المتبقي آخر المدة'=>$closing) as $label=>$value) { ?><div class="col-6 col-lg-3"><div class="card shadow-sm border-0"><div class="card-body"><small class="text-muted"><?= $label ?></small><div class="fs-4 fw-bold text-success"><?= number_format($value,2) ?></div></div></div></div><?php } ?></div>
+    <div class="card shadow-sm border-0 mb-4"><div class="card-header bg-white">حركات حساب المندوب</div><div class="table-responsive representative-statement-table"><table class="table table-striped mb-0"><thead><tr><th>التاريخ</th><th>العملية</th><th>السند</th><th>مصروف المكتب</th><th>البيان</th><th>المستحق</th><th>المصروف</th><th>الرصيد</th></tr></thead><tbody>
+        <tr><td colspan="7">رصيد أول المدة</td><td><?= number_format($opening,2) ?></td></tr>
+        <?php $running=$opening; foreach ($movements as $m) { $running+=(float)$m['earned']-(float)$m['paid']; ?><tr><td><?= date('d/m/Y',intval($m['movement_date'])) ?></td><td><?= intval($m['movement_kind'])===0 ? 'استحقاق عمولة' : 'صرف من المكتب' ?></td><td>#<?= intval($m['idsanad']) ?></td><td><?= $m['expense_id'] ? '#'.intval($m['expense_id']) : '—' ?></td><td><?= receiptCommissionEsc($m['description']) ?></td><td><?= number_format($m['earned'],2) ?></td><td><?= number_format($m['paid'],2) ?></td><td><?= number_format($running,2) ?></td></tr><?php } ?>
+    </tbody><tfoot><tr><th colspan="5">الإجمالي ورصيد آخر المدة</th><th><?= number_format($earned,2) ?></th><th><?= number_format($paid,2) ?></th><th><?= number_format($closing,2) ?></th></tr></tfoot></table></div></div>
+    <div class="card shadow-sm border-0 mb-4"><div class="card-header bg-white"><strong>العمولات المتبقية حتى نهاية الفترة</strong></div><div class="card-body text-muted small">كل صف حصة مستقلة في سند قبض. زر الصرف يفتح مصروف مكتب مرتبطاً بهذه الحصة، ويقبل دفعة جزئية أو كامل الرصيد المتاح وقت الحفظ.</div><div class="table-responsive representative-statement-table"><table class="table table-striped mb-0"><thead><tr><th>السند</th><th>التاريخ</th><th>العميل</th><th>مبلغ السند</th><th>العمولة</th><th>المصروف</th><th>المتبقي</th><th class="statement-screen">صرف</th></tr></thead><tbody>
+    <?php foreach ($unpaid as $u) { ?><tr><td>#<?= intval($u['idsanad']) ?></td><td><?= date('d/m/Y',intval($u['sanaddate'])) ?></td><td><?= receiptCommissionEsc($u['mostagername']) ?></td><td><?= number_format($u['depositeamount'],2) ?></td><td><?= number_format($u['commission_amount'],2) ?></td><td><?= number_format($u['paid'],2) ?></td><td class="fw-bold"><?= number_format($u['remaining'],2) ?></td><td class="statement-screen"><?php if ($u['split_id']>0) { ?><a class="btn btn-sm btn-success" href="../include/amlak/office_expense.hnt?commission_split_id=<?= intval($u['split_id']) ?>"><i class="bi bi-cash-coin"></i> صرف من المكتب</a><?php } else { ?><a class="btn btn-sm btn-outline-secondary" href="receipt_commissions.hnt?idsanad=<?= intval($u['idsanad']) ?>">حفظ توزيع السند</a><?php } ?></td></tr><?php } ?>
+    <?php if (!$unpaid) { ?><tr><td colspan="8" class="text-center text-muted py-4">لا توجد عمولات متبقية.</td></tr><?php } ?>
+    </tbody></table></div></div>
+    <?php } elseif (!$representative && $error==='') { ?><div class="alert alert-info">اختر المندوب لعرض كشفه وطباعته وتسوية عمولاته من مصروفات المكتب.</div><?php } ?>
+</div>
+<?php require $footer; ?>

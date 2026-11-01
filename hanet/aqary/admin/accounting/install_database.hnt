@@ -1,0 +1,401 @@
+<?php
+
+/**
+ * Accounting Module - Database Installer
+ * تثبيت قاعدة بيانات نظام المحاسبة
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "تثبيت قاعدة البيانات";
+$sc_id = "200";
+include_once "../../nocash.hnt";
+include_once "../../connectdb.hnt";
+include_once "../../header.hnt";
+require __DIR__.'/includes/active_database.hnt';
+
+$currentUserId = $_SESSION['userid'] ?? 1;
+$installLog = [];
+$hasErrors = false;
+
+// Handle installation
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['install'])) {
+
+    // Start installation
+    $installLog[] = ['type' => 'info', 'message' => 'بدء تثبيت قاعدة البيانات...'];
+
+    // 1. Chart of Accounts
+    $sql = "CREATE TABLE IF NOT EXISTS `acc_chart_of_accounts` (
+      `account_id` INT(11) NOT NULL AUTO_INCREMENT,
+      `account_code` VARCHAR(50) NOT NULL,
+      `account_name_ar` VARCHAR(255) NOT NULL,
+      `account_name_en` VARCHAR(255) NOT NULL,
+      `parent_account_id` INT(11) DEFAULT NULL,
+      `account_type` ENUM('asset','liability','equity','revenue','expense') NOT NULL,
+      `account_category` VARCHAR(100) NOT NULL,
+      `account_level` INT(2) NOT NULL DEFAULT 1,
+      `is_leaf` TINYINT(1) DEFAULT 1,
+      `opening_balance` DECIMAL(15,2) DEFAULT 0.00,
+      `current_balance` DECIMAL(15,2) DEFAULT 0.00,
+      `currency` VARCHAR(3) DEFAULT 'SAR',
+      `is_active` TINYINT(1) DEFAULT 1,
+      `is_bank_account` TINYINT(1) DEFAULT 0,
+      `is_cash_account` TINYINT(1) DEFAULT 0,
+      `is_control_account` TINYINT(1) DEFAULT 0,
+      `vat_applicable` TINYINT(1) DEFAULT 0,
+      `description` TEXT,
+      `created_by` INT(11) NOT NULL,
+      `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      `formuid` VARCHAR(500) NOT NULL,
+      PRIMARY KEY (`account_id`),
+      UNIQUE KEY `idx_code` (`account_code`),
+      KEY `idx_parent` (`parent_account_id`),
+      KEY `idx_type` (`account_type`),
+      KEY `idx_active` (`is_active`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+
+    if ($db->query($sql)) {
+        $installLog[] = ['type' => 'success', 'message' => '✓ تم إنشاء جدول دليل الحسابات'];
+    } else {
+        $installLog[] = ['type' => 'error', 'message' => '✗ خطأ في إنشاء جدول دليل الحسابات: ' . $db->error];
+        $hasErrors = true;
+    }
+
+    // Insert default accounts
+    $checkAccounts = $db->query("SELECT COUNT(*) as count FROM acc_chart_of_accounts");
+    if ($checkAccounts && $checkAccounts->fetch_assoc()['count'] == 0) {
+        $defaultAccounts = [
+            ['1000', 'الأصول', 'Assets', 'asset', 'main', 1, 0],
+            ['1100', 'الأصول المتداولة', 'Current Assets', 'asset', 'current_assets', 2, 0],
+            ['1111', 'الصندوق', 'Cash on Hand', 'asset', 'cash', 4, 1],
+            ['1112', 'البنوك', 'Banks', 'asset', 'cash', 4, 1],
+            ['1121', 'ذمم المستأجرين', 'Tenant Receivables', 'asset', 'receivables', 4, 1],
+            ['2000', 'الخصوم', 'Liabilities', 'liability', 'main', 1, 0],
+            ['2121', 'ضريبة القيمة المضافة', 'VAT Payable', 'liability', 'tax', 4, 1],
+            ['3000', 'حقوق الملكية', 'Equity', 'equity', 'main', 1, 0],
+            ['3100', 'رأس المال', 'Capital', 'equity', 'capital', 2, 1],
+            ['4000', 'الإيرادات', 'Revenue', 'revenue', 'main', 1, 0],
+            ['4100', 'إيرادات التأجير', 'Rental Revenue', 'revenue', 'rental', 2, 1],
+            ['5000', 'المصروفات', 'Expenses', 'expense', 'main', 1, 0],
+            ['5110', 'الرواتب والأجور', 'Salaries & Wages', 'expense', 'salaries', 3, 1]
+        ];
+
+        foreach ($defaultAccounts as $acc) {
+            $stmt = $db->prepare("INSERT INTO acc_chart_of_accounts (account_code, account_name_ar, account_name_en, account_type, account_category, account_level, is_leaf, created_by, formuid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, UUID())");
+            $stmt->bind_param("sssssiii", $acc[0], $acc[1], $acc[2], $acc[3], $acc[4], $acc[5], $acc[6], $currentUserId);
+            $stmt->execute();
+        }
+        $installLog[] = ['type' => 'success', 'message' => '✓ تم إضافة الحسابات الافتراضية'];
+    }
+
+    // 2. Journal Entries
+    $sql = "CREATE TABLE IF NOT EXISTS `acc_journal_entries` (
+      `entry_id` INT(11) NOT NULL AUTO_INCREMENT,
+      `entry_number` VARCHAR(50) NOT NULL,
+      `entry_date` DATE NOT NULL,
+      `entry_type` ENUM('manual','auto','opening','closing','adjustment') DEFAULT 'manual',
+      `reference_type` VARCHAR(50) DEFAULT NULL,
+      `reference_id` INT(11) DEFAULT NULL,
+      `reference_number` VARCHAR(100) DEFAULT NULL,
+      `description` TEXT NOT NULL,
+      `total_debit` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+      `total_credit` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+      `fiscal_year` INT(4) NOT NULL,
+      `fiscal_period` INT(2) NOT NULL,
+      `status` ENUM('draft','posted','cancelled') DEFAULT 'draft',
+      `posted_date` DATETIME DEFAULT NULL,
+      `posted_by` INT(11) DEFAULT NULL,
+      `created_by` INT(11) NOT NULL,
+      `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      `notes` TEXT,
+      `attachments` TEXT,
+      `formuid` VARCHAR(500) NOT NULL,
+      PRIMARY KEY (`entry_id`),
+      UNIQUE KEY `idx_number` (`entry_number`),
+      KEY `idx_date` (`entry_date`),
+      KEY `idx_status` (`status`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+
+    if ($db->query($sql)) {
+        $installLog[] = ['type' => 'success', 'message' => '✓ تم إنشاء جدول القيود اليومية'];
+    } else {
+        $installLog[] = ['type' => 'error', 'message' => '✗ خطأ في إنشاء جدول القيود: ' . $db->error];
+        $hasErrors = true;
+    }
+
+    // 3. Journal Entry Lines
+    $sql = "CREATE TABLE IF NOT EXISTS `acc_journal_entry_lines` (
+      `line_id` INT(11) NOT NULL AUTO_INCREMENT,
+      `entry_id` INT(11) NOT NULL,
+      `account_id` INT(11) NOT NULL,
+      `line_number` INT(3) NOT NULL,
+      `description` VARCHAR(255) NOT NULL,
+      `debit_amount` DECIMAL(15,2) DEFAULT 0.00,
+      `credit_amount` DECIMAL(15,2) DEFAULT 0.00,
+      `cost_center_id` INT(11) DEFAULT NULL,
+      `reference_type` VARCHAR(50) DEFAULT NULL,
+      `reference_id` INT(11) DEFAULT NULL,
+      `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      `formuid` VARCHAR(500) NOT NULL,
+      PRIMARY KEY (`line_id`),
+      KEY `idx_entry` (`entry_id`),
+      KEY `idx_account` (`account_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+
+    if ($db->query($sql)) {
+        $installLog[] = ['type' => 'success', 'message' => '✓ تم إنشاء جدول تفاصيل القيود'];
+    } else {
+        $installLog[] = ['type' => 'error', 'message' => '✗ خطأ في إنشاء جدول تفاصيل القيود: ' . $db->error];
+        $hasErrors = true;
+    }
+
+    // 4. Invoices
+    $sql = "CREATE TABLE IF NOT EXISTS `acc_invoices` (
+      `invoice_id` INT(11) NOT NULL AUTO_INCREMENT,
+      `invoice_number` VARCHAR(50) NOT NULL,
+      `invoice_type` ENUM('sales','purchase','credit_note','debit_note') NOT NULL,
+      `invoice_date` DATE NOT NULL,
+      `due_date` DATE NOT NULL,
+      `customer_type` ENUM('tenant','buyer','owner','supplier') NOT NULL,
+      `customer_id` INT(11) NOT NULL,
+      `customer_name` VARCHAR(255) NOT NULL,
+      `customer_vat_number` VARCHAR(50) DEFAULT NULL,
+      `subtotal` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+      `vat_rate` DECIMAL(5,2) DEFAULT 15.00,
+      `vat_amount` DECIMAL(15,2) DEFAULT 0.00,
+      `total_amount` DECIMAL(15,2) NOT NULL,
+      `paid_amount` DECIMAL(15,2) DEFAULT 0.00,
+      `remaining_amount` DECIMAL(15,2) DEFAULT 0.00,
+      `zatca_status` ENUM('pending','submitted','approved','rejected','cancelled') DEFAULT 'pending',
+      `zatca_qr_code` TEXT DEFAULT NULL,
+      `payment_status` ENUM('unpaid','partial','paid','overdue') DEFAULT 'unpaid',
+      `status` ENUM('draft','approved','posted','cancelled') DEFAULT 'draft',
+      `created_by` INT(11) NOT NULL,
+      `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      `formuid` VARCHAR(500) NOT NULL,
+      PRIMARY KEY (`invoice_id`),
+      UNIQUE KEY `idx_invoice_number` (`invoice_number`),
+      KEY `idx_status` (`status`),
+      KEY `idx_payment_status` (`payment_status`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+
+    if ($db->query($sql)) {
+        $installLog[] = ['type' => 'success', 'message' => '✓ تم إنشاء جدول الفواتير'];
+    } else {
+        $installLog[] = ['type' => 'error', 'message' => '✗ خطأ في إنشاء جدول الفواتير: ' . $db->error];
+        $hasErrors = true;
+    }
+
+    // 5. Fiscal Years
+    $sql = "CREATE TABLE IF NOT EXISTS `acc_fiscal_years` (
+      `fiscal_year_id` INT(11) NOT NULL AUTO_INCREMENT,
+      `fiscal_year` INT(4) NOT NULL,
+      `start_date` DATE NOT NULL,
+      `end_date` DATE NOT NULL,
+      `status` ENUM('open','closed','locked') DEFAULT 'open',
+      `description` VARCHAR(255),
+      `created_by` INT(11) NOT NULL,
+      `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      `formuid` VARCHAR(500) NOT NULL,
+      PRIMARY KEY (`fiscal_year_id`),
+      UNIQUE KEY `idx_year` (`fiscal_year`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+
+    if ($db->query($sql)) {
+        $installLog[] = ['type' => 'success', 'message' => '✓ تم إنشاء جدول السنوات المالية'];
+
+        // Insert current year
+        $checkYear = $db->query("SELECT COUNT(*) as count FROM acc_fiscal_years");
+        if ($checkYear && $checkYear->fetch_assoc()['count'] == 0) {
+            $currentYear = date('Y');
+            $stmt = $db->prepare("INSERT INTO acc_fiscal_years (fiscal_year, start_date, end_date, status, created_by, formuid) VALUES (?, ?, ?, 'open', ?, UUID())");
+            $startDate = "$currentYear-01-01";
+            $endDate = "$currentYear-12-31";
+            $stmt->bind_param("issi", $currentYear, $startDate, $endDate, $currentUserId);
+            $stmt->execute();
+            $installLog[] = ['type' => 'success', 'message' => "✓ تم إضافة السنة المالية $currentYear"];
+        }
+    } else {
+        $installLog[] = ['type' => 'error', 'message' => '✗ خطأ في إنشاء جدول السنوات المالية: ' . $db->error];
+        $hasErrors = true;
+    }
+
+    // 6. System Settings
+    $sql = "CREATE TABLE IF NOT EXISTS `acc_system_settings` (
+      `setting_id` INT(11) NOT NULL AUTO_INCREMENT,
+      `setting_key` VARCHAR(100) NOT NULL,
+      `setting_value` TEXT,
+      `setting_category` VARCHAR(50) NOT NULL,
+      `description_ar` VARCHAR(255),
+      `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      `formuid` VARCHAR(500) NOT NULL,
+      PRIMARY KEY (`setting_id`),
+      UNIQUE KEY `idx_key` (`setting_key`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+
+    if ($db->query($sql)) {
+        $installLog[] = ['type' => 'success', 'message' => '✓ تم إنشاء جدول الإعدادات'];
+
+        // Insert default settings
+        $checkSettings = $db->query("SELECT COUNT(*) as count FROM acc_system_settings");
+        if ($checkSettings && $checkSettings->fetch_assoc()['count'] == 0) {
+            $settings = [
+                ['default_currency', 'SAR', 'accounting', 'العملة الافتراضية'],
+                ['default_vat_rate', '15.00', 'accounting', 'نسبة ضريبة القيمة المضافة'],
+                ['invoice_prefix', 'INV', 'invoicing', 'بادئة رقم الفاتورة'],
+                ['enable_zatca', '1', 'zatca', 'تفعيل تكامل ZATCA']
+            ];
+
+            foreach ($settings as $setting) {
+                $stmt = $db->prepare("INSERT INTO acc_system_settings (setting_key, setting_value, setting_category, description_ar, formuid) VALUES (?, ?, ?, ?, UUID())");
+                $stmt->bind_param("ssss", $setting[0], $setting[1], $setting[2], $setting[3]);
+                $stmt->execute();
+            }
+            $installLog[] = ['type' => 'success', 'message' => '✓ تم إضافة الإعدادات الافتراضية'];
+        }
+    } else {
+        $installLog[] = ['type' => 'error', 'message' => '✗ خطأ في إنشاء جدول الإعدادات: ' . $db->error];
+        $hasErrors = true;
+    }
+
+    // Accounting may be installed after the shared version was already marked
+    // complete for a company without accounting. Finish its updates explicitly.
+    if (!$hasErrors) {
+        require_once __DIR__ . '/../include/amlak/migrations.hnt';
+        if (!AmlakMigrations::run($db, true)) {
+            $hasErrors = true;
+            $installLog[] = ['type'=>'error','message'=>'تعذر إكمال التحديثات المشتركة. راجع سجل الخادم وأعد المحاولة من صفحة إصلاح الجداول.'];
+        }
+    }
+
+    if (!$hasErrors) {
+        $installLog[] = ['type' => 'success', 'message' => '🎉 تم تثبيت قاعدة البيانات بنجاح!'];
+    }
+}
+?>
+
+<link rel="stylesheet" href="<?= $urlh ?>/css/bootstrap-5.3.8-dist/css/bootstrap.rtl.min.css">
+<link rel="stylesheet" href="<?= $urlh ?>/css/bootstrap-icons-1.13.1/bootstrap-icons.min.css">
+<!-- Bootstrap 5 Compatibility -->
+<script src="<?= $urlh ?>/css/bootstrap-5.3.8-dist/js/bootstrap.bundle.min.js"></script>
+
+<style>
+    .install-container {
+        max-width: 900px;
+        margin: 2rem auto;
+        padding: 2rem;
+    }
+
+    .install-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 15px;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+
+    .log-item {
+        padding: 1rem;
+        margin-bottom: 0.5rem;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+    }
+
+    .log-item.success {
+        background: #d4edda;
+        border-left: 4px solid #28a745;
+        color: #155724;
+    }
+
+    .log-item.error {
+        background: #f8d7da;
+        border-left: 4px solid #dc3545;
+        color: #721c24;
+    }
+
+    .log-item.info {
+        background: #d1ecf1;
+        border-left: 4px solid #17a2b8;
+        color: #0c5460;
+    }
+
+    .install-btn {
+        padding: 1rem 3rem;
+        font-size: 1.2rem;
+        border-radius: 10px;
+        font-weight: 600;
+    }
+</style>
+
+<div class="install-container">
+    <div class="install-header">
+        <h1><i class="bi bi-database-add me-3"></i>تثبيت قاعدة بيانات المحاسبة</h1>
+        <p class="mb-0">Database Installation Wizard</p>
+    </div>
+
+    <?php if (empty($installLog)): ?>
+        <div class="card shadow-sm" style="border-radius: 15px;">
+            <div class="card-body p-5 text-center">
+                <i class="bi bi-info-circle" style="font-size: 4rem; color: #17a2b8;"></i>
+                <h3 class="mt-4 mb-3">مرحباً بك في معالج التثبيت</h3>
+                <p class="text-muted mb-4">
+                    سيقوم هذا المعالج بإنشاء جداول قاعدة البيانات اللازمة لنظام المحاسبة<br>
+                    يشمل ذلك: دليل الحسابات، القيود اليومية، الفواتير، والإعدادات
+                </p>
+
+                <div class="alert alert-warning text-start" role="alert">
+                    <i class="bi bi-exclamation-triangle me-2"></i>
+                    <strong>تنبيه:</strong> تأكد من أخذ نسخة احتياطية من قاعدة البيانات قبل المتابعة
+                </div>
+
+                <form method="POST">
+                    <button type="submit" name="install" class="btn btn-primary install-btn">
+                        <i class="bi bi-play-circle me-2"></i>بدء التثبيت
+                    </button>
+                </form>
+            </div>
+        </div>
+    <?php else: ?>
+        <div class="card shadow-sm" style="border-radius: 15px;">
+            <div class="card-body p-4">
+                <h4 class="mb-4">
+                    <i class="bi bi-list-check me-2"></i>سجل التثبيت
+                </h4>
+
+                <?php foreach ($installLog as $log): ?>
+                    <div class="log-item <?php echo $log['type']; ?>">
+                        <?php if ($log['type'] == 'success'): ?>
+                            <i class="bi bi-check-circle-fill" style="font-size: 1.5rem;"></i>
+                        <?php elseif ($log['type'] == 'error'): ?>
+                            <i class="bi bi-x-circle-fill" style="font-size: 1.5rem;"></i>
+                        <?php else: ?>
+                            <i class="bi bi-info-circle-fill" style="font-size: 1.5rem;"></i>
+                        <?php endif; ?>
+                        <span><?php echo $log['message']; ?></span>
+                    </div>
+                <?php endforeach; ?>
+
+                <div class="mt-4 text-center">
+                    <?php if (!$hasErrors): ?>
+                        <a href="index.hnt" class="btn btn-success btn-lg">
+                            <i class="bi bi-arrow-left me-2"></i>الانتقال إلى لوحة التحكم
+                        </a>
+                    <?php else: ?>
+                        <button onclick="location.reload()" class="btn btn-warning btn-lg">
+                            <i class="bi bi-arrow-clockwise me-2"></i>إعادة المحاولة
+                        </button>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+    <?php endif; ?>
+</div>
+
+<?php require("../../foter.hnt"); ?>

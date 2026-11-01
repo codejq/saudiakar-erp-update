@@ -45,6 +45,7 @@ readonly class StoragePath
     public static function upload(string $category, string $filename = ''): string
     {
         $paths = [
+            'users.avatars' => STORAGE_UPLOADS . 'users' . DIRECTORY_SEPARATOR . 'avatars' . DIRECTORY_SEPARATOR,
             'properties.images' => STORAGE_UPLOADS_IMAGES,
             'properties.blueprints' => STORAGE_UPLOADS_BLUEPRINTS,
             'media.slides' => STORAGE_UPLOADS_MEDIA . 'slides' . DIRECTORY_SEPARATOR,

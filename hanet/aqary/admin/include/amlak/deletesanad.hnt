@@ -25,41 +25,42 @@ else{
 require_once '../arabicTools.class.hnt';
 require_once "amlakfunctions.hnt";
 
-// Handle kastid update
-if ($idsanad && $dkastid) {
-    mysql_query("UPDATE sanad SET kastid='" . intval($dkastid) . "' WHERE idsanad='" . intval($idsanad) . "' LIMIT 1", $link);
+require_once __DIR__ . '/receipt_cancellation_helpers.hnt';
+$idsanad=(int)($_POST['idsanad'] ?? $_GET['idsanad'] ?? 0);
+$dkastid=(int)($_POST['dkastid'] ?? $_GET['dkastid'] ?? 0);
+$ajax=(int)($_POST['ajax'] ?? $_GET['ajax'] ?? 0);
+$step=(int)($_POST['step'] ?? $_GET['step'] ?? 1);
+$receiptCancellationCsrf=receiptCancellationToken();
+
+if ($idsanad && $dkastid && !($ajax===1 && $step===3)) {
+    try {
+        $relinkToken=$_POST['receipt_cancellation_token'] ?? '';
+        if ($_SERVER['REQUEST_METHOD']!=='POST' || !is_string($relinkToken) || !hash_equals($receiptCancellationCsrf,$relinkToken)) throw new RuntimeException('أعد اختيار القسط من نموذج السند.');
+        receiptCancellationRelink($link,$idsanad,$dkastid);
+    }
+    catch (Throwable $error) {
+        error_log('Receipt relink: '.$error->getMessage());
+        echo '<div class="alert alert-danger">'.receiptCommissionEsc($error instanceof RuntimeException ? $error->getMessage() : 'تعذر تغيير قسط السند.').'</div>';
+    }
 }
 
-// Handle AJAX delete request
-if ($ajax == 1 && $step == 3 && $idsanad) {
-    $sql = "SELECT * FROM sanad WHERE idsanad='" . intval($idsanad) . "'";
-    $row = mysql_fetch_array(mysql_query($sql, $link));
-
-    if (!$row || !$row['idsanad']) {
-        echo json_encode([
-            'success' => false,
-            'message' => 'لم أتمكن من إيجاد سند بهذا الرقم '. $idsanad
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        exit();
+if ($ajax===1 && $step===3 && $idsanad>0) {
+    header('Content-Type: application/json; charset=utf-8');
+    try {
+        $postedToken=$_POST['receipt_cancellation_token'] ?? '';
+        if ($_SERVER['REQUEST_METHOD']!=='POST' || !is_string($postedToken) || !hash_equals($receiptCancellationCsrf,$postedToken)) {
+            throw new RuntimeException('انتهت صلاحية طلب الإلغاء. أعد تحميل الصفحة.');
+        }
+        $cancelledReceipt=receiptCancellationDelete($link,$idsanad);
+        try { loginfo('critical','delete','الغاء السند رقم: '.(int)$cancelledReceipt['idsanad'],'','sanad',(int)$cancelledReceipt['idsanad'],$link); }
+        catch (Throwable $logError) { error_log('Cancelled receipt audit log: '.$logError->getMessage()); }
+        echo json_encode(['success'=>true,'message'=>'تم إلغاء السند غير المرحل وعمولاته غير المصروفة بنجاح'],JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $error) {
+        error_log('Receipt cancellation: '.$error->getMessage());
+        http_response_code(409);
+        echo json_encode(['success'=>false,'message'=>$error instanceof RuntimeException ? $error->getMessage() : 'تعذر إلغاء السند. لم تكتمل العملية.'],JSON_UNESCAPED_UNICODE);
     }
-
-    // Log the deletion
-    loginfo("critical", "delete", "الغاء السند رقم: {$row['idsanad']} البيان", "", "sanad", $row['idsanad'], $link);
-
-    // Get related records
-    $iderad = mysql_fetch_array(mysql_query("SELECT iderad FROM eradat WHERE sanadrakam='" . intval($row['idsanad']) . "' LIMIT 1"));
-
-    // Delete related records
-    mysql_query("DELETE FROM eradat WHERE iderad='" . intval($iderad['iderad']) . "' LIMIT 1", $link);
-    mysql_query("DELETE FROM sanadsarf WHERE iderad='" . intval($iderad['iderad']) . "' LIMIT 1", $link);
-    mysql_query("DELETE FROM sanad WHERE idsanad='" . intval($row['idsanad']) . "' LIMIT 1", $link);
-    mysql_query("UPDATE aksat SET dof3at=dof3at-" . floatval($row['depositeamount']) . ", iscomplete=0 WHERE kastid='" . intval($row['kastid']) . "' LIMIT 1", $link);
-
-    echo json_encode([
-        'success' => true,
-        'message' => 'تم إلغاء السند بنجاح'
-    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    exit();
+    exit;
 }
 ?>
 
@@ -333,7 +334,17 @@ const submitInstallmentForm = () => {
         return;
     }
 
-    window.location.href = `deletesanad.hnt?step=2&idsanad=${idsanad}&dkastid=${dkastid}`;
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = 'deletesanad.hnt';
+    Object.entries({step: '2', idsanad: idsanad, dkastid: dkastid,
+        receipt_cancellation_token: <?= json_encode($receiptCancellationCsrf) ?>}).forEach(([name, value]) => {
+        const input = document.createElement('input');
+        input.type = 'hidden'; input.name = name; input.value = value;
+        form.appendChild(input);
+    });
+    document.body.appendChild(form);
+    form.submit();
 };
 
 // Confirm and delete voucher
@@ -351,6 +362,7 @@ const doDelete = async (idsanad) => {
         formData.append('idsanad', idsanad);
         formData.append('step', '3');
         formData.append('ajax', '1');
+        formData.append('receipt_cancellation_token', <?= json_encode($receiptCancellationCsrf) ?>);
 
         const response = await fetch(window.location.href, {
             method: 'POST',

@@ -1,0 +1,47 @@
+<?php
+$sc_title='ربط المستأجرين بعملاء المحاسبة'; $sc_id='211'; $use_accounting_theme=true;
+require_once '../../header.hnt';
+require __DIR__.'/includes/active_database.hnt';
+require_once __DIR__.'/includes/customer_identity.hnt';
+if (empty($_SESSION['accounting_customer_link_token'])) $_SESSION['accounting_customer_link_token']=bin2hex(random_bytes(24));
+$error=''; $success='';
+$ready=accountingCustomerLinksReady($db);
+if ($_SERVER['REQUEST_METHOD']==='POST') {
+    try {
+        $token=$_POST['csrf_token'] ?? '';
+        if (!is_string($token) || !hash_equals($_SESSION['accounting_customer_link_token'],$token)) throw new RuntimeException('أعد تحميل نموذج الربط.');
+        if (!receiptCommissionCan($db,'211','edits') && !receiptCommissionCan($db,'211','adds')) throw new RuntimeException('ليس لديك صلاحية تعديل ربط العملاء.');
+        if (!$ready) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث ربط العملاء.');
+        $tenantId=(int)($_POST['tenant_id'] ?? 0); $customerId=(int)($_POST['customer_id'] ?? 0);
+        if ($tenantId<=0 || $customerId<=0) throw new RuntimeException('اختر المستأجر وعميل المحاسبة.');
+        $db->begin_transaction();
+        if (!receiptCommissionRows($db,'SELECT mostagerid FROM mostagereen WHERE mostagerid=?',[$tenantId]) ||
+            !receiptCommissionRows($db,'SELECT customer_id FROM acc_customers WHERE customer_id=?',[$customerId])) throw new RuntimeException('المستأجر أو العميل غير موجود.');
+        $existing=receiptCommissionRows($db,'SELECT customer_id FROM acc_customer_tenants WHERE tenant_id=? FOR UPDATE',[$tenantId]);
+        if ($existing && (int)$existing[0]['customer_id']!==$customerId) throw new RuntimeException('المستأجر مرتبط بعميل آخر. لا يغيّر هذا النموذج الربط التاريخي.');
+        if (!$existing) receiptCommissionQuery($db,'INSERT INTO acc_customer_tenants (tenant_id,customer_id) VALUES (?,?)',[$tenantId,$customerId])->close();
+        $db->commit(); $success='تم حفظ الربط. ستظهر المقبوضات غير المخصصة لفاتورة في كشف العميل.';
+    } catch (Throwable $exception) {
+        $db->rollback(); error_log('Manual customer link: '.$exception->getMessage());
+        $error=$exception instanceof RuntimeException ? $exception->getMessage() : 'تعذر حفظ الربط.';
+    }
+}
+$tenants=receiptCommissionRows($db,'SELECT mostagerid,mostagername FROM mostagereen ORDER BY mostagername,mostagerid');
+$customers=receiptCommissionRows($db,'SELECT customer_id,customer_name FROM acc_customers ORDER BY customer_name,customer_id');
+$links=$ready ? receiptCommissionRows($db,'SELECT l.tenant_id,l.customer_id,t.mostagername,c.customer_name FROM acc_customer_tenants l
+    LEFT JOIN mostagereen t ON t.mostagerid=l.tenant_id LEFT JOIN acc_customers c ON c.customer_id=l.customer_id ORDER BY t.mostagername') : [];
+?>
+<div class="container py-4" dir="rtl">
+    <div class="d-flex justify-content-between mb-3"><h3><?= receiptCommissionEsc($sc_title) ?></h3><a class="btn btn-outline-secondary" href="sync_amlak.hnt">مزامنة العقارات</a></div>
+    <p class="text-muted">استخدم الربط اليدوي عند تكرار الأسماء. رقم المستأجر يختلف عن رقم عميل المحاسبة. لا تنقل هذه العملية القيود أو الفواتير بين العملاء.</p>
+    <?php if (!$ready) { ?><div class="alert alert-warning">افتح إدارة الأملاك لتثبيت تحديث ربط العملاء.</div><?php } ?>
+    <?php if ($error!=='') { ?><div class="alert alert-danger"><?= receiptCommissionEsc($error) ?></div><?php } ?>
+    <?php if ($success!=='') { ?><div class="alert alert-success"><?= receiptCommissionEsc($success) ?></div><?php } ?>
+    <form method="post" class="card card-body mb-4"><input type="hidden" name="csrf_token" value="<?= receiptCommissionEsc($_SESSION['accounting_customer_link_token']) ?>">
+        <div class="row g-3"><div class="col-md-5"><label class="form-label" for="tenant_id">المستأجر</label><select class="form-select" id="tenant_id" name="tenant_id" required><option value="">اختر المستأجر</option><?php foreach ($tenants as $tenant) { ?><option value="<?= (int)$tenant['mostagerid'] ?>"><?= receiptCommissionEsc($tenant['mostagername']) ?> #<?= (int)$tenant['mostagerid'] ?></option><?php } ?></select></div>
+        <div class="col-md-5"><label class="form-label" for="customer_id">عميل المحاسبة</label><select class="form-select" id="customer_id" name="customer_id" required><option value="">اختر العميل</option><?php foreach ($customers as $customer) { ?><option value="<?= (int)$customer['customer_id'] ?>"><?= receiptCommissionEsc($customer['customer_name']) ?> #<?= (int)$customer['customer_id'] ?></option><?php } ?></select></div>
+        <div class="col-md-2 d-flex align-items-end"><button class="btn btn-success w-100" <?= !$ready ? 'disabled' : '' ?>>حفظ الربط</button></div></div>
+    </form>
+    <div class="table-responsive"><table class="table table-striped"><thead><tr><th>المستأجر</th><th>عميل المحاسبة</th></tr></thead><tbody><?php foreach ($links as $identity) { ?><tr><td><?= receiptCommissionEsc($identity['mostagername']) ?> #<?= (int)$identity['tenant_id'] ?></td><td><?= receiptCommissionEsc($identity['customer_name']) ?> #<?= (int)$identity['customer_id'] ?></td></tr><?php } ?></tbody></table></div>
+</div>
+<?php require '../../foter.hnt'; ?>

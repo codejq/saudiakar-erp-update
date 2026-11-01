@@ -13,6 +13,7 @@ $sc_id = "211";
 include_once "../../nocash.hnt";
 include_once "../../connectdb.hnt";
 include_once "../../header.hnt";
+require __DIR__ . '/includes/active_database.hnt';
 include_once "includes/accounting_class.hnt";
 include_once "includes/amlak_integration.hnt";
 
@@ -166,11 +167,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['sync_action'])) {
             break;
 
         case 'sync_payments':
-            // Source columns are installed by schema_migrations.hnt from the
-            // accounting dashboard.  Process a bounded batch on every run.
+            // Source columns are installed by the shared versioned migrations.
+            // Process a bounded batch on every run.
             $vouchersQuery = "SELECT idsanad as sanadid, sanadrakam as sanadnumber, mybyan as sanaddescription
                              FROM sanad
-                             WHERE accounting_entry_id IS NULL OR accounting_entry_id = 0
+                             WHERE accounting_entry_id IS NULL OR accounting_entry_id=0 OR NOT EXISTS
+                                 (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id=sanad.accounting_entry_id AND j.status='posted')
                              ORDER BY idsanad DESC
                              LIMIT 100";
             $vouchersResult = $db->query($vouchersQuery);
@@ -215,7 +217,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['sync_action'])) {
         case 'sync_expenses':
             $expensesResult = $db->query("SELECT idmasrof, idaqar, payeddue
                 FROM masrofat
-                WHERE fund_source=0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0)
+                WHERE fund_source=0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0 OR NOT EXISTS
+                    (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id=masrofat.accounting_entry_id AND j.status='posted'))
                 ORDER BY idmasrof DESC LIMIT 100");
             if (!$expensesResult) {
                 $syncStats['errors']++;
@@ -251,7 +254,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['sync_action'])) {
         case 'sync_owner_settlements':
             $settlementsResult = $db->query("SELECT sanadid, bayan
                 FROM sanadsarf
-                WHERE aqarid>0 AND iderad>0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0)
+                WHERE aqarid>0 AND iderad>0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0 OR NOT EXISTS
+                    (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id=sanadsarf.accounting_entry_id AND j.status='posted'))
                 ORDER BY sanadid DESC LIMIT 100");
             if (!$settlementsResult) {
                 $syncStats['errors']++;
@@ -304,15 +308,15 @@ $result = $db->query("SELECT COUNT(*) as count FROM amlak");
 if ($result) $propertiesCount = $result->fetch_assoc()['count'];
 
 $sanadCount = 0;
-$result = $db->query("SELECT COUNT(*) as count FROM sanad WHERE accounting_entry_id IS NULL OR accounting_entry_id=0");
+$result = $db->query("SELECT COUNT(*) as count FROM sanad WHERE accounting_entry_id IS NULL OR accounting_entry_id=0 OR NOT EXISTS (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id=sanad.accounting_entry_id AND j.status='posted')");
 if ($result) $sanadCount = $result->fetch_assoc()['count'];
 
 $expenseSyncCount = 0;
-$result = $db->query("SELECT COUNT(*) as count FROM masrofat WHERE fund_source=0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0)");
+$result = $db->query("SELECT COUNT(*) as count FROM masrofat WHERE fund_source=0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0 OR NOT EXISTS (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id=masrofat.accounting_entry_id AND j.status='posted'))");
 if ($result) $expenseSyncCount = $result->fetch_assoc()['count'];
 
 $ownerSettlementSyncCount = 0;
-$result = $db->query("SELECT COUNT(*) as count FROM sanadsarf WHERE aqarid>0 AND iderad>0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0)");
+$result = $db->query("SELECT COUNT(*) as count FROM sanadsarf WHERE aqarid>0 AND iderad>0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0 OR NOT EXISTS (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id=sanadsarf.accounting_entry_id AND j.status='posted'))");
 if ($result) $ownerSettlementSyncCount = $result->fetch_assoc()['count'];
 
 $customersCount = 0;
@@ -394,6 +398,7 @@ if ($result) $invoicesCount = $result->fetch_assoc()['count'];
 </style>
 
 <div class="container-fluid p-4">
+    <div class="mb-3"><a class="btn btn-outline-primary" href="customer_tenant_links.hnt"><i class="bi bi-link-45deg"></i> ربط المستأجرين بعملاء المحاسبة</a></div>
     <!-- Header -->
     <div class="page-header">
         <div class="d-flex justify-content-between align-items-center">

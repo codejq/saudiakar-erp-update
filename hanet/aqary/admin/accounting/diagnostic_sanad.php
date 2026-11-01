@@ -1,5 +1,6 @@
 <?php
 include '../../connectdb.hnt';
+require __DIR__.'/includes/active_database.hnt';
 
 echo "<h2>Diagnostic: Sanad Table Investigation</h2>";
 echo "<pre>";

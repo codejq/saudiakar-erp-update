@@ -1,6 +1,11 @@
 <?php
 $showdhmltazkeer = 1;
-include_once "../header.hnt";
+$is_ajax_upload=isset($_POST['ajax_upload']) && $_POST['ajax_upload']==='1';
+if ($is_ajax_upload) {
+    include_once '../reqloginajax.hnt';
+    header('Content-Type: application/json; charset=utf-8');
+} else include_once '../header.hnt';
+require_once __DIR__.'/include/logo_image_helpers.hnt';
 
 
 // Initialize variables from REQUEST
@@ -43,38 +48,22 @@ $is_ajax_upload = isset($_POST['ajax_upload']) && $_POST['ajax_upload'] == '1';
 
 if(isset($_FILES['fil']['name']) && $_FILES['fil']['name']){
 
-$targetpic="./images/sh3ar.gif";
-if($_FILES['fil']['type']!="image/pjpeg" and $_FILES['fil']['type']!="image/gif"
-			and $_FILES['fil']['type']!="image/x-png" and $_FILES['fil']['type']!="image/png" and $_FILES['fil']['type']!="image/jpeg"){
-	if ($is_ajax_upload) {
-		header('Content-Type: application/json; charset=utf-8');
-		echo json_encode(array('success' => false, 'message' => "خطأ: يجب ان يكون نوع الصورة jpg او gif او png  الملف الذي تحاول رفعه من النوع ". $_FILES['fil']['type']));
-	} else {
-		echo"<script>parent.alert(\"<font color=red>خطأ: يجب ان يكون نوع الصورة jpg او gif او png  الملف الذي تحاول رفعه من النوع ". $_FILES['fil']['type']." </font>\");</script>";
-	}
-	exit();
-}
-
-if($_FILES['fil']['size']>100000){
-	if ($is_ajax_upload) {
-		header('Content-Type: application/json; charset=utf-8');
-		echo json_encode(array('success' => false, 'message' => "خطأ: اقصى حجم مسموح به 100 ك بايت  يجب تقليل حجم الصورة"));
-	} else {
-		echo"<script>parent.alert(\"<font color=red>خطأ: اقصى حجم مسموح به 100 ك بايت  يجب تقليل حجم الصورة  </font>\");</script>";
-	}
-	exit();
-}
-
-	if(move_uploaded_file($_FILES['fil']['tmp_name'],$targetpic)) {
-		if ($is_ajax_upload) {
-			header('Content-Type: application/json; charset=utf-8');
-			echo json_encode(array('success' => true, 'message' => 'تم حفظ الشعار بنجاح'));
-		} else {
-			echo "<script>parent.location.replace('replacelogo.hnt');</script>";
-		}
-	}
-
-exit();
+    try {
+        $uploadError=(int)($_FILES['fil']['error'] ?? UPLOAD_ERR_NO_FILE);
+        if ($uploadError!==UPLOAD_ERR_OK || !is_uploaded_file($_FILES['fil']['tmp_name'])) {
+            throw new RuntimeException('لم يكتمل رفع صورة الشعار. أعد اختيار الملف وحاول مجدداً.');
+        }
+        $dimensions=resizeCompanyLogoGif($_FILES['fil']['tmp_name'],__DIR__.'/images/sh3ar.gif',400);
+        if ($is_ajax_upload) {
+            echo json_encode(array_merge(['success'=>true,'message'=>'تم حفظ الشعار بنجاح مع ضبط المقاس تلقائياً.'],$dimensions),JSON_UNESCAPED_UNICODE);
+        } else echo "<script>parent.location.replace('replacelogo.hnt');</script>";
+    } catch (Throwable $error) {
+        error_log('Logo upload: '.$error->getMessage());
+        $message=$error instanceof RuntimeException ? $error->getMessage() : 'تعذر معالجة الشعار. بقي الشعار الحالي دون تغيير.';
+        if ($is_ajax_upload) echo json_encode(['success'=>false,'message'=>$message],JSON_UNESCAPED_UNICODE);
+        else echo '<script>parent.alert('.json_encode($message,JSON_UNESCAPED_UNICODE|JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT).');</script>';
+    }
+    exit;
 }
 
 if(isset($_FILES['headerimage']['name']) && $_FILES['headerimage']['name']){
@@ -252,7 +241,7 @@ if ($changesize) {
 					</div>
 					<div class="col-md-9">
 						<div class="mb-3">
-							<input type="file" id="photoimg" name="fil" class="form-control d-none" onchange="xx.width=100;xx.height=100;">
+							<input type="file" id="photoimg" name="fil" accept="image/jpeg,image/png,image/gif,image/webp" class="form-control d-none" onchange="xx.width=100;xx.height=100;">
 							<button type="button" class="btn btn-primary me-2" id="upfile1">
 								<i class="bi bi-upload me-1"></i>اختر ملف الشعار
 							</button>
@@ -265,7 +254,7 @@ if ($changesize) {
 						</div>
 						<p class="text-muted small mb-3">
 							<i class="bi bi-info-circle me-1"></i>
-							يراعى أن تكون مقاسات الشعار (العرض 100 × الارتفاع 100 بكسل) وبحجم لا يتجاوز 100 كيلوبايت.
+							ارفع شعاراً بصيغة JPG أو PNG أو GIF أو WEBP. يتم تصغير الصور الكبيرة تلقائياً إلى عرض 400 بكسل مع الحفاظ على التناسب.
 						</p>
 						<div class="row g-2 align-items-center mb-3">
 							<div class="col-auto">
@@ -442,6 +431,12 @@ $(document).ready(function() {
 				contentType: false,
 				dataType: 'json',
 				success: function (response) {
+					if (!response || !response.success) {
+						var failure = response && response.message ? response.message : 'تعذر حفظ الصورة';
+						if (typeof showBootstrapNotification === 'function') showBootstrapNotification('danger', failure);
+						else alert(failure);
+						return;
+					}
 					var msg = (response && response.message) ? response.message : successMessage;
 					if (typeof showBootstrapNotification === 'function') {
 						showBootstrapNotification('success', msg);

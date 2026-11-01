@@ -1,0 +1,1212 @@
+<?php
+/**
+ * Shared Amlak migrations. Including this file defines the runner only.
+ * The main/property hubs call run($link); the repair page calls run($link, true).
+ * Bump ver.hnt whenever adding a migration here.
+ */
+final class AmlakMigrations
+{
+    private $link;
+    private $failed = false;
+    private $lockName = null;
+    private $loadingId = null;
+    private const MARKER = 'amlak_migration_version';
+
+    private function __construct($link)
+    {
+        $this->link = $link;
+    }
+
+    public static function run($link, bool $force = false): bool
+    {
+        $runner = new self($link);
+        try {
+            return $runner->execute($force);
+        } catch (Throwable $error) {
+            error_log('Amlak migration: ' . $error->getMessage());
+            echo '<div class="alert alert-danger" dir="rtl">تعذر إكمال تحديث النظام. راجع سجل الخادم وأعد المحاولة من إدارة الأملاك أو صفحة إصلاح الجداول.</div>';
+            return false;
+        } finally {
+            if ($runner->lockName !== null) {
+                try {
+                    $escaped = mysql_real_escape_string($runner->lockName, $link);
+                    mysql_query("SELECT RELEASE_LOCK('{$escaped}')", $link);
+                } catch (Throwable $error) {
+                    error_log('Amlak migration lock release: ' . $error->getMessage());
+                }
+            }
+            $runner->hideLoading();
+        }
+    }
+
+    private function flushLoadingOutput(): void
+    {
+        // Drain nested plain buffers, preserving their settings for legacy pages.
+        // Custom handlers (including compression) are flushed without closing.
+        $buffers = [];
+        while (ob_get_level() > 0) {
+            $status = ob_get_status();
+            if ($status['name'] !== 'default output handler'
+                || !($status['flags'] & PHP_OUTPUT_HANDLER_REMOVABLE)
+                || !($status['flags'] & PHP_OUTPUT_HANDLER_FLUSHABLE)) break;
+            if (!@ob_end_flush()) break;
+            $buffers[] = $status;
+        }
+        if (ob_get_level() > 0) {
+            $status = ob_get_status();
+            if ($status['flags'] & PHP_OUTPUT_HANDLER_FLUSHABLE) @ob_flush();
+        }
+        flush();
+        foreach (array_reverse($buffers) as $status) {
+            ob_start(null, $status['chunk_size'], $status['flags'] & PHP_OUTPUT_HANDLER_STDFLAGS);
+        }
+    }
+
+    private function showLoading(): void
+    {
+        if (PHP_SAPI === 'cli') return;
+        $id = $this->loadingId = uniqid('aqary-application-update-');
+        if (!headers_sent()) header('X-Accel-Buffering: no');
+        echo <<<HTML
+<style>
+#{$id}{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(15,23,42,.72);font-family:inherit;color:#212529}
+#{$id} .aqary-update-card{width:min(480px,100%);padding:40px 28px;border-radius:16px;background:#fff;text-align:center;box-shadow:0 16px 48px rgba(0,0,0,.2)}
+#{$id} .aqary-update-spinner{width:54px;height:54px;margin:0 auto 24px;border:5px solid #e9ecef;border-top-color:var(--bs-success,#198754);border-radius:50%;animation:aqary-application-update-spin .85s linear infinite}
+#{$id} h2{margin:0 0 16px;font-size:1.4rem;font-weight:600;line-height:1.7}
+#{$id} p{margin:0;color:#6c757d;line-height:1.9}
+@keyframes aqary-application-update-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){#{$id} .aqary-update-spinner{animation-duration:2s}}
+</style>
+<div id="{$id}" dir="rtl" role="status" aria-live="polite" aria-atomic="true" aria-busy="true">
+    <div class="aqary-update-card">
+        <div class="aqary-update-spinner" aria-hidden="true"></div>
+        <h2>يرجى الانتظار، جارٍ تحديث التطبيق...</h2>
+        <p>يرجى عدم إغلاق الصفحة حتى يكتمل التحديث.</p>
+    </div>
+</div>
+HTML;
+        // Allow the browser to render the message before the first slow query.
+        echo '<!--' . str_repeat(' ', 8192) . '-->';
+        $this->flushLoadingOutput();
+    }
+
+    private function hideLoading(): void
+    {
+        if ($this->loadingId === null) return;
+        // CSS also dismisses the overlay when JavaScript is unavailable.
+        echo '<style>#' . $this->loadingId . '{display:none!important}</style>';
+        $this->loadingId = null;
+        $this->flushLoadingOutput();
+    }
+
+    private function query(string $sql, $unusedLink = null)
+    {
+        if ($this->failed) throw new RuntimeException('An earlier migration step failed');
+        try {
+            $result = mysql_query($sql, $this->link);
+            if ($result === false) throw new RuntimeException(mysql_error($this->link));
+            return $result;
+        } catch (Throwable $error) {
+            $this->failed = true;
+            throw $error;
+        }
+    }
+
+    private function installedVersion(): string
+    {
+        $result = $this->query("SELECT valuribalevalue FROM global WHERE variblename='" . self::MARKER . "' ORDER BY id DESC LIMIT 1");
+        $row = mysql_fetch_assoc($result);
+        return $row ? (string)$row['valuribalevalue'] : '';
+    }
+
+    private function execute(bool $force): bool
+    {
+        $version = @hash_file('sha256', dirname(__DIR__, 3) . '/ver.hnt');
+        if ($version === false) throw new RuntimeException('Unable to read ver.hnt');
+        if (!$force && hash_equals($version, $this->installedVersion())) return true;
+        $this->showLoading();
+
+        $databaseResult = $this->query('SELECT DATABASE() AS db');
+        $database = mysql_fetch_assoc($databaseResult);
+        if (!$database || empty($database['db'])) throw new RuntimeException('No selected company database');
+        $lock = 'aqary:amlak:migration:' . substr(hash('sha256', $database['db']), 0, 40);
+        $escapedLock = mysql_real_escape_string($lock, $this->link);
+        $wait = $force ? 30 : 0;
+        $lockResult = $this->query("SELECT GET_LOCK('{$escapedLock}', {$wait}) AS acquired");
+        $lockRow = mysql_fetch_assoc($lockResult);
+        if (!$lockRow || (string)$lockRow['acquired'] !== '1') {
+            echo '<div class="alert alert-info" dir="rtl">يجري تحديث هذه الشركة في نافذة أخرى. يرجى الانتظار ثم إعادة فتح الصفحة.</div>';
+            return false;
+        }
+        $this->lockName = $lock;
+        // Another request may have completed the same version while we waited.
+        if (!$force && hash_equals($version, $this->installedVersion())) return true;
+        // A failed forced repair must also be retried on the next hub visit.
+        if ($force) {
+            $this->query("UPDATE global SET valuribalevalue='' WHERE variblename='" . self::MARKER . "'");
+        }
+        @set_time_limit(0);
+        $this->apply();
+        if ($this->failed) throw new RuntimeException('Migration did not complete');
+
+        // These operations share the advisory lock, so initial visits cannot
+        // create duplicate markers even though the legacy global key is not unique.
+        $markerResult = $this->query("SELECT id FROM global WHERE variblename='" . self::MARKER . "' LIMIT 1");
+        if (mysql_fetch_assoc($markerResult)) {
+            $this->query("UPDATE global SET valuribalevalue='{$version}' WHERE variblename='" . self::MARKER . "'");
+        } else {
+            $this->query("INSERT INTO global (variblename,valuribalevalue,formuid)
+                VALUES ('" . self::MARKER . "','{$version}','amlak-version-migration')");
+        }
+        return true;
+    }
+
+    private function prepare(string $sql)
+    {
+        if ($this->failed) throw new RuntimeException('An earlier migration step failed');
+        try {
+            $stmt = $this->link->prepare($sql);
+            if (!$stmt) throw new RuntimeException($this->link->error);
+            return $stmt;
+        } catch (Throwable $error) {
+            $this->failed = true;
+            throw $error;
+        }
+    }
+
+    private function applyAccounting(): void
+    {
+        // Accounting is optional. Do not auto-install its core tables on the
+        // main dashboard; a partial installation must be finished explicitly.
+        $required = ['acc_invoices','acc_journal_entries','acc_journal_entry_lines','acc_chart_of_accounts','acc_system_settings'];
+        $tableResult = $this->query("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN
+            ('acc_invoices','acc_journal_entries','acc_journal_entry_lines','acc_chart_of_accounts','acc_system_settings')");
+        $installed = [];
+        while ($table = mysql_fetch_assoc($tableResult)) $installed[] = $table['TABLE_NAME'];
+        if (!$installed) return;
+        if (array_diff($required, $installed)) throw new RuntimeException('Accounting core installation is incomplete');
+        $db = $this->link;
+        $errors = [];
+        $applied = [];
+
+        $invoiceColumnMigrations = [
+            'journal_id' => "ALTER TABLE acc_invoices ADD COLUMN journal_id INT NULL AFTER due_date",
+            'cost_center_id' => "ALTER TABLE acc_invoices ADD COLUMN cost_center_id INT NULL AFTER journal_id",
+            'tenant_id' => "ALTER TABLE acc_invoices ADD COLUMN tenant_id INT NULL AFTER cost_center_id",
+            'owner_id' => "ALTER TABLE acc_invoices ADD COLUMN owner_id INT NULL AFTER tenant_id",
+            'aqar_id' => "ALTER TABLE acc_invoices ADD COLUMN aqar_id INT NULL AFTER owner_id",
+            'subaqar_id' => "ALTER TABLE acc_invoices ADD COLUMN subaqar_id INT NULL AFTER aqar_id",
+            'egar_id' => "ALTER TABLE acc_invoices ADD COLUMN egar_id INT NULL AFTER subaqar_id",
+            'vat_rate' => "ALTER TABLE acc_invoices ADD COLUMN vat_rate DECIMAL(5,2) DEFAULT 15.00 AFTER subtotal",
+            'remaining_amount' => "ALTER TABLE acc_invoices ADD COLUMN remaining_amount DECIMAL(15,2) DEFAULT 0 AFTER paid_amount",
+            'payment_method' => "ALTER TABLE acc_invoices ADD COLUMN payment_method VARCHAR(50) NULL AFTER payment_status",
+            'status' => "ALTER TABLE acc_invoices ADD COLUMN status ENUM('draft','approved','posted','cancelled') DEFAULT 'draft' AFTER payment_status",
+            'updated_at' => "ALTER TABLE acc_invoices ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at"
+        ];
+
+        foreach ($invoiceColumnMigrations as $columnName => $alterSql) {
+            $columnCheck = $this->query("SHOW COLUMNS FROM acc_invoices LIKE '{$columnName}'");
+            if (!$columnCheck) {
+                $errors[] = 'فشل في فحص أعمدة جدول الفواتير: ' . $db->error;
+                continue;
+            }
+            if ($columnCheck->num_rows == 0 && !$this->query($alterSql)) {
+                $errors[] = 'فشل في تحديث بنية جدول الفواتير: ' . $db->error;
+            }
+        }
+
+        $journalTableCheck = $this->query("SHOW TABLES LIKE 'acc_journals'");
+        if (!$journalTableCheck) {
+            $errors[] = 'فشل في فحص جدول اليومية: ' . $db->error;
+        } elseif ($journalTableCheck->num_rows == 0) {
+            $createJournalTableSql = "CREATE TABLE acc_journals (
+                journal_id INT(11) NOT NULL AUTO_INCREMENT,
+                journal_code VARCHAR(50) NOT NULL,
+                journal_name_ar VARCHAR(255) NOT NULL,
+                journal_name_en VARCHAR(255) DEFAULT NULL,
+                journal_type VARCHAR(50) DEFAULT 'general',
+                is_active TINYINT(1) DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                formuid VARCHAR(500) NOT NULL,
+                PRIMARY KEY (journal_id),
+                UNIQUE KEY idx_journal_code (journal_code),
+                KEY idx_journal_active (is_active)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+            if (!$this->query($createJournalTableSql)) {
+                $errors[] = 'فشل في إنشاء جدول اليوميات: ' . $db->error;
+            }
+        }
+
+        $defaultJournals = [
+            [
+                'journal_code' => 'GEN',
+                'journal_name_ar' => 'دفتر اليومية العام',
+                'journal_name_en' => 'General Journal',
+                'journal_type' => 'general'
+            ],
+            [
+                'journal_code' => 'REC',
+                'journal_name_ar' => 'دفتر المقبوضات',
+                'journal_name_en' => 'Receipts Journal',
+                'journal_type' => 'receipt'
+            ],
+            [
+                'journal_code' => 'PAY',
+                'journal_name_ar' => 'دفتر المدفوعات',
+                'journal_name_en' => 'Payments Journal',
+                'journal_type' => 'payment'
+            ],
+            [
+                'journal_code' => 'SAL',
+                'journal_name_ar' => 'دفتر المبيعات',
+                'journal_name_en' => 'Sales Journal',
+                'journal_type' => 'sales'
+            ],
+            [
+                'journal_code' => 'ADJ',
+                'journal_name_ar' => 'دفتر التسويات',
+                'journal_name_en' => 'Adjustments Journal',
+                'journal_type' => 'adjustment'
+            ]
+        ];
+
+        foreach ($defaultJournals as $journal) {
+            $journalCheck = $this->query("SELECT journal_id FROM acc_journals WHERE journal_code = '" . $db->real_escape_string($journal['journal_code']) . "' LIMIT 1");
+            if (!$journalCheck) {
+                $errors[] = 'فشل في فحص اليوميات الافتراضية: ' . $db->error;
+                continue;
+            }
+            if ($journalCheck->num_rows == 0) {
+                $journalInsert = $this->prepare("INSERT INTO acc_journals (journal_code, journal_name_ar, journal_name_en, journal_type, is_active, formuid) VALUES (?, ?, ?, ?, 1, UUID())");
+                if (!$journalInsert) {
+                    $errors[] = 'فشل في تجهيز إدراج دفتر يومية افتراضي: ' . $db->error;
+                    continue;
+                }
+                $journalInsert->bind_param('ssss', $journal['journal_code'], $journal['journal_name_ar'], $journal['journal_name_en'], $journal['journal_type']);
+                if (!$journalInsert->execute()) {
+                    $errors[] = 'فشل في إضافة دفتر يومية افتراضي: ' . $journalInsert->error;
+                }
+                $journalInsert->close();
+            }
+        }
+
+        $costCenterTableCheck = $this->query("SHOW TABLES LIKE 'acc_cost_centers'");
+        if (!$costCenterTableCheck) {
+            $errors[] = 'فشل في فحص جدول مراكز التكلفة: ' . $db->error;
+        } elseif ($costCenterTableCheck->num_rows == 0) {
+            $createCostCenterTableSql = "CREATE TABLE acc_cost_centers (
+                cost_center_id INT(11) NOT NULL AUTO_INCREMENT,
+                cost_center_code VARCHAR(50) NOT NULL,
+                cost_center_name_ar VARCHAR(255) NOT NULL,
+                cost_center_name_en VARCHAR(255) DEFAULT NULL,
+                parent_cost_center_id INT(11) DEFAULT NULL,
+                aqar_id INT(11) DEFAULT NULL,
+                subaqar_id INT(11) DEFAULT NULL,
+                is_active TINYINT(1) DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                formuid VARCHAR(500) NOT NULL,
+                PRIMARY KEY (cost_center_id),
+                UNIQUE KEY idx_cost_center_code (cost_center_code),
+                KEY idx_cost_center_parent (parent_cost_center_id),
+                KEY idx_cost_center_aqar (aqar_id),
+                KEY idx_cost_center_subaqar (subaqar_id),
+                KEY idx_cost_center_active (is_active)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+            if (!$this->query($createCostCenterTableSql)) {
+                $errors[] = 'فشل في إنشاء جدول مراكز التكلفة: ' . $db->error;
+            }
+        }
+
+        $journalEntryColumnMigrations = [
+            'journal_id' => "ALTER TABLE acc_journal_entries ADD COLUMN journal_id INT(11) NULL AFTER entry_type",
+            'tenant_id' => "ALTER TABLE acc_journal_entries ADD COLUMN tenant_id INT(11) NULL AFTER journal_id",
+            'owner_id' => "ALTER TABLE acc_journal_entries ADD COLUMN owner_id INT(11) NULL AFTER tenant_id",
+            'aqar_id' => "ALTER TABLE acc_journal_entries ADD COLUMN aqar_id INT(11) NULL AFTER owner_id",
+            'subaqar_id' => "ALTER TABLE acc_journal_entries ADD COLUMN subaqar_id INT(11) NULL AFTER aqar_id",
+            'egar_id' => "ALTER TABLE acc_journal_entries ADD COLUMN egar_id INT(11) NULL AFTER subaqar_id",
+            'sanad_id' => "ALTER TABLE acc_journal_entries ADD COLUMN sanad_id INT(11) NULL AFTER egar_id",
+            'sanadsarf_id' => "ALTER TABLE acc_journal_entries ADD COLUMN sanadsarf_id INT(11) NULL AFTER sanad_id",
+            'masrofat_id' => "ALTER TABLE acc_journal_entries ADD COLUMN masrofat_id INT(11) NULL AFTER sanadsarf_id",
+            'invoice_id' => "ALTER TABLE acc_journal_entries ADD COLUMN invoice_id INT(11) NULL AFTER masrofat_id",
+            'sales_representative_userid' => "ALTER TABLE acc_journal_entries ADD COLUMN sales_representative_userid INT(11) NULL AFTER invoice_id"
+        ];
+
+        foreach ($journalEntryColumnMigrations as $columnName => $alterSql) {
+            $columnCheck = $this->query("SHOW COLUMNS FROM acc_journal_entries LIKE '{$columnName}'");
+            if (!$columnCheck) {
+                $errors[] = 'فشل في فحص أعمدة القيود اليومية: ' . $db->error;
+                continue;
+            }
+            if ($columnCheck->num_rows == 0 && !$this->query($alterSql)) {
+                $errors[] = 'فشل في تحديث جدول القيود اليومية: ' . $db->error;
+            } elseif ($columnCheck->num_rows == 0) {
+                $applied[] = 'تمت إضافة حقل ' . $columnName . ' للقيود المحاسبية.';
+            }
+        }
+
+        // The original enum did not include the values already used by payment
+        // and expense code.  On installations without strict SQL mode those rows
+        // were silently stored with an empty entry_type.
+        if (!$this->query("UPDATE acc_journal_entries SET entry_type='manual' WHERE entry_type IS NULL")) {
+            $errors[] = 'فشل في تصحيح القيود التي لا تحمل نوعاً: ' . $db->error;
+        }
+        $entryTypeCheck = $this->query("SHOW COLUMNS FROM acc_journal_entries LIKE 'entry_type'");
+        if (!$entryTypeCheck) {
+            $errors[] = 'فشل في فحص نوع القيد المحاسبي: ' . $db->error;
+        } else {
+            $entryTypeDefinition = $entryTypeCheck->fetch_assoc();
+            if (strpos((string)($entryTypeDefinition['Type'] ?? ''), "'owner_settlement'") === false) {
+                $entryTypeSql = "ALTER TABLE acc_journal_entries MODIFY COLUMN entry_type
+                    ENUM('','manual','auto','opening','closing','adjustment','invoice','payment','receipt','expense','owner_settlement','commission')
+                    NOT NULL DEFAULT 'manual'";
+                if (!$this->query($entryTypeSql)) {
+                    $errors[] = 'فشل في توسيع أنواع القيود المحاسبية: ' . $db->error;
+                } else {
+                    $applied[] = 'تم توسيع أنواع القيود لتشمل المقبوضات والمصروفات وتسليمات الملاك.';
+                }
+            }
+        }
+
+        if (!$this->query("UPDATE acc_journal_entries SET entry_type='receipt' WHERE entry_type='' AND reference_type='sanad'")) {
+            $errors[] = 'فشل في تصحيح أنواع قيود سندات القبض: ' . $db->error;
+        }
+        if (!$this->query("UPDATE acc_journal_entries SET entry_type='payment' WHERE entry_type='' AND reference_type='invoice'")) {
+            $errors[] = 'فشل في تصحيح أنواع قيود دفعات الفواتير: ' . $db->error;
+        }
+        $emptyEntryTypes = $this->query("SELECT COUNT(*) AS total FROM acc_journal_entries WHERE entry_type='' ");
+        $emptyEntryTypeRow = $emptyEntryTypes ? $emptyEntryTypes->fetch_assoc() : ['total' => 1];
+        if ((int)($emptyEntryTypeRow['total'] ?? 1) === 0) {
+            $finalEntryTypeSql = "ALTER TABLE acc_journal_entries MODIFY COLUMN entry_type
+                ENUM('manual','auto','opening','closing','adjustment','invoice','payment','receipt','expense','owner_settlement','commission')
+                NOT NULL DEFAULT 'manual'";
+            $currentTypeCheck = $this->query("SHOW COLUMNS FROM acc_journal_entries LIKE 'entry_type'");
+            $currentTypeRow = $currentTypeCheck ? $currentTypeCheck->fetch_assoc() : [];
+            if (strpos((string)($currentTypeRow['Type'] ?? ''), "enum('','manual'") !== false && !$this->query($finalEntryTypeSql)) {
+                $errors[] = 'فشل في إنهاء تصحيح نوع القيد المحاسبي: ' . $db->error;
+            }
+        }
+
+        $journalEntryIndexes = [
+            'idx_journal_entries_journal_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_journal_id (journal_id)",
+            'idx_journal_entries_tenant_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_tenant_id (tenant_id)",
+            'idx_journal_entries_owner_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_owner_id (owner_id)",
+            'idx_journal_entries_aqar_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_aqar_id (aqar_id)",
+            'idx_journal_entries_subaqar_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_subaqar_id (subaqar_id)",
+            'idx_journal_entries_egar_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_egar_id (egar_id)",
+            'idx_journal_entries_sanad_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_sanad_id (sanad_id)",
+            'idx_journal_entries_sanadsarf_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_sanadsarf_id (sanadsarf_id)",
+            'idx_journal_entries_masrofat_id' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_masrofat_id (masrofat_id)",
+            'idx_journal_entries_sales_rep' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_sales_rep (sales_representative_userid, entry_date)",
+            'idx_journal_entries_reference' => "ALTER TABLE acc_journal_entries ADD INDEX idx_journal_entries_reference (reference_type, reference_id)"
+        ];
+
+        foreach ($journalEntryIndexes as $indexName => $alterSql) {
+            $indexCheck = $this->query("SHOW INDEX FROM acc_journal_entries WHERE Key_name = '{$indexName}'");
+            if (!$indexCheck) {
+                $errors[] = 'فشل في فحص فهارس القيود اليومية: ' . $db->error;
+                continue;
+            }
+            if ($indexCheck->num_rows == 0 && !$this->query($alterSql)) {
+                $errors[] = 'فشل في إضافة فهرس إلى جدول القيود اليومية: ' . $db->error;
+            }
+        }
+
+        $lineCostCenterIndexCheck = $this->query("SHOW INDEX FROM acc_journal_entry_lines WHERE Key_name = 'idx_cost_center_id'");
+        if (!$lineCostCenterIndexCheck) {
+            $errors[] = 'فشل في فحص فهرس مراكز التكلفة في بنود القيود: ' . $db->error;
+        } elseif ($lineCostCenterIndexCheck->num_rows == 0 && !$this->query("ALTER TABLE acc_journal_entry_lines ADD INDEX idx_cost_center_id (cost_center_id)")) {
+            $errors[] = 'فشل في إضافة فهرس مراكز التكلفة في بنود القيود: ' . $db->error;
+        }
+
+        // Source markers keep synchronization repeatable.  They are intentionally
+        // installed by the shared versioned runner, never in receipt/expense pages.
+        $sourceMigrations = [
+            'sanad' => [
+                'column' => "ALTER TABLE sanad ADD COLUMN accounting_entry_id INT(11) NULL",
+                'index' => 'idx_sanad_accounting_entry'
+            ],
+            'masrofat' => [
+                'column' => "ALTER TABLE masrofat ADD COLUMN accounting_entry_id INT(11) NULL",
+                'index' => 'idx_masrofat_accounting_entry'
+            ],
+            'sanadsarf' => [
+                'column' => "ALTER TABLE sanadsarf ADD COLUMN accounting_entry_id INT(11) NULL",
+                'index' => 'idx_sanadsarf_accounting_entry'
+            ]
+        ];
+
+        foreach ($sourceMigrations as $tableName => $migration) {
+            $tableCheck = $this->query("SHOW TABLES LIKE '" . $db->real_escape_string($tableName) . "'");
+            if (!$tableCheck || $tableCheck->num_rows === 0) {
+                continue;
+            }
+            $columnCheck = $this->query("SHOW COLUMNS FROM `{$tableName}` LIKE 'accounting_entry_id'");
+            if (!$columnCheck) {
+                $errors[] = 'فشل في فحص ربط ' . $tableName . ' بالمحاسبة: ' . $db->error;
+                continue;
+            }
+            if ($columnCheck->num_rows === 0) {
+                if (!$this->query($migration['column'])) {
+                    $errors[] = 'فشل في إضافة ربط ' . $tableName . ' بالمحاسبة: ' . $db->error;
+                    continue;
+                }
+                $applied[] = 'تم ربط جدول ' . $tableName . ' بالقيود المحاسبية.';
+            }
+            $indexName = $migration['index'];
+            $indexCheck = $this->query("SHOW INDEX FROM `{$tableName}` WHERE Column_name='accounting_entry_id'");
+            if ($indexCheck && $indexCheck->num_rows === 0) {
+                if (!$this->query("ALTER TABLE `{$tableName}` ADD INDEX `{$indexName}` (accounting_entry_id)")) {
+                    $errors[] = 'فشل في إضافة فهرس الربط المحاسبي لجدول ' . $tableName . ': ' . $db->error;
+                }
+            }
+        }
+
+        $contractTableCheck = $this->query("SHOW TABLES LIKE 'egar'");
+        if ($contractTableCheck && $contractTableCheck->num_rows > 0) {
+            $contractInvoiceColumn = $this->query("SHOW COLUMNS FROM egar LIKE 'invoice_id'");
+            if ($contractInvoiceColumn && $contractInvoiceColumn->num_rows === 0) {
+                if (!$this->query("ALTER TABLE egar ADD COLUMN invoice_id INT(11) NULL")) {
+                    $errors[] = 'فشل في إضافة ربط العقد بالفاتورة المحاسبية: ' . $db->error;
+                } else {
+                    $applied[] = 'تم ربط العقود بالفواتير المحاسبية.';
+                }
+            }
+            $contractInvoiceIndex = $this->query("SHOW INDEX FROM egar WHERE Column_name='invoice_id'");
+            if ($contractInvoiceIndex && $contractInvoiceIndex->num_rows === 0) {
+                if (!$this->query("ALTER TABLE egar ADD INDEX idx_egar_accounting_invoice (invoice_id)")) {
+                    $errors[] = 'فشل في إضافة فهرس ربط العقود بالفواتير: ' . $db->error;
+                }
+            }
+        }
+
+        // Accounts required by the newer Amlak flows.  Codes are stable across
+        // customers; IDs are resolved after insertion and stored in settings.
+        $defaultIntegrationAccounts = [
+            ['1130', 'تحصيلات مودعة في حسابات الملاك', 'Owner-held collections', 'asset', 'owner_clearing', '1100'],
+            ['2111', 'ذمم الملاك', 'Property owner payables', 'liability', 'owner_payable', '2000'],
+            ['2112', 'عمولات مندوبي المبيعات المستحقة', 'Sales commissions payable', 'liability', 'commission_payable', '2000'],
+            ['5120', 'عمولات مندوبي المبيعات', 'Sales representative commissions', 'expense', 'sales_commission', '5000'],
+            ['5190', 'مصروفات تشغيلية عامة', 'General operating expenses', 'expense', 'operating_expense', '5000'],
+            ['5210', 'مبالغ مسلمة للملاك', 'Property owner settlements', 'expense', 'owner_settlement', '5000']
+        ];
+
+        foreach ($defaultIntegrationAccounts as $account) {
+            [$code, $nameAr, $nameEn, $type, $category, $parentCode] = $account;
+            $accountCheck = $this->prepare("SELECT account_id FROM acc_chart_of_accounts WHERE account_code=? LIMIT 1");
+            if (!$accountCheck) {
+                $errors[] = 'فشل في فحص حساب التكامل ' . $code . ': ' . $db->error;
+                continue;
+            }
+            $accountCheck->bind_param('s', $code);
+            if (!$accountCheck->execute()) throw new RuntimeException($accountCheck->error);
+            $existingAccount = $accountCheck->get_result()->fetch_assoc();
+            $accountCheck->close();
+            if ($existingAccount) {
+                continue;
+            }
+
+            $parentId = null;
+            $accountLevel = 2;
+            $parentCheck = $this->prepare("SELECT account_id, account_level FROM acc_chart_of_accounts WHERE account_code=? LIMIT 1");
+            if ($parentCheck) {
+                $parentCheck->bind_param('s', $parentCode);
+                if (!$parentCheck->execute()) throw new RuntimeException($parentCheck->error);
+                $parentRow = $parentCheck->get_result()->fetch_assoc();
+                $parentId = $parentRow ? (int)$parentRow['account_id'] : null;
+                $accountLevel = $parentRow ? ((int)$parentRow['account_level'] + 1) : 2;
+                $parentCheck->close();
+            }
+            // Cross-company maintenance uses the system actor; source user IDs
+            // must not be attributed to a different user in the target company.
+            $createdBy = ($GLOBALS['link'] ?? null) === $this->link ? (int)($_SESSION['useridv'] ?? 0) : 0;
+            $insertAccount = $this->prepare("INSERT INTO acc_chart_of_accounts
+                (account_code, account_name_ar, account_name_en, parent_account_id, account_type,
+                 account_category, account_level, is_leaf, is_active, created_by, formuid)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, UUID())");
+            if (!$insertAccount) {
+                $errors[] = 'فشل في تجهيز حساب التكامل ' . $code . ': ' . $db->error;
+                continue;
+            }
+            $insertAccount->bind_param('sssissii', $code, $nameAr, $nameEn, $parentId, $type, $category, $accountLevel, $createdBy);
+            if (!$insertAccount->execute()) {
+                $errors[] = 'فشل في إضافة حساب التكامل ' . $code . ': ' . $insertAccount->error;
+            } else {
+                $applied[] = 'تم إضافة الحساب ' . $code . ' - ' . $nameAr . '.';
+            }
+            $insertAccount->close();
+        }
+
+        $integrationSettings = [
+            'default_receipt_cash_account_id' => '1111',
+            'default_receipt_bank_account_id' => '1112',
+            'default_receivable_account_id' => '1121',
+            'default_expense_account_id' => '5190',
+            'default_payment_cash_account_id' => '1111',
+            'default_payment_bank_account_id' => '1112',
+            'default_owner_funds_clearing_account_id' => '1130',
+            'default_owner_payable_account_id' => '2111',
+            'default_sales_commission_payable_account_id' => '2112',
+            'default_sales_commission_expense_account_id' => '5120',
+            'default_owner_settlement_account_id' => '5210'
+        ];
+
+        foreach ($integrationSettings as $settingKey => $accountCode) {
+            $accountResult = $this->prepare("SELECT account_id FROM acc_chart_of_accounts WHERE account_code=? LIMIT 1");
+            if (!$accountResult) {
+                continue;
+            }
+            $accountResult->bind_param('s', $accountCode);
+            if (!$accountResult->execute()) throw new RuntimeException($accountResult->error);
+            $accountRow = $accountResult->get_result()->fetch_assoc();
+            $accountResult->close();
+            if (!$accountRow) {
+                continue;
+            }
+            $settingValue = (string)(int)$accountRow['account_id'];
+            $settingCategory = 'amlak_integration';
+            $description = 'حساب افتراضي لتكامل إدارة الأملاك';
+            $settingInsert = $this->prepare("INSERT INTO acc_system_settings
+                (setting_key, setting_value, setting_category, description_ar, formuid)
+                VALUES (?, ?, ?, ?, UUID())
+                ON DUPLICATE KEY UPDATE setting_value=IF(TRIM(COALESCE(setting_value,''))='', VALUES(setting_value), setting_value)");
+            if (!$settingInsert) {
+                $errors[] = 'فشل في تجهيز إعداد التكامل ' . $settingKey . ': ' . $db->error;
+                continue;
+            }
+            $settingInsert->bind_param('ssss', $settingKey, $settingValue, $settingCategory, $description);
+            if (!$settingInsert->execute()) {
+                $errors[] = 'فشل في حفظ إعداد التكامل ' . $settingKey . ': ' . $settingInsert->error;
+            }
+            $settingInsert->close();
+        }
+
+        if ($errors) {
+            foreach ($errors as $error) error_log('Accounting schema migration: ' . $error);
+            throw new RuntimeException('Accounting schema migration did not complete');
+        }
+    }
+
+    private function apply(): void
+    {
+        $link = $this->link;
+        $this->query("ALTER TABLE sanadsarf ADD COLUMN IF NOT EXISTS bankid int(11) NOT NULL DEFAULT 0", $link);
+        $this->query("ALTER TABLE sanadsarf ADD COLUMN IF NOT EXISTS money_source int(11) NOT NULL DEFAULT 0", $link);
+        $this->query("ALTER TABLE sanadsarf ADD COLUMN IF NOT EXISTS money_received_date int(11) NOT NULL DEFAULT 0", $link);
+        $this->query("ALTER TABLE sanadsarf ADD COLUMN IF NOT EXISTS money_actual_date int(11) NOT NULL DEFAULT 0", $link);
+        $this->query("UPDATE sanadsarf SET money_received_date = sanadate WHERE money_received_date = 0", $link);
+        $this->query("UPDATE sanadsarf SET money_actual_date = sanadate WHERE money_actual_date = 0", $link);
+
+        // Shared, repeatable schema changes and conservative seed/backfill operations.
+        $this->query("ALTER TABLE egar
+        	ADD COLUMN IF NOT EXISTS annual_rent_increase_percent DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER annualprice,
+        	ADD COLUMN IF NOT EXISTS max_rent_increase_percent DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER annual_rent_increase_percent,
+        	ADD COLUMN IF NOT EXISTS sales_representative_userid INT(11) NOT NULL DEFAULT 0 AFTER max_rent_increase_percent", $link);
+        $this->query("ALTER TABLE aksat
+        	ADD COLUMN IF NOT EXISTS base_rent_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER kastvalue,
+        	ADD COLUMN IF NOT EXISTS rent_increase_percent DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER base_rent_amount", $link);
+        $this->query("ALTER TABLE sanad
+        	ADD COLUMN IF NOT EXISTS sales_representative_userid INT(11) NOT NULL DEFAULT 0 AFTER bankid,
+        	ADD COLUMN IF NOT EXISTS sales_commission_type VARCHAR(20) NOT NULL DEFAULT 'percentage' AFTER sales_representative_userid,
+        	ADD COLUMN IF NOT EXISTS sales_commission_value DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER sales_commission_type,
+        	ADD COLUMN IF NOT EXISTS sales_commission_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER sales_commission_value,
+        	ADD INDEX IF NOT EXISTS idx_sanad_sales_rep_date (sales_representative_userid, sanaddate)", $link);
+        $this->query("INSERT INTO global (variblename, valuribalevalue, formuid)
+        	SELECT 'sales_representative_commission_type', 'percentage', '' FROM DUAL
+        	WHERE NOT EXISTS (
+        		SELECT 1 FROM global WHERE variblename='sales_representative_commission_type'
+        	)", $link);
+        $this->query("INSERT INTO global (variblename, valuribalevalue, formuid)
+        	SELECT 'sales_representative_commission_value', '0', '' FROM DUAL
+        	WHERE NOT EXISTS (
+        		SELECT 1 FROM global WHERE variblename='sales_representative_commission_value'
+        	)", $link);
+
+        // Office-expense reporting uses the existing masrofat ledger.  idaqar=0 is
+        // reserved for office-wide expenses, while positive values remain property
+        // expenses.  Seed the standard categories without changing customer-defined
+        // categories or creating duplicates when this migration runs again.
+        $this->query("ALTER TABLE masrofat
+        	ADD COLUMN IF NOT EXISTS paid_by_userid INT(11) NOT NULL DEFAULT 0 AFTER payedby,
+        	ADD COLUMN IF NOT EXISTS beneficiary_userid INT(11) NOT NULL DEFAULT 0 AFTER paid_by_userid,
+        	ADD COLUMN IF NOT EXISTS beneficiary_name VARCHAR(245) NOT NULL DEFAULT '' AFTER beneficiary_userid,
+        	ADD COLUMN IF NOT EXISTS created_by_userid INT(11) NOT NULL DEFAULT 0 AFTER beneficiary_name,
+        	ADD COLUMN IF NOT EXISTS created_at BIGINT(20) NOT NULL DEFAULT 0 AFTER created_by_userid,
+        	ADD INDEX IF NOT EXISTS idx_masrofat_office_date_category (idaqar, payeddate, idmasrofcod),
+        	ADD INDEX IF NOT EXISTS idx_masrofat_office_audit (idaqar, created_at, created_by_userid)", $link);
+        $this->query("INSERT INTO masrofattakweed (masrofkind, formuid)
+        	SELECT seed.masrofkind, 'office-expense-standard'
+        	FROM (
+        		SELECT 'رواتب وأجور' AS masrofkind
+        		UNION ALL SELECT 'طعام وضيافة'
+        		UNION ALL SELECT 'كهرباء المكتب'
+        		UNION ALL SELECT 'إعلانات وتسويق'
+        		UNION ALL SELECT 'إيجار المكتب'
+        		UNION ALL SELECT 'اتصالات وإنترنت'
+        		UNION ALL SELECT 'صيانة المكتب'
+        		UNION ALL SELECT 'قرطاسية ومستلزمات'
+        		UNION ALL SELECT 'مواصلات'
+        		UNION ALL SELECT 'رسوم حكومية'
+        		UNION ALL SELECT 'أخرى'
+        	) seed
+        	WHERE NOT EXISTS (
+        		SELECT 1
+        		FROM masrofattakweed existing
+        		WHERE TRIM(existing.masrofkind) = seed.masrofkind
+        	)", $link);
+
+        // Receipt commission splits: reusable, idempotent migration (no agent-side DB changes).
+        $receiptCommissionMigrationOk = true;
+        $receiptCommissionEngineQueries = array();
+        foreach (array('sanad','masrofat','aksat','eradat','sanadsarf','aksat_payment_history') as $receiptCommissionLedger) {
+            $receiptCommissionEngineResult = $this->query("SELECT ENGINE FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='{$receiptCommissionLedger}'",$link);
+            $receiptCommissionEngineRow = $receiptCommissionEngineResult ? mysql_fetch_assoc($receiptCommissionEngineResult) : false;
+            if ($receiptCommissionEngineRow && strcasecmp($receiptCommissionEngineRow['ENGINE'],'InnoDB')!==0) {
+                $receiptCommissionEngineQueries[] = "ALTER TABLE `{$receiptCommissionLedger}` ENGINE=InnoDB";
+            }
+        }
+        $receiptCommissionMigrationQueries = array(
+            "CREATE TABLE IF NOT EXISTS sanad_commission_splits (
+                split_id INT NOT NULL AUTO_INCREMENT,
+                idsanad INT NOT NULL,
+                representative_userid INT NOT NULL DEFAULT 0,
+                commission_type VARCHAR(20) NOT NULL DEFAULT 'percentage',
+                commission_value DECIMAL(10,2) NOT NULL DEFAULT 0,
+                commission_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+                created_by_userid INT NOT NULL DEFAULT 0,
+                created_at BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (split_id),
+                UNIQUE KEY uq_receipt_representative (idsanad,representative_userid),
+                KEY idx_commission_representative (representative_userid,idsanad)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            "CREATE TABLE IF NOT EXISTS sanad_commission_audit (
+                audit_id INT NOT NULL AUTO_INCREMENT,
+                idsanad INT NOT NULL,
+                changed_by_userid INT NOT NULL DEFAULT 0,
+                changed_at BIGINT NOT NULL DEFAULT 0,
+                before_json MEDIUMTEXT NOT NULL,
+                after_json MEDIUMTEXT NOT NULL,
+                PRIMARY KEY (audit_id), KEY idx_commission_audit_receipt (idsanad,audit_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            "ALTER TABLE masrofat ADD COLUMN IF NOT EXISTS commission_split_id INT NOT NULL DEFAULT 0,
+                ADD INDEX IF NOT EXISTS idx_masrofat_commission (commission_split_id)",
+            "INSERT INTO masrofattakweed (masrofkind,formuid)
+                SELECT 'عمولات المندوبين','receipt-commission-category' FROM DUAL
+                WHERE NOT EXISTS (SELECT 1 FROM masrofattakweed WHERE masrofkind='عمولات المندوبين')",
+            "INSERT IGNORE INTO sanad_commission_splits
+                (idsanad,representative_userid,commission_type,commission_value,commission_amount,created_by_userid,created_at)
+                SELECT s.idsanad,s.sales_representative_userid,s.sales_commission_type,
+                    s.sales_commission_value,s.sales_commission_amount,0,0 FROM sanad s
+                WHERE NOT EXISTS (SELECT 1 FROM sanad_commission_splits c WHERE c.idsanad=s.idsanad)"
+        );
+        $receiptCommissionMigrationQueries = array_merge($receiptCommissionEngineQueries,$receiptCommissionMigrationQueries);
+        foreach ($receiptCommissionMigrationQueries as $receiptCommissionMigrationSql) {
+            try {
+                if (!$this->query($receiptCommissionMigrationSql, $link)) throw new RuntimeException(mysql_error($link));
+            } catch (Throwable $receiptCommissionMigrationError) {
+                error_log('Receipt commission migration: ' . $receiptCommissionMigrationError->getMessage());
+                $receiptCommissionMigrationOk = false;
+                break;
+            }
+        }
+        if (!$receiptCommissionMigrationOk) {
+            echo '<div class="alert alert-danger">تعذر إكمال تحديث عمولات السندات. راجع سجل الخادم وأعد تشغيل تحديث إدارة الأملاك.</div>';
+        } else {
+            try {
+            foreach (array('voucher_reports'=>'تقارير السندات والعمولات','voucher_commissions'=>'توزيع عمولات سندات القبض') as $receiptCommissionScreenKey=>$receiptCommissionScreenName) {
+                $receiptCommissionScreenKey = mysql_real_escape_string($receiptCommissionScreenKey,$link);
+                $receiptCommissionScreenName = mysql_real_escape_string($receiptCommissionScreenName,$link);
+                if (!$this->query("INSERT INTO screens (screen_id,screen_name,screen_isactive,parentid,formuid)
+                    SELECT '{$receiptCommissionScreenKey}','{$receiptCommissionScreenName}','1',135,'receipt-commission-screen'
+                    FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM screens WHERE screen_id='{$receiptCommissionScreenKey}')",$link)) throw new RuntimeException(mysql_error($link));
+                $receiptCommissionScreenResult = $this->query("SELECT screenid FROM screens WHERE screen_id='{$receiptCommissionScreenKey}' ORDER BY screenid LIMIT 1",$link);
+                $receiptCommissionScreenRow = $receiptCommissionScreenResult ? mysql_fetch_assoc($receiptCommissionScreenResult) : false;
+                if ($receiptCommissionScreenRow) {
+                    $receiptCommissionScreenId = intval($receiptCommissionScreenRow['screenid']);
+                    if (!$this->query("INSERT INTO ugroupscreen (groupid,screenid,adds,sees,edits,deleetes,prints,formuid)
+                        SELECT p.groupid,{$receiptCommissionScreenId},MAX(p.adds),MAX(p.sees),MAX(p.edits),0,MAX(p.prints),'receipt-commission-permission'
+                        FROM ugroupscreen p WHERE p.screenid=135
+                        AND NOT EXISTS (SELECT 1 FROM ugroupscreen e WHERE e.groupid=p.groupid AND e.screenid={$receiptCommissionScreenId})
+                        GROUP BY p.groupid",$link)) throw new RuntimeException(mysql_error($link));
+                }
+            }
+            } catch (Throwable $receiptCommissionPermissionError) {
+                error_log('Receipt commission permissions: '.$receiptCommissionPermissionError->getMessage());
+                echo '<div class="alert alert-danger">تعذر تسجيل صلاحيات تقارير السندات. راجع سجل الخادم وأعد تشغيل تحديث إدارة الأملاك.</div>';
+            }
+        }
+        // End receipt commission splits migration.
+
+        // Office-expense payment vouchers. Old expenses are issued only on explicit user action.
+        $expenseVoucherMigrationQueries=array(
+            "ALTER TABLE payment_voucher
+                ADD COLUMN IF NOT EXISTS expense_id INT NULL DEFAULT NULL,
+                ADD COLUMN IF NOT EXISTS idmasrofcod INT NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS cheqdate1 VARCHAR(245) NOT NULL DEFAULT '',
+                ADD UNIQUE INDEX IF NOT EXISTS uq_payment_voucher_expense (expense_id),
+                ADD INDEX IF NOT EXISTS idx_payment_voucher_category (idmasrofcod)",
+            "ALTER TABLE masrofat ADD COLUMN IF NOT EXISTS payment_voucher_id INT NULL DEFAULT NULL,
+                ADD INDEX IF NOT EXISTS idx_masrofat_payment_voucher (payment_voucher_id)"
+        );
+        $expenseVoucherEngineResult=$this->query("SELECT ENGINE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='payment_voucher'",$link);
+        $expenseVoucherEngineRow=$expenseVoucherEngineResult ? mysql_fetch_assoc($expenseVoucherEngineResult) : false;
+        if ($expenseVoucherEngineRow && strcasecmp($expenseVoucherEngineRow['ENGINE'],'InnoDB')!==0) array_unshift($expenseVoucherMigrationQueries,'ALTER TABLE payment_voucher ENGINE=InnoDB');
+        foreach ($expenseVoucherMigrationQueries as $expenseVoucherMigrationSql) {
+            try {
+                if (!$this->query($expenseVoucherMigrationSql,$link)) throw new RuntimeException(mysql_error($link));
+            } catch (Throwable $expenseVoucherMigrationError) {
+                error_log('Office expense voucher migration: '.$expenseVoucherMigrationError->getMessage());
+                echo '<div class="alert alert-danger">تعذر تحديث سندات صرف مصروفات المكتب. راجع سجل الخادم وأعد تشغيل تحديث إدارة الأملاك.</div>';
+                break;
+            }
+        }
+        // End office-expense payment voucher migration.
+
+        // Report date ranges and commission balances use these indexes on every customer copy.
+        foreach (array(
+            "ALTER TABLE sanad ADD INDEX IF NOT EXISTS idx_sanad_report_date (sanaddate,idsanad)",
+            "ALTER TABLE masrofat ADD INDEX IF NOT EXISTS idx_masrofat_commission_date (commission_split_id,payeddate)"
+        ) as $voucherReportIndexSql) {
+            try {
+                if (!$this->query($voucherReportIndexSql,$link)) throw new RuntimeException(mysql_error($link));
+            } catch (Throwable $voucherReportIndexError) {
+                error_log('Voucher report index migration: '.$voucherReportIndexError->getMessage());
+                echo '<div class="alert alert-warning">تعذر إكمال فهارس تقارير السندات. راجع سجل الخادم وأعد تشغيل تحديث إدارة الأملاك.</div>';
+                break;
+            }
+        }
+        // End voucher report index migration.
+
+        // Stable customer identities: a tenant ID is not an accounting customer ID.
+        $accountingIdentityQueries=array("CREATE TABLE IF NOT EXISTS acc_customer_tenants (
+            tenant_id INT(11) NOT NULL, customer_id INT(11) NOT NULL,
+            PRIMARY KEY (tenant_id), KEY idx_acc_customer_tenants_customer (customer_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        $accountingCustomersTable=$this->query("SELECT ENGINE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='acc_customers'",$link);
+        $accountingCustomersEngine=$accountingCustomersTable ? mysql_fetch_assoc($accountingCustomersTable) : false;
+        if ($accountingCustomersEngine) {
+            if (strcasecmp($accountingCustomersEngine['ENGINE'],'InnoDB')!==0) $accountingIdentityQueries[]='ALTER TABLE acc_customers ENGINE=InnoDB';
+            // Backfill only exact, unique names on both sides. Explicit links always win.
+            $accountingIdentityQueries[]="INSERT INTO acc_customer_tenants (tenant_id,customer_id)
+                SELECT t.mostagerid,c.customer_id FROM mostagereen t JOIN acc_customers c ON c.customer_name=t.mostagername
+                WHERE TRIM(c.customer_name)<>''
+                  AND NOT EXISTS (SELECT 1 FROM acc_customers other_c WHERE other_c.customer_name=c.customer_name AND other_c.customer_id<>c.customer_id)
+                  AND NOT EXISTS (SELECT 1 FROM mostagereen other_t WHERE other_t.mostagername=t.mostagername AND other_t.mostagerid<>t.mostagerid)
+                  AND NOT EXISTS (SELECT 1 FROM acc_customer_tenants linked WHERE linked.tenant_id=t.mostagerid OR linked.customer_id=c.customer_id)
+                ON DUPLICATE KEY UPDATE tenant_id=VALUES(tenant_id)";
+        }
+        foreach ($accountingIdentityQueries as $accountingIdentitySql) {
+            try {
+                if (!$this->query($accountingIdentitySql,$link)) throw new RuntimeException(mysql_error($link));
+            } catch (Throwable $accountingIdentityError) {
+                error_log('Accounting customer identity migration: '.$accountingIdentityError->getMessage());
+                echo '<div class="alert alert-warning">تعذر تثبيت ربط عملاء المحاسبة. راجع سجل الخادم وأعد فتح إدارة الأملاك.</div>';
+                break;
+            }
+        }
+        // End accounting customer identity migration.
+
+        // Every signed-in user may maintain their own contact details and avatar.
+        // Preserve existing passwords; only newly changed passwords are hashed by PHP.
+        $profilePasswordResult=$this->query("SELECT DATA_TYPE,CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='user' AND COLUMN_NAME='password'",$link);
+        $profilePasswordColumn=mysql_fetch_assoc($profilePasswordResult);
+        if (!$profilePasswordColumn) throw new RuntimeException('Missing user password column');
+        $profilePasswordSize=(int)$profilePasswordColumn['CHARACTER_MAXIMUM_LENGTH'];
+        if ($profilePasswordSize<255) $this->query("ALTER TABLE user MODIFY COLUMN password VARCHAR(255) NOT NULL",$link);
+        $profileMigrationQueries=array("ALTER TABLE user
+            ADD COLUMN IF NOT EXISTS phone VARCHAR(50) NOT NULL DEFAULT '',
+            ADD COLUMN IF NOT EXISTS email VARCHAR(254) NOT NULL DEFAULT '',
+            ADD COLUMN IF NOT EXISTS profile_photo VARCHAR(255) NOT NULL DEFAULT '',
+            ADD COLUMN IF NOT EXISTS profile_updated_at BIGINT(20) NOT NULL DEFAULT 0");
+        foreach ($profileMigrationQueries as $profileMigrationSql) {
+            try {
+                if (!$this->query($profileMigrationSql,$link)) throw new RuntimeException(mysql_error($link));
+            } catch (Throwable $profileMigrationError) {
+                error_log('User profile migration: '.$profileMigrationError->getMessage());
+                echo '<div class="alert alert-warning">تعذر تثبيت تحديث الملف الشخصي. راجع سجل الخادم وأعد فتح إدارة الأملاك.</div>';
+                break;
+            }
+        }
+        // End user profile migration.
+
+        // Recheck custody tables on every forced repair, regardless of old module markers.
+        	$cashCustodyMigrationQueries = array(
+        		"CREATE TABLE IF NOT EXISTS cash_custody_holders (
+        			holder_id INT(11) NOT NULL AUTO_INCREMENT,
+        			user_id INT(11) NOT NULL DEFAULT 0,
+        			employee_number VARCHAR(100) NOT NULL DEFAULT '',
+        			national_id VARCHAR(50) NOT NULL DEFAULT '',
+        			phone VARCHAR(50) NOT NULL DEFAULT '',
+        			department VARCHAR(150) NOT NULL DEFAULT '',
+        			number_prefix VARCHAR(20) NOT NULL DEFAULT 'CUS',
+        			is_active TINYINT(1) NOT NULL DEFAULT 1,
+        			created_by_userid INT(11) NOT NULL DEFAULT 0,
+        			created_at BIGINT(20) NOT NULL DEFAULT 0,
+        			updated_by_userid INT(11) NOT NULL DEFAULT 0,
+        			updated_at BIGINT(20) NOT NULL DEFAULT 0,
+        			formuid VARCHAR(100) NOT NULL DEFAULT '',
+        			PRIMARY KEY (holder_id),
+        			UNIQUE KEY uq_cash_custody_holder_user (user_id),
+        			UNIQUE KEY uq_cash_custody_holder_prefix (number_prefix),
+        			KEY idx_cash_custody_holder_active (is_active)
+        		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+        		"CREATE TABLE IF NOT EXISTS cash_custody_requests (
+        			request_id INT(11) NOT NULL AUTO_INCREMENT,
+        			request_number VARCHAR(60) NOT NULL,
+        			holder_id INT(11) NOT NULL,
+        			request_type VARCHAR(20) NOT NULL DEFAULT 'new',
+        			target_custody_id INT(11) NOT NULL DEFAULT 0,
+        			requested_amount DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        			purpose TEXT NOT NULL,
+        			required_date DATE DEFAULT NULL,
+        			status VARCHAR(30) NOT NULL DEFAULT 'pending',
+        			requested_by_userid INT(11) NOT NULL DEFAULT 0,
+        			requested_at BIGINT(20) NOT NULL DEFAULT 0,
+        			reviewed_by_userid INT(11) NOT NULL DEFAULT 0,
+        			reviewed_at BIGINT(20) NOT NULL DEFAULT 0,
+        			decision_note TEXT NULL,
+        			disbursed_by_userid INT(11) NOT NULL DEFAULT 0,
+        			disbursed_at BIGINT(20) NOT NULL DEFAULT 0,
+        			created_custody_id INT(11) NOT NULL DEFAULT 0,
+        			formuid VARCHAR(100) NOT NULL DEFAULT '',
+        			created_at BIGINT(20) NOT NULL DEFAULT 0,
+        			updated_at BIGINT(20) NOT NULL DEFAULT 0,
+        			PRIMARY KEY (request_id),
+        			UNIQUE KEY uq_cash_custody_request_number (request_number),
+        			UNIQUE KEY uq_cash_custody_request_formuid (formuid),
+        			KEY idx_cash_custody_request_holder_status (holder_id, status),
+        			KEY idx_cash_custody_request_date (required_date)
+        		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+        		"CREATE TABLE IF NOT EXISTS cash_custodies (
+        			custody_id INT(11) NOT NULL AUTO_INCREMENT,
+        			custody_number VARCHAR(60) NOT NULL,
+        			holder_id INT(11) NOT NULL,
+        			request_id INT(11) DEFAULT NULL,
+        			status VARCHAR(30) NOT NULL DEFAULT 'open',
+        			opened_date DATE NOT NULL,
+        			closed_date DATE DEFAULT NULL,
+        			carried_from_custody_id INT(11) NOT NULL DEFAULT 0,
+        			carried_to_custody_id INT(11) NOT NULL DEFAULT 0,
+        			notes TEXT NULL,
+        			created_by_userid INT(11) NOT NULL DEFAULT 0,
+        			created_at BIGINT(20) NOT NULL DEFAULT 0,
+        			updated_by_userid INT(11) NOT NULL DEFAULT 0,
+        			updated_at BIGINT(20) NOT NULL DEFAULT 0,
+        			formuid VARCHAR(100) NOT NULL DEFAULT '',
+        			PRIMARY KEY (custody_id),
+        			UNIQUE KEY uq_cash_custody_number (custody_number),
+        			UNIQUE KEY uq_cash_custody_request (request_id),
+        			KEY idx_cash_custody_holder_status (holder_id, status),
+        			KEY idx_cash_custody_opened_date (opened_date)
+        		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+        		"CREATE TABLE IF NOT EXISTS cash_custody_transactions (
+        			transaction_id INT(11) NOT NULL AUTO_INCREMENT,
+        			custody_id INT(11) NOT NULL,
+        			request_id INT(11) NOT NULL DEFAULT 0,
+        			transaction_type VARCHAR(30) NOT NULL,
+        			document_number VARCHAR(70) NOT NULL,
+        			transaction_date DATE NOT NULL,
+        			amount DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        			net_amount DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        			vat_amount DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        			vat_rate DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+        			payment_method VARCHAR(30) NOT NULL DEFAULT 'cash',
+        			reference_number VARCHAR(150) NOT NULL DEFAULT '',
+        			category_id INT(11) NOT NULL DEFAULT 0,
+        			cost_center_id INT(11) NOT NULL DEFAULT 0,
+        			supplier_id INT(11) NOT NULL DEFAULT 0,
+        			supplier_name VARCHAR(255) NOT NULL DEFAULT '',
+        			supplier_vat_number VARCHAR(50) NOT NULL DEFAULT '',
+        			invoice_number VARCHAR(100) NOT NULL DEFAULT '',
+        			description TEXT NULL,
+        			status VARCHAR(30) NOT NULL DEFAULT 'approved',
+        			accounting_entry_id INT(11) NOT NULL DEFAULT 0,
+        			reversed_transaction_id INT(11) NOT NULL DEFAULT 0,
+        			created_by_userid INT(11) NOT NULL DEFAULT 0,
+        			created_at BIGINT(20) NOT NULL DEFAULT 0,
+        			approved_by_userid INT(11) NOT NULL DEFAULT 0,
+        			approved_at BIGINT(20) NOT NULL DEFAULT 0,
+        			formuid VARCHAR(100) NOT NULL DEFAULT '',
+        			PRIMARY KEY (transaction_id),
+        			UNIQUE KEY uq_cash_custody_document (document_number),
+        			UNIQUE KEY uq_cash_custody_transaction_formuid (formuid),
+        			KEY idx_cash_custody_transaction_custody (custody_id, status, transaction_date),
+        			KEY idx_cash_custody_transaction_type (transaction_type, status),
+        			KEY idx_cash_custody_transaction_supplier (supplier_id),
+        			KEY idx_cash_custody_transaction_category (category_id),
+        			KEY idx_cash_custody_transaction_cost_center (cost_center_id)
+        		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+        		"CREATE TABLE IF NOT EXISTS cash_custody_settlements (
+        			settlement_id INT(11) NOT NULL AUTO_INCREMENT,
+        			settlement_number VARCHAR(70) NOT NULL,
+        			custody_id INT(11) NOT NULL,
+        			settlement_date DATE NOT NULL,
+        			total_funding DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        			total_expenses DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        			total_returns DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        			closing_balance DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        			settlement_action VARCHAR(30) NOT NULL DEFAULT 'close',
+        			new_custody_id INT(11) NOT NULL DEFAULT 0,
+        			notes TEXT NULL,
+        			status VARCHAR(30) NOT NULL DEFAULT 'completed',
+        			created_by_userid INT(11) NOT NULL DEFAULT 0,
+        			created_at BIGINT(20) NOT NULL DEFAULT 0,
+        			approved_by_userid INT(11) NOT NULL DEFAULT 0,
+        			approved_at BIGINT(20) NOT NULL DEFAULT 0,
+        			formuid VARCHAR(100) NOT NULL DEFAULT '',
+        			PRIMARY KEY (settlement_id),
+        			UNIQUE KEY uq_cash_custody_settlement_number (settlement_number),
+        			UNIQUE KEY uq_cash_custody_settlement_custody (custody_id),
+        			UNIQUE KEY uq_cash_custody_settlement_formuid (formuid),
+        			KEY idx_cash_custody_settlement_date (settlement_date)
+        		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+        		"CREATE TABLE IF NOT EXISTS cash_custody_attachments (
+        			attachment_id INT(11) NOT NULL AUTO_INCREMENT,
+        			entity_type VARCHAR(30) NOT NULL,
+        			entity_id INT(11) NOT NULL,
+        			original_name VARCHAR(255) NOT NULL DEFAULT '',
+        			stored_name VARCHAR(255) NOT NULL DEFAULT '',
+        			storage_path VARCHAR(500) NOT NULL DEFAULT '',
+        			mime_type VARCHAR(100) NOT NULL DEFAULT '',
+        			file_size BIGINT(20) NOT NULL DEFAULT 0,
+        			uploaded_by_userid INT(11) NOT NULL DEFAULT 0,
+        			uploaded_at BIGINT(20) NOT NULL DEFAULT 0,
+        			PRIMARY KEY (attachment_id),
+        			KEY idx_cash_custody_attachment_entity (entity_type, entity_id)
+        		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+        		"CREATE TABLE IF NOT EXISTS cash_custody_sequences (
+        			sequence_key VARCHAR(100) NOT NULL,
+        			next_value INT(11) NOT NULL DEFAULT 1,
+        			updated_at BIGINT(20) NOT NULL DEFAULT 0,
+        			PRIMARY KEY (sequence_key)
+        		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+        		"CREATE TABLE IF NOT EXISTS cash_custody_audit_log (
+        			audit_id BIGINT(20) NOT NULL AUTO_INCREMENT,
+        			entity_type VARCHAR(30) NOT NULL,
+        			entity_id INT(11) NOT NULL,
+        			action_type VARCHAR(40) NOT NULL,
+        			old_data LONGTEXT NULL,
+        			new_data LONGTEXT NULL,
+        			performed_by_userid INT(11) NOT NULL DEFAULT 0,
+        			performed_at BIGINT(20) NOT NULL DEFAULT 0,
+        			PRIMARY KEY (audit_id),
+        			KEY idx_cash_custody_audit_entity (entity_type, entity_id),
+        			KEY idx_cash_custody_audit_user_date (performed_by_userid, performed_at)
+        		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+        		"ALTER TABLE cash_custodies MODIFY COLUMN request_id INT(11) DEFAULT NULL"
+        	);
+
+        	$cashCustodyMigrationOk = true;
+        	foreach ($cashCustodyMigrationQueries as $cashCustodyMigrationQuery) {
+        		if (!$this->query($cashCustodyMigrationQuery, $link)) {
+        			$cashCustodyMigrationOk = false;
+        			if (function_exists('write_log')) {
+        				write_log('Cash custody migration failed: ' . mysql_error($link), 'error', 'cash-custody.log');
+        			}
+        			break;
+        		}
+        	}
+
+        // Keep settings and screen registration self-healing without duplicating rows.
+        $cashCustodyScreenId = 0;
+        if ($cashCustodyMigrationOk) {
+        $cashCustodySettings = array(
+        	'cash_custody_default_prefix' => 'CUS',
+        	'cash_custody_default_vat_rate' => '15',
+        	'cash_custody_allow_negative_balance' => '0',
+        	'cash_custody_require_expense_attachment' => '0',
+        	'cash_custody_accounting_enabled' => '0',
+        	'cash_custody_account_id' => '0',
+        	'cash_custody_cash_account_id' => '0',
+        	'cash_custody_bank_account_id' => '0',
+        	'cash_custody_expense_account_id' => '0',
+        	'cash_custody_input_vat_account_id' => '0',
+        	'cash_custody_journal_id' => '0'
+        );
+        foreach ($cashCustodySettings as $cashCustodySettingName => $cashCustodySettingValue) {
+        	$escapedSettingName = mysql_real_escape_string($cashCustodySettingName, $link);
+        	$escapedSettingValue = mysql_real_escape_string($cashCustodySettingValue, $link);
+        	$this->query("INSERT INTO global (variblename, valuribalevalue, formuid)
+        		SELECT '{$escapedSettingName}', '{$escapedSettingValue}', 'cash-custody-setting'
+        		FROM DUAL WHERE NOT EXISTS (
+        			SELECT 1 FROM global WHERE variblename='{$escapedSettingName}'
+        		)", $link);
+        }
+        $this->query("INSERT INTO screens (screen_id, screen_name, screen_isactive, parentid, formuid)
+        	SELECT 'cash_custody', 'إدارة العهد النقدية', '1', 36, 'cash-custody-screen'
+        	FROM DUAL WHERE NOT EXISTS (
+        		SELECT 1 FROM screens WHERE screen_id='cash_custody'
+        	)", $link);
+        $cashCustodyScreenResult = $this->query("SELECT screenid FROM screens WHERE screen_id='cash_custody' ORDER BY screenid ASC LIMIT 1", $link);
+        if ($cashCustodyScreenResult && ($cashCustodyScreenRow = mysql_fetch_array($cashCustodyScreenResult))) {
+        	$cashCustodyScreenId = intval($cashCustodyScreenRow['screenid']);
+        }
+        if ($cashCustodyScreenId > 0) {
+        	// Inherit access from the Amlak hub; administrators can refine it later.
+        	$this->query("INSERT INTO ugroupscreen (groupid, screenid, adds, sees, edits, deleetes, prints, formuid)
+        		SELECT source.groupid, '{$cashCustodyScreenId}', MAX(source.adds), MAX(source.sees), MAX(source.edits), MAX(source.deleetes), MAX(source.prints), 'cash-custody-permission'
+        		FROM ugroupscreen source
+        		WHERE source.screenid=36
+        		  AND NOT EXISTS (
+        			SELECT 1 FROM ugroupscreen existing
+        			WHERE existing.groupid=source.groupid AND existing.screenid='{$cashCustodyScreenId}'
+        		  )
+        		GROUP BY source.groupid", $link);
+        }
+        }
+
+        // Maintenance request lifecycle migration. This module is separate from the
+        // legacy maintenance-contract and maintenance-expense screens.
+        	$maintenanceRequestMigrationQueries = array(
+        		"CREATE TABLE IF NOT EXISTS maintenance_requests (
+        			request_id BIGINT(20) NOT NULL AUTO_INCREMENT,
+        			request_number VARCHAR(40) NOT NULL,
+        			title VARCHAR(255) NOT NULL,
+        			description TEXT NOT NULL,
+        			category VARCHAR(60) NOT NULL DEFAULT 'other',
+        			priority ENUM('low','normal','high','urgent') NOT NULL DEFAULT 'normal',
+        			status ENUM('new','assigned','scheduled','in_progress','waiting_parts','on_hold','completed','verified','cancelled') NOT NULL DEFAULT 'new',
+        			idaqar INT(11) NOT NULL DEFAULT 0,
+        			idsubaqar INT(11) NOT NULL DEFAULT 0,
+        			mostagerid INT(11) NOT NULL DEFAULT 0,
+        			tenant_name_snapshot VARCHAR(244) NOT NULL DEFAULT '',
+        			tenant_phone_snapshot VARCHAR(100) NOT NULL DEFAULT '',
+        			assigned_userid INT(11) NOT NULL DEFAULT 0,
+        			reported_by_type ENUM('tenant','user','owner','other') NOT NULL DEFAULT 'tenant',
+        			reported_by_name VARCHAR(244) NOT NULL DEFAULT '',
+        			reported_by_contact VARCHAR(150) NOT NULL DEFAULT '',
+        			preferred_visit_at DATETIME DEFAULT NULL,
+        			scheduled_at DATETIME DEFAULT NULL,
+        			due_at DATETIME DEFAULT NULL,
+        			started_at DATETIME DEFAULT NULL,
+        			completed_at DATETIME DEFAULT NULL,
+        			verified_at DATETIME DEFAULT NULL,
+        			location_details VARCHAR(500) NOT NULL DEFAULT '',
+        			access_instructions TEXT NULL,
+        			requires_tenant_presence TINYINT(1) NOT NULL DEFAULT 0,
+        			vendor_name VARCHAR(244) NOT NULL DEFAULT '',
+        			vendor_phone VARCHAR(100) NOT NULL DEFAULT '',
+        			estimated_cost DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        			actual_cost DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        			resolution_summary TEXT NULL,
+        			cancellation_reason TEXT NULL,
+        			created_by_userid INT(11) NOT NULL DEFAULT 0,
+        			updated_by_userid INT(11) NOT NULL DEFAULT 0,
+        			created_at BIGINT(20) NOT NULL DEFAULT 0,
+        			updated_at BIGINT(20) NOT NULL DEFAULT 0,
+        			formuid VARCHAR(100) NOT NULL DEFAULT '',
+        			PRIMARY KEY (request_id),
+        			UNIQUE KEY uq_maintenance_request_number (request_number),
+        			UNIQUE KEY uq_maintenance_request_formuid (formuid),
+        			KEY idx_maintenance_request_status_priority (status,priority,request_id),
+        			KEY idx_maintenance_request_assignment (assigned_userid,status,due_at),
+        			KEY idx_maintenance_request_property (idaqar,idsubaqar,status),
+        			KEY idx_maintenance_request_tenant (mostagerid,status)
+        		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        		"CREATE TABLE IF NOT EXISTS maintenance_request_events (
+        			event_id BIGINT(20) NOT NULL AUTO_INCREMENT,
+        			request_id BIGINT(20) NOT NULL,
+        			event_type VARCHAR(50) NOT NULL,
+        			from_status VARCHAR(30) NOT NULL DEFAULT '',
+        			to_status VARCHAR(30) NOT NULL DEFAULT '',
+        			note TEXT NULL,
+        			event_data LONGTEXT NULL,
+        			event_by_userid INT(11) NOT NULL DEFAULT 0,
+        			event_at BIGINT(20) NOT NULL DEFAULT 0,
+        			PRIMARY KEY (event_id),
+        			KEY idx_maintenance_event_request (request_id,event_id),
+        			KEY idx_maintenance_event_user_date (event_by_userid,event_at)
+        		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        		"CREATE TABLE IF NOT EXISTS maintenance_request_items (
+        			item_id BIGINT(20) NOT NULL AUTO_INCREMENT,
+        			request_id BIGINT(20) NOT NULL,
+        			item_type ENUM('material','service','transport','other') NOT NULL DEFAULT 'material',
+        			item_name VARCHAR(255) NOT NULL,
+        			quantity DECIMAL(12,3) NOT NULL DEFAULT 1.000,
+        			unit VARCHAR(50) NOT NULL DEFAULT 'قطعة',
+        			unit_cost DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        			supplier_name VARCHAR(244) NOT NULL DEFAULT '',
+        			status ENUM('requested','ordered','received','used','returned','cancelled') NOT NULL DEFAULT 'requested',
+        			notes TEXT NULL,
+        			created_by_userid INT(11) NOT NULL DEFAULT 0,
+        			created_at BIGINT(20) NOT NULL DEFAULT 0,
+        			updated_at BIGINT(20) NOT NULL DEFAULT 0,
+        			PRIMARY KEY (item_id),
+        			KEY idx_maintenance_item_request (request_id,status)
+        		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        		"CREATE TABLE IF NOT EXISTS maintenance_request_attachments (
+        			attachment_id BIGINT(20) NOT NULL AUTO_INCREMENT,
+        			request_id BIGINT(20) NOT NULL,
+        			original_name VARCHAR(255) NOT NULL DEFAULT '',
+        			stored_name VARCHAR(255) NOT NULL DEFAULT '',
+        			storage_path VARCHAR(500) NOT NULL DEFAULT '',
+        			mime_type VARCHAR(120) NOT NULL DEFAULT '',
+        			file_size BIGINT(20) NOT NULL DEFAULT 0,
+        			uploaded_by_userid INT(11) NOT NULL DEFAULT 0,
+        			uploaded_at BIGINT(20) NOT NULL DEFAULT 0,
+        			PRIMARY KEY (attachment_id),
+        			KEY idx_maintenance_attachment_request (request_id,attachment_id)
+        		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        	);
+        	$maintenanceRequestMigrationOk = true;
+        	foreach ($maintenanceRequestMigrationQueries as $maintenanceRequestMigrationQuery) {
+        		if (!$this->query($maintenanceRequestMigrationQuery, $link)) {
+        			$maintenanceRequestMigrationOk = false;
+        			if (function_exists('write_log')) {
+        				write_log('Maintenance request migration failed: ' . mysql_error($link), 'error', 'maintenance-requests.log');
+        			}
+        			break;
+        		}
+        	}
+        $maintenanceRequestScreenId = 0;
+        if ($maintenanceRequestMigrationOk) {
+        	$this->query("INSERT INTO screens (screen_id,screen_name,screen_isactive,parentid,formuid)
+        		SELECT 'maintenance_requests','طلبات الصيانة','1',36,'maintenance-request-screen'
+        		FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM screens WHERE screen_id='maintenance_requests')", $link);
+        	$maintenanceRequestScreenResult = $this->query("SELECT screenid FROM screens WHERE screen_id='maintenance_requests' ORDER BY screenid LIMIT 1", $link);
+        	if ($maintenanceRequestScreenResult && ($maintenanceRequestScreenRow = mysql_fetch_array($maintenanceRequestScreenResult))) {
+        		$maintenanceRequestScreenId = intval($maintenanceRequestScreenRow['screenid']);
+        	}
+        	if ($maintenanceRequestScreenId > 0) {
+        		$this->query("INSERT INTO ugroupscreen (groupid,screenid,adds,sees,edits,deleetes,prints,formuid)
+        			SELECT source.groupid,'{$maintenanceRequestScreenId}',MAX(source.adds),MAX(source.sees),MAX(source.edits),MAX(source.deleetes),MAX(source.prints),'maintenance-request-permission'
+        			FROM ugroupscreen source
+        			WHERE source.screenid=36
+        			AND NOT EXISTS (SELECT 1 FROM ugroupscreen existing WHERE existing.groupid=source.groupid AND existing.screenid='{$maintenanceRequestScreenId}')
+        			GROUP BY source.groupid", $link);
+        	}
+        }
+
+        // Register the tenant QR-card screen once and inherit the Property Management
+        // hub permissions. The feature stores generated images in storage, not in SQL.
+        $tenantQrScreenId = 0;
+        $this->query("INSERT INTO screens (screen_id,screen_name,screen_isactive,parentid,formuid)
+        	SELECT 'tenant_qr_cards','بطاقات QR للمستأجرين','1',36,'tenant-qr-card-screen'
+        	FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM screens WHERE screen_id='tenant_qr_cards')", $link);
+        $tenantQrScreenResult = $this->query("SELECT screenid FROM screens WHERE screen_id='tenant_qr_cards' ORDER BY screenid ASC LIMIT 1", $link);
+        if ($tenantQrScreenResult && ($tenantQrScreenRow = mysql_fetch_array($tenantQrScreenResult))) {
+        	$tenantQrScreenId = intval($tenantQrScreenRow['screenid']);
+        }
+        if ($tenantQrScreenId > 0) {
+        	$this->query("INSERT INTO ugroupscreen (groupid,screenid,adds,sees,edits,deleetes,prints,formuid)
+        		SELECT source.groupid,'{$tenantQrScreenId}',MAX(source.adds),MAX(source.sees),MAX(source.edits),MAX(source.deleetes),MAX(source.prints),'tenant-qr-card-permission'
+        		FROM ugroupscreen source
+        		WHERE source.screenid=36
+        		AND NOT EXISTS (SELECT 1 FROM ugroupscreen existing WHERE existing.groupid=source.groupid AND existing.screenid='{$tenantQrScreenId}')
+        		GROUP BY source.groupid", $link);
+        }
+        $this->applyAccounting();
+    }
+}

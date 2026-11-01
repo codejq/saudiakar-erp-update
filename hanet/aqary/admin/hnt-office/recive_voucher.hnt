@@ -33,12 +33,12 @@ if ($paymentvou) {
     $img = "payment.jpg";
     $table = "payment_voucher";
     $sc_title = "سند صرف حر";
-    $sc_id = "voucher_payment";
+    $sc_id = "135";
 } else {
     $img = "recive.jpg";
     $table = "recive_voucher";
     $sc_title = "سند قبض حر";
-    $sc_id = "voucher_receive";
+    $sc_id = "135";
 }
 
 // Check if this is an AJAX form submission
@@ -53,8 +53,38 @@ if (!$is_ajax_request) {
 }
 
 include_once "../../hjerymelady.ip";
+require_once __DIR__ . '/../include/amlak/receipt_commission_helpers.hnt';
+require_once __DIR__ . '/../include/amlak/expense_payment_voucher_helpers.hnt';
+$paymentvou = intval($_REQUEST['paymentvou'] ?? 0);
+$is_ajax_request = isset($_POST['ajax_submit']) && $_POST['ajax_submit']==='1';
+$table = $paymentvou ? 'payment_voucher' : 'recive_voucher';
 
-// Database schema updates (run silently)
+// Receipt shares and the receipt itself are saved atomically in the customer ledger.
+if ($is_ajax_request && ($_POST['action'] ?? '') === 'save_voucher' && !$paymentvou) {
+    try {
+        $voucher_id = receiptCommissionCreateFree($link, $_POST);
+        echo json_encode(array('success'=>true,'message'=>'تم حفظ السند وتوزيع العمولات بنجاح',
+            'voucher_id'=>$voucher_id,'redirect_url'=>'voucherhome.hnt'),JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $error) {
+        echo json_encode(array('success'=>false,'message'=>$error->getMessage()),JSON_UNESCAPED_UNICODE);
+    }
+    exit;
+}
+
+// Payment vouchers and their classified office expense share one transaction.
+if ($is_ajax_request && ($_POST['action'] ?? '')==='save_voucher' && $paymentvou) {
+    try {
+        $savedPayment=expensePaymentVoucherCreateManual($link,$_POST);
+        echo json_encode(array_merge($savedPayment,array('success'=>true,
+            'message'=>'تم حفظ المصروف وإصدار سند الصرف بنجاح','redirect_url'=>$savedPayment['print_url'])),JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $error) {
+        error_log('Manual office payment voucher: '.$error->getMessage());
+        echo json_encode(array('success'=>false,'message'=>$error instanceof RuntimeException ? $error->getMessage() : 'تعذر حفظ سند الصرف.'),JSON_UNESCAPED_UNICODE);
+    }
+    exit;
+}
+
+// Legacy schema compatibility.
 @mysql_query("ALTER TABLE payment_voucher CHANGE ryial ryial DECIMAL(10, 2) NOT NULL", $link);
 @mysql_query("ALTER TABLE recive_voucher CHANGE ryial ryial DECIMAL(10, 2) NOT NULL", $link);
 @mysql_query("ALTER TABLE payment_voucher ADD COLUMN notes VARCHAR(1000) NULL", $link);
@@ -174,220 +204,125 @@ if ($is_ajax_request && isset($_POST['action']) && $_POST['action'] == 'save_vou
 }
 
 // Only output HTML if not AJAX request
+$paymentCategories=$paymentvou ? expensePaymentVoucherCategories($link) : array();
 if (!$is_ajax_request):
 ?>
-<!-- Main Content -->
-<div class="container-fluid mt-4">
-    <div class="row">
-        <div class="col-12">
-            <!-- Page Header -->
-            <div class="card mb-4 shadow-sm border-0">
-                <div class="card-header text-white" style="background: <?= $paymentvou ? 'linear-gradient(135deg, #0891b2 0%, #0e7490 100%)' : 'linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%)' ?>;">
-                    <h4 class="mb-0">
-                        <i class="<?= $paymentvou ? 'bi bi-cash-coin' : 'bi bi-wallet2' ?> me-2"></i>
-                        <?= $sc_title ?>
-                    </h4>
-                </div>
-                <div class="card-body p-4">
-                    <p class="text-muted mb-0">
-                        <i class="bi bi-info-circle me-2"></i>
-                        السند هنا سيستكمل على نفس مسلسل السندات والفواتير لديك فقط لن يكون مرتبط بأسم مستأجر معين
-                    </p>
-                </div>
+<style>
+.voucher-compact { max-width: 1320px; }
+.voucher-compact .form-label { font-size: .85rem; font-weight: 600; margin-bottom: .2rem; }
+.voucher-compact .form-control,
+.voucher-compact .form-select { font-size: .9rem; padding: .35rem .55rem; }
+.voucher-compact .voucher-form-header { background: linear-gradient(135deg,#15803d,#0e7490); color: #fff; }
+.voucher-compact .voucher-form-header p { font-size: .8rem; opacity: .85; }
+.voucher-compact .voucher-payment-methods { min-height: 35px; align-items: center; }
+.voucher-compact .voucher-extra { border-top: 1px solid #e2e8f0; padding-top: .6rem; }
+.voucher-compact .voucher-extra summary { color: #0f766e; font-size: .9rem; font-weight: 600; cursor: pointer; }
+.voucher-compact #receiptCommissionEditor { margin: .75rem 0 !important; }
+.voucher-compact #receiptCommissionEditor .card-header { padding: .4rem .75rem; font-size: .9rem; }
+.voucher-compact #receiptCommissionEditor .card-body { padding: .6rem .75rem; }
+.voucher-compact #receiptCommissionEditor p { font-size: .8rem; margin-bottom: .4rem; }
+.voucher-compact #receiptCommissionEditor .table { min-width: 540px; margin-bottom: .4rem; }
+.voucher-compact #receiptCommissionEditor th,
+.voucher-compact #receiptCommissionEditor td { padding: .3rem; font-size: .85rem; }
+.voucher-compact #receiptCommissionEditor th:first-child { width: 34%; }
+.voucher-compact #receiptCommissionEditor .btn { font-size: .85rem; padding: .25rem .55rem; }
+.voucher-compact #receiptCommissionEditor strong { font-size: .85rem; }
+.voucher-compact .select2-container--bootstrap-5 .select2-selection { min-height: 34px; font-size: .9rem; padding-top: .25rem; padding-bottom: .25rem; }
+</style>
+<div class="container-fluid voucher-compact py-3" dir="rtl">
+    <div class="card border-0 shadow-sm">
+        <div class="card-header voucher-form-header py-2 px-3 d-flex flex-wrap align-items-center justify-content-between gap-2">
+            <div>
+                <h5 class="mb-1"><i class="bi <?= $paymentvou ? 'bi-cash-coin' : 'bi-wallet2' ?> me-1"></i><?= htmlspecialchars($sc_title, ENT_QUOTES, 'UTF-8') ?></h5>
+                <p class="mb-0"><?= $paymentvou ? 'يسجل المصروف بتصنيفه في مصروفات المكتب ويصدر له سند صرف واحد.' : 'سند حر على نفس مسلسل السندات والفواتير، دون ارتباط بمستأجر معين.' ?></p>
             </div>
+            <a href="voucherhome.hnt" class="btn btn-sm btn-outline-light"><i class="bi bi-arrow-return-right me-1"></i>السندات</a>
+        </div>
+        <div class="card-body p-3">
+            <?php if ($paymentvou && !expensePaymentVoucherReady($link)) { ?><div class="alert alert-warning py-2">افتح إدارة الأملاك أولاً لتثبيت تحديث ربط مصروفات المكتب بسندات الصرف.</div><?php } ?>
+            <form id="voucherForm" method="post">
+                <input type="hidden" name="ajax_submit" value="1">
+                <input type="hidden" name="action" value="save_voucher">
+                <input type="hidden" name="formuid" id="formuid" value="<?= str_replace('.', '', microtime(true) . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+                <input type="hidden" name="paymentvou" value="<?= $paymentvou ?>">
+                <?php if ($paymentvou) { ?><input type="hidden" name="expense_payment_token" value="<?= receiptCommissionEsc(expensePaymentVoucherToken()) ?>"><?php } ?>
 
-            <!-- Voucher Form -->
-            <div class="card shadow-sm">
-                <div class="card-body">
-                    <form id="voucherForm" method="post">
-                        <input type="hidden" name="ajax_submit" value="1">
-                        <input type="hidden" name="action" value="save_voucher">
-                        <input type="hidden" name="formuid" id="formuid"
-                               value="<?= str_replace('.', '', microtime(true) . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
-                        <input type="hidden" name="paymentvou" value="<?= $paymentvou ?>">
-
-                        <div class="row g-3">
-                            <!-- Date -->
-                            <div class="col-md-3">
-                                <label for="period" class="form-label fw-bold">
-                                    <i class="fas fa-calendar me-1"></i>
-                                    تاريخ السند
-                                </label>
-                                <input type="text" class="form-control" id="period" name="period"
-                                       value="<?= htmlspecialchars($period) ?>" required>
-                            </div>
-
-                            <!-- Amount Including VAT -->
-                            <div class="col-md-3">
-                                <label for="depositeamount" class="form-label fw-bold">
-                                    <i class="fas fa-money-bill-wave me-1"></i>
-                                    المبلغ المدفوع شامل الضريبة
-                                </label>
-                                <input type="number" step="0.01" class="form-control" id="depositeamount"
-                                       name="depositeamount" value="<?= $depositeamount ?>" required>
-                            </div>
-
-                            <!-- VAT Amount -->
-                            <div class="col-md-3">
-                                <label for="depositeamount_vat" class="form-label fw-bold">
-                                    <i class="fas fa-percentage me-1"></i>
-                                    ضريبة القيمة المضافة
-                                </label>
-                                <input type="number" step="0.01" class="form-control" id="depositeamount_vat"
-                                       name="depositeamount_vat" value="<?= $depositeamount_vat ?>">
-                            </div>
-
-                            <!-- Description -->
-                            <div class="col-md-3">
-                                <label for="mybyan" class="form-label fw-bold">
-                                    <i class="fas fa-align-left me-1"></i>
-                                    البيان
-                                </label>
-                                <input type="text" class="form-control" id="mybyan" name="mybyan"
-                                       value="<?= htmlspecialchars($mybyan) ?>">
-                            </div>
-
-                            <!-- Notes -->
-                            <div class="col-12">
-                                <label for="notes" class="form-label fw-bold">
-                                    <i class="fas fa-sticky-note me-1"></i>
-                                    ملاحظات
-                                </label>
-                                <textarea class="form-control" id="notes" name="notes" rows="2"><?= htmlspecialchars($notes) ?></textarea>
-                            </div>
-
-                            <!-- Beneficiary Name -->
-                            <div class="col-md-3">
-                                <label for="mostagername" class="form-label fw-bold">
-                                    <i class="fas fa-user me-1"></i>
-                                    اسم المستفيد
-                                </label>
-                                <input type="text" class="form-control" id="mostagername" name="mostagername"
-                                       value="<?= htmlspecialchars($mostagername) ?>" required>
-                            </div>
-
-                            <!-- Beneficiary VAT Number -->
-                            <div class="col-md-3">
-                                <label for="mostagervatnumber" class="form-label fw-bold">
-                                    <i class="fas fa-hashtag me-1"></i>
-                                    رقم ضريبي المستفيد
-                                </label>
-                                <input type="text" class="form-control" id="mostagervatnumber" name="mostagervatnumber"
-                                       value="<?= htmlspecialchars($mostagervatnumber) ?>">
-                            </div>
-
-                            <!-- Supplier Name -->
-                            <div class="col-md-3">
-                                <label for="suppliername" class="form-label fw-bold">
-                                    <i class="fas fa-building me-1"></i>
-                                    اسم المورد
-                                </label>
-                                <input type="text" class="form-control" id="suppliername" name="suppliername"
-                                       value="<?= htmlspecialchars($suppliername) ?>">
-                            </div>
-
-                            <!-- Supplier VAT Number -->
-                            <div class="col-md-3">
-                                <label for="suppliervatnumber" class="form-label fw-bold">
-                                    <i class="fas fa-hashtag me-1"></i>
-                                    رقم ضريبي للمورد
-                                </label>
-                                <input type="text" class="form-control" id="suppliervatnumber" name="suppliervatnumber"
-                                       value="<?= htmlspecialchars($suppliervatnumber) ?>">
-                            </div>
-
-                            <!-- Payment Method -->
-                            <div class="col-12">
-                                <label class="form-label fw-bold">
-                                    <i class="fas fa-credit-card me-1"></i>
-                                    طريقة الدفع
-                                </label>
-                                <div class="d-flex flex-wrap gap-3">
-                                    <div class="form-check">
-                                        <input class="form-check-input" type="radio" name="payment_type"
-                                               id="cheqorchash1" value="1" <?= $payment_type == 1 ? 'checked' : '' ?>>
-                                        <label class="form-check-label" for="cheqorchash1">نقدا</label>
-                                    </div>
-                                    <div class="form-check">
-                                        <input class="form-check-input" type="radio" name="payment_type"
-                                               id="cheqorchash2" value="2" <?= $payment_type == 2 ? 'checked' : '' ?>>
-                                        <label class="form-check-label" for="cheqorchash2">شيك</label>
-                                    </div>
-                                    <div class="form-check">
-                                        <input class="form-check-input" type="radio" name="payment_type"
-                                               id="cheqorchash3" value="3" <?= $payment_type == 3 ? 'checked' : '' ?>>
-                                        <label class="form-check-label" for="cheqorchash3">طريقة اخرى</label>
-                                    </div>
-                                    <input type="text" class="form-control" style="max-width: 300px;"
-                                           id="chekorcashother" name="chekorcashother"
-                                           placeholder="حدد الطريقة الأخرى"
-                                           value="<?= htmlspecialchars($chekorcashother) ?>">
-                                </div>
-                            </div>
-
-                            <!-- Check Number -->
-                            <div class="col-md-4">
-                                <label for="cheqnumber" class="form-label fw-bold">
-                                    <i class="fas fa-file-invoice me-1"></i>
-                                    رقم الشيك
-                                </label>
-                                <input type="text" class="form-control" id="cheqnumber" name="cheqnumber"
-                                       value="<?= htmlspecialchars($cheqnumber) ?>">
-                            </div>
-
-                            <!-- Bank Name -->
-                            <div class="col-md-4">
-                                <label for="cheqon" class="form-label fw-bold">
-                                    <i class="fas fa-university me-1"></i>
-                                    اسم البنك
-                                </label>
-                                <input type="text" class="form-control" id="cheqon" name="cheqon"
-                                       value="<?= htmlspecialchars($cheqon) ?>">
-                            </div>
-
-                            <!-- Check Date -->
-                            <div class="col-md-4">
-                                <label for="cheqdate1" class="form-label fw-bold">
-                                    <i class="fas fa-calendar-check me-1"></i>
-                                    تاريخ الشيك
-                                </label>
-                                <input type="text" class="form-control" id="cheqdate1" name="cheqdate1"
-                                       value="<?= htmlspecialchars($cheqdate1) ?>">
-                            </div>
-
-                            <!-- Accountant -->
-                            <div class="col-12">
-                                <label for="recivername" class="form-label fw-bold">
-                                    <i class="fas fa-user-tie me-1"></i>
-                                    المحاسب
-                                </label>
-                                <input type="text" class="form-control" id="recivername" name="recivername"
-                                       value="<?= isset($user_data['name']) ? htmlspecialchars($user_data['name']) : '' ?>" readonly>
-                            </div>
+                <div class="row g-2">
+                    <div class="col-sm-6 col-lg-4">
+                        <label for="mostagername" class="form-label">اسم المستفيد <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="mostagername" name="mostagername" value="<?= htmlspecialchars($mostagername, ENT_QUOTES, 'UTF-8') ?>" required>
+                    </div>
+                    <div class="col-sm-6 col-lg-2">
+                        <label for="period" class="form-label">تاريخ السند <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="period" name="period" value="<?= htmlspecialchars($period, ENT_QUOTES, 'UTF-8') ?>" placeholder="يوم/شهر/سنة" required>
+                    </div>
+                    <div class="col-sm-6 col-lg-3">
+                        <label for="depositeamount" class="form-label">المبلغ شامل الضريبة <span class="text-danger">*</span></label>
+                        <input type="number" step="0.01" class="form-control" id="depositeamount" name="depositeamount" value="<?= $depositeamount ?>" required>
+                    </div>
+                    <div class="col-sm-6 col-lg-3">
+                        <label for="depositeamount_vat" class="form-label">ضريبة القيمة المضافة</label>
+                        <input type="number" step="0.01" class="form-control" id="depositeamount_vat" name="depositeamount_vat" value="<?= $depositeamount_vat ?>">
+                    </div>
+                    <?php if ($paymentvou) { ?>
+                    <div class="col-md-4">
+                        <label for="idmasrofcod" class="form-label">تصنيف المصروف <span class="text-danger">*</span></label>
+                        <select class="form-select" id="idmasrofcod" name="idmasrofcod" required>
+                            <option value="">اختر تصنيف المصروف</option>
+                            <?php foreach ($paymentCategories as $category) { ?><option value="<?= intval($category['idmasrofcod']) ?>" <?= intval($_REQUEST['idmasrofcod'] ?? 0)===intval($category['idmasrofcod']) ? 'selected' : '' ?>><?= receiptCommissionEsc($category['masrofkind']) ?></option><?php } ?>
+                        </select>
+                        <small class="text-muted">نفس تصنيفات مصروفات المكتب. <a href="../include/amlak/office_expense.hnt" target="_blank" rel="noopener">إضافة تصنيف</a></small>
+                    </div>
+                    <?php } ?>
+                    <div class="<?= $paymentvou ? 'col-md-5' : 'col-md-8' ?>">
+                        <label for="mybyan" class="form-label">البيان</label>
+                        <input type="text" class="form-control" id="mybyan" name="mybyan" value="<?= htmlspecialchars($mybyan, ENT_QUOTES, 'UTF-8') ?>">
+                    </div>
+                    <div class="<?= $paymentvou ? 'col-md-3' : 'col-md-4' ?>">
+                        <label for="recivername" class="form-label">المحاسب</label>
+                        <input type="text" class="form-control" id="recivername" name="recivername" value="<?= isset($user_data['name']) ? htmlspecialchars($user_data['name'], ENT_QUOTES, 'UTF-8') : '' ?>" readonly>
+                    </div>
+                    <div class="col-md-8">
+                        <div class="form-label" id="voucherPaymentLabel">طريقة الدفع</div>
+                        <div class="d-flex flex-wrap gap-3 voucher-payment-methods" role="group" aria-labelledby="voucherPaymentLabel">
+                            <div class="form-check mb-0"><input class="form-check-input" type="radio" name="payment_type" id="cheqorchash1" value="1" <?= $payment_type == 1 ? 'checked' : '' ?>><label class="form-check-label" for="cheqorchash1">نقداً</label></div>
+                            <div class="form-check mb-0"><input class="form-check-input" type="radio" name="payment_type" id="cheqorchash2" value="2" <?= $payment_type == 2 ? 'checked' : '' ?>><label class="form-check-label" for="cheqorchash2">شيك</label></div>
+                            <div class="form-check mb-0"><input class="form-check-input" type="radio" name="payment_type" id="cheqorchash4" value="4" <?= $payment_type == 4 ? 'checked' : '' ?>><label class="form-check-label" for="cheqorchash4">تحويل بنكي</label></div>
+                            <div class="form-check mb-0"><input class="form-check-input" type="radio" name="payment_type" id="cheqorchash3" value="3" <?= $payment_type == 3 ? 'checked' : '' ?>><label class="form-check-label" for="cheqorchash3">طريقة أخرى</label></div>
                         </div>
-
-                        <!-- Form Actions -->
-                        <div class="row mt-4">
-                            <div class="col-12">
-                                <div class="d-flex gap-2 justify-content-center">
-                                    <button type="submit" class="btn btn-primary btn-lg px-5" id="saveVoucherBtn">
-                                        <i class="fas fa-save me-2"></i>
-                                        حفظ السند
-                                    </button>
-                                    <button type="button" class="btn btn-secondary btn-lg px-4" onclick="window.location.href='voucherhome.hnt'">
-                                        <i class="fas fa-times me-2"></i>
-                                        إغلاق وعودة
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </form>
+                    </div>
+                    <div class="col-md-4 <?= $payment_type != 3 && $chekorcashother === '' ? 'd-none' : '' ?>" id="voucherOtherPayment">
+                        <label for="chekorcashother" class="form-label">الطريقة الأخرى</label>
+                        <input type="text" class="form-control" id="chekorcashother" name="chekorcashother" placeholder="حدد الطريقة الأخرى" value="<?= htmlspecialchars($chekorcashother, ENT_QUOTES, 'UTF-8') ?>">
+                    </div>
                 </div>
-            </div>
+
+                <div class="row g-2 mt-1 <?= !in_array(intval($payment_type), array(2, 4), true) && $cheqnumber === '' && $cheqon === '' && $cheqdate1 === '' ? 'd-none' : '' ?>" id="voucherChequeDetails">
+                    <div class="col-sm-4"><label for="cheqnumber" id="voucherBankNumberLabel" class="form-label"><?= $payment_type == 4 ? 'رقم التحويل' : 'رقم الشيك' ?></label><input type="text" class="form-control" id="cheqnumber" name="cheqnumber" value="<?= htmlspecialchars($cheqnumber, ENT_QUOTES, 'UTF-8') ?>"></div>
+                    <div class="col-sm-4"><label for="cheqon" class="form-label">اسم البنك</label><input type="text" class="form-control" id="cheqon" name="cheqon" value="<?= htmlspecialchars($cheqon, ENT_QUOTES, 'UTF-8') ?>"></div>
+                    <div class="col-sm-4"><label for="cheqdate1" id="voucherBankDateLabel" class="form-label"><?= $payment_type == 4 ? 'تاريخ التحويل' : 'تاريخ الشيك' ?></label><input type="text" class="form-control" id="cheqdate1" name="cheqdate1" placeholder="dd/mm/yyyy" value="<?= htmlspecialchars($cheqdate1, ENT_QUOTES, 'UTF-8') ?>"></div>
+                </div>
+
+                <?php if (!$paymentvou) { require __DIR__ . '/../include/amlak/receipt_commission_form.hnt'; } ?>
+
+                <details class="voucher-extra mt-2" <?= $notes !== '' || $mostagervatnumber !== '' || $suppliername !== '' || $suppliervatnumber !== '' ? 'open' : '' ?>>
+                    <summary><i class="bi bi-sliders me-1"></i>الملاحظات وبيانات المورد والرقم الضريبي (اختياري)</summary>
+                    <div class="row g-2 mt-1">
+                        <div class="col-md-4"><label for="mostagervatnumber" class="form-label">الرقم الضريبي للمستفيد</label><input type="text" class="form-control" id="mostagervatnumber" name="mostagervatnumber" value="<?= htmlspecialchars($mostagervatnumber, ENT_QUOTES, 'UTF-8') ?>"></div>
+                        <div class="col-md-4"><label for="suppliername" class="form-label">اسم المورد</label><input type="text" class="form-control" id="suppliername" name="suppliername" value="<?= htmlspecialchars($suppliername, ENT_QUOTES, 'UTF-8') ?>"></div>
+                        <div class="col-md-4"><label for="suppliervatnumber" class="form-label">الرقم الضريبي للمورد</label><input type="text" class="form-control" id="suppliervatnumber" name="suppliervatnumber" value="<?= htmlspecialchars($suppliervatnumber, ENT_QUOTES, 'UTF-8') ?>"></div>
+                        <div class="col-12"><label for="notes" class="form-label">ملاحظات</label><textarea class="form-control" id="notes" name="notes" rows="2"><?= htmlspecialchars($notes, ENT_QUOTES, 'UTF-8') ?></textarea></div>
+                    </div>
+                </details>
+
+                <div class="d-flex flex-wrap gap-2 justify-content-end border-top pt-2 mt-3">
+                    <button type="submit" class="btn btn-success px-4" id="saveVoucherBtn"><i class="fas fa-save me-1"></i>حفظ السند</button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="window.location.href='voucherhome.hnt'">إغلاق وعودة</button>
+                </div>
+            </form>
         </div>
     </div>
 </div>
-
 <!-- Toast Notification Container -->
 <div class="position-fixed bottom-0 end-0 p-3" style="z-index: 11">
     <div id="voucherToast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
@@ -463,17 +398,22 @@ document.addEventListener('DOMContentLoaded', function() {
         toast.show();
     }
 
-    // Auto-calculate VAT if needed
-    const amountInput = document.getElementById('depositeamount');
-    const vatInput = document.getElementById('depositeamount_vat');
-
-    amountInput.addEventListener('input', function() {
-        // Optional: Auto-calculate VAT at 15%
-        // Uncomment if you want automatic VAT calculation
-        // const amount = parseFloat(this.value) || 0;
-        // const vat = (amount * 0.15 / 1.15).toFixed(2);
-        // vatInput.value = vat;
+    function updatePaymentDetails() {
+        const selected = voucherForm.querySelector('input[name="payment_type"]:checked');
+        const method = selected ? selected.value : '1';
+        const hasBankDetails = ['cheqnumber', 'cheqon', 'cheqdate1'].some(function(id) {
+            return document.getElementById(id).value.trim() !== '';
+        });
+        const hasOtherMethod = document.getElementById('chekorcashother').value.trim() !== '';
+        document.getElementById('voucherChequeDetails').classList.toggle('d-none', method !== '2' && method !== '4' && !hasBankDetails);
+        document.getElementById('voucherBankNumberLabel').textContent = method === '4' ? 'رقم التحويل' : 'رقم الشيك';
+        document.getElementById('voucherBankDateLabel').textContent = method === '4' ? 'تاريخ التحويل' : 'تاريخ الشيك';
+        document.getElementById('voucherOtherPayment').classList.toggle('d-none', method !== '3' && !hasOtherMethod);
+    }
+    voucherForm.querySelectorAll('input[name="payment_type"]').forEach(function(input) {
+        input.addEventListener('change', updatePaymentDetails);
     });
+    updatePaymentDetails();
 });
 </script>
 

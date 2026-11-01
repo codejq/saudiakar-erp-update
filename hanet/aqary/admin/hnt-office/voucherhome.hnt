@@ -1,0 +1,205 @@
+<?php
+// Set page variables
+$sc_title = "السندات الحرة";
+$sc_id = "135";
+
+// Include authentication and headers
+include_once "../../nocash.hnt";
+include_once "../../header.hnt";
+
+// Include SQL configuration
+require "sql.hnt";
+require_once __DIR__ . '/../include/amlak/receipt_commission_helpers.hnt';
+date_default_timezone_set('Asia/Riyadh');
+$voucherStats = array('receipts'=>0,'gross'=>0,'commission'=>0,'system_receipts'=>0);
+try {
+    $voucherScope = receiptCommissionScope($link);
+    $voucherStats = receiptCommissionRows($link,"SELECT COUNT(*) receipts,COALESCE(SUM(s.depositeamount),0) gross,
+        COALESCE(SUM(s.sales_commission_amount),0) commission,
+        COALESCE(SUM(s.sales_representative_userid=0),0) system_receipts FROM sanad s
+        WHERE s.sanaddate>=? AND s.sanaddate<? AND {$voucherScope}",
+        array(strtotime(date('Y-m-01')),strtotime(date('Y-m-01').' +1 month')))[0];
+} catch (Throwable $voucherStatsError) { error_log('Voucher hub: '.$voucherStatsError->getMessage()); }
+?>
+
+<style>
+.voucher-card {
+    min-height: 150px;
+    height: 100%;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    text-align: center;
+    transition: transform 0.2s;
+}
+.voucher-card:hover,
+.voucher-card:focus-within {
+    transform: translateY(-5px);
+}
+.voucher-card a {
+    text-decoration: none;
+    color: inherit;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    height: 100%;
+    padding: 1rem;
+}
+.voucher-card a:focus-visible {
+    outline: 2px solid #0d9488;
+    outline-offset: 2px;
+    border-radius: 6px;
+}
+.voucher-card .icon-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    font-size: 2.4rem;
+    margin-bottom: 0.5rem;
+    color: #0f766e;
+    background: none;
+}
+.voucher-card .voucher-title {
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.4;
+}
+.voucher-card .voucher-subtitle {
+    font-size: 0.8rem;
+    color: #64748b;
+    margin-top: 0.25rem;
+}
+.voucher-payment .icon-wrapper,
+.voucher-view-payment .icon-wrapper { color: #0369a1; }
+.voucher-receipt .icon-wrapper { color: #15803d; }
+.voucher-archive .icon-wrapper { color: #64748b; }
+</style>
+
+<div class="container-fluid py-4">
+    <?php if (!receiptCommissionReady($link)) { ?><div class="alert alert-warning">لتفعيل توزيع العمولات وصرفها افتح <a href="/aqary/admin/amlak.hnt" class="alert-link">إدارة الأملاك</a> لتثبيت التحديث أولاً.</div><?php } ?>
+    <!-- Page Header -->
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0">
+                <i class="bi bi-receipt-cutoff me-2"></i>
+                <?= htmlspecialchars($sc_title, ENT_QUOTES, 'UTF-8') ?>
+            </h4>
+        </div>
+        <div class="card-body p-4">
+            <p class="text-muted mb-0">
+                <i class="bi bi-info-circle me-2"></i>
+                إدارة سندات القبض والصرف - إنشاء وعرض وأرشفة السندات المالية
+            </p>
+        </div>
+    </div>
+
+    <!-- Voucher actions: six columns on desktop, matching the property hub. -->
+    <div class="row g-3">
+        <?php
+        $voucherActions = array(
+            array('recive_voucher.hnt','bi-wallet2','سند قبض جديد','إنشاء سند قبض','voucher-receipt'),
+            array('recive_voucher.hnt?paymentvou=1','bi-cash-coin','سند صرف جديد','إنشاء سند صرف','voucher-payment'),
+            array('../include/amlak/allsanad.hnt','bi-file-earmark-check','عرض سندات القبض','استعراض وإدارة','voucher-view-receipt'),
+            array('allsanad.hnt?paymentvou=1','bi-file-earmark-text','عرض سندات الصرف','استعراض وإدارة','voucher-view-payment'),
+            array('../include/amlak/office_expense.hnt','bi-cash-stack','تسجيل صرف عمولة','تسوية مستحقات المندوبين','voucher-view-receipt'),
+            array('allsanad.hnt?paymentvou=0','bi-archive','أرشيف السندات','السندات المؤرشفة','voucher-archive'),
+        );
+        foreach ($voucherActions as $action) { ?>
+        <div class="col-6 col-sm-4 col-md-3 col-lg-2">
+            <div class="card voucher-card <?= receiptCommissionEsc($action[4]) ?>">
+                <a href="<?= receiptCommissionEsc($action[0]) ?>" class="uifont">
+                    <div class="icon-wrapper"><i class="bi <?= receiptCommissionEsc($action[1]) ?>"></i></div>
+                    <div class="voucher-title"><?= receiptCommissionEsc($action[2]) ?></div>
+                    <div class="voucher-subtitle"><?= receiptCommissionEsc($action[3]) ?></div>
+                </a>
+            </div>
+        </div>
+        <?php } ?>
+    </div>
+    <h4 class="mt-5 mb-3"><i class="bi bi-bar-chart-line text-success me-2"></i>تقارير السندات والمندوبين</h4>
+    <div class="row g-3">
+    <?php
+    $voucherReportCards = array(
+        array('representative_statement.hnt','bi-person-lines-fill','كشف حساب مندوب','المستحق والمصروف والمتبقي وصرف العمولة'),
+        array('voucher_representatives_report.hnt','bi-people','ملخص المندوبين','مقارنة التحصيل والعمولات والأرصدة'),
+        array('voucher_commissions_report.hnt','bi-percent','تفاصيل العمولات','كل مندوب وحصته في كل سند'),
+        array('voucher_outstanding_report.hnt','bi-hourglass-split','عمولات لم تصرف','المتبقي وروابط تسجيل الصرف'),
+        array('voucher_paid_report.hnt','bi-cash-stack','عمولات صرفت','الدفعات والأرصدة المتبقية'),
+        array('../include/amlak/office_expense_report.hnt?detail_level=transactions&commission_only=1','bi-wallet2','صرف عمولات المندوبين','سجل دفعات المكتب للمندوبين'),
+        array('voucher_receipts_report.hnt','bi-receipt','سجل المقبوضات','تفاصيل وقيم وضرائب السندات'),
+        array('voucher_daily_report.hnt','bi-calendar-day','المقبوضات اليومية','تجميع حسب اليوم'),
+        array('voucher_monthly_report.hnt','bi-calendar-month','المقبوضات الشهرية','تجميع حسب الشهر'),
+        array('voucher_yearly_report.hnt','bi-calendar-range','المقبوضات السنوية','تجميع حسب السنة'),
+        array('voucher_property_report.hnt','bi-buildings','حسب العقار','تحصيل وعمولات العقارات'),
+        array('voucher_customer_report.hnt','bi-person-vcard','حسب العميل','مقبوضات كل عميل'),
+        array('voucher_receiver_report.hnt','bi-person-check','حسب المحصل','تجميع باسم مستلم السند'),
+        array('voucher_payment_method_report.hnt','bi-credit-card','حسب طريقة الدفع','نقد وشيك وتحويل وشبكة'),
+        array('voucher_accounting_report.hnt','bi-journal-check','مطابقة المحاسبة','السندات المرتبطة بقيد وغير المرحلة'),
+
+        array('../include/amlak/office_expense_report.hnt?detail_level=category','bi-tags','مصروفات حسب التصنيف','تحليل أوجه مصروفات المكتب'),
+        array('../include/amlak/office_expense_report.hnt?detail_level=payer','bi-person-up','مصروفات حسب الدافع','ما دفعه كل مستخدم'),
+        array('../include/amlak/office_expense_report.hnt','bi-graph-down-arrow','مصروفات المكتب','ملخص زمني مع الطباعة'),
+
+    );
+    foreach ($voucherReportCards as $reportCard) { ?>
+        <div class="col-6 col-sm-4 col-md-3 col-lg-2"><div class="card voucher-card voucher-view-receipt"><a href="<?= receiptCommissionEsc($reportCard[0]) ?>"><div class="icon-wrapper"><i class="bi <?= receiptCommissionEsc($reportCard[1]) ?>"></i></div><div class="voucher-title"><?= receiptCommissionEsc($reportCard[2]) ?></div><div class="voucher-subtitle"><?= receiptCommissionEsc($reportCard[3]) ?></div></a></div></div>
+    <?php } ?>
+    </div>
+
+    <!-- Current-month figures from the shared receipt ledger. -->
+    <div class="row g-3 mt-4">
+        <div class="col-12">
+            <div class="card shadow-sm border-0">
+                <div class="card-header" style="background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%); color: white;">
+                    <h6 class="mb-0">
+                        <i class="bi bi-graph-up me-2"></i>
+                        إحصائيات سريعة
+                    </h6>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3 text-center">
+                        <div class="col-6 col-md-3">
+                            <div class="p-3 bg-light rounded">
+                                <i class="bi bi-cash-coin text-primary" style="font-size: 2rem;"></i>
+                                <h5 class="mt-2 mb-0"><?= number_format($voucherStats['receipts']) ?></h5>
+                                <p class="text-muted mb-0 small">سندات قبض هذا الشهر</p>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="p-3 bg-light rounded">
+                                <i class="bi bi-wallet2 text-success" style="font-size: 2rem;"></i>
+                                <h5 class="mt-2 mb-0"><?= number_format($voucherStats['gross'],2) ?></h5>
+                                <p class="text-muted mb-0 small">المقبوضات هذا الشهر</p>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="p-3 bg-light rounded">
+                                <i class="bi bi-file-earmark-text text-info" style="font-size: 2rem;"></i>
+                                <h5 class="mt-2 mb-0"><?= number_format($voucherStats['commission'],2) ?></h5>
+                                <p class="text-muted mb-0 small">عمولات هذا الشهر</p>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="p-3 bg-light rounded">
+                                <i class="bi bi-archive text-secondary" style="font-size: 2rem;"></i>
+                                <h5 class="mt-2 mb-0"><?= number_format($voucherStats['system_receipts']) ?></h5>
+                                <p class="text-muted mb-0 small">سندات باسم النظام هذا الشهر</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+
+<?php
+require '../../foter.hnt';
+?>

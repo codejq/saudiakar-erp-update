@@ -1,0 +1,336 @@
+<?php
+// Handle installation request
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action']) && $_GET['action'] === 'install') {
+    header('Content-Type: application/json; charset=utf-8');
+    include_once "../../connectdb.hnt";
+    require __DIR__.'/includes/active_database.hnt';
+    $response = ['success' => false, 'logs' => [], 'error' => ''];
+
+    try {
+        // Start transaction
+        $db->begin_transaction();
+
+        // 1. Drop existing tables if they exist
+        $response['logs'][] = ['message' => '📋 حذف الجداول القديمة إن وجدت...', 'type' => 'info'];
+        $db->query("DROP TABLE IF EXISTS acc_suppliers");
+        // Customer IDs are recreated below; old tenant links must not survive ID reuse.
+        $identityTable=$db->query("SHOW TABLES LIKE 'acc_customer_tenants'");
+        if ($identityTable && $identityTable->num_rows>0 && !$db->query('DELETE FROM acc_customer_tenants')) {
+            throw new RuntimeException('تعذر إزالة روابط العملاء القديمة؛ توقف إعادة التثبيت.');
+        }
+        $db->query("DROP TABLE IF EXISTS acc_customers");
+        $response['logs'][] = ['message' => '✓ تم حذف الجداول القديمة', 'type' => 'success'];
+
+        // 2. Create acc_suppliers table
+        $response['logs'][] = ['message' => '📋 إنشاء جدول الموردين (acc_suppliers)...', 'type' => 'info'];
+
+        $createSuppliersTable = "
+        CREATE TABLE `acc_suppliers` (
+            `supplier_id` INT(11) NOT NULL AUTO_INCREMENT,
+            `supplier_code` VARCHAR(50) DEFAULT NULL,
+            `supplier_name` VARCHAR(255) NOT NULL,
+            `vat_number` VARCHAR(50) DEFAULT NULL,
+            `phone` VARCHAR(50) DEFAULT NULL,
+            `mobile` VARCHAR(50) DEFAULT NULL,
+            `email` VARCHAR(100) DEFAULT NULL,
+            `website` VARCHAR(255) DEFAULT NULL,
+            `address` TEXT DEFAULT NULL,
+            `city` VARCHAR(100) DEFAULT NULL,
+            `country` VARCHAR(100) DEFAULT 'Saudi Arabia',
+            `contact_person` VARCHAR(255) DEFAULT NULL,
+            `bank_name` VARCHAR(255) DEFAULT NULL,
+            `bank_account` VARCHAR(100) DEFAULT NULL,
+            `iban` VARCHAR(50) DEFAULT NULL,
+            `payment_terms` VARCHAR(255) DEFAULT NULL,
+            `credit_limit` DECIMAL(15,2) DEFAULT 0.00,
+            `current_balance` DECIMAL(15,2) DEFAULT 0.00,
+            `category` VARCHAR(100) DEFAULT NULL,
+            `notes` TEXT DEFAULT NULL,
+            `is_active` TINYINT(1) DEFAULT 1,
+            `created_by` INT(11) DEFAULT NULL,
+            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            `formuid` VARCHAR(500) NOT NULL,
+            PRIMARY KEY (`supplier_id`),
+            UNIQUE KEY `idx_supplier_code` (`supplier_code`),
+            KEY `idx_supplier_name` (`supplier_name`),
+            KEY `idx_vat_number` (`vat_number`),
+            KEY `idx_active` (`is_active`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+
+        if (!$db->query($createSuppliersTable)) {
+            throw new Exception("فشل إنشاء جدول الموردين: " . $db->error);
+        }
+        $response['logs'][] = ['message' => '✓ تم إنشاء جدول الموردين بنجاح', 'type' => 'success'];
+
+        // 3. Create acc_customers table
+        $response['logs'][] = ['message' => '📋 إنشاء جدول العملاء (acc_customers)...', 'type' => 'info'];
+
+        $createCustomersTable = "
+        CREATE TABLE `acc_customers` (
+            `customer_id` INT(11) NOT NULL AUTO_INCREMENT,
+            `customer_code` VARCHAR(50) DEFAULT NULL,
+            `customer_type` ENUM('individual','company') DEFAULT 'individual',
+            `customer_name` VARCHAR(255) NOT NULL,
+            `vat_number` VARCHAR(50) DEFAULT NULL,
+            `id_number` VARCHAR(50) DEFAULT NULL COMMENT 'National ID or CR Number',
+            `phone` VARCHAR(50) DEFAULT NULL,
+            `mobile` VARCHAR(50) DEFAULT NULL,
+            `email` VARCHAR(100) DEFAULT NULL,
+            `website` VARCHAR(255) DEFAULT NULL,
+            `address` TEXT DEFAULT NULL,
+            `city` VARCHAR(100) DEFAULT NULL,
+            `country` VARCHAR(100) DEFAULT 'Saudi Arabia',
+            `contact_person` VARCHAR(255) DEFAULT NULL,
+            `bank_name` VARCHAR(255) DEFAULT NULL,
+            `bank_account` VARCHAR(100) DEFAULT NULL,
+            `iban` VARCHAR(50) DEFAULT NULL,
+            `payment_terms` VARCHAR(255) DEFAULT NULL,
+            `credit_limit` DECIMAL(15,2) DEFAULT 0.00,
+            `current_balance` DECIMAL(15,2) DEFAULT 0.00,
+            `category` VARCHAR(100) DEFAULT NULL,
+            `notes` TEXT DEFAULT NULL,
+            `is_active` TINYINT(1) DEFAULT 1,
+            `created_by` INT(11) DEFAULT NULL,
+            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            `formuid` VARCHAR(500) NOT NULL,
+            PRIMARY KEY (`customer_id`),
+            UNIQUE KEY `idx_customer_code` (`customer_code`),
+            KEY `idx_customer_name` (`customer_name`),
+            KEY `idx_vat_number` (`vat_number`),
+            KEY `idx_id_number` (`id_number`),
+            KEY `idx_active` (`is_active`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+
+        if (!$db->query($createCustomersTable)) {
+            throw new Exception("فشل إنشاء جدول العملاء: " . $db->error);
+        }
+        $response['logs'][] = ['message' => '✓ تم إنشاء جدول العملاء بنجاح', 'type' => 'success'];
+
+        // 4. Insert sample data
+        $response['logs'][] = ['message' => '📋 إضافة بيانات تجريبية...', 'type' => 'info'];
+
+        // Sample suppliers
+        $sampleSuppliers = "
+        INSERT INTO `acc_suppliers`
+        (`supplier_code`, `supplier_name`, `vat_number`, `phone`, `email`, `address`, `is_active`, `formuid`)
+        VALUES
+        ('SUP001', 'شركة الصيانة المتحدة', '300123456789001', '0112345678', 'info@maintenance.com', 'الرياض', 1, UUID()),
+        ('SUP002', 'مؤسسة التوريدات الحديثة', '300123456789002', '0112345679', 'sales@modern.com', 'جدة', 1, UUID())
+        ";
+
+        if ($db->query($sampleSuppliers)) {
+            $response['logs'][] = ['message' => '✓ تم إضافة موردين تجريبيين', 'type' => 'success'];
+        }
+
+        // Sample customers
+        $sampleCustomers = "
+        INSERT INTO `acc_customers`
+        (`customer_code`, `customer_type`, `customer_name`, `vat_number`, `id_number`, `phone`, `email`, `address`, `is_active`, `formuid`)
+        VALUES
+        ('CUS001', 'company', 'شركة العقارات النموذجية', '300987654321001', '1010123456', '0112345680', 'info@realestate.com', 'الرياض', 1, UUID()),
+        ('CUS002', 'individual', 'أحمد محمد علي', NULL, '1012345678', '0551234567', 'ahmed@email.com', 'جدة', 1, UUID())
+        ";
+
+        if ($db->query($sampleCustomers)) {
+            $response['logs'][] = ['message' => '✓ تم إضافة عملاء تجريبيين', 'type' => 'success'];
+        }
+
+        // Commit transaction
+        $db->commit();
+
+        $response['success'] = true;
+        $response['logs'][] = ['message' => '🎉 تم إكمال التثبيت بنجاح!', 'type' => 'success'];
+
+    } catch (Exception $e) {
+        $db->rollback();
+        $response['error'] = $e->getMessage();
+        $response['logs'][] = ['message' => '❌ فشل التثبيت: ' . $e->getMessage(), 'type' => 'error'];
+    }
+
+    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/**
+ * Install Suppliers & Customers Tables
+ * تثبيت جداول الموردين والعملاء
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "تثبيت جداول الموردين والعملاء";
+$sc_id = "999";
+
+include_once "../../header.hnt";
+
+// Check if already installed
+$check = $db->query("SHOW TABLES LIKE 'acc_suppliers'");
+$alreadyInstalled = ($check && $check->num_rows > 0);
+?>
+
+<style>
+:root {
+    --primary-color: #667eea;
+    --secondary-color: #764ba2;
+}
+
+.install-container {
+    max-width: 800px;
+    margin: 2rem auto;
+    padding: 2rem;
+}
+
+.header-gradient {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    padding: 2rem;
+    border-radius: 15px;
+    text-align: center;
+    margin-bottom: 2rem;
+}
+
+.install-log {
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 10px;
+    padding: 1.5rem;
+    font-family: 'Courier New', monospace;
+    max-height: 500px;
+    overflow-y: auto;
+}
+
+.log-success {
+    color: #28a745;
+    font-weight: bold;
+}
+
+.log-error {
+    color: #dc3545;
+    font-weight: bold;
+}
+
+.log-info {
+    color: #17a2b8;
+}
+
+.btn-install {
+    background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+    border: none;
+    color: white;
+    padding: 1rem 3rem;
+    font-size: 1.2rem;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+.btn-install:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(40, 167, 69, 0.3);
+}
+</style>
+
+<div class="install-container">
+    <div class="header-gradient">
+        <h1>
+            <i class="bi bi-database-add me-2"></i>
+            تثبيت جداول الموردين والعملاء
+        </h1>
+        <p class="mb-0">Suppliers & Customers Tables Installation</p>
+    </div>
+
+    <?php if ($alreadyInstalled): ?>
+    <div class="alert alert-warning">
+        <i class="bi bi-exclamation-triangle me-2"></i>
+        <strong>تحذير:</strong> يبدو أن الجداول مثبتة مسبقاً. إذا تابعت سيتم حذف البيانات الموجودة.
+    </div>
+    <?php endif; ?>
+
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-body">
+            <h5 class="card-title">
+                <i class="bi bi-info-circle me-2"></i>
+                ما الذي سيتم تثبيته؟
+            </h5>
+            <ul class="list-group list-group-flush">
+                <li class="list-group-item">✅ جدول الموردين (acc_suppliers)</li>
+                <li class="list-group-item">✅ جدول العملاء (acc_customers)</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="text-center mb-4">
+        <button class="btn btn-install" onclick="startInstallation()">
+            <i class="bi bi-play-circle me-2"></i>
+            بدء التثبيت
+        </button>
+    </div>
+
+    <div id="installLog" class="install-log" style="display: none;">
+        <div id="logContent"></div>
+    </div>
+
+    <div id="successMessage" class="alert alert-success" style="display: none;">
+        <h4 class="alert-heading">
+            <i class="bi bi-check-circle me-2"></i>
+            تم التثبيت بنجاح!
+        </h4>
+        <p>تم إنشاء جميع الجداول المطلوبة بنجاح</p>
+        <hr>
+        <div class="d-flex gap-2">
+            <a href="modules/suppliers/index.hnt" class="btn btn-success">
+                <i class="bi bi-truck me-2"></i>إدارة الموردين
+            </a>
+            <a href="modules/customers/index.hnt" class="btn btn-primary">
+                <i class="bi bi-people me-2"></i>إدارة العملاء
+            </a>
+            <a href="index.hnt" class="btn btn-secondary">
+                <i class="bi bi-house me-2"></i>لوحة التحكم
+            </a>
+        </div>
+    </div>
+</div>
+
+<script>
+function log(message, type = 'info') {
+    const logContent = document.getElementById('logContent');
+    const className = type === 'success' ? 'log-success' : (type === 'error' ? 'log-error' : 'log-info');
+    logContent.innerHTML += `<div class="${className}">${message}</div>`;
+    logContent.scrollTop = logContent.scrollHeight;
+}
+
+async function startInstallation() {
+    document.getElementById('installLog').style.display = 'block';
+    document.getElementById('logContent').innerHTML = '';
+
+    log('⏳ بدء التثبيت...', 'info');
+
+    try {
+        const response = await fetch('install_suppliers_customers.hnt?action=install', {
+            method: 'POST'
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            result.logs.forEach(logMsg => {
+                log(logMsg.message, logMsg.type);
+            });
+
+            log('✅ تم التثبيت بنجاح!', 'success');
+            document.getElementById('successMessage').style.display = 'block';
+        } else {
+            log('❌ فشل التثبيت: ' + result.error, 'error');
+        }
+    } catch (error) {
+        log('❌ خطأ في الاتصال: ' + error.message, 'error');
+    }
+}
+</script>
+
+<?php
+
+require("../../foter.hnt");
+?>

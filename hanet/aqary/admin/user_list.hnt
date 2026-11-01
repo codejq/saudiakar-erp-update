@@ -1,0 +1,87 @@
+<?php
+// Set page variables
+header('Content-Type: application/json; charset=utf-8');
+$_REQUEST=array_intersect_key($_GET,['userid'=>true]);
+require_once '../reqloginajax.hnt';
+if (!aqaryUserManagementAllowed($link,'sees')) { http_response_code(403); echo json_encode(['success'=>false,'message'=>'ليس لديك صلاحية عرض المستخدمين.'],JSON_UNESCAPED_UNICODE); exit; }
+
+// Include database connection
+include_once "../connectdb.hnt";
+
+// Check database connection
+if (!isset($link) || !$link) {
+    echo json_encode([
+        'success' => false,
+        'message' => 'فشل الاتصال بقاعدة البيانات',
+        'users' => []
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// Check if this is a single user fetch request
+if (isset($_GET['userid']) && intval($_GET['userid']) > 0) {
+    $userid = intval($_GET['userid']);
+
+    $sql = "SELECT * FROM user WHERE userid = '{$userid}' LIMIT 1";
+    $result = mysql_query($sql, $link);
+
+    if ($result && mysql_num_rows($result) > 0) {
+        $user = mysql_fetch_array($result);
+        echo json_encode([
+            'success' => true,
+            'user' => [
+                'userid' => intval($user['userid']),
+                'name' => htmlspecialchars($user['name']),
+                'username' => htmlspecialchars($user['username']),
+                'password' => '',
+                'groupid' => intval($user['groupid'])
+            ]
+        ], JSON_UNESCAPED_UNICODE);
+    } else {
+        echo json_encode([
+            'success' => false,
+            'message' => 'المستخدم غير موجود'
+        ], JSON_UNESCAPED_UNICODE);
+    }
+    exit;
+}
+
+// Get all users with their group information
+$sql = "SELECT u.userid, u.name, u.username, u.groupid, ug.groupname
+        FROM user u
+        LEFT JOIN usergroups ug ON u.groupid = ug.groupid
+        ORDER BY u.userid ASC";
+
+$result = mysql_query($sql, $link);
+$users = [];
+
+// Check for SQL errors
+if (!$result) {
+    echo json_encode([
+        'success' => false,
+        'message' => 'خطأ في الاستعلام: ' . mysql_error($link),
+        'sql' => $sql,
+        'users' => []
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (mysql_num_rows($result) > 0) {
+    while ($row = mysql_fetch_array($result)) {
+        $users[] = [
+            'userid' => intval($row['userid']),
+            'name' => htmlspecialchars($row['name']),
+            'username' => htmlspecialchars($row['username']),
+            'groupid' => intval($row['groupid']),
+            'groupname' => htmlspecialchars($row['groupname'] ?? 'بدون مجموعة')
+        ];
+    }
+}
+
+echo json_encode([
+    'success' => true,
+    'users' => $users,
+    'count' => count($users)
+], JSON_UNESCAPED_UNICODE);
+exit;
+?>
