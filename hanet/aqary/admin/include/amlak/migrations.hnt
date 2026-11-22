@@ -716,11 +716,13 @@ HTML;
             echo '<div class="alert alert-danger">تعذر إكمال تحديث عمولات السندات. راجع سجل الخادم وأعد تشغيل تحديث إدارة الأملاك.</div>';
         } else {
             try {
+            // The voucher hub is legacy screen 135 on older databases; newer ones get a keyed row.
+            $voucherHubScreenId = $this->voucherHubScreenId();
             foreach (array('voucher_reports'=>'تقارير السندات والعمولات','voucher_commissions'=>'توزيع عمولات سندات القبض') as $receiptCommissionScreenKey=>$receiptCommissionScreenName) {
                 $receiptCommissionScreenKey = mysql_real_escape_string($receiptCommissionScreenKey,$link);
                 $receiptCommissionScreenName = mysql_real_escape_string($receiptCommissionScreenName,$link);
                 if (!$this->query("INSERT INTO screens (screen_id,screen_name,screen_isactive,parentid,formuid)
-                    SELECT '{$receiptCommissionScreenKey}','{$receiptCommissionScreenName}','1',135,'receipt-commission-screen'
+                    SELECT '{$receiptCommissionScreenKey}','{$receiptCommissionScreenName}','1',{$voucherHubScreenId},'receipt-commission-screen'
                     FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM screens WHERE screen_id='{$receiptCommissionScreenKey}')",$link)) throw new RuntimeException(mysql_error($link));
                 $receiptCommissionScreenResult = $this->query("SELECT screenid FROM screens WHERE screen_id='{$receiptCommissionScreenKey}' ORDER BY screenid LIMIT 1",$link);
                 $receiptCommissionScreenRow = $receiptCommissionScreenResult ? mysql_fetch_assoc($receiptCommissionScreenResult) : false;
@@ -728,7 +730,7 @@ HTML;
                     $receiptCommissionScreenId = intval($receiptCommissionScreenRow['screenid']);
                     if (!$this->query("INSERT INTO ugroupscreen (groupid,screenid,adds,sees,edits,deleetes,prints,formuid)
                         SELECT p.groupid,{$receiptCommissionScreenId},MAX(p.adds),MAX(p.sees),MAX(p.edits),0,MAX(p.prints),'receipt-commission-permission'
-                        FROM ugroupscreen p WHERE p.screenid=135
+                        FROM ugroupscreen p WHERE p.screenid={$voucherHubScreenId}
                         AND NOT EXISTS (SELECT 1 FROM ugroupscreen e WHERE e.groupid=p.groupid AND e.screenid={$receiptCommissionScreenId})
                         GROUP BY p.groupid",$link)) throw new RuntimeException(mysql_error($link));
                 }
@@ -1207,6 +1209,70 @@ HTML;
         		AND NOT EXISTS (SELECT 1 FROM ugroupscreen existing WHERE existing.groupid=source.groupid AND existing.screenid='{$tenantQrScreenId}')
         		GROUP BY source.groupid", $link);
         }
+
+        // Per-area permissions for the free-voucher and cash-custody hubs. Each child
+        // inherits its hub permissions once, when first created.
+        $voucherHubScreenId = $this->voucherHubScreenId();
+        foreach (array('voucher_receipts' => 'سندات القبض الحرة', 'voucher_payments' => 'سندات الصرف الحرة') as $areaKey => $areaName) {
+        	$this->ensureScreen($areaKey, $areaName, $voucherHubScreenId, 'voucher-area-screen');
+        }
+        $cashCustodyHubRow = mysql_fetch_assoc($this->query("SELECT screenid FROM screens WHERE screen_id='cash_custody' ORDER BY screenid LIMIT 1", $link));
+        if ($cashCustodyHubRow) {
+        	foreach (array(
+        		'cash_custody_requests' => 'العهد النقدية - الطلبات',
+        		'cash_custody_approval' => 'العهد النقدية - الاعتماد والصرف',
+        		'cash_custody_custodies' => 'العهد النقدية - العهد والمصروفات',
+        		'cash_custody_holders' => 'العهد النقدية - أصحاب العهد',
+        		'cash_custody_reports' => 'العهد النقدية - التقارير والكشوف',
+        		'cash_custody_settings' => 'العهد النقدية - الإعدادات'
+        	) as $areaKey => $areaName) {
+        		$this->ensureScreen($areaKey, $areaName, intval($cashCustodyHubRow['screenid']), 'cash-custody-area-screen');
+        	}
+        }
         $this->applyAccounting();
+    }
+
+    /** Free-voucher hub: keyed row, else legacy unkeyed 135, else a new keyed row (preferring 135). */
+    private function voucherHubScreenId(): int
+    {
+        $row = mysql_fetch_assoc($this->query("SELECT screenid FROM screens
+            WHERE screen_id='voucher_home' OR (screenid=135 AND (screen_id IS NULL OR screen_id IN ('','135')))
+            ORDER BY screen_id='voucher_home' DESC, screenid LIMIT 1"));
+        if ($row) return intval($row['screenid']);
+        return $this->ensureScreen('voucher_home', 'السندات الحرة', 36, 'voucher-home-screen', 135);
+    }
+
+    /**
+     * Registers a keyed screen once. Only when the row is first created does each
+     * group receive the permissions it has on the parent, so a restriction made
+     * later by an administrator is never re-granted by a rerun.
+     */
+    private function ensureScreen(string $key, string $name, int $parentId, string $formuid, int $preferredId = 0): int
+    {
+        $link = $this->link;
+        $safeKey = mysql_real_escape_string($key, $link);
+        $existing = mysql_fetch_assoc($this->query("SELECT screenid FROM screens WHERE screen_id='{$safeKey}' ORDER BY screenid LIMIT 1"));
+        if ($existing) return intval($existing['screenid']);
+
+        $safeName = mysql_real_escape_string($name, $link);
+        $safeFormuid = mysql_real_escape_string($formuid, $link);
+        $idColumn = '';
+        $idValue = '';
+        if ($preferredId > 0 && !mysql_fetch_assoc($this->query("SELECT screenid FROM screens WHERE screenid=" . intval($preferredId) . " LIMIT 1"))) {
+            $idColumn = 'screenid,';
+            $idValue = intval($preferredId) . ',';
+        }
+        $this->query("INSERT INTO screens ({$idColumn}screen_id,screen_name,screen_isactive,parentid,formuid)
+            VALUES ({$idValue}'{$safeKey}','{$safeName}','1'," . intval($parentId) . ",'{$safeFormuid}')");
+        $screenId = intval(mysql_insert_id($link));
+        if ($screenId > 0 && $parentId > 0) {
+            $this->query("INSERT INTO ugroupscreen (groupid,screenid,adds,sees,edits,deleetes,prints,formuid)
+                SELECT source.groupid,{$screenId},MAX(source.adds),MAX(source.sees),MAX(source.edits),MAX(source.deleetes),MAX(source.prints),'{$safeFormuid}'
+                FROM ugroupscreen source
+                WHERE source.screenid=" . intval($parentId) . "
+                AND NOT EXISTS (SELECT 1 FROM ugroupscreen existing WHERE existing.groupid=source.groupid AND existing.screenid={$screenId})
+                GROUP BY source.groupid");
+        }
+        return $screenId;
     }
 }

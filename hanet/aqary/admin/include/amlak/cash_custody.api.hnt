@@ -75,12 +75,26 @@ try {
         mysqli_select_db($db, $companyDatabaseName ?? ($qdb_db . $dbSuffix));
         $db->set_charset('utf8mb4');
     }
-    $screenId = CashCustodyService::resolveScreenId($db);
+    require_once dirname(__DIR__, 3) . '/lib/screen_permissions.hnt';
     $service = new CashCustodyService($db, intval($_SESSION['useridv'] ?? 0));
     $action = (string)($_POST['action'] ?? '');
-    $permission = in_array($action, array('create_request', 'add_expense', 'add_return'), true) ||
-        ($action === 'save_holder' && intval($_POST['holder_id'] ?? 0) <= 0) ? 'adds' : 'edits';
-    if (!ccApiPermission($db, $screenId, $permission)) {
+    // Each action needs "see" on the cash-custody hub plus its own area screen and operation.
+    $actionAreas = array(
+        'create_request' => array('cash_custody_requests', 'adds'),
+        'review_request' => array('cash_custody_approval', 'edits'),
+        'disburse_request' => array('cash_custody_approval', 'edits'),
+        'review_expense' => array('cash_custody_approval', 'edits'),
+        'add_expense' => array('cash_custody_custodies', 'adds'),
+        'add_return' => array('cash_custody_custodies', 'adds'),
+        'settle' => array('cash_custody_custodies', 'edits'),
+        'reverse_transaction' => array('cash_custody_custodies', 'deleetes'),
+        'save_holder' => array('cash_custody_holders', intval($_POST['holder_id'] ?? 0) <= 0 ? 'adds' : 'edits'),
+        'save_settings' => array('cash_custody_settings', 'edits'),
+    );
+    if (!isset($actionAreas[$action])) {
+        ccApiReply(false, 'العملية المطلوبة غير معروفة.', array(), 400);
+    }
+    if (!aqaryScreenCan($db, 'cash_custody', 'sees') || !aqaryScreenCan($db, $actionAreas[$action][0], $actionAreas[$action][1])) {
         ccApiReply(false, 'ليس لديك الصلاحية لتنفيذ هذه العملية.', array(), 403);
     }
 

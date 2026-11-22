@@ -1,0 +1,117 @@
+<?php
+/**
+ * Keyed screen permissions for screens registered by AmlakMigrations.
+ *
+ * A child screen that is not registered yet (migration not run) falls back to
+ * its parent, so access is unchanged until the update runs. Anything that
+ * cannot be resolved grants nothing unless the group has full privileges.
+ */
+
+/** Parent of each keyed screen. Numeric keys are legacy screen IDs. */
+function aqaryScreenParents()
+{
+    return array(
+        'voucher_home' => '36',
+        'voucher_receipts' => 'voucher_home',
+        'voucher_payments' => 'voucher_home',
+        'voucher_reports' => 'voucher_home',
+        'voucher_commissions' => 'voucher_home',
+        'cash_custody' => '36',
+        'cash_custody_requests' => 'cash_custody',
+        'cash_custody_approval' => 'cash_custody',
+        'cash_custody_custodies' => 'cash_custody',
+        'cash_custody_holders' => 'cash_custody',
+        'cash_custody_reports' => 'cash_custody',
+        'cash_custody_settings' => 'cash_custody',
+    );
+}
+
+function aqaryScreenRow($db, $sql, array $params)
+{
+    try {
+        $stmt = mysqli_prepare($db, $sql);
+        if (!$stmt || !$stmt->execute($params)) {
+            throw new RuntimeException(mysqli_error($db));
+        }
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $row ?: null;
+    } catch (Throwable $error) {
+        error_log('Screen permissions: ' . $error->getMessage());
+        return null;
+    }
+}
+
+/** Resolves a screen key (or legacy numeric ID) to screens.screenid; 0 when missing. */
+function aqaryScreenId($db, $key)
+{
+    static $cache = array();
+    if (!($db instanceof mysqli)) return 0;
+    $key = (string)$key;
+    $cacheKey = spl_object_id($db) . '|' . $key;
+    if (isset($cache[$cacheKey])) return $cache[$cacheKey];
+    if (ctype_digit($key)) {
+        $row = aqaryScreenRow($db, 'SELECT screenid FROM screens WHERE screenid=? LIMIT 1', array(intval($key)));
+    } else {
+        $row = aqaryScreenRow($db, 'SELECT screenid FROM screens WHERE screen_id=? ORDER BY screenid LIMIT 1', array($key));
+        if (!$row && $key === 'voucher_home') {
+            // Older installations registered the free-voucher hub as unkeyed screen 135.
+            $row = aqaryScreenRow($db, "SELECT screenid FROM screens WHERE screenid=135
+                AND (screen_id IS NULL OR screen_id IN ('','135')) LIMIT 1", array());
+        }
+    }
+    return $cache[$cacheKey] = $row ? intval($row['screenid']) : 0;
+}
+
+/** Returns sees/adds/edits/deleetes/prints for the signed-in user on a screen key. */
+function aqaryScreenAccess($db, $key)
+{
+    static $cache = array();
+    $ops = array('sees' => false, 'adds' => false, 'edits' => false, 'deleetes' => false, 'prints' => false);
+    $userId = intval($_SESSION['useridv'] ?? 0);
+    if ($userId <= 0 || !($db instanceof mysqli)) return $ops;
+    $key = (string)$key;
+    $cacheKey = spl_object_id($db) . '|' . $userId . '|' . $key;
+    if (isset($cache[$cacheKey])) return $cache[$cacheKey];
+
+    $group = aqaryScreenRow($db, 'SELECT u.groupid, COALESCE(g.allprevilage,0) AS allprevilage
+        FROM user u LEFT JOIN usergroups g ON g.groupid=u.groupid WHERE u.userid=? LIMIT 1', array($userId));
+    if (!$group) return $cache[$cacheKey] = $ops;
+    if (!empty($group['allprevilage'])) return $cache[$cacheKey] = array_fill_keys(array_keys($ops), true);
+
+    $screenId = aqaryScreenId($db, $key);
+    if ($screenId <= 0) {
+        $parents = aqaryScreenParents();
+        return $cache[$cacheKey] = isset($parents[$key]) ? aqaryScreenAccess($db, $parents[$key]) : $ops;
+    }
+    $row = aqaryScreenRow($db, 'SELECT MAX(sees) AS sees, MAX(adds) AS adds, MAX(edits) AS edits,
+        MAX(deleetes) AS deleetes, MAX(prints) AS prints FROM ugroupscreen WHERE groupid=? AND screenid=?',
+        array(intval($group['groupid']), $screenId));
+    foreach ($ops as $op => $unused) {
+        $ops[$op] = !empty($row[$op]);
+    }
+    return $cache[$cacheKey] = $ops;
+}
+
+function aqaryScreenCan($db, $key, $operation = 'sees')
+{
+    $access = aqaryScreenAccess($db, $key);
+    return !empty($access[$operation]);
+}
+
+/** True when any of the keys grants the operation. */
+function aqaryScreenCanAny($db, array $keys, $operation = 'sees')
+{
+    foreach ($keys as $key) {
+        if (aqaryScreenCan($db, $key, $operation)) return true;
+    }
+    return false;
+}
+
+/** Stops an HTML page with an Arabic access-denied message. */
+function aqaryScreenDenyPage($message)
+{
+    http_response_code(403);
+    echo '<div dir="rtl" class="alert alert-danger m-4">' . htmlspecialchars((string)$message, ENT_QUOTES, 'UTF-8') . '</div>';
+    exit;
+}

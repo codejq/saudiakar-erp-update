@@ -30,6 +30,16 @@ include_once "../../header.hnt";
 require_once __DIR__ . '/../include/amlak/expense_payment_voucher_helpers.hnt';
 $paymentvou=intval($_REQUEST['paymentvou'] ?? 0);
 $table=$paymentvou===1 ? 'payment_voucher' : 'recive_voucher';
+
+// Listing, deleting and printing are checked against the voucher type's own area screen.
+require_once __DIR__ . '/../../lib/screen_permissions.hnt';
+$voucherScreenKey = $paymentvou===1 ? 'voucher_payments' : 'voucher_receipts';
+if (!aqaryScreenCan($link, $voucherScreenKey, 'sees')) {
+    aqaryScreenDenyPage($paymentvou===1 ? 'ليس لديك صلاحية عرض سندات الصرف.' : 'ليس لديك صلاحية عرض سندات القبض.');
+}
+$sc_id = aqaryScreenId($link, $voucherScreenKey) ?: $sc_id;
+$voucherCanDelete = aqaryScreenCan($link, $voucherScreenKey, 'deleetes');
+$voucherCanPrint = aqaryScreenCan($link, $voucherScreenKey, 'prints');
 $voucherExpenseLinksReady=$paymentvou===1 && expensePaymentVoucherReady($link);
 $voucherCategories=$paymentvou===1 ? expensePaymentVoucherCategories($link) : array();
 $voucherCategory=max(-1,intval($_GET['idmasrofcod'] ?? -1));
@@ -57,7 +67,9 @@ if (!isset($passcode) || !$passcode) {
 require "../../hjerymelady.ip";
 
 // Handle delete
-if ($deletevou) {
+if ($deletevou && !$voucherCanDelete) {
+    echo '<div class="alert alert-danger">ليس لديك صلاحية حذف السندات.</div>';
+} elseif ($deletevou) {
     $linkedExpense=$voucherExpenseLinksReady ? receiptCommissionRows($link,'SELECT expense_id FROM payment_voucher WHERE id=? AND expense_id IS NOT NULL',array(intval($deletevou))) : array();
     if ($linkedExpense) {
         echo '<div class="alert alert-warning">هذا السند مرتبط بمصروف مكتب؛ لا يمكن حذفه منفرداً.</div>';
@@ -231,6 +243,7 @@ while ($row = mysql_fetch_array($result)) {
                                     <td><?= htmlspecialchars($row['thrsumof']) ?></td>
                                     <td class="text-center">
                                         <div class="btn-group btn-group-sm" role="group">
+                                            <?php if ($voucherCanPrint) { ?>
                                             <button type="button" class="btn btn-primary"
                                                     onclick="window.location.href='../../admin/include/amlak/selectprintform.hnt?formtype=recivevoucher&id=<?= $row['id'] ?>&paymentvou=<?= $paymentvou ?>&voucer_type=free';"
                                                     title="طباعة">
@@ -241,7 +254,8 @@ while ($row = mysql_fetch_array($result)) {
                                                     title="وورد">
                                                 <i class="bi bi-file-word"></i>
                                             </button>
-                                            <?php if (empty($row['expense_id'])) { ?><button type="button" class="btn btn-danger <?= "policy_" . $sc_id . "_deleetes" ?>"
+                                            <?php } ?>
+                                            <?php if (empty($row['expense_id']) && $voucherCanDelete) { ?><button type="button" class="btn btn-danger <?= "policy_" . $sc_id . "_deleetes" ?>"
                                                     onclick="confirm('ادخل كلمة المرور الخاصة بالحذف <br> <input type=password name=pincode id=pincode onkeyup=\'updatecode();\'>', 'صلاحية الحذف', function() {
                                                         if($('#pincodeval').val() !='<?= $passcode ?>') {
                                                             alert('كود خاطئ');
