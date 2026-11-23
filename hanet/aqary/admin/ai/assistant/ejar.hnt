@@ -1,0 +1,672 @@
+<?php
+/**
+ * Ejar (منصة إيجار) unified contract import for the AI assistant.
+ *
+ * When an attachment is an Ejar contract PDF/image, the assistant replies with one multi-step card
+ * instead of a normal answer:
+ *   1. building: matched by deed number, owner (lessor) ID or name; otherwise "not found, let's add it"
+ *      (owner + building + the contract's unit are created after the user confirms);
+ *   2. unit: matched by unit number inside the chosen building; otherwise "let's add it";
+ *   3. tenant: matched by ID / CR / unified number; otherwise "let's add it" (AqaryAssistant::confirmTenant);
+ *   4. contract: the normal new-contract screen (egar.hnt) opens pre-filled with everything from the
+ *      contract, so installments, accounting and ZATCA still go through the usual save.
+ * Nothing is written without a click. Field extraction is done by the AI model on the OCR text
+ * (labels and values are on separate lines in the OCR output, so fixed patterns are unreliable).
+ */
+
+require_once dirname(__DIR__, 3) . '/lib/screen_permissions.hnt';
+require_once dirname(__DIR__) . '/lib/OpenRouterAPI.class.php';
+
+final class AqaryEjarImport
+{
+    /** Screens: add building, add unit, new contract. Tenants use AqaryAssistant::canCreateTenant(). */
+    private const SCREEN_BUILDING = '37';
+    private const SCREEN_UNIT = '100';
+    private const SCREEN_CONTRACT = '42';
+
+    private const PROMPT = <<<'TXT'
+You extract data from a Saudi "Ejar" unified rental contract (منصة إيجار / العقد الموحد) that was read by OCR.
+In the OCR text labels and values are often on separate lines and Arabic and English labels are mixed.
+Contracts differ (residential or commercial, a person or an organization as tenant, one or several units,
+different address styles, older template versions): rely on the labels in the text, not on positions.
+The usual sections are: contract data, lessor, lessor representative, tenant, tenant representative,
+brokerage, title deeds, property, rental units, tenant commercial activity, financial data, payments schedule.
+Return ONLY one JSON object with exactly these keys:
+{
+ "is_ejar": true or false,
+ "contract": {"number": "the record number before ' / ', digits only", "type": "جديد or مجدد", "sealing_date": "YYYY-MM-DD", "sealing_city": "", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"},
+ "lessor": {"name": "", "id_number": "", "id_type": "", "nationality": "", "mobile": "", "email": ""},
+ "lessor_representative": {"name": "", "id_number": "", "mobile": ""} or null,
+ "tenant": {"kind": "person or organization", "name": "person's full name, or the full company/establishment name", "id_number": "national ID/iqama for a person, CR number for an organization", "id_type": "", "unified_number": "", "nationality": "", "mobile": "", "email": "", "address": ""},
+ "tenant_representative": {"name": "", "id_number": "", "nationality": "", "mobile": "", "email": ""} or null,
+ "broker": {"name": "", "cr_number": ""} or null,
+ "deed": {"number": "", "date": "YYYY-MM-DD"},
+ "property": {"national_address": "exactly as written", "street": "", "district": "", "city": "", "building_number": "", "postal_code": "", "building_type": "", "usage": "as written", "floors": 0, "units_count": 0, "suggested_name": "a short name for the building made only of words from the property data (its type plus street or district)"},
+ "units": [{"type": "as written", "usage": "residential, commercial or null", "number": "", "floor": "", "area": 0, "electricity_meter": "", "water_meter": ""}],
+ "financial": {"annual_rent": 0, "total_value": 0, "vat_amount": 0, "security_deposit": 0, "first_payment": 0, "payments_count": 0, "payment_cycle": "monthly, quarterly, semiannual, annual or other", "electricity_annual": 0, "water_annual": 0, "gas_annual": 0, "services_annual": 0, "payment_methods": ""},
+ "schedule": [{"due_date": "YYYY-MM-DD (the Gregorian / AD due date)", "amount": 0}]
+}
+Rules: numbers are JSON numbers without currency symbols; use Western digits; a missing value or "-" is null.
+A company name split over several lines must be joined in reading order. Keep the "+" of mobile numbers.
+Split the national address into street / district / city / building_number / postal_code only when those
+parts can be told apart; otherwise leave them null. property.city falls back to the contract sealing city.
+tenant.kind is "organization" when the tenant section is for a company/establishment (CR number), else "person".
+units[].usage: residential or commercial from the unit or property usage labels; null when not stated.
+Never invent values. If the text is not an Ejar contract, return {"is_ejar": false}.
+TXT;
+
+    private $link;
+    private $userId;
+    private $restricted = null;
+    private $assigned = array();
+    private $columns = array();
+
+    public function __construct(mysqli $link, int $userId)
+    {
+        $this->link = $link;
+        $this->userId = $userId;
+    }
+
+    // ------------------------------------------------------------------ detection and extraction
+
+    /** True when OCR text looks like an Ejar unified contract. */
+    public static function looksLikeEjar(string $text): bool
+    {
+        $hits = 0;
+        foreach (array('/EJAR|إيجار|ايجار/u', '/Contract\s*No|رقم سجل العقد/iu', '/Lessor|المؤج[ّ]?ر/iu', '/Tenant|المستأجر/iu', '/Unified|الموحد|Rent Payments Schedule|جدول سداد الدفعات/iu') as $pattern) {
+            if (preg_match($pattern, $text)) $hits++;
+        }
+        return $hits >= 4;
+    }
+
+    /** The data part of the contract (sections 1-12), without the standard legal articles. */
+    public static function dataSection(string $text): string
+    {
+        $cut = preg_split('/(?:١٣|13)?\s*التزامات الأطراف|Obligations by Parties/u', $text, 2);
+        return mb_substr(trim((string)($cut[0] ?? $text)), 0, 16000);
+    }
+
+    /**
+     * Asks the AI model for the contract fields.
+     * @return array normalized data, or array() when the text is not an Ejar contract
+     */
+    public function extract(string $ocrText, array $config): array
+    {
+        $ai = new OpenRouterAPI($this->link);
+        $content = $ai->chat(array(
+            array('role' => 'system', 'content' => self::PROMPT),
+            array('role' => 'user', 'content' => "OCR text of the contract:\n\n" . self::dataSection($ocrText)),
+        ), array(
+            'model' => (string)($config['assistant_model'] ?? $config['default_model']),
+            'response_format' => array('type' => 'json_object'),
+            'temperature' => 0,
+            // Thinking is off (OpenRouterAPI): the JSON for one contract is ~800 tokens. The cap leaves room for
+            // long payment schedules, and for an OpenRouter model that still reasons.
+            'max_tokens' => 4000,
+            'enforce_limits' => true,
+            'log_feature' => 'assistant_ejar',
+        ));
+        $json = AqaryAssistant::parseJson((string)$content);
+        if (empty($json) || ($json['is_ejar'] ?? true) === false || empty($json['contract'])) return array();
+        return $json;
+    }
+
+    // ------------------------------------------------------------------ the card
+
+    /** Builds the multi-step card from the extracted contract. */
+    public function card(array $x, bool $canTenant): array
+    {
+        return self::utf8($this->buildCard($x, $canTenant));
+    }
+
+    /**
+     * UTF-8 only: a legacy row with bytes that are not valid UTF-8 would make json_encode fail for the
+     * whole reply, so invalid bytes are replaced ("?") instead. No other encoding is ever assumed.
+     */
+    private static function utf8($value)
+    {
+        if (is_array($value)) return array_map(array(self::class, 'utf8'), $value);
+        if (!is_string($value) || mb_check_encoding($value, 'UTF-8')) return $value;
+        return mb_scrub($value, 'UTF-8');
+    }
+
+    private function buildCard(array $x, bool $canTenant): array
+    {
+        $c = (array)($x['contract'] ?? array());
+        $f = (array)($x['financial'] ?? array());
+        $lessor = (array)($x['lessor'] ?? array());
+        $tenant = (array)($x['tenant'] ?? array());
+        $rep = is_array($x['tenant_representative'] ?? null) ? $x['tenant_representative'] : array();
+        $deed = (array)($x['deed'] ?? array());
+        $property = (array)($x['property'] ?? array());
+        $units = array_values(array_filter((array)($x['units'] ?? array()), 'is_array'));
+        $unit = $units[0] ?? array();
+
+        $number = self::digitsOnly($c['number'] ?? null);
+        $start = self::date($c['start_date'] ?? null);
+        $end = self::date($c['end_date'] ?? null);
+        $cycle = self::cycleMonths((string)($f['payment_cycle'] ?? ''), intval($f['payments_count'] ?? 0), $start, $end);
+        $annual = self::money($f['annual_rent'] ?? null);
+        $schedule = array();
+        foreach (array_slice(array_filter((array)($x['schedule'] ?? array()), 'is_array'), 0, 60) as $row) {
+            $schedule[] = array('due_date' => self::date($row['due_date'] ?? null), 'amount' => self::money($row['amount'] ?? null));
+        }
+        $installment = $schedule && $schedule[0]['amount'] ? $schedule[0]['amount']
+            : (self::money($f['first_payment'] ?? null) ?? ($annual !== null && $cycle ? round($annual * $cycle / 12, 2) : null));
+        $vat = self::money($f['vat_amount'] ?? null);
+        $unitType = (string)self::text($unit['type'] ?? null);
+        // Residential / commercial as classified by the model from the contract's own labels; unknown = not pre-filled.
+        $usageKind = strtolower((string)($unit['usage'] ?? ''));
+
+        $contract = array(
+            'number' => $number, 'type' => self::text($c['type'] ?? null), 'sealing_date' => self::date($c['sealing_date'] ?? null),
+            'start_date' => $start, 'end_date' => $end, 'months' => self::months($start, $end),
+            'annual_rent' => $annual, 'total_value' => self::money($f['total_value'] ?? null), 'vat_amount' => $vat,
+            'cycle_months' => $cycle, 'payments_count' => intval($f['payments_count'] ?? 0) ?: null, 'installment' => $installment,
+            'security_deposit' => self::money($f['security_deposit'] ?? null),
+            'water' => self::money($f['water_annual'] ?? null), 'services' => self::money($f['services_annual'] ?? null),
+            'electricity' => self::money($f['electricity_annual'] ?? null),
+            'payment_methods' => self::text($f['payment_methods'] ?? null),
+            'purpose' => $usageKind === 'commercial' ? 'تجاري' : ($usageKind === 'residential' ? 'للسكن' : null),
+            'vat_type' => $vat !== null && $vat > 0 ? 2 : 0,
+            'electricity_meter' => self::text($unit['electricity_meter'] ?? null),
+            'broker' => is_array($x['broker'] ?? null) ? self::text($x['broker']['name'] ?? null) : null,
+            'schedule' => $schedule,
+        );
+
+        $existing = $number ? $this->row('SELECT rakam3akdid FROM egar WHERE rakam3akd=? ORDER BY rakam3akdid DESC LIMIT 1', array($number)) : null;
+
+        // Building candidates.
+        $owner = array(
+            'name' => self::text($lessor['name'] ?? null, 200), 'id_number' => self::digitsOnly($lessor['id_number'] ?? null),
+            'id_type' => self::text($lessor['id_type'] ?? null, 100), 'nationality' => self::text($lessor['nationality'] ?? null, 50),
+            'mobile' => self::phone($lessor['mobile'] ?? null),
+        );
+        $deedNumber = self::text($deed['number'] ?? null, 100);
+        $nationalAddress = self::address($property['national_address'] ?? null);
+        $unitNumber = self::text(self::western((string)($unit['number'] ?? '')), 20);
+        $candidates = $this->buildingCandidates($deedNumber, $nationalAddress, $owner['id_number'], $unitNumber,
+            array_values(array_filter(array(self::text($property['street'] ?? null), self::text($property['district'] ?? null)))));
+        $matchId = null;
+        foreach ($candidates as $candidate) {
+            if ($candidate['strong']) { $matchId = $candidate['id']; break; }
+        }
+        if ($matchId === null && count($candidates) === 1 && $candidates[0]['reason'] === 'owner') $matchId = $candidates[0]['id'];
+
+        $types = $this->rows('SELECT aqartype id, aqartypename name FROM aqartype ORDER BY aqartype');
+        $subtypes = $this->rows('SELECT aqarsubtype id, aqarsubtypename name FROM aqarsubtype ORDER BY aqarsubtype');
+        $buildingType = (string)self::text($property['building_type'] ?? null);
+        $city = self::text($property['city'] ?? $c['sealing_city'] ?? null, 60);
+        $place = self::text($property['street'] ?? null) ?? self::text($property['district'] ?? null);
+        $buildingName = self::text($property['suggested_name'] ?? null, 244)
+            ?? (($buildingType !== '' && $place) ? $buildingType . ' ' . $place : null);
+
+        // Tenant: organizations are registered by CR number, people by ID.
+        $isOrg = ($tenant['kind'] ?? '') === 'organization';
+        $tenantData = array(
+            'name' => self::text($tenant['name'] ?? null, 244),
+            'id_number' => self::digitsOnly($tenant['id_number'] ?? null),
+            'id_type' => self::text($tenant['id_type'] ?? null, 100),
+            'nationality' => self::text($tenant['nationality'] ?? $rep['nationality'] ?? null, 50),
+            'phone' => self::phone($tenant['mobile'] ?? null) ?? self::phone($rep['mobile'] ?? null),
+            'email' => self::email($tenant['email'] ?? null) ?? self::email($rep['email'] ?? null),
+            'address' => self::text($tenant['address'] ?? null, 244),
+            'work' => null,
+            'vat_number' => null,
+        );
+        $ids = array_values(array_unique(array_filter(array($tenantData['id_number'], self::digitsOnly($tenant['unified_number'] ?? null)))));
+        $tenantMatch = null;
+        if ($ids) {
+            $marks = implode(',', array_fill(0, count($ids), '?'));
+            $row = $this->row("SELECT mostagerid, mostagername FROM mostagereen WHERE mostageridnumber IN ($marks) ORDER BY mostagerid DESC LIMIT 1", $ids);
+            if ($row) $tenantMatch = array('id' => intval($row['mostagerid']), 'name' => $row['mostagername'], 'url' => '/aqary/admin/include/amlak/editmostager.hnt?mostagerid=' . intval($row['mostagerid']));
+        }
+
+        $repName = self::text($rep['name'] ?? null, 100);
+        return array(
+            'type' => 'ejar_contract',
+            'missing' => array(),
+            'data' => array(
+                'contract' => $contract,
+                'existing_contract' => $existing ? array('id' => intval($existing['rakam3akdid']),
+                    'url' => '/aqary/admin/include/amlak/show3akd.hnt?rakam3akdid=' . intval($existing['rakam3akdid'])) : null,
+                'owner' => $owner,
+                'building' => array(
+                    'candidates' => $candidates,
+                    'new' => array(
+                        'name' => $buildingName, 'address' => self::text(($city && mb_strpos((string)$nationalAddress, $city) === false ? $city . ' - ' : '') . (string)$nationalAddress, 244),
+                        'type_id' => self::pick($types, array($buildingType)), 'deed_number' => $deedNumber,
+                        'national_address' => $nationalAddress, 'floors' => intval($property['floors'] ?? 0) ?: null,
+                        'units_count' => intval($property['units_count'] ?? 0) ?: null,
+                    ),
+                ),
+                'unit' => array(
+                    'number' => $unitNumber, 'type_label' => $unitType ?: null,
+                    'subtype_id' => self::pick($subtypes, self::spellings($unitType)),
+                    'floor' => self::text($unit['floor'] ?? null, 20), 'area' => self::money($unit['area'] ?? null),
+                    'price' => $annual,
+                    'pricemethod' => $cycle ? (array(1 => 4, 3 => 3, 4 => 8, 6 => 1, 12 => 2)[$cycle] ?? null) : null,
+                ),
+                'units_total' => count($units),
+                'tenant' => array('match' => $tenantMatch, 'data' => $tenantData, 'agent' => $repName,
+                    'kind' => $isOrg ? 'organization' : 'person'),
+                'types' => $types,
+                'subtypes' => $subtypes,
+                'perms' => array(
+                    'building' => aqaryScreenCan($this->link, self::SCREEN_BUILDING, 'adds'),
+                    'unit' => aqaryScreenCanAny($this->link, array(self::SCREEN_UNIT, self::SCREEN_BUILDING), 'adds'),
+                    'tenant' => $canTenant,
+                    'contract' => aqaryScreenCan($this->link, self::SCREEN_CONTRACT, 'adds'),
+                ),
+            ),
+            'state' => array(
+                'building_id' => $matchId,
+                'unit_id' => $this->unitFor($candidates, $matchId),
+                'tenant_id' => $tenantMatch ? $tenantMatch['id'] : null,
+            ),
+        );
+    }
+
+    /**
+     * Buildings that may be the contract's: same deed number (strong), same national address (strong),
+     * owned by the lessor's ID, or named after the street / district the model read from the address.
+     * Deed and address are compared by their letters and digits only, so spacing and punctuation never matter.
+     * Restricted users only see their buildings.
+     */
+    private function buildingCandidates(?string $deed, ?string $nationalAddress, ?string $ownerId, ?string $unitNumber, array $places): array
+    {
+        $scope = $this->scopeSql('a.idaqar');
+        $found = array();
+        $add = function (array $rows, string $reason, bool $strong) use (&$found) {
+            foreach ($rows as $r) {
+                $id = intval($r['idaqar']);
+                if (isset($found[$id])) { $found[$id]['strong'] = $found[$id]['strong'] || $strong; continue; }
+                $found[$id] = array('id' => $id, 'name' => trim((string)$r['aqarname']), 'address' => trim((string)$r['aqaraddress']),
+                    'owner' => trim((string)$r['ownername']), 'reason' => $reason, 'strong' => $strong);
+            }
+        };
+        $cols = 'a.idaqar, a.aqarname, a.aqaraddress, a.ownername';
+        foreach (array('deed_number' => array($deed, 'deed'), 'national_address' => array($nationalAddress, 'address')) as $column => $wanted) {
+            $key = self::matchKey($wanted[0]);
+            if ($key === '' || !$this->hasColumn('amlak', $column)) continue;
+            $rows = $this->rows("SELECT $cols, a.{$column} k FROM amlak a WHERE a.{$column}<>''{$scope} LIMIT 2000");
+            $add(array_filter($rows, function ($r) use ($key) { return self::matchKey($r['k']) === $key; }), $wanted[1], true);
+        }
+        if ($ownerId) {
+            $add($this->rows("SELECT $cols FROM amlak a LEFT JOIN amlakowner o ON o.ownerid=a.ownerid
+                WHERE (a.hawiarakam=? OR o.hawiarakam=?){$scope} ORDER BY a.idaqar DESC LIMIT 8", array($ownerId, $ownerId)), 'owner', false);
+        }
+        foreach ($places as $place) {
+            if (mb_strlen($place) < 4) continue;
+            $add($this->rows("SELECT $cols FROM amlak a WHERE (a.aqarname LIKE ? OR a.aqaraddress LIKE ?){$scope} LIMIT 5",
+                array(self::likePattern($place), self::likePattern($place))), 'name', false);
+        }
+        $list = array_slice(array_values($found), 0, 8);
+        foreach ($list as $i => $candidate) {
+            $list[$i]['units'] = $this->vacantUnits($candidate['id']);
+            $list[$i]['unit_match'] = $unitNumber !== null ? $this->unitMatch($candidate['id'], $unitNumber) : null;
+        }
+        usort($list, function ($a, $b) { return intval($b['strong']) <=> intval($a['strong']); });
+        return $list;
+    }
+
+    private function vacantUnits(int $buildingId): array
+    {
+        $rows = $this->rows("SELECT d.idsubaqar id, d.rakam, COALESCE(s.aqarsubtypename,'') subtype FROM amlakdetails d
+            LEFT JOIN aqarsubtype s ON s.aqarsubtype=d.aqarsubtype WHERE d.idaqar=? AND d.mostagerid=0 ORDER BY d.rakam+0, d.rakam LIMIT 60", array($buildingId));
+        return array_map(function ($r) { return array('id' => intval($r['id']), 'label' => trim($r['subtype'] . ' ' . $r['rakam'])); }, $rows);
+    }
+
+    /** The unit with the contract's number in a building (vacant first). */
+    private function unitMatch(int $buildingId, string $number): ?array
+    {
+        $r = $this->row("SELECT d.idsubaqar id, d.rakam, d.mostagerid, COALESCE(s.aqarsubtypename,'') subtype, COALESCE(m.mostagername,'') tenant
+            FROM amlakdetails d LEFT JOIN aqarsubtype s ON s.aqarsubtype=d.aqarsubtype LEFT JOIN mostagereen m ON m.mostagerid=d.mostagerid
+            WHERE d.idaqar=? AND TRIM(d.rakam)=? ORDER BY d.mostagerid=0 DESC LIMIT 1", array($buildingId, $number));
+        if (!$r) return null;
+        return array('id' => intval($r['id']), 'label' => trim($r['subtype'] . ' ' . $r['rakam']),
+            'rented' => intval($r['mostagerid']) > 0, 'tenant' => trim((string)$r['tenant']));
+    }
+
+    private function unitFor(array $candidates, ?int $buildingId): ?int
+    {
+        foreach ($candidates as $candidate) {
+            if ($candidate['id'] === $buildingId && $candidate['unit_match'] && !$candidate['unit_match']['rented']) return $candidate['unit_match']['id'];
+        }
+        return null;
+    }
+
+    // ------------------------------------------------------------------ confirmed writes
+
+    /**
+     * Adds the owner (unless one with the same ID exists), the building and the contract's unit.
+     * @return array{message: string, building_id: int, building_label: string, unit_id: int, unit_label: string}
+     */
+    public function confirmBuilding(array $d): array
+    {
+        if (!aqaryScreenCan($this->link, self::SCREEN_BUILDING, 'adds')) throw new InvalidArgumentException('ليست لديك صلاحية إضافة عقار.');
+        $b = (array)($d['building'] ?? array());
+        $o = (array)($d['owner'] ?? array());
+        $u = (array)($d['unit'] ?? array());
+        $name = self::required($b['name'] ?? null, 244, 'اسم العقار');
+        $ownerName = self::required($o['name'] ?? null, 200, 'اسم المالك');
+        $typeId = intval($b['type_id'] ?? 0);
+        if (!$this->row('SELECT aqartype FROM aqartype WHERE aqartype=?', array($typeId))) throw new InvalidArgumentException('اختر نوع العقار.');
+        $unit = $this->unitInput($u);
+        $ownerId = self::digitsOnly($o['id_number'] ?? null) ?? '';
+        $mobile = self::phone($o['mobile'] ?? null) ?? '';
+        $deed = self::text($b['deed_number'] ?? null, 100) ?? '';
+        $national = self::text($b['national_address'] ?? null, 244) ?? '';
+        $address = self::text($b['address'] ?? null, 244) ?? '';
+        $hasDeed = $this->hasColumn('amlak', 'deed_number');
+        $hasNational = $this->hasColumn('amlak', 'national_address');
+
+        $this->link->begin_transaction();
+        try {
+            if ($deed !== '' && $hasDeed) {
+                $key = self::matchKey($deed);
+                foreach ($this->rows("SELECT idaqar, aqarname, deed_number FROM amlak WHERE deed_number<>'' FOR UPDATE") as $dup) {
+                    if (self::matchKey($dup['deed_number']) === $key) {
+                        throw new InvalidArgumentException('يوجد عقار بنفس رقم الصك: ' . self::utf8($dup['aqarname']) . ' (#' . intval($dup['idaqar']) . ').');
+                    }
+                }
+            }
+            $formuid = 'ai-ejar-' . bin2hex(random_bytes(8));
+            $owner = $ownerId !== '' ? $this->row('SELECT ownerid, ownername FROM amlakowner WHERE hawiarakam=? ORDER BY ownerid DESC LIMIT 1', array($ownerId)) : null;
+            if ($owner) {
+                $ownerRowId = intval($owner['ownerid']);
+            } else {
+                $this->exec('INSERT INTO amlakowner (ownername, mobile, phone, owneraddress, email, hawiarakam, hawiaplace, hawiadate, hawiatype, gensia, formuid, owner_vat_number)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', array($ownerName, $mobile, '', '', '', $ownerId, '', '', (string)(self::text($o['id_type'] ?? null, 100) ?? ''),
+                    (string)(self::text($o['nationality'] ?? null, 50) ?? ''), $formuid, ''));
+                $ownerRowId = intval($this->link->insert_id);
+            }
+            $description = 'أضيف من المساعد الذكي من عقد منصة إيجار' . (!empty($d['contract_number']) ? ' رقم ' . self::digitsOnly($d['contract_number']) : '')
+                . ($deed !== '' ? "\nرقم الصك: " . $deed : '') . ($national !== '' ? "\nالعنوان الوطني: " . $national : '')
+                . (!empty($b['floors']) ? "\nعدد الطوابق: " . intval($b['floors']) : '') . (!empty($b['units_count']) ? "\nعدد الوحدات: " . intval($b['units_count']) : '');
+            $columns = array('aqartype' => (string)$typeId, 'aqarname' => $name, 'aqaraddress' => $address, 'ownerid' => (string)$ownerRowId,
+                'ownername' => $ownerName, 'mobile' => $mobile, 'phone' => '', 'owneraddress' => '', 'persentage' => '', 'email' => '',
+                'description' => $description, 'hawiarakam' => $ownerId, 'gensia' => (string)(self::text($o['nationality'] ?? null, 50) ?? ''),
+                'hawiaplace' => '', 'hawiadate' => '', 'hawiatype' => (string)(self::text($o['id_type'] ?? null, 100) ?? ''),
+                'formuid' => $formuid, 'externalid' => '0', 'externaltype' => '', 'users' => ',' . $this->userId . ',',
+                'owner_vat_number' => '', 'bankname' => '', 'acountnumber' => '', 'acountholder' => '', 'iban' => '');
+            if ($hasDeed) $columns['deed_number'] = $deed;
+            if ($hasNational) $columns['national_address'] = $national;
+            $this->exec('INSERT INTO amlak (' . implode(',', array_keys($columns)) . ') VALUES (' . implode(',', array_fill(0, count($columns), '?')) . ')', array_values($columns));
+            $buildingId = intval($this->link->insert_id);
+            $unitId = $this->insertUnit($buildingId, $unit, $formuid);
+            $this->link->commit();
+        } catch (Throwable $error) {
+            $this->link->rollback();
+            throw $error;
+        }
+        return array('message' => 'تمت إضافة العقار ' . $name . ' (#' . $buildingId . ') والوحدة ' . $unit['number'] . '.',
+            'building_id' => $buildingId, 'building_label' => $name, 'unit_id' => $unitId, 'unit_label' => $this->unitLabel($unitId),
+            'owner_reused' => (bool)$owner);
+    }
+
+    /** Adds the contract's unit to an existing building (or returns the vacant one with the same number and type). */
+    public function confirmUnit(array $d): array
+    {
+        if (!aqaryScreenCanAny($this->link, array(self::SCREEN_UNIT, self::SCREEN_BUILDING), 'adds')) throw new InvalidArgumentException('ليست لديك صلاحية إضافة وحدة.');
+        $buildingId = intval($d['building_id'] ?? 0);
+        $building = $this->row('SELECT a.idaqar, a.aqarname FROM amlak a WHERE a.idaqar=?' . $this->scopeSql('a.idaqar') . ' LIMIT 1', array($buildingId));
+        if (!$building) throw new InvalidArgumentException('العقار غير موجود.');
+        $unit = $this->unitInput((array)($d['unit'] ?? array()));
+        $same = $this->row('SELECT idsubaqar FROM amlakdetails WHERE idaqar=? AND TRIM(rakam)=? AND aqarsubtype=? AND mostagerid=0 LIMIT 1',
+            array($buildingId, $unit['number'], $unit['subtype_id']));
+        if ($same) {
+            $unitId = intval($same['idsubaqar']);
+            return array('message' => 'الوحدة موجودة مسبقاً وشاغرة: ' . $this->unitLabel($unitId) . '.', 'unit_id' => $unitId, 'unit_label' => $this->unitLabel($unitId));
+        }
+        $unitId = $this->insertUnit($buildingId, $unit, 'ai-ejar-' . bin2hex(random_bytes(8)));
+        return array('message' => 'تمت إضافة الوحدة ' . $this->unitLabel($unitId) . ' إلى ' . self::utf8(trim($building['aqarname'])) . '.', 'unit_id' => $unitId, 'unit_label' => $this->unitLabel($unitId));
+    }
+
+    /**
+     * Saves the deed number and national address on the chosen building when they are still empty,
+     * so the next contract for the same building is matched automatically. Best effort.
+     */
+    public function rememberBuilding(array $d): array
+    {
+        $buildingId = intval($d['building_id'] ?? 0);
+        if ($buildingId <= 0 || !aqaryScreenCanAny($this->link, array(self::SCREEN_BUILDING, '43'), 'adds')
+            && !aqaryScreenCanAny($this->link, array(self::SCREEN_BUILDING, '43'), 'edits')) return array('message' => '');
+        if (!$this->row('SELECT a.idaqar FROM amlak a WHERE a.idaqar=?' . $this->scopeSql('a.idaqar') . ' LIMIT 1', array($buildingId))) return array('message' => '');
+        foreach (array('deed_number' => 100, 'national_address' => 244) as $column => $max) {
+            $value = self::text($d[$column] ?? null, $max);
+            if ($value !== null && $this->hasColumn('amlak', $column)) {
+                $this->exec("UPDATE amlak SET {$column}=? WHERE idaqar=? AND ({$column}='' OR {$column} IS NULL)", array($value, $buildingId));
+            }
+        }
+        return array('message' => '');
+    }
+
+    /** @return array{number: string, subtype_id: int, price: int, pricemethod: int, note: string} */
+    private function unitInput(array $u): array
+    {
+        $number = self::required(self::western((string)($u['number'] ?? '')), 20, 'رقم الوحدة');
+        $subtype = intval($u['subtype_id'] ?? 0);
+        if (!$this->row('SELECT aqarsubtype FROM aqarsubtype WHERE aqarsubtype=?', array($subtype))) throw new InvalidArgumentException('اختر نوع الوحدة.');
+        $price = self::money($u['price'] ?? null);
+        $method = intval($u['pricemethod'] ?? 1);
+        $note = 'أضيفت من المساعد الذكي (عقد منصة إيجار)'
+            . (!empty($u['floor']) || (isset($u['floor']) && $u['floor'] === '0') ? ' — الطابق: ' . self::text($u['floor'], 20) : '')
+            . (self::money($u['area'] ?? null) ? ' — المساحة: ' . self::money($u['area']) . ' م²' : '');
+        return array('number' => $number, 'subtype_id' => $subtype, 'price' => $price !== null ? intval(round($price)) : 0,
+            'pricemethod' => in_array($method, array(1, 2, 3, 4, 5, 6, 7, 8), true) ? $method : 1, 'note' => $note);
+    }
+
+    private function insertUnit(int $buildingId, array $unit, string $formuid): int
+    {
+        $this->exec('INSERT INTO amlakdetails (aqarsubtype, idaqar, door, gorfanum, matbakhnum, hamamatnum, aircondetion, finishing, price, pricemethod, note, mostagerid, rakam, rakam3akdid, hnt_dll_type, formuid, images, externalid, externaltype)
+            VALUES (?,?,0,0,0,0,0,0,?,?,?,0,?,0,\'\',?,\'\',0,\'\')',
+            array($unit['subtype_id'], $buildingId, $unit['price'], $unit['pricemethod'], $unit['note'], $unit['number'], $formuid));
+        return intval($this->link->insert_id);
+    }
+
+    private function unitLabel(int $unitId): string
+    {
+        $r = $this->row("SELECT d.rakam, COALESCE(s.aqarsubtypename,'') subtype FROM amlakdetails d LEFT JOIN aqarsubtype s ON s.aqarsubtype=d.aqarsubtype WHERE d.idsubaqar=?", array($unitId));
+        return $r ? self::utf8(trim($r['subtype'] . ' ' . $r['rakam'])) : '#' . $unitId;
+    }
+
+    // ------------------------------------------------------------------ data helpers
+
+    private function scopeSql(string $column): string
+    {
+        if ($this->restricted === null) {
+            $user = $this->row("SELECT u.groupid, COALESCE(g.allprevilage,0) allprevilage FROM user u LEFT JOIN usergroups g ON g.groupid=u.groupid WHERE u.userid=? LIMIT 1", array($this->userId));
+            $this->restricted = !$user || (intval($user['groupid']) > 2 && empty($user['allprevilage']));
+            if ($this->restricted) {
+                foreach ($this->rows("SELECT idaqar FROM amlak WHERE users LIKE ?", array('%,' . $this->userId . ',%')) as $r) $this->assigned[] = intval($r['idaqar']);
+            }
+        }
+        if (!$this->restricted) return '';
+        return $this->assigned ? " AND {$column} IN (" . implode(',', $this->assigned) . ')' : ' AND 1=0';
+    }
+
+    private function hasColumn(string $table, string $column): bool
+    {
+        $key = $table . '.' . $column;
+        if (!isset($this->columns[$key])) {
+            $this->columns[$key] = (bool)$this->row('SELECT 1 x FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?', array($table, $column));
+        }
+        return $this->columns[$key];
+    }
+
+    private function rows(string $sql, array $params = array()): array
+    {
+        $stmt = $this->link->prepare($sql);
+        if (!$stmt) throw new RuntimeException($this->link->error);
+        $stmt->execute($params ? array_map('strval', $params) : null);
+        $result = $stmt->get_result();
+        $rows = $result ? $result->fetch_all(MYSQLI_ASSOC) : array();
+        $stmt->close();
+        return $rows;
+    }
+
+    private function row(string $sql, array $params = array()): ?array
+    {
+        $rows = $this->rows($sql, $params);
+        return $rows[0] ?? null;
+    }
+
+    private function exec(string $sql, array $params): void
+    {
+        $stmt = $this->link->prepare($sql);
+        if (!$stmt) throw new RuntimeException($this->link->error);
+        $stmt->execute(array_map('strval', $params));
+        $stmt->close();
+    }
+
+    // ------------------------------------------------------------------ value helpers
+
+    /**
+     * Pre-selects an option only when it is unambiguous: a name equal to the keyword, or the single name
+     * containing it. Several candidates (e.g. شقة عزاب / شقة عوائل for "شقة") → null, the user chooses.
+     */
+    private static function pick(array $options, array $keywords): ?int
+    {
+        foreach ($keywords as $keyword) {
+            $keyword = self::matchKey($keyword);
+            if ($keyword === '') continue;
+            $containing = array();
+            foreach ($options as $option) {
+                $name = self::matchKey($option['name']);
+                if ($name === $keyword) return intval($option['id']);
+                if ($name !== '' && mb_strpos($name, $keyword) !== false) $containing[] = intval($option['id']);
+            }
+            if (count($containing) === 1) return $containing[0];
+        }
+        return null;
+    }
+
+    /**
+     * The contract's unit type as written, plus its other common spelling (فلة / فيلا). Only one option
+     * matching it is pre-selected; anything else is left for the user to choose.
+     */
+    private static function spellings(string $type): array
+    {
+        if ($type === '') return array();
+        $words = array($type);
+        if (preg_match('/فل[ةه]/u', $type)) $words[] = preg_replace('/فل[ةه]/u', 'فيلا', $type);
+        if (mb_strpos($type, 'فيلا') !== false) $words[] = str_replace('فيلا', 'فله', $type);
+        return $words;
+    }
+
+    /** Payment cycle in months (monthly 1, quarterly 3, semi-annual 6, annual 12), else from the count of payments; null when unknown. */
+    private static function cycleMonths(string $cycle, int $payments, ?string $start, ?string $end): ?int
+    {
+        $cycle = mb_strtolower($cycle);
+        if (preg_match('/semi|نصف/u', $cycle)) return 6;
+        if (preg_match('/quarter|ربع/u', $cycle)) return 3;
+        if (preg_match('/month|شهر/u', $cycle)) return 1;
+        if (preg_match('/annual|year|سنو/u', $cycle)) return 12;
+        $months = self::months($start, $end);
+        if ($payments > 0 && $months) {
+            $guess = intval(round($months / $payments));
+            foreach (array(1, 2, 3, 4, 6, 12) as $allowed) if ($guess === $allowed) return $allowed;
+        }
+        return null;
+    }
+
+    /** Whole months from start to end inclusive (2027-02-02 .. 2028-02-01 = 12). */
+    private static function months(?string $start, ?string $end): ?int
+    {
+        if (!$start || !$end) return null;
+        $a = new DateTime($start);
+        $b = (new DateTime($end))->modify('+1 day');
+        if ($b <= $a) return null;
+        $diff = $a->diff($b);
+        $months = $diff->y * 12 + $diff->m + ($diff->d >= 15 ? 1 : 0);
+        return max(1, min(120, $months));
+    }
+
+    private static function western(string $value): string
+    {
+        return strtr(trim($value), array('٠' => '0', '١' => '1', '٢' => '2', '٣' => '3', '٤' => '4', '٥' => '5', '٦' => '6', '٧' => '7', '٨' => '8', '٩' => '9',
+            '۰' => '0', '۱' => '1', '۲' => '2', '۳' => '3', '۴' => '4', '۵' => '5', '۶' => '6', '۷' => '7', '۸' => '8', '۹' => '9'));
+    }
+
+    private static function text($value, int $max = 190): ?string
+    {
+        if (!is_scalar($value)) return null;
+        $value = trim(preg_replace('/\s+/u', ' ', (string)$value));
+        return $value === '' || $value === '-' || strtolower($value) === 'null' ? null : mb_substr($value, 0, $max);
+    }
+
+    /**
+     * The address as written, only tidied: Western digits, one kind of comma, no empty or repeated separators.
+     * Nothing is split or reordered, whatever the address style.
+     */
+    private static function address($value): ?string
+    {
+        $value = self::text(is_scalar($value) ? self::western((string)$value) : null, 400);
+        if ($value === null) return null;
+        $parts = array_values(array_filter(array_map('trim', preg_split('/[,،]/u', $value) ?: array()), 'strlen'));
+        return $parts ? mb_substr(implode('، ', $parts), 0, 244) : null;
+    }
+
+    /** Comparison key: letters and digits only, Western digits, Arabic spelling variants unified. */
+    private static function matchKey($value): string
+    {
+        if (!is_scalar($value)) return '';
+        $text = AqaryAssistant::normalize(self::western((string)$value));
+        return (string)preg_replace('/[^\p{L}\p{N}]+/u', '', $text);
+    }
+
+    private static function required($value, int $max, string $label): string
+    {
+        $value = self::text($value, 1000);
+        if ($value === null) throw new InvalidArgumentException($label . ' مطلوب.');
+        if (mb_strlen($value) > $max) throw new InvalidArgumentException($label . ' طويل جداً.');
+        return $value;
+    }
+
+    private static function digitsOnly($value): ?string
+    {
+        if (!is_scalar($value)) return null;
+        // The first run of 3+ digits ("20621850329 / 1-0" -> 20621850329), else all digits.
+        $value = self::western((string)$value);
+        if (preg_match('/\d{3,}/', $value, $m)) return substr($m[0], 0, 50);
+        $digits = preg_replace('/\D/', '', $value);
+        return $digits === '' ? null : $digits;
+    }
+
+    private static function phone($value): ?string
+    {
+        if (!is_scalar($value)) return null;
+        $value = preg_replace('/[^\d+]/', '', self::western((string)$value));
+        return $value === '' || $value === '+' ? null : substr($value, 0, 30);
+    }
+
+    private static function email($value): ?string
+    {
+        $value = self::text($value, 100);
+        return $value !== null && filter_var($value, FILTER_VALIDATE_EMAIL) ? $value : null;
+    }
+
+    private static function money($value): ?float
+    {
+        if (is_string($value)) $value = str_replace(array(',', ' '), '', self::western($value));
+        return is_numeric($value) ? round((float)$value, 2) : null;
+    }
+
+    private static function date($value): ?string
+    {
+        if (!is_string($value)) return null;
+        $value = self::western($value);
+        if (!preg_match('/^(\d{4})-(\d{1,2})-(\d{1,2})$/', $value, $m) || !checkdate(intval($m[2]), intval($m[3]), intval($m[1]))) return null;
+        return sprintf('%04d-%02d-%02d', $m[1], $m[2], $m[3]);
+    }
+
+    /** LIKE pattern tolerant to Arabic spelling; "%" not "_" because of the latin1 connection (see AqaryAssistant::namePattern). */
+    private static function likePattern(string $text): string
+    {
+        $text = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $text) ?? $text;
+        $text = preg_replace('/[أإآاةهىي]/u', '%', $text);
+        $words = preg_split('/\s+/u', trim($text), -1, PREG_SPLIT_NO_EMPTY) ?: array();
+        return '%' . implode('%', $words) . '%';
+    }
+}

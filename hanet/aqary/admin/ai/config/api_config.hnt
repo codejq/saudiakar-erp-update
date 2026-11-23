@@ -1,0 +1,169 @@
+<?php
+/**
+ * AI API Configuration
+ * OpenRouter API Settings
+ */
+
+// Load API keys from secure file
+$api_keys_file = __DIR__ . '/api_keys.hnt';
+$api_keys = file_exists($api_keys_file) ? require($api_keys_file) : [];
+if (!is_array($api_keys)) {
+    $api_keys = [];
+}
+
+// DeepSeek is the default provider. Its key ships split/encoded with the code
+// (lib/ai/provider_key.hnt); a company key in api_keys.hnt overrides it.
+require_once dirname(__DIR__, 3) . '/lib/ai/provider_key.hnt';
+
+// API Configuration
+$ai_config = [
+    // API Provider Settings
+    // Default provider: models without a "vendor/" prefix (e.g. deepseek-flash) go to DeepSeek.
+    // OpenRouter stays available: models such as "openai/gpt-4o" use it when its key is set.
+    'provider' => 'deepseek',
+    'deepseek_api_key' => aqaryDeepseekKey($api_keys),
+    'deepseek_base_url' => 'https://api.deepseek.com',
+    'assistant_model' => 'deepseek-flash', // The in-app AI assistant (admin/ai/assistant)
+
+    'api_key' => $api_keys['openrouter_api_key'] ?? '', // OpenRouter API key
+    'openai_api_key' => $api_keys['openai_api_key'] ?? '', // Optional: OpenAI API key for DALL-E and Whisper
+    'groq_api_key' => $api_keys['groq_api_key'] ?? '', // Recommended: FREE Groq API key for fast Whisper (Get from: https://console.groq.com)
+    'together_api_key' => $api_keys['together_api_key'] ?? '', // Recommended: FREE Together AI key for image generation - 3 months unlimited FLUX.1 (Get from: https://api.together.xyz)
+    'huggingface_api_token' => $api_keys['huggingface_api_token'] ?? '', // Optional: FREE Hugging Face token for Stable Diffusion (Get from: https://huggingface.co/settings/tokens)
+    'speechify_api_key' => $api_keys['speechify_api_key'] ?? '', // Optional: FREE Speechify API key for TTS - 50k chars/month (Get from: https://speechify.com/api/)
+    'base_url' => 'https://openrouter.ai/api/v1',
+    'site_url' => 'https://your-domain.com', // Optional: for OpenRouter rankings
+    'site_name' => 'نظام إدارة العقارات', // Optional
+
+    // Audio Transcription Settings
+    'audio_provider' => 'groq', // Options: 'groq' (FREE, recommended), 'openai' (paid), 'auto' (try groq first)
+
+    // Image Generation Settings
+    'image_provider' => 'huggingface', // Options: 'together' (3 months FREE, then $0.032/image), 'huggingface' (FREE forever), 'openai' (premium DALL-E), 'auto' (try together first)
+
+    // Default Model Settings
+    // Users can still pick another model (including OpenRouter ones) in AI settings.
+    'default_model' => 'deepseek-flash', // Was 'openai/gpt-3.5-turbo' (OpenRouter)
+    'premium_model' => 'deepseek-v4-pro', // Was 'openai/gpt-4-turbo-preview' (OpenRouter)
+    'timeout' => 180, // seconds
+
+    // Token Limits
+    'max_tokens' => 2000,
+    'temperature' => 0.7,
+
+    // Caching Settings
+    'cache_enabled' => true,
+    'cache_duration' => 3600, // 1 hour in seconds
+
+    // Rate Limiting
+    'rate_limit_enabled' => true,
+    'max_requests_per_minute' => 20,
+    'max_requests_per_hour' => 500,
+    'max_requests_per_day' => 5000,
+
+    // Cost Management
+    'daily_budget' => 10.00, // USD
+    'monthly_budget' => 200.00, // USD
+    'alert_threshold' => 0.80, // Alert at 80% of budget
+
+    // Logging
+    'log_enabled' => true,
+    'log_all_requests' => true,
+    'log_errors_only' => false,
+
+    // Feature Flags
+    'features' => [
+        'property_description' => true,
+        'email_generator' => true,
+        'report_generator' => true,
+        'chatbot' => true,
+        'lead_scoring' => true,
+        'market_analysis' => true,
+        'image_analysis' => false, // Requires vision models
+        'voice_transcription' => false, // Requires Whisper API
+    ]
+];
+
+// Model Configurations
+// Costs are per 1K tokens in USD and only feed the budget estimates in ai_usage_log.
+$ai_models = [
+    // Default provider: DeepSeek (direct API)
+    'deepseek-flash' => [
+        'id' => 'deepseek-flash',
+        'name' => 'DeepSeek Flash',
+        'provider' => 'deepseek',
+        'context_length' => 128000,
+        'cost_per_1k_input' => 0.00028,
+        'cost_per_1k_output' => 0.00042,
+        'use_for' => ['general', 'chatbot', 'assistant', 'email', 'description']
+    ],
+
+    'deepseek-v4-pro' => [
+        'id' => 'deepseek-v4-pro',
+        'name' => 'DeepSeek V4 Pro',
+        'provider' => 'deepseek',
+        'context_length' => 128000,
+        'cost_per_1k_input' => 0.0011,
+        'cost_per_1k_output' => 0.0022,
+        'use_for' => ['analysis', 'reports', 'valuation']
+    ],
+
+    // Fast and Cost-Effective
+    'gpt-3.5-turbo' => [
+        'id' => 'openai/gpt-3.5-turbo',
+        'name' => 'GPT-3.5 Turbo',
+        'context_length' => 16385,
+        'cost_per_1k_input' => 0.0005,
+        'cost_per_1k_output' => 0.0015,
+        'use_for' => ['general', 'email', 'description']
+    ],
+
+    // High Quality
+    'gpt-4-turbo' => [
+        'id' => 'openai/gpt-4-turbo-preview',
+        'name' => 'GPT-4 Turbo',
+        'context_length' => 128000,
+        'cost_per_1k_input' => 0.01,
+        'cost_per_1k_output' => 0.03,
+        'use_for' => ['analysis', 'reports', 'valuation']
+    ],
+
+    // Alternative: Claude 3
+    'claude-3-sonnet' => [
+        'id' => 'anthropic/claude-3-sonnet',
+        'name' => 'Claude 3 Sonnet',
+        'context_length' => 200000,
+        'cost_per_1k_input' => 0.003,
+        'cost_per_1k_output' => 0.015,
+        'use_for' => ['analysis', 'long_documents']
+    ],
+
+    // Budget Option
+    'gpt-3.5-turbo-0125' => [
+        'id' => 'openai/gpt-3.5-turbo-0125',
+        'name' => 'GPT-3.5 Turbo (Latest)',
+        'context_length' => 16385,
+        'cost_per_1k_input' => 0.0005,
+        'cost_per_1k_output' => 0.0015,
+        'use_for' => ['chatbot', 'quick_tasks']
+    ]
+];
+
+// Error Messages (Arabic)
+$ai_errors = [
+    'api_key_missing' => 'مفتاح API مفقود. الرجاء تكوين المفتاح في ملف الإعدادات.',
+    'rate_limit_exceeded' => 'تم تجاوز الحد المسموح من الطلبات. الرجاء المحاولة لاحقاً.',
+    'budget_exceeded' => 'تم تجاوز الميزانية اليومية/الشهرية.',
+    'network_error' => 'خطأ في الاتصال بخادم الذكاء الاصطناعي.',
+    'invalid_response' => 'استجابة غير صالحة من API.',
+    'model_not_found' => 'النموذج المطلوب غير متاح.',
+    'timeout' => 'انتهت مهلة الطلب. الرجاء المحاولة مرة أخرى.',
+    'content_filtered' => 'تم تصفية المحتوى بسبب سياسات الأمان.',
+];
+
+return [
+    'config' => $ai_config,
+    'models' => $ai_models,
+    'errors' => $ai_errors
+];
+?>

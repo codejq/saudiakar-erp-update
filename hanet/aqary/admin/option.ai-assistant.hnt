@@ -1,0 +1,209 @@
+<?php
+/**
+ * System Options -> المساعد الذكي: company-wide on/off switch for the floating AI assistant
+ * (global.ai_assistant_enabled; a missing row means on). Viewing needs screen 84; changing needs
+ * its edit permission. Each user can still turn the assistant off for themselves in profile.hnt.
+ */
+$sc_title = 'المساعد الذكي';
+$sc_id = '84';
+require_once __DIR__ . '/../reqlogin.hnt';
+require_once __DIR__ . '/ai/assistant/service.hnt';
+
+$aiOptUser = intval($_SESSION['useridv'] ?? 0);
+$aiOptError = '';
+if (empty($_SESSION['ai_assistant_csrf'])) $_SESSION['ai_assistant_csrf'] = bin2hex(random_bytes(24));
+$aiOptCsrf = (string)$_SESSION['ai_assistant_csrf'];
+$aiOptTest = null;     // OCR connection test result (shown without saving)
+$aiOptPosted = null;   // OCR form values to show again after a test or an error
+
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && $link instanceof mysqli && $aiOptUser > 0) {
+    $aiOptAction = (string)($_POST['action'] ?? 'company');
+    try {
+        if (!hash_equals($aiOptCsrf, (string)($_POST['csrf_token'] ?? ''))) throw new InvalidArgumentException('انتهت صلاحية النموذج. أعد تحميل الصفحة.');
+        $assistant = new AqaryAssistant($link, $aiOptUser);
+        if ($aiOptAction === 'ocr_save' || $aiOptAction === 'ocr_test') {
+            if (!aqaryScreenCan($link, '84', 'edits')) throw new InvalidArgumentException('ليست لديك صلاحية تعديل خيارات النظام.');
+            $aiOptPosted = array(
+                'provider' => ($_POST['ocr_provider'] ?? '') === 'remote' ? 'remote' : 'local',
+                'url' => trim((string)($_POST['ocr_url'] ?? '')),
+                'key' => trim((string)($_POST['ocr_key'] ?? '')),
+                'clear' => !empty($_POST['ocr_clear_key']),
+            );
+            if ($aiOptAction === 'ocr_save') {
+                $assistant->setOcrSettings($aiOptPosted['provider'], $aiOptPosted['url'], $aiOptPosted['key'], $aiOptPosted['clear']);
+                $_SESSION['ai_assistant_flash'] = 'تم حفظ إعداد قراءة المستندات.';
+                header('Location: /aqary/admin/option.ai-assistant.hnt#ocr', true, 303);
+                exit;
+            }
+            session_write_close();
+            if ($aiOptPosted['provider'] === 'remote') {
+                $saved = $assistant->ocrSettings();
+                $key = $aiOptPosted['clear'] ? '' : ($aiOptPosted['key'] !== '' ? $aiOptPosted['key'] : $saved['key']);
+                $health = AqaryOcrRuntime::remoteHealth($aiOptPosted['url'], $key);
+            } else {
+                $running = AqaryOcrRuntime::ensureRunning(false);
+                $health = array('ok' => $running['ok'], 'detail' => $running['message']);
+            }
+            $aiOptTest = $health;
+        } else {
+            $values = (array)($_POST['company_enabled'] ?? '0');
+            $assistant->setCompanyEnabled(in_array('1', $values, true));
+            $_SESSION['ai_assistant_flash'] = 'تم حفظ الإعداد.';
+            header('Location: /aqary/admin/option.ai-assistant.hnt', true, 303);
+            exit;
+        }
+    } catch (InvalidArgumentException $error) {
+        $aiOptError = $error->getMessage();
+    } catch (Throwable $error) {
+        error_log('AI assistant option: ' . $error->getMessage());
+        $aiOptError = 'تعذّر حفظ الإعداد. حاول مرة أخرى.';
+    }
+}
+
+include_once __DIR__ . '/../nocash.hnt';
+include_once __DIR__ . '/../header.hnt';
+
+$aiOpt = new AqaryAssistant($link, $aiOptUser);
+$aiOptOn = $aiOpt->enabled();
+$aiOptCanEdit = aqaryScreenCan($link, '84', 'edits');
+$aiOptStatus = $aiOpt->status();
+$aiOptUserOn = $aiOpt->userEnabled();
+$aiOptFlash = (string)($_SESSION['ai_assistant_flash'] ?? '');
+unset($_SESSION['ai_assistant_flash']);
+$aiOptEsc = function ($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); };
+$ocr = $aiOptStatus['ocr'];
+$ocrSaved = $aiOpt->ocrSettings();
+$ocrForm = $aiOptPosted ?: array('provider' => $ocrSaved['provider'], 'url' => $ocrSaved['url'], 'key' => '', 'clear' => false);
+$ocrLocalInstalled = AqaryOcrRuntime::isInstalled();
+$ocrLocalToken = AqaryOcrRuntime::localToken();
+$ocrLocalText = !$ocr['supported'] ? 'غير مدعومة على هذا الخادم' : ($ocrLocalInstalled ? 'مثبتة (تعمل تلقائياً عند أول مرفق)' : ($ocr['installing'] ? 'جارٍ التثبيت…' : 'غير مثبتة بعد (تُثبَّت مع تحديث النظام أو عند أول مرفق)'));
+$ocrText = $ocrSaved['provider'] === 'remote' ? 'خدمة خارجية: ' . $ocrSaved['url'] : 'الخدمة المحلية — ' . $ocrLocalText;
+$ocrMask = function ($secret) { $n = strlen($secret); return $n <= 8 ? str_repeat('•', $n) : substr($secret, 0, 4) . str_repeat('•', 12) . substr($secret, -4); };
+?>
+<div class="container py-4" dir="rtl" style="max-width:900px">
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header text-white" style="background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);">
+            <h4 class="mb-0"><i class="bi bi-robot me-2"></i><?= $aiOptEsc($sc_title) ?></h4>
+        </div>
+        <div class="card-body p-4">
+            <?php if ($aiOptError !== '') { ?><div class="alert alert-danger"><?= $aiOptEsc($aiOptError) ?></div><?php } ?>
+            <?php if ($aiOptFlash !== '') { ?><div class="alert alert-success"><?= $aiOptEsc($aiOptFlash) ?></div><?php } ?>
+            <form method="post">
+                <input type="hidden" name="csrf_token" value="<?= $aiOptEsc($aiOptCsrf) ?>">
+                <input type="hidden" name="company_enabled" value="0">
+                <div class="form-check form-switch fs-5">
+                    <input class="form-check-input" type="checkbox" role="switch" id="aiCompanyEnabled" name="company_enabled" value="1" <?= $aiOptOn ? 'checked' : '' ?> <?= $aiOptCanEdit ? '' : 'disabled' ?>>
+                    <label class="form-check-label" for="aiCompanyEnabled">تشغيل المساعد الذكي لجميع مستخدمي هذه الشركة</label>
+                </div>
+                <div class="form-text mb-3">
+                    عند الإيقاف يختفي زر المساعد من جميع الشاشات لكل المستخدمين. الإعداد الافتراضي: مُشغّل.
+                    يستطيع كل مستخدم أيضاً إيقافه لحسابه فقط من <a href="/aqary/admin/profile.hnt">الملف الشخصي</a>،
+                    ويُحدَّد من يحق له استخدامه من صلاحيات المجموعات (شاشة «المساعد الذكي»).
+                </div>
+                <?php if ($aiOptCanEdit) { ?>
+                    <button class="btn btn-success"><i class="bi bi-check-lg me-1"></i>حفظ</button>
+                <?php } else { ?>
+                    <div class="alert alert-secondary mb-0">تحتاج صلاحية تعديل خيارات النظام لتغيير هذا الإعداد.</div>
+                <?php } ?>
+            </form>
+        </div>
+    </div>
+
+    <div class="card shadow-sm border-0 mb-4" id="ocr">
+        <div class="card-header bg-white py-3"><strong><i class="bi bi-file-earmark-text me-1"></i>قراءة المستندات (OCR)</strong></div>
+        <div class="card-body p-4">
+            <?php if ($aiOptTest !== null) { ?>
+                <div class="alert <?= $aiOptTest['ok'] ? 'alert-success' : 'alert-danger' ?>">
+                    <?= $aiOptTest['ok'] ? '<i class="bi bi-check-circle me-1"></i>الاتصال ناجح.' : '<i class="bi bi-x-circle me-1"></i>فشل الاتصال.' ?>
+                    <span class="small" dir="ltr">(<?= $aiOptEsc($aiOptTest['detail']) ?>)</span>
+                    <div class="small">لم يُحفظ شيء بعد — اضغط «حفظ» لاعتماد الإعداد.</div>
+                </div>
+            <?php } ?>
+            <form method="post" autocomplete="off">
+                <input type="hidden" name="csrf_token" value="<?= $aiOptEsc($aiOptCsrf) ?>">
+                <fieldset <?= $aiOptCanEdit ? '' : 'disabled' ?>>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="radio" name="ocr_provider" id="ocrLocal" value="local" <?= $ocrForm['provider'] === 'local' ? 'checked' : '' ?>>
+                        <label class="form-check-label" for="ocrLocal"><strong>الخدمة المحلية (الافتراضي)</strong> — تعمل على هذا الخادم بدون إنترنت.</label>
+                    </div>
+                    <div class="border rounded p-3 mb-3 ms-4 bg-light small" data-ocr-panel="local">
+                        <div class="mb-1">الحالة: <?= $aiOptEsc($ocrLocalText) ?></div>
+                        <div class="mb-1">العنوان: <code dir="ltr"><?= $aiOptEsc(AqaryOcrRuntime::localUrl()) ?></code> (داخلي فقط)</div>
+                        <div>مفتاح API:
+                            <?php if ($ocrLocalToken === '') { ?>
+                                <span class="text-muted">يُنشأ تلقائياً عند التثبيت</span>
+                            <?php } else { ?>
+                                <code dir="ltr" id="ocrLocalKey" data-full="<?= $aiOptCanEdit ? $aiOptEsc($ocrLocalToken) : '' ?>"><?= $aiOptEsc($ocrMask($ocrLocalToken)) ?></code>
+                                <?php if ($aiOptCanEdit) { ?><button type="button" class="btn btn-link btn-sm p-0 ms-2" id="ocrLocalReveal">إظهار</button><?php } ?>
+                                <div class="text-muted">المفتاح السري المحفوظ في ملف <code dir="ltr">ocr-service/aqary_ocr.env</code>، يُنشأ عشوائياً لكل تثبيت.</div>
+                            <?php } ?>
+                        </div>
+                    </div>
+
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="radio" name="ocr_provider" id="ocrRemote" value="remote" <?= $ocrForm['provider'] === 'remote' ? 'checked' : '' ?>>
+                        <label class="form-check-label" for="ocrRemote"><strong>خدمة خارجية</strong> — خادم OCR آخر متوافق (نفس واجهة Indra: <code dir="ltr">/v1/ocr</code> و <code dir="ltr">/health</code>).</label>
+                    </div>
+                    <div class="border rounded p-3 mb-3 ms-4" data-ocr-panel="remote">
+                        <div class="mb-3">
+                            <label class="form-label" for="ocrUrl">عنوان الخدمة (URL)</label>
+                            <input type="url" class="form-control" dir="ltr" id="ocrUrl" name="ocr_url" maxlength="300" placeholder="https://ocr.example.com" value="<?= $aiOptEsc($ocrForm['url']) ?>">
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label" for="ocrKey">مفتاح API</label>
+                            <input type="password" class="form-control" dir="ltr" id="ocrKey" name="ocr_key" maxlength="512" autocomplete="new-password"
+                                   placeholder="<?= $ocrSaved['has_key'] ? 'محفوظ — اتركه فارغاً للإبقاء عليه' : 'المفتاح السري للخدمة' ?>" value="<?= $aiOptEsc($ocrForm['key']) ?>">
+                            <div class="form-text">يُرسل في الترويسة <code dir="ltr">X-Ocr-Token</code> وكذلك <code dir="ltr">Authorization: Bearer</code>. لا يُعرض المفتاح المحفوظ.</div>
+                        </div>
+                        <?php if ($ocrSaved['has_key']) { ?>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="ocr_clear_key" id="ocrClearKey" value="1" <?= $ocrForm['clear'] ? 'checked' : '' ?>>
+                                <label class="form-check-label" for="ocrClearKey">حذف المفتاح المحفوظ</label>
+                            </div>
+                        <?php } ?>
+                    </div>
+                </fieldset>
+                <?php if ($aiOptCanEdit) { ?>
+                    <button class="btn btn-success" name="action" value="ocr_save"><i class="bi bi-check-lg me-1"></i>حفظ</button>
+                    <button class="btn btn-outline-primary" name="action" value="ocr_test"><i class="bi bi-plug me-1"></i>اختبار الاتصال</button>
+                <?php } else { ?>
+                    <div class="alert alert-secondary mb-0">تحتاج صلاحية تعديل خيارات النظام لتغيير هذا الإعداد.</div>
+                <?php } ?>
+            </form>
+        </div>
+    </div>
+    <script>
+    (function () {
+        var radios = document.querySelectorAll('input[name="ocr_provider"]');
+        function sync() {
+            var chosen = document.querySelector('input[name="ocr_provider"]:checked');
+            document.querySelectorAll('[data-ocr-panel]').forEach(function (panel) {
+                panel.style.opacity = chosen && chosen.value === panel.getAttribute('data-ocr-panel') ? '1' : '.5';
+            });
+            var url = document.getElementById('ocrUrl');
+            if (url) url.required = !!(chosen && chosen.value === 'remote');
+        }
+        radios.forEach(function (r) { r.addEventListener('change', sync); });
+        sync();
+        var reveal = document.getElementById('ocrLocalReveal'), key = document.getElementById('ocrLocalKey');
+        if (reveal && key) reveal.addEventListener('click', function () {
+            var masked = key.getAttribute('data-masked');
+            if (masked === null) { key.setAttribute('data-masked', key.textContent); key.textContent = key.getAttribute('data-full'); reveal.textContent = 'إخفاء'; }
+            else { key.textContent = masked; key.removeAttribute('data-masked'); reveal.textContent = 'إظهار'; }
+        });
+    })();
+    </script>
+
+    <div class="card shadow-sm border-0">
+        <div class="card-header bg-white py-3"><strong><i class="bi bi-info-circle me-1"></i>الحالة</strong></div>
+        <div class="card-body p-4">
+            <table class="table table-sm mb-0">
+                <tr><th style="width:40%">المساعد للشركة</th><td><?= $aiOptOn ? '<span class="badge bg-success">مُشغّل</span>' : '<span class="badge bg-secondary">متوقف</span>' ?></td></tr>
+                <tr><th>المساعد لحسابك</th><td><?= $aiOptUserOn ? '<span class="badge bg-success">مُشغّل</span>' : '<span class="badge bg-secondary">متوقف</span>' ?> <a class="ms-2" href="/aqary/admin/profile.hnt">تغيير</a></td></tr>
+                <tr><th>نموذج الذكاء الاصطناعي</th><td dir="ltr" class="text-end"><?= $aiOptEsc($aiOptStatus['model']) ?> <a class="ms-2" href="/aqary/admin/ai/index.hnt" dir="rtl">إعدادات الذكاء الاصطناعي</a></td></tr>
+                <tr><th>قراءة المستندات (OCR)</th><td><?= $aiOptEsc($ocrText) ?></td></tr>
+            </table>
+        </div>
+    </div>
+</div>
+<?php require __DIR__ . '/../foter.hnt'; ?>

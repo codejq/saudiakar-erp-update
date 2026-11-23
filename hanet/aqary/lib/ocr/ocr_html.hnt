@@ -1,0 +1,203 @@
+<?php
+/**
+ * Turns the OCR service's Markdown (headings, paragraphs, lists, pipe tables, **bold**) into safe HTML.
+ * All text is escaped before any tag is added, so recognised text can never inject markup.
+ * Each block gets dir="auto" so Arabic and English lines both read in their own direction.
+ */
+final class AqaryOcrHtml
+{
+    public static function fromMarkdown(string $markdown): string
+    {
+        // The service writes some tables (e.g. ID cards) as raw HTML. Those are rebuilt through a
+        // whitelist; everything else is Markdown.
+        $html = '';
+        $parts = preg_split('#(<table\b.*?</table\s*>)#is', $markdown, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY);
+        foreach ($parts ?: array() as $part) {
+            $html .= preg_match('#^<table\b#i', $part) ? self::htmlTable($part) : self::markdownBlocks($part);
+        }
+        return $html;
+    }
+
+    /**
+     * Rebuilds an HTML table from the OCR output keeping only table/thead/tbody/tr/th/td/br and numeric
+     * colspan/rowspan; all text is escaped. Drops rows that are entirely empty, and (when no cell spans)
+     * columns that are empty in every row.
+     */
+    private static function htmlTable(string $source): string
+    {
+        if (!class_exists('DOMDocument')) {
+            // No DOM extension: fall back to one paragraph per row, cells separated by spaces.
+            return self::markdownBlocks(strip_tags(preg_replace(array('#</(td|th)>#i', '#</tr>#i'), array('  ', "\n\n"), $source)));
+        }
+        $dom = new DOMDocument();
+        $previous = libxml_use_internal_errors(true);
+        $loaded = $dom->loadHTML('<?xml encoding="utf-8"?><div>' . $source . '</div>', LIBXML_NONET);
+        libxml_clear_errors();
+        libxml_use_internal_errors($previous);
+        $table = $loaded ? $dom->getElementsByTagName('table')->item(0) : null;
+        if (!$table) return self::markdownBlocks(strip_tags($source));
+        foreach (array('script', 'style') as $tag) {
+            foreach (iterator_to_array($table->getElementsByTagName($tag)) as $node) $node->parentNode->removeChild($node);
+        }
+
+        $rows = array();
+        $spans = false;
+        foreach ($table->getElementsByTagName('tr') as $tr) {
+            $cells = array();
+            foreach ($tr->childNodes as $cell) {
+                if (!($cell instanceof DOMElement) || !in_array(strtolower($cell->tagName), array('td', 'th'), true)) continue;
+                $colspan = max(1, min(50, intval($cell->getAttribute('colspan')) ?: 1));
+                $rowspan = max(1, min(50, intval($cell->getAttribute('rowspan')) ?: 1));
+                if ($colspan > 1 || $rowspan > 1) $spans = true;
+                $text = trim(preg_replace('/[ \t]+/u', ' ', $cell->textContent));
+                $cells[] = array('tag' => strtolower($cell->tagName), 'text' => $text, 'colspan' => $colspan, 'rowspan' => $rowspan);
+            }
+            if ($cells && implode('', array_column($cells, 'text')) !== '') $rows[] = $cells;
+        }
+        if (!$rows) return '';
+
+        if (!$spans) {
+            $width = max(array_map('count', $rows));
+            $keep = array();
+            for ($c = 0; $c < $width; $c++) {
+                foreach ($rows as $cells) {
+                    if (isset($cells[$c]) && $cells[$c]['text'] !== '') { $keep[] = $c; break; }
+                }
+            }
+            foreach ($rows as $r => $cells) {
+                $rows[$r] = array();
+                foreach ($keep as $c) $rows[$r][] = $cells[$c] ?? array('tag' => 'td', 'text' => '', 'colspan' => 1, 'rowspan' => 1);
+            }
+        }
+
+        $html = '<table dir="auto"><tbody>';
+        foreach ($rows as $cells) {
+            $html .= '<tr>';
+            foreach ($cells as $cell) {
+                $html .= '<' . $cell['tag']
+                    . ($cell['colspan'] > 1 ? ' colspan="' . $cell['colspan'] . '"' : '')
+                    . ($cell['rowspan'] > 1 ? ' rowspan="' . $cell['rowspan'] . '"' : '')
+                    . ' dir="auto">' . nl2br(htmlspecialchars($cell['text'], ENT_QUOTES, 'UTF-8'), false) . '</' . $cell['tag'] . '>';
+            }
+            $html .= '</tr>';
+        }
+        return $html . "</tbody></table>\n";
+    }
+
+    private static function markdownBlocks(string $markdown): string
+    {
+        $lines = preg_split('/\r\n|\r|\n/', trim($markdown));
+        if ($lines === array('')) return '';
+        $html = '';
+        $paragraph = array();
+        $list = null;      // 'ul' | 'ol'
+        $items = array();
+        $count = count($lines);
+
+        $flushParagraph = function () use (&$paragraph, &$html) {
+            if ($paragraph) $html .= '<p dir="auto">' . implode('<br>', array_map(array(self::class, 'inline'), $paragraph)) . "</p>\n";
+            $paragraph = array();
+        };
+        $flushList = function () use (&$list, &$items, &$html) {
+            if ($list) {
+                $html .= '<' . $list . ' dir="auto">';
+                foreach ($items as $item) $html .= '<li>' . self::inline($item) . '</li>';
+                $html .= '</' . $list . ">\n";
+            }
+            $list = null;
+            $items = array();
+        };
+
+        for ($i = 0; $i < $count; $i++) {
+            $line = rtrim($lines[$i]);
+            $trim = trim($line);
+            if ($trim === '') {
+                $flushParagraph();
+                $flushList();
+                continue;
+            }
+            if (preg_match('/^(#{1,6})\s+(.+)$/u', $trim, $m)) {
+                $flushParagraph();
+                $flushList();
+                $level = min(6, strlen($m[1]) + 1); // the page title is the document's h1, so start at h2
+                $html .= '<h' . $level . ' dir="auto">' . self::inline(rtrim($m[2], " #")) . '</h' . $level . ">\n";
+                continue;
+            }
+            if (self::isTableRow($trim) && $i + 1 < $count && self::isTableSeparator(trim($lines[$i + 1]))) {
+                $flushParagraph();
+                $flushList();
+                $html .= '<table dir="auto"><thead><tr>';
+                foreach (self::cells($trim) as $cell) $html .= '<th>' . self::inline($cell) . '</th>';
+                $html .= '</tr></thead><tbody>';
+                $i += 2;
+                while ($i < $count && self::isTableRow(trim($lines[$i]))) {
+                    $html .= '<tr>';
+                    foreach (self::cells(trim($lines[$i])) as $cell) $html .= '<td>' . self::inline($cell) . '</td>';
+                    $html .= '</tr>';
+                    $i++;
+                }
+                $i--;
+                $html .= "</tbody></table>\n";
+                continue;
+            }
+            if (preg_match('/^[-*•]\s+(.+)$/u', $trim, $m) || preg_match('/^(\d+)[.)]\s+(.+)$/u', $trim, $n)) {
+                $type = isset($n[2]) ? 'ol' : 'ul';
+                $text = isset($n[2]) ? $n[2] : $m[1];
+                $flushParagraph();
+                if ($list !== $type) $flushList();
+                $list = $type;
+                $items[] = $text;
+                unset($m, $n);
+                continue;
+            }
+            $flushList();
+            $paragraph[] = $trim;
+        }
+        $flushParagraph();
+        $flushList();
+        return $html;
+    }
+
+    /** A complete, self-contained HTML document (for download). */
+    public static function document(string $title, string $body): string
+    {
+        $title = htmlspecialchars($title, ENT_QUOTES, 'UTF-8');
+        return "<!doctype html>\n<html lang=\"ar\" dir=\"rtl\">\n<head>\n<meta charset=\"utf-8\">\n"
+            . "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{$title}</title>\n<style>\n" . self::css() . "</style>\n</head>\n"
+            . "<body>\n<main class=\"ocr-doc\">\n{$body}</main>\n</body>\n</html>\n";
+    }
+
+    public static function css(): string
+    {
+        return ".ocr-doc{font-family:Tahoma,'Segoe UI',Arial,sans-serif;line-height:1.8;color:#1f2937;max-width:900px;margin:0 auto;padding:16px}\n"
+            . ".ocr-doc h1{font-size:1.4rem}.ocr-doc h2{font-size:1.25rem}.ocr-doc h3{font-size:1.1rem}\n"
+            . ".ocr-doc table{border-collapse:collapse;width:100%;margin:12px 0}\n"
+            . ".ocr-doc th,.ocr-doc td{border:1px solid #cbd5e1;padding:6px 8px;text-align:start;vertical-align:top}\n"
+            . ".ocr-doc th{background:#f1f5f9}\n"
+            . ".ocr-doc .ocr-page{border-top:2px dashed #cbd5e1;margin-top:24px;padding-top:12px}\n"
+            . ".ocr-doc .ocr-page:first-of-type{border-top:0;margin-top:0;padding-top:0}\n"
+            . ".ocr-doc .ocr-page-label{color:#64748b;font-size:.8rem}\n";
+    }
+
+    private static function inline(string $text): string
+    {
+        $text = htmlspecialchars($text, ENT_QUOTES, 'UTF-8');
+        return (string)preg_replace('/\*\*(.+?)\*\*/u', '<strong>$1</strong>', $text);
+    }
+
+    private static function isTableRow(string $line): bool
+    {
+        return strlen($line) > 2 && $line[0] === '|' && substr($line, -1) === '|';
+    }
+
+    private static function isTableSeparator(string $line): bool
+    {
+        return (bool)preg_match('/^\|(\s*:?-{2,}:?\s*\|)+$/', $line);
+    }
+
+    /** @return list<string> */
+    private static function cells(string $line): array
+    {
+        return array_map('trim', explode('|', trim($line, '|')));
+    }
+}

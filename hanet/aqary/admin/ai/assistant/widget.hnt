@@ -1,0 +1,678 @@
+<?php
+/**
+ * Floating AI assistant. Included by header.hnt (every authenticated page) and, as a fallback, by
+ * foter.hnt; the AQARY_ASSISTANT_RENDERED guard makes it render once. Skipped when $report is set.
+ * Hidden when printing, inside iframes, for signed-out users, when the company turns it off
+ * (global ai_assistant_enabled = 0, System Options -> المساعد الذكي), when the user turns it off for
+ * themselves (user.ai_assistant_enabled = 0, profile page or the hide button in the chat header),
+ * or when the user's group has no access to screen "ai_assistant". All switches default to on.
+ * A page can opt out by setting $aqaryAssistantHide = true before including the footer.
+ *
+ * Chat history lives in sessionStorage per user and company. Drafts are cards: only "create tenant"
+ * saves from the chat (after confirmation); contracts and vouchers open their normal screen pre-filled
+ * (the fields are handed over in sessionStorage and filled by the same script on the target page).
+ */
+// Rendered once per page: header.hnt includes it, foter.hnt is only a fallback for pages without the header.
+if (defined('AQARY_ASSISTANT_RENDERED') || !empty($report) || !empty($aqaryAssistantHide)
+    || empty($_SESSION['useridv']) || !isset($link) || !($link instanceof mysqli)) {
+    return;
+}
+require_once __DIR__ . '/service.hnt';
+try {
+    $aqaryAssistantProbe = new AqaryAssistant($link, intval($_SESSION['useridv']));
+    if (!$aqaryAssistantProbe->enabled() || !$aqaryAssistantProbe->userEnabled() || !$aqaryAssistantProbe->allowed()) {
+        return;
+    }
+} catch (Throwable $error) {
+    error_log('AI assistant widget: ' . $error->getMessage());
+    return;
+}
+define('AQARY_ASSISTANT_RENDERED', true);
+if (empty($_SESSION['ai_assistant_csrf'])) {
+    $_SESSION['ai_assistant_csrf'] = bin2hex(random_bytes(24));
+}
+// Panel open/expanded state from the previous page (cookies set by the script below).
+$aqaryAssistantOpen = ($_COOKIE['aqa_open'] ?? '') === '1';
+$aqaryAssistantWide = ($_COOKIE['aqa_wide'] ?? '') === '1';
+$aqaryAssistantCfg = array(
+    'api' => '/aqary/admin/ai/assistant/api.hnt',
+    'csrf' => (string)$_SESSION['ai_assistant_csrf'],
+    'key' => 'aqary.assistant.v1.' . intval($_SESSION['useridv']) . '.' . substr(hash('sha256', (string)($companyDatabaseName ?? ($_SESSION['dbAddPerfix'] ?? ''))), 0, 12),
+    'canTenant' => $aqaryAssistantProbe->canCreateTenant(),
+);
+?>
+<style>
+    .aqa-launch,.aqa-panel{--aqa-head:#1e3a8a;--aqa-accent:#2563eb;--aqa-soft:#eef3ff;--aqa-line:#e5e7eb;--aqa-text:#1f2937;--aqa-muted:#6b7280;--aqa-bg:#f7f8fb;--aqa-card:#fff;font-family:inherit}
+    .aqa-panel *,.aqa-panel *::before,.aqa-panel *::after,.aqa-launch{box-sizing:border-box}
+    .aqa-launch{position:fixed;bottom:22px;left:22px;z-index:1080;width:58px;height:58px;border-radius:50%;border:0;background:var(--aqa-head);color:#fff;box-shadow:0 8px 24px rgba(30,58,138,.35);font-size:1.55rem;display:flex;align-items:center;justify-content:center;transition:transform .15s;cursor:pointer}
+    .aqa-launch:hover{transform:scale(1.06)}
+    .aqa-panel{position:fixed;bottom:92px;left:22px;z-index:1081;width:420px;max-width:calc(100vw - 24px);height:640px;max-height:calc(100vh - 112px);background:var(--aqa-card);border-radius:18px;box-shadow:0 18px 50px rgba(15,23,42,.30);display:none;flex-direction:column;overflow:hidden;color:var(--aqa-text);direction:rtl;text-align:right}
+    .aqa-panel.open{display:flex}
+    .aqa-panel.wide{width:760px;height:calc(100vh - 112px)}
+    .aqa-head{background:var(--aqa-head);color:#fff;padding:12px 14px;display:flex;align-items:center;gap:10px}
+    .aqa-logo{width:40px;height:40px;border-radius:12px;background:#fff;color:var(--aqa-head);display:flex;align-items:center;justify-content:center;font-size:1.35rem;flex:none}
+    .aqa-titles{flex:1;min-width:0}
+    .aqa-title{font-weight:800;font-size:1.05rem;line-height:1.2}
+    .aqa-status{font-size:.78rem;opacity:.92;display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .aqa-dot{width:8px;height:8px;border-radius:50%;background:#9ca3af;flex:none}
+    .aqa-dot.ok{background:#22c55e}.aqa-dot.warn{background:#f59e0b}
+    .aqa-head button{background:transparent;border:0;color:#fff;font-size:1.15rem;opacity:.85;padding:4px 6px;border-radius:8px;cursor:pointer}
+    .aqa-head button:hover{opacity:1;background:rgba(255,255,255,.12)}
+    .aqa-body{flex:1;overflow-y:auto;padding:14px;background:var(--aqa-bg);scrollbar-width:thin}
+    .aqa-notice{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:12px;padding:10px 12px;margin-bottom:12px;font-size:.85rem;line-height:1.6}
+    .aqa-empty{text-align:center;padding:12px 6px 4px}
+    .aqa-empty-icon{width:58px;height:58px;border-radius:50%;background:var(--aqa-soft);color:var(--aqa-accent);display:inline-flex;align-items:center;justify-content:center;font-size:1.6rem;margin-bottom:12px}
+    .aqa-empty p{color:var(--aqa-muted);font-size:.9rem;line-height:1.8;margin:0 0 14px}
+    .aqa-sugg{display:flex;flex-direction:column;gap:8px}
+    .aqa-sugg button{display:block;width:100%;text-align:right;background:var(--aqa-card);border:1px solid var(--aqa-line);border-radius:12px;padding:10px 14px;font-size:.88rem;font-weight:600;color:var(--aqa-text);cursor:pointer;transition:border-color .15s,background .15s}
+    .aqa-sugg button:hover{border-color:var(--aqa-accent);background:var(--aqa-soft)}
+    .aqa-msg{max-width:88%;margin-bottom:10px;padding:9px 13px;border-radius:14px;white-space:pre-wrap;word-wrap:break-word;font-size:.92rem;line-height:1.6}
+    .aqa-msg.user{background:var(--aqa-accent);color:#fff;margin-right:auto;margin-left:0;border-bottom-left-radius:4px}
+    .aqa-msg.assistant{background:var(--aqa-card);border:1px solid var(--aqa-line);margin-left:auto;border-bottom-right-radius:4px}
+    .aqa-msg.error{background:#fdecea;border:1px solid #f5c2c7;color:#842029}
+    .aqa-links{margin-top:8px;display:flex;flex-wrap:wrap;gap:6px}
+    .aqa-links a,.aqa-links button{font-size:.8rem;border:1px solid var(--aqa-accent);color:var(--aqa-accent);background:transparent;border-radius:999px;padding:3px 11px;text-decoration:none;cursor:pointer}
+    .aqa-links a:hover,.aqa-links button:hover{background:var(--aqa-accent);color:#fff}
+    .aqa-card{background:var(--aqa-card);border:1px solid var(--aqa-accent);border-radius:12px;padding:11px;margin:0 0 10px;font-size:.85rem}
+    .aqa-card h6{font-size:.92rem;color:var(--aqa-head);margin:0 0 8px;font-weight:700}
+    .aqa-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+    .aqa-grid .full{grid-column:1/-1}
+    .aqa-card label{display:block;font-size:.75rem;color:var(--aqa-muted);margin:0 0 2px}
+    .aqa-card input,.aqa-card select{width:100%;font-size:.82rem;padding:4px 7px;border:1px solid var(--aqa-line);border-radius:7px;background:#fff;color:var(--aqa-text)}
+    .aqa-card .ro{font-weight:600;padding:3px 0}
+    .aqa-btn{border:0;border-radius:10px;padding:6px 12px;font-size:.82rem;font-weight:700;cursor:pointer}
+    .aqa-btn.primary{background:var(--aqa-accent);color:#fff}
+    .aqa-btn.primary:disabled{opacity:.6;cursor:default}
+    .aqa-btn.ghost{background:transparent;border:1px solid var(--aqa-line);color:var(--aqa-text)}
+    .aqa-row-btns{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+    .aqa-miss{color:#b02a37;font-size:.78rem;margin-top:6px}
+    .aqa-ok{color:#166534}
+    .aqa-step{border:1px solid var(--aqa-line);border-radius:10px;padding:8px 9px;margin-top:8px;background:var(--aqa-bg)}
+    .aqa-step.ok{background:#f0fdf4;border-color:#bbf7d0}
+    .aqa-step.off{opacity:.55}
+    .aqa-step-h{display:flex;align-items:center;gap:7px;font-weight:700;font-size:.84rem;color:var(--aqa-head)}
+    .aqa-step-n{width:22px;height:22px;border-radius:50%;background:var(--aqa-accent);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:.75rem;flex:none}
+    .aqa-step.ok .aqa-step-n{background:#16a34a}
+    .aqa-step-b{margin-top:7px}
+    .aqa-step-b .aqa-sub{font-size:.76rem;font-weight:700;color:var(--aqa-muted);margin:8px 0 4px}
+    .aqa-ocr{font-size:.75rem;margin-top:6px}
+    .aqa-ocr pre{max-height:160px;overflow:auto;white-space:pre-wrap;background:var(--aqa-bg);padding:6px;border-radius:6px;margin:4px 0 0;font-family:inherit}
+    .aqa-typing{display:inline-flex;gap:4px;vertical-align:middle;margin-left:6px}
+    .aqa-typing span{width:6px;height:6px;border-radius:50%;background:var(--aqa-muted);animation:aqa-b 1s infinite ease-in-out}
+    .aqa-typing span:nth-child(2){animation-delay:.15s}.aqa-typing span:nth-child(3){animation-delay:.3s}
+    @keyframes aqa-b{0%,80%,100%{opacity:.3;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}
+    .aqa-foot{border-top:1px solid var(--aqa-line);padding:10px 12px;background:var(--aqa-card)}
+    .aqa-files{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+    .aqa-files:empty{display:none}
+    .aqa-files span{font-size:.75rem;background:var(--aqa-soft);border-radius:999px;padding:3px 8px;display:inline-flex;align-items:center;gap:5px;max-width:100%}
+    .aqa-files span img{width:28px;height:28px;object-fit:cover;border-radius:6px}
+    .aqa-files span em{font-style:normal;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px}
+    .aqa-files span button{border:0;background:transparent;padding:0 2px;color:#b02a37;font-size:1rem;line-height:1;cursor:pointer}
+    .aqa-row{display:flex;gap:8px;align-items:flex-end}
+    .aqa-iconbtn{width:44px;height:44px;flex:none;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.15rem;cursor:pointer;margin:0}
+    .aqa-attach{border:1px solid var(--aqa-line);background:var(--aqa-card);color:var(--aqa-accent)}
+    .aqa-attach:hover{border-color:var(--aqa-accent)}
+    .aqa-send{border:0;background:var(--aqa-accent);color:#fff}
+    .aqa-send:disabled{background:#bfdbfe;cursor:default}
+    .aqa-send i{transform:scaleX(-1)}
+    .aqa-input{flex:1;resize:none;border:1px solid var(--aqa-line);border-radius:12px;padding:11px 13px;font-size:.92rem;line-height:1.45;min-height:44px;max-height:180px;background:var(--aqa-card);color:var(--aqa-text);overflow-y:auto;scrollbar-width:none;outline:none;font-family:inherit}
+    .aqa-input::-webkit-scrollbar{display:none}
+    .aqa-input:focus{border-color:var(--aqa-accent);box-shadow:0 0 0 3px rgba(37,99,235,.15)}
+    .aqa-filled{outline:2px solid #22c55e!important;outline-offset:1px;background-color:#f0fdf4!important}
+    .aqa-banner{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:1090;background:#065f46;color:#fff;border-radius:12px;padding:10px 16px;box-shadow:0 8px 24px rgba(0,0,0,.2);font-size:.9rem;direction:rtl;display:flex;gap:10px;align-items:center;max-width:calc(100vw - 32px)}
+    .aqa-banner button{background:transparent;border:0;color:#fff;font-size:1.1rem;cursor:pointer}
+    @media (max-width:576px){.aqa-panel,.aqa-panel.wide{left:8px;bottom:80px;width:calc(100vw - 16px);height:calc(100vh - 96px)}.aqa-launch{bottom:14px;left:14px}}
+    @media print{.aqa-launch,.aqa-panel,.aqa-banner{display:none!important}.aqa-filled{outline:0!important;background-color:transparent!important}}
+</style>
+
+<button type="button" class="aqa-launch" id="aqaLaunch" title="المساعد الذكي" aria-label="فتح المساعد الذكي" aria-controls="aqaPanel" aria-expanded="<?= $aqaryAssistantOpen ? 'true' : 'false' ?>">
+    <i class="bi bi-robot"></i>
+</button>
+<div class="aqa-panel<?= $aqaryAssistantOpen ? ' open' : '' ?><?= $aqaryAssistantWide ? ' wide' : '' ?>" id="aqaPanel" role="dialog" aria-label="المساعد الذكي">
+    <div class="aqa-head">
+        <div class="aqa-logo"><i class="bi bi-robot"></i></div>
+        <div class="aqa-titles">
+            <div class="aqa-title">المساعد الذكي</div>
+            <div class="aqa-status"><span class="aqa-dot" id="aqaDot"></span><span id="aqaStatusText">جارٍ التحقق…</span></div>
+        </div>
+        <button type="button" id="aqaHide" title="إيقاف المساعد لحسابي" aria-label="إيقاف المساعد لحسابي"><i class="bi bi-eye-slash"></i></button>
+        <button type="button" id="aqaClear" title="محادثة جديدة" aria-label="محادثة جديدة"><i class="bi bi-arrow-counterclockwise"></i></button>
+        <button type="button" id="aqaWide" title="تكبير" aria-label="تكبير"><i class="bi bi-arrows-angle-expand"></i></button>
+        <button type="button" id="aqaClose" title="إغلاق" aria-label="إغلاق"><i class="bi bi-x-lg"></i></button>
+    </div>
+    <div class="aqa-body" id="aqaBody" aria-live="polite"></div>
+    <div class="aqa-foot">
+        <div class="aqa-files" id="aqaFiles"></div>
+        <div class="aqa-row">
+            <label class="aqa-iconbtn aqa-attach" title="إرفاق هوية أو عقد أو إيصال (صورة / PDF) — أو الصق صورة بـ Ctrl+V" aria-label="إرفاق ملف">
+                <i class="bi bi-paperclip"></i>
+                <input type="file" id="aqaFile" style="display:none" multiple accept="image/*,application/pdf">
+            </label>
+            <textarea id="aqaInput" class="aqa-input" rows="1" placeholder="اسأل أي شيء أو أرفق مستنداً..."></textarea>
+            <button type="button" id="aqaSend" class="aqa-iconbtn aqa-send" title="إرسال" aria-label="إرسال" disabled><i class="bi bi-send-fill"></i></button>
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+    if (window.top !== window.self || window.__aqaryAssistant) { return; }
+    window.__aqaryAssistant = true;
+    const CFG = <?= json_encode($aqaryAssistantCfg, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP) ?>;
+    const PREFILL_KEY = 'aqary.assistant.prefill.v1';
+    const SUGG = [
+        'أضف مستأجراً جديداً من صورة الهوية المرفقة',
+        'استورد عقد منصة إيجار من الملف المرفق',
+        'أنشئ عقد إيجار للمستأجر <اسم المستأجر> في عقار <اسم العقار> وحدة <رقم الوحدة>',
+        'كم متأخرات المستأجر <اسم المستأجر>؟',
+        'ما الوحدات الشاغرة في <اسم العقار>؟',
+        'سجّل سند صرف بمبلغ <المبلغ> لـ <المستفيد> مقابل <البيان>'
+    ];
+    const LABELS = {
+        name: 'الاسم', id_number: 'رقم الهوية / الإقامة', id_type: 'نوع الهوية', nationality: 'الجنسية', phone: 'الجوال',
+        email: 'البريد الإلكتروني', address: 'العنوان', work: 'جهة العمل', vat_number: 'الرقم الضريبي',
+        annual_rent: 'الإيجار السنوي', duration_months: 'المدة (شهر)', start_date: 'تاريخ البداية', notes: 'ملاحظات',
+        party_name: 'الاسم', amount: 'المبلغ', date: 'التاريخ', description: 'البيان', payment_method: 'طريقة الدفع',
+        tenant: 'المستأجر', tenant_permission: 'صلاحية إضافة مستأجر', property: 'العقار', unit: 'الوحدة', no_vacant_unit: 'وحدة شاغرة في العقار',
+        unit_ambiguous: 'تأكيد نوع الوحدة (يوجد أكثر من وحدة بنفس الرقم)',
+        payer: 'اسم الدافع', beneficiary: 'اسم المستفيد'
+    };
+    const METHODS = { cash: ['نقداً', 1], cheque: ['شيك', 2], transfer: ['تحويل بنكي', 4], other: ['طريقة أخرى', 3] };
+
+    const $ = (id) => document.getElementById(id);
+    const panel = $('aqaPanel'), body = $('aqaBody'), input = $('aqaInput'), fileInput = $('aqaFile'), filesBox = $('aqaFiles'), sendBtn = $('aqaSend');
+    let state = { open: false, wide: false, messages: [] };
+    let files = [], busy = false, status = null, previews = [];
+
+    // Open/expanded state lives in cookies (shared by all pages and tabs, read by PHP on the next page);
+    // the conversation stays in sessionStorage.
+    const getCookie = (name) => { const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)')); return m ? m[1] : null; };
+    const setCookie = (name, on) => { document.cookie = name + '=' + (on ? '1' : '0') + '; path=/aqary/; max-age=2592000; SameSite=Lax' + (location.protocol === 'https:' ? '; Secure' : ''); };
+    try { state.messages = (JSON.parse(sessionStorage.getItem(CFG.key) || '{}').messages) || []; } catch (e) {}
+    state.open = getCookie('aqa_open') === '1';
+    state.wide = getCookie('aqa_wide') === '1';
+    const save = () => {
+        setCookie('aqa_open', state.open); setCookie('aqa_wide', state.wide);
+        try { sessionStorage.setItem(CFG.key, JSON.stringify({ messages: state.messages.slice(-40) })); } catch (e) {}
+    };
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const safeUrl = (u) => { try { const x = new URL(u, location.origin); return x.origin === location.origin ? x.href : null; } catch (e) { return null; } };
+    const toDMY = (iso) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ''); return m ? m[3] + '/' + m[2] + '/' + m[1] : ''; };
+
+    async function post(data, form) {
+        const fd = form || new FormData();
+        Object.keys(data).forEach((k) => fd.append(k, data[k]));
+        fd.append('csrf_token', CFG.csrf);
+        const res = await fetch(CFG.api, { method: 'POST', body: fd, credentials: 'same-origin', headers: { 'Accept': 'application/json', 'X-CSRF-Token': CFG.csrf } });
+        const json = await res.json().catch(() => ({}));
+        return { ok: res.ok && json.ok, data: json };
+    }
+
+    function setOpen(open) {
+        state.open = open; panel.classList.toggle('open', open); $('aqaLaunch').setAttribute('aria-expanded', open ? 'true' : 'false'); save();
+        if (open) { render(); loadStatus(); setTimeout(() => input.focus(), 50); }
+    }
+    function setWide(wide) {
+        state.wide = wide; panel.classList.toggle('wide', wide); save();
+        const b = $('aqaWide'); b.title = wide ? 'تصغير' : 'تكبير'; b.setAttribute('aria-label', b.title);
+        b.innerHTML = '<i class="bi ' + (wide ? 'bi-arrows-angle-contract' : 'bi-arrows-angle-expand') + '"></i>';
+    }
+    async function loadStatus() {
+        try {
+            const res = await fetch(CFG.api + '?action=status', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+            status = res.ok ? await res.json() : null;
+        } catch (e) { status = null; }
+        const ready = status && status.ready;
+        let text = status ? (ready ? 'جاهز' : 'غير جاهز') : 'تعذّر التحقق';
+        if (ready && status.ocr) {
+            text += status.ocr.installed ? ' · قراءة المستندات جاهزة' : (status.ocr.installing ? ' · جارٍ تجهيز قراءة المستندات' : (status.ocr.supported ? ' · تُجهَّز قراءة المستندات عند أول مرفق' : ''));
+        }
+        $('aqaDot').className = 'aqa-dot ' + (status ? (ready ? 'ok' : 'warn') : '');
+        $('aqaStatusText').textContent = text;
+        render();
+    }
+
+    function links(list) {
+        const ok = (list || []).map((l) => ({ t: l.title, u: safeUrl(l.url) })).filter((l) => l.u);
+        return ok.length ? '<div class="aqa-links">' + ok.map((l) => '<a href="' + esc(l.u) + '">' + esc(l.t) + '</a>').join('') + '</div>' : '';
+    }
+    function ocrBlock(atts) {
+        return (atts || []).map((a) => '<details class="aqa-ocr"><summary><i class="bi bi-file-earmark-text"></i> ' + esc(a.name) + (a.error ? ' — ' + esc(a.error) : ' · نص المرفق') + '</summary>'
+            + (a.text ? '<pre dir="' + (a.rtl ? 'rtl' : 'ltr') + '">' + esc(a.text) + '</pre>' : '') + '</details>').join('');
+    }
+    function field(prefix, key, val, full) {
+        let control;
+        if (key === 'payment_method') {
+            control = '<select data-f="' + prefix + key + '">' + Object.keys(METHODS).map((m) => '<option value="' + m + '"' + (val === m ? ' selected' : '') + '>' + METHODS[m][0] + '</option>').join('') + '</select>';
+        } else {
+            const type = key === 'start_date' || key === 'date' ? 'date' : (key === 'amount' || key === 'annual_rent' || key === 'duration_months' ? 'number' : 'text');
+            control = '<input type="' + type + '" data-f="' + prefix + key + '" value="' + esc(val ?? '') + '"' + (type === 'number' ? ' step="any" min="0"' : '') + '>';
+        }
+        return '<div' + (full ? ' class="full"' : '') + '><label>' + esc(LABELS[key] || key) + '</label>' + control + '</div>';
+    }
+    function ro(label, value) { return '<div><label>' + esc(label) + '</label><div class="ro">' + esc(value || '—') + '</div></div>'; }
+    const TENANT_FIELDS = ['name', 'id_number', 'id_type', 'nationality', 'phone', 'email', 'address', 'work', 'vat_number'];
+
+    // ---- Ejar contract import: one card, four steps (building, unit, tenant, contract screen).
+    const EJAR_REASON = { deed: 'نفس رقم الصك', address: 'نفس العنوان الوطني', owner: 'لنفس المالك', name: 'اسم مشابه' };
+    const num = (v) => (v === null || v === undefined || v === '' || isNaN(Number(v))) ? '—' : Number(v).toLocaleString('ar-SA');
+    function ejarCard(a, key) {
+        const d = a.data || {}, s = a.state || (a.state = {}), c = d.contract || {}, p = d.perms || {};
+        const cands = (d.building && d.building.candidates) || [];
+        const chosen = cands.find((x) => x.id === s.building_id) || null;
+        const opts = (list, val) => (list || []).map((o) => '<option value="' + esc(o.id) + '"' + (String(o.id) === String(val ?? '') ? ' selected' : '') + '>' + esc(o.name || o.label) + '</option>').join('');
+        const inp = (path, label, val, type, full) => '<div' + (full ? ' class="full"' : '') + '><label>' + esc(label) + '</label><input data-e="' + path + '" type="' + (type || 'text') + '" value="' + esc(val ?? '') + '"' + (type === 'number' ? ' step="any" min="0"' : '') + '></div>';
+        const sel = (path, label, list, val) => '<div><label>' + esc(label) + '</label><select data-e="' + path + '"><option value="">— اختر —</option>' + opts(list, val) + '</select></div>';
+        const btn = (act, label, ok) => '<button type="button" class="aqa-btn primary" data-ejar="' + key + '|' + act + '"' + (!ok || a.busy ? ' disabled' : '') + '>' + label + '</button>';
+        const step = (n, ok, off, title, inner) => '<div class="aqa-step' + (ok ? ' ok' : '') + (off ? ' off' : '') + '"><div class="aqa-step-h"><span class="aqa-step-n">' + (ok ? '<i class="bi bi-check-lg"></i>' : n) + '</span>' + title + '</div>' + (inner ? '<div class="aqa-step-b">' + inner + '</div>' : '') + '</div>';
+        const noPerm = (what) => '<div class="aqa-miss">ليست لديك صلاحية ' + what + '.</div>';
+
+        if (a.done) { return '<div class="aqa-card"><i class="bi bi-check-circle-fill aqa-ok"></i> ' + esc(a.done.message) + links(a.done.links) + '</div>'; }
+        let h = '<div class="aqa-card" data-card="' + key + '"><h6><i class="bi bi-file-earmark-arrow-down"></i> استيراد عقد إيجار' + (c.number ? ' رقم ' + esc(c.number) : '') + '</h6>';
+        h += '<div class="aqa-grid">' + ro('من', c.start_date) + ro('إلى', c.end_date) + ro('الإيجار السنوي', num(c.annual_rent))
+            + ro('الدفعات', (c.payments_count ? c.payments_count + ' × ' : '') + num(c.installment) + (c.cycle_months ? ' · كل ' + c.cycle_months + ' أشهر' : '')) + '</div>';
+        if (d.units_total > 1) { h += '<div class="aqa-miss"><i class="bi bi-info-circle"></i> العقد يشمل ' + d.units_total + ' وحدات؛ جُهّزت الوحدة الأولى، وتُضاف البقية من شاشة العقار.</div>'; }
+        if (d.existing_contract) { h += '<div class="aqa-miss"><i class="bi bi-exclamation-triangle"></i> يوجد عقد بنفس الرقم في النظام.' + links([{ title: 'فتح العقد المسجّل', url: d.existing_contract.url }]) + '</div>'; }
+
+        // 1. Building
+        let b = '';
+        const picker = cands.length && !s.building_created
+            ? '<div><label>اختر العقار</label><select data-ejar-pick="' + key + '|building"><option value="new"' + (s.building_id ? '' : ' selected') + '>➕ عقار جديد (غير موجود)</option>'
+              + cands.map((x) => '<option value="' + x.id + '"' + (x.id === s.building_id ? ' selected' : '') + '>' + esc(x.name) + ' — ' + esc(EJAR_REASON[x.reason] || '') + '</option>').join('') + '</select></div>'
+            : '';
+        if (s.building_id) {
+            b += '<div class="ro">' + esc(s.building_label || (chosen && chosen.name) || ('#' + s.building_id)) + (chosen && chosen.address ? ' · ' + esc(chosen.address) : '') + '</div>' + picker;
+        } else {
+            b += picker + '<div class="aqa-miss">' + (cands.length ? 'إن لم يكن أحد هذه العقارات، ' : '') + 'العقار غير موجود في النظام — لنضفه:</div>';
+            const nb = d.building.new || {}, o = d.owner || {}, u = d.unit || {};
+            b += '<div class="aqa-grid">' + inp('building.new.name', 'اسم العقار', nb.name, 'text', true) + sel('building.new.type_id', 'نوع العقار', d.types, nb.type_id)
+                + inp('building.new.deed_number', 'رقم الصك', nb.deed_number) + inp('building.new.address', 'العنوان', nb.address, 'text', true) + '</div>'
+                + '<div class="aqa-sub">المالك (المؤجر)</div><div class="aqa-grid">' + inp('owner.name', 'الاسم', o.name, 'text', true) + inp('owner.id_number', 'رقم الهوية', o.id_number) + inp('owner.mobile', 'الجوال', o.mobile) + '</div>'
+                + '<div class="aqa-sub">وحدة العقد (تُضاف مع العقار)</div><div class="aqa-grid">' + sel('unit.subtype_id', 'نوع الوحدة' + (u.type_label ? ' (' + u.type_label + ')' : ''), d.subtypes, u.subtype_id)
+                + inp('unit.number', 'رقم الوحدة', u.number) + inp('unit.price', 'الإيجار السنوي', u.price, 'number') + '</div>';
+            b += '<div class="aqa-row-btns">' + (p.building ? btn('add_building', '<i class="bi bi-building-add"></i> إضافة العقار والوحدة', true) : noPerm('إضافة عقار')) + '</div>';
+        }
+        h += step(1, !!s.building_id, false, 'العقار', b);
+
+        // 2. Unit
+        let u2 = '';
+        if (s.building_id) {
+            const units = chosen ? (chosen.units || []) : [];
+            const unitPicker = units.length ? '<div><label>أو اختر وحدة شاغرة</label><select data-ejar-pick="' + key + '|unit"><option value="">—</option>' + opts(units, s.unit_id) + '</select></div>' : '';
+            if (s.unit_id) {
+                u2 += '<div class="ro">' + esc(s.unit_label || '') + '</div>' + (s.building_created ? '' : unitPicker);
+            } else {
+                const m = chosen && chosen.unit_match, u = d.unit || {};
+                if (m && m.rented) { u2 += '<div class="aqa-miss">الوحدة ' + esc(m.label) + ' مؤجرة حالياً' + (m.tenant ? ' لـ ' + esc(m.tenant) : '') + '. اختر وحدة شاغرة أو أضف وحدة.</div>'; }
+                u2 += unitPicker + '<div class="aqa-miss">الوحدة رقم ' + esc(u.number || '?') + ' غير موجودة في هذا العقار — لنضفها:</div>'
+                    + '<div class="aqa-grid">' + sel('unit.subtype_id', 'نوع الوحدة' + (u.type_label ? ' (' + u.type_label + ')' : ''), d.subtypes, u.subtype_id)
+                    + inp('unit.number', 'رقم الوحدة', u.number) + inp('unit.price', 'الإيجار السنوي', u.price, 'number') + '</div>'
+                    + '<div class="aqa-row-btns">' + (p.unit ? btn('add_unit', '<i class="bi bi-plus-square"></i> إضافة الوحدة', true) : noPerm('إضافة وحدة')) + '</div>';
+            }
+        }
+        h += step(2, !!s.unit_id, !s.building_id, 'الوحدة', u2);
+
+        // 3. Tenant
+        let t = '';
+        const tm = d.tenant && d.tenant.match;
+        if (s.tenant_id) {
+            t += '<div class="ro">' + esc(s.tenant_label || (tm && tm.name) || '') + '</div>' + (tm && tm.id === s.tenant_id ? links([{ title: 'بيانات المستأجر', url: tm.url }]) : '');
+        } else {
+            const td = (d.tenant && d.tenant.data) || {};
+            t += '<div class="aqa-miss">المستأجر غير موجود في النظام — لنضفه:</div><div class="aqa-grid">';
+            TENANT_FIELDS.forEach((k) => { t += inp('tenant.data.' + k, LABELS[k] || k, td[k], 'text', k === 'name' || k === 'address'); });
+            t += '</div>' + (d.tenant && d.tenant.agent ? '<div class="aqa-ocr">يمثله في العقد: ' + esc(d.tenant.agent) + '</div>' : '')
+                + '<div class="aqa-row-btns">' + (p.tenant ? btn('add_tenant', '<i class="bi bi-person-plus"></i> إضافة المستأجر', true) : noPerm('إضافة مستأجر')) + '</div>';
+        }
+        h += step(3, !!s.tenant_id, false, 'المستأجر', t);
+
+        // 4. Contract
+        const ready = s.building_id && s.unit_id && s.tenant_id;
+        h += step(4, false, !ready, 'العقد', '<div class="aqa-ocr">تُفتح شاشة عقد الإيجار معبّأة بالرقم والتواريخ والمبالغ ودورة السداد — راجعها ثم احفظ.</div>'
+            + '<div class="aqa-row-btns">' + (p.contract ? btn('open_contract', '<i class="bi bi-file-earmark-text"></i> فتح شاشة العقد معبّأة', !!ready) : noPerm('إنشاء عقود الإيجار')) + '</div>');
+
+        if (a.error) { h += '<div class="aqa-miss">' + esc(a.error) + '</div>'; }
+        if (a.notes && a.notes.length) { h += '<div class="aqa-ocr">' + a.notes.map((n) => '<div><i class="bi bi-check2 aqa-ok"></i> ' + esc(n) + '</div>').join('') + '</div>'; }
+        h += '<div class="aqa-row-btns"><button type="button" class="aqa-btn ghost" data-cancel="' + key + '">إلغاء الاستيراد</button></div></div>';
+        return h;
+    }
+    function setPath(obj, path, value) {
+        const parts = path.split('.');
+        let o = obj;
+        parts.slice(0, -1).forEach((k) => { if (!o[k] || typeof o[k] !== 'object') { o[k] = {}; } o = o[k]; });
+        o[parts[parts.length - 1]] = value === '' ? null : value;
+    }
+    function ejarSync(a, el) { if (el) { el.querySelectorAll('[data-e]').forEach((inp) => setPath(a.data, inp.dataset.e, inp.value.trim())); } }
+    function ejarFind(key) {
+        const [mi, ai] = key.split(':').map(Number);
+        return { a: state.messages[mi]?.actions?.[ai], el: body.querySelector('[data-card="' + key + '"]') };
+    }
+    function ejarPick(key, what, value) {
+        const { a, el } = ejarFind(key);
+        if (!a) { return; }
+        ejarSync(a, el);
+        const s = a.state;
+        if (what === 'building') {
+            const cand = (a.data.building.candidates || []).find((x) => String(x.id) === value);
+            s.building_id = cand ? cand.id : null; s.building_label = cand ? cand.name : null;
+            const m = cand && cand.unit_match;
+            s.unit_id = m && !m.rented ? m.id : null; s.unit_label = m && !m.rented ? m.label : null;
+        } else {
+            const cand = (a.data.building.candidates || []).find((x) => x.id === s.building_id);
+            const unit = cand && (cand.units || []).find((x) => String(x.id) === value);
+            s.unit_id = unit ? unit.id : null; s.unit_label = unit ? unit.label : null;
+        }
+        a.error = null; save(); render();
+    }
+    function ejarNotes(c, d) {
+        const parts = ['مستورد من عقد منصة إيجار رقم ' + (c.number || '—')];
+        if (c.broker) { parts.push('الوسيط: ' + c.broker); }
+        if (c.payment_methods) { parts.push('طرق الدفع: ' + c.payment_methods); }
+        if (d.tenant && d.tenant.agent) { parts.push('ممثل المستأجر: ' + d.tenant.agent); }
+        if ((c.schedule || []).length) { parts.push('جدول الدفعات: ' + c.schedule.map((r) => (r.due_date || '?') + ' = ' + (r.amount ?? '?')).join('، ')); }
+        return parts.join(' — ');
+    }
+    async function ejarAction(key, act) {
+        const { a, el } = ejarFind(key);
+        if (!a || a.busy) { return; }
+        ejarSync(a, el);
+        const d = a.data, s = a.state, c = d.contract || {};
+        a.busy = true; a.error = null; a.notes = a.notes || []; render();
+        try {
+            if (act === 'add_building') {
+                const r = await post({ action: 'confirm', type: 'ejar_building', data: JSON.stringify({ building: d.building.new, owner: d.owner, unit: d.unit, contract_number: c.number }) });
+                if (!r.ok) { throw new Error(r.data.message || 'تعذّرت إضافة العقار.'); }
+                Object.assign(s, { building_id: r.data.building_id, building_label: r.data.building_label, unit_id: r.data.unit_id, unit_label: r.data.unit_label, building_created: true });
+                a.notes.push(r.data.message);
+            } else if (act === 'add_unit') {
+                const r = await post({ action: 'confirm', type: 'ejar_unit', data: JSON.stringify({ building_id: s.building_id, unit: d.unit }) });
+                if (!r.ok) { throw new Error(r.data.message || 'تعذّرت إضافة الوحدة.'); }
+                Object.assign(s, { unit_id: r.data.unit_id, unit_label: r.data.unit_label });
+                a.notes.push(r.data.message);
+            } else if (act === 'add_tenant') {
+                const t = await createTenant(d.tenant.data || {});
+                Object.assign(s, { tenant_id: t.tenant_id, tenant_label: t.tenant_label });
+                a.notes.push(t.message);
+            } else if (act === 'open_contract') {
+                if (!s.building_created) {
+                    // Remember the deed / national address on the chosen building for the next import (best effort).
+                    await post({ action: 'confirm', type: 'ejar_remember', data: JSON.stringify({ building_id: s.building_id, deed_number: d.building.new.deed_number, national_address: d.building.new.national_address }) }).catch(() => null);
+                }
+                const url = '/aqary/admin/include/amlak/egar.hnt?hnt_dll=1&idaqar=' + encodeURIComponent(s.building_id) + '&idsubaqar=' + encodeURIComponent(s.unit_id) + '&mostagerid=' + encodeURIComponent(s.tenant_id);
+                a.busy = false;
+                a.done = { message: 'فُتحت شاشة العقد معبّأة ببيانات عقد إيجار' + (c.number ? ' رقم ' + c.number : '') + '، راجعها ثم احفظ.', links: [{ title: 'فتح شاشة العقد', url: url }] };
+                save(); render();
+                goWithPrefill(url, {
+                    rakam3akd: c.number, aqartype: c.purpose, elect: c.electricity_meter,
+                    annualprice: c.annual_rent, duration: c.cycle_months, depositeamount: c.installment,
+                    contractDuraion: c.months, st_date_: toDMY(c.start_date), st_date0_: toDMY(c.end_date), st_datex_: toDMY(c.sealing_date),
+                    tamen: c.security_deposit, water: c.water, services: c.services, vat_type: c.vat_type,
+                    mostageragent: d.tenant && d.tenant.agent, notes: ejarNotes(c, d)
+                });
+                return;
+            }
+        } catch (e) { a.error = e.message || 'مشكلة في الاتصال، حاول مرة أخرى.'; }
+        a.busy = false; save(); render();
+    }
+
+    function card(a, key) {
+        if (a.cancelled) { return ''; }
+        if (a.type === 'ejar_contract') { return ejarCard(a, key); }
+        if (a.done) { return '<div class="aqa-card"><i class="bi bi-check-circle-fill aqa-ok"></i> ' + esc(a.done.message) + links(a.done.links) + '</div>'; }
+        const d = a.data || {};
+        let h = '<div class="aqa-card" data-card="' + key + '">', button = 'تأكيد';
+        if (a.type === 'create_tenant') {
+            h += '<h6><i class="bi bi-person-plus"></i> مستأجر جديد</h6><div class="aqa-grid">';
+            TENANT_FIELDS.forEach((k) => { h += field('', k, d[k], k === 'name' || k === 'address'); });
+            h += '</div>';
+            if (a.existing) { h += '<div class="aqa-miss">يوجد مستأجر بنفس رقم الهوية: ' + esc(a.existing.name) + links([{ title: 'فتح بياناته', url: a.existing.url }]) + '</div>'; }
+            button = 'تأكيد وإضافة المستأجر';
+        } else if (a.type === 'draft_contract') {
+            h += '<h6><i class="bi bi-file-earmark-text"></i> مسودة عقد إيجار</h6><div class="aqa-grid">';
+            h += ro('العقار', d.property_label) + ro('الوحدة', d.unit_label);
+            if (d.tenant_id) { h += '<div class="full"><label>المستأجر</label><div class="ro">' + esc(d.tenant_label) + '</div></div>'; }
+            h += field('', 'annual_rent', d.annual_rent) + field('', 'duration_months', d.duration_months) + field('', 'start_date', d.start_date) + field('', 'notes', d.notes);
+            h += '</div>';
+            if (!d.tenant_id && d.tenant) {
+                h += '<div style="margin-top:8px"><label style="font-size:.78rem;font-weight:700;color:var(--aqa-head)">مستأجر جديد (يُضاف عند التأكيد)</label><div class="aqa-grid">';
+                TENANT_FIELDS.forEach((k) => { h += field('t.', k, d.tenant[k], k === 'name' || k === 'address'); });
+                h += '</div></div>';
+            }
+            button = 'فتح شاشة العقد معبّأة';
+        } else if (a.type === 'draft_rent_receipt') {
+            h += '<h6><i class="bi bi-cash-coin"></i> سند قبض إيجار</h6><div class="aqa-grid">' + ro('المستأجر', d.tenant_label)
+                + ro('المتأخرات', d.arrears_count ? d.arrears_count + ' قسط · ' + Number(d.arrears_amount).toLocaleString('ar-SA') + ' ريال' : 'لا يوجد') + '</div>';
+            h += '<div class="aqa-links">' + (d.units || []).map((u, i) => '<button type="button" data-unit="' + key + '|' + i + '">قبض: ' + esc(u.label) + '</button>').join('') + '</div></div>';
+            return h;
+        } else {
+            const payment = a.type === 'draft_payment_voucher';
+            h += '<h6><i class="bi bi-receipt"></i> ' + (payment ? 'مسودة سند صرف' : 'مسودة سند قبض حر') + '</h6><div class="aqa-grid">';
+            h += field('', 'party_name', d.party_name, true) + field('', 'amount', d.amount) + field('', 'date', d.date)
+                + field('', 'payment_method', d.payment_method) + field('', 'description', d.description) + field('', 'notes', d.notes, true);
+            h += '</div>';
+            button = 'فتح الشاشة معبّأة';
+        }
+        if ((a.missing || []).length) { h += '<div class="aqa-miss"><i class="bi bi-exclamation-triangle"></i> ناقص: ' + esc(a.missing.map((m) => LABELS[m] || m).join('، ')) + '</div>'; }
+        if (a.error) { h += '<div class="aqa-miss">' + esc(a.error) + '</div>'; }
+        h += '<div class="aqa-row-btns"><button type="button" class="aqa-btn primary" data-confirm="' + key + '"' + (a.busy ? ' disabled' : '') + '><i class="bi bi-check2"></i> ' + button + '</button>'
+            + '<button type="button" class="aqa-btn ghost" data-cancel="' + key + '">إلغاء</button></div></div>';
+        return h;
+    }
+
+    let askHide = false;
+    function render() {
+        let h = status && !status.ready && status.message ? '<div class="aqa-notice">' + esc(status.message) + '</div>' : '';
+        if (askHide) {
+            h += '<div class="aqa-card"><h6><i class="bi bi-eye-slash"></i> إيقاف المساعد الذكي لحسابك؟</h6>'
+                + '<div>سيختفي زر المساعد من جميع الشاشات لحسابك فقط. يمكنك تشغيله مرة أخرى في أي وقت من <b>الملف الشخصي</b>.</div>'
+                + '<div class="aqa-row-btns"><button type="button" class="aqa-btn primary" data-hide-yes="1">إيقاف</button>'
+                + '<button type="button" class="aqa-btn ghost" data-hide-no="1">إلغاء</button></div></div>';
+        }
+        if (!state.messages.length) {
+            h += '<div class="aqa-empty"><div class="aqa-empty-icon"><i class="bi bi-file-earmark-text"></i></div>'
+                + '<p>أرفق صورة الهوية أو العقد أو الإيصال، واسألني عن المستأجرين والعقارات والمتأخرات، أو اطلب مني إضافة مستأجر أو تجهيز عقد أو سند، أو فتح أي شاشة.</p>'
+                + '<div class="aqa-sugg">' + SUGG.map((s) => '<button type="button" data-sugg="' + esc(s) + '">' + esc(s) + '</button>').join('') + '</div></div>';
+        }
+        state.messages.forEach((m, i) => {
+            h += '<div class="aqa-msg ' + (m.error ? 'error' : m.role) + '">' + esc(m.text)
+                + (m.files && m.files.length ? '<div class="aqa-ocr"><i class="bi bi-paperclip"></i> ' + esc(m.files.join('، ')) + '</div>' : '')
+                + (m.navigate ? links([m.navigate]) : '') + links(m.links) + ocrBlock(m.attachments) + '</div>';
+            (m.actions || []).forEach((a, j) => { h += card(a, i + ':' + j); });
+        });
+        if (busy) { h += '<div class="aqa-msg assistant"><span class="aqa-typing"><span></span><span></span><span></span></span>' + esc(busy) + '</div>'; }
+        body.innerHTML = h;
+        body.scrollTop = state.messages.length || busy ? body.scrollHeight : 0;
+        syncSend();
+    }
+    function syncSend() { sendBtn.disabled = !!busy || (!input.value.trim() && !files.length); }
+    function grow() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight + 2, 180) + 'px'; }
+    function renderFiles() {
+        previews.forEach((u) => URL.revokeObjectURL(u)); previews = [];
+        filesBox.innerHTML = files.map((f, i) => {
+            let thumb = '';
+            if (f.type.startsWith('image/')) { const u = URL.createObjectURL(f); previews.push(u); thumb = '<img src="' + u + '" alt="">'; }
+            return '<span>' + thumb + '<em>' + esc(f.name) + '</em><button type="button" data-rm="' + i + '" aria-label="إزالة">&times;</button></span>';
+        }).join('');
+        syncSend();
+    }
+
+    async function send(text) {
+        text = (text ?? input.value).trim();
+        if (busy || (!text && !files.length)) { return; }
+        const sent = files.slice();
+        state.messages.push({ role: 'user', text: text, files: sent.map((f) => f.name) });
+        input.value = ''; grow(); files = []; renderFiles();
+        busy = sent.length ? 'جارٍ قراءة المرفقات…' : 'جارٍ التفكير…'; save(); render();
+        const history = state.messages.filter((m) => !m.error).slice(-13).map((m) => ({ role: m.role, text: m.text || (m.files || []).join(', ') }));
+        const fd = new FormData();
+        sent.forEach((f) => fd.append('files[]', f));
+        try {
+            const r = await post({ action: 'chat', messages: JSON.stringify(history), current_url: location.pathname + location.search }, fd);
+            if (!r.ok) {
+                state.messages.push({ role: 'assistant', text: r.data.message || 'مشكلة في الاتصال، حاول مرة أخرى.', error: true });
+            } else {
+                const d = r.data;
+                state.messages.push({ role: 'assistant', text: d.reply || '', navigate: d.navigate, links: d.links, actions: d.actions, attachments: d.attachments });
+                if (d.navigate && safeUrl(d.navigate.url)) { busy = false; save(); render(); setTimeout(() => { location.href = safeUrl(d.navigate.url); }, 700); return; }
+            }
+        } catch (e) {
+            state.messages.push({ role: 'assistant', text: 'مشكلة في الاتصال، حاول مرة أخرى.', error: true });
+        }
+        busy = false; save(); render();
+    }
+
+    function readCard(el, a) {
+        const d = JSON.parse(JSON.stringify(a.data || {}));
+        el.querySelectorAll('[data-f]').forEach((inp) => {
+            const k = inp.dataset.f, v = inp.value.trim();
+            if (k.startsWith('t.')) { d.tenant = d.tenant || {}; d.tenant[k.slice(2)] = v || null; } else { d[k] = v === '' ? null : v; }
+        });
+        return d;
+    }
+    function goWithPrefill(url, fields) {
+        const target = safeUrl(url);
+        if (!target) { return; }
+        const clean = {};
+        Object.keys(fields).forEach((k) => { if (fields[k] !== null && fields[k] !== undefined && fields[k] !== '') { clean[k] = String(fields[k]); } });
+        try { sessionStorage.setItem(PREFILL_KEY, JSON.stringify({ path: new URL(target).pathname, fields: clean, at: Date.now() })); } catch (e) {}
+        location.href = target;
+    }
+    async function createTenant(data) {
+        const r = await post({ action: 'confirm', type: 'create_tenant', data: JSON.stringify(data) });
+        if (!r.ok) { throw new Error(r.data.message || 'تعذّر إضافة المستأجر.'); }
+        return r.data;
+    }
+
+    async function confirmCard(key) {
+        const [mi, ai] = key.split(':').map(Number);
+        const a = state.messages[mi]?.actions?.[ai];
+        const el = body.querySelector('[data-card="' + key + '"]');
+        if (!a || !el) { return; }
+        a.data = readCard(el, a); a.busy = true; a.error = null; render();
+        const d = a.data;
+        try {
+            if (a.type === 'create_tenant') {
+                const t = await createTenant(d);
+                const next = [{ title: 'بيانات المستأجر', url: t.url }];
+                if (t.contract_url) { next.push({ title: 'عقد إيجار لهذا المستأجر', url: t.contract_url }); }
+                a.done = { message: t.message, links: next };
+            } else if (a.type === 'draft_contract') {
+                let url = a.url;
+                if (!d.tenant_id && d.tenant && d.tenant.name) {
+                    const t = await createTenant(d.tenant);
+                    d.tenant_id = t.tenant_id; url += '&mostagerid=' + encodeURIComponent(t.tenant_id);
+                    a.done = { message: t.message + ' فُتحت شاشة العقد معبّأة للمراجعة.', links: [{ title: 'فتح شاشة العقد', url: url }] };
+                }
+                a.busy = false;
+                a.done = a.done || { message: 'فُتحت شاشة العقد معبّأة، راجعها ثم احفظ.', links: [{ title: 'فتح شاشة العقد', url: url }] };
+                save(); render();
+                goWithPrefill(url, { annualprice: d.annual_rent, contractDuraion: d.duration_months, st_date_: toDMY(d.start_date), notes: d.notes });
+                return;
+            } else {
+                const m = METHODS[d.payment_method] || METHODS.cash;
+                a.busy = false;
+                a.done = { message: 'فُتحت شاشة السند معبّأة، راجعها ثم احفظ.', links: [{ title: 'فتح الشاشة', url: a.url }] };
+                save(); render();
+                goWithPrefill(a.url, { mostagername: d.party_name, depositeamount: d.amount, period: toDMY(d.date), mybyan: d.description, payment_type: m[1], notes: d.notes });
+                return;
+            }
+        } catch (e) { a.error = e.message || 'مشكلة في الاتصال، حاول مرة أخرى.'; }
+        a.busy = false; save(); render();
+    }
+
+    function useSuggestion(text) {
+        const start = text.indexOf('<');
+        if (start === -1) { if (text.indexOf('المرفق') !== -1 && !files.length) { input.value = text; grow(); syncSend(); fileInput.click(); return; } send(text); return; }
+        input.value = text; grow(); syncSend(); input.focus();
+        const end = text.indexOf('>', start);
+        input.setSelectionRange(start, end === -1 ? text.length : end + 1);
+    }
+
+    const ACCEPTED = /^(image\/(jpeg|png|webp|gif|bmp|tiff)|application\/pdf)$/;
+    function addFiles(list) {
+        const ok = Array.from(list || []).filter((f) => ACCEPTED.test(f.type) && f.size <= 10485760);
+        if (!ok.length) { return false; }
+        files = files.concat(ok).slice(0, 5); renderFiles(); return true;
+    }
+
+    $('aqaLaunch').addEventListener('click', () => setOpen(!state.open));
+    $('aqaClose').addEventListener('click', () => setOpen(false));
+    $('aqaWide').addEventListener('click', () => setWide(!state.wide));
+    $('aqaClear').addEventListener('click', () => { if (!busy) { state.messages = []; save(); render(); } });
+    sendBtn.addEventListener('click', () => send());
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+    input.addEventListener('input', () => { grow(); syncSend(); });
+    fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
+    panel.addEventListener('paste', (e) => {
+        const items = Array.from((e.clipboardData && e.clipboardData.items) || []).filter((it) => it.kind === 'file');
+        if (!items.length) { return; }
+        const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+        const pasted = items.map((it, n) => { const f = it.getAsFile(); if (!f) { return null; } const ext = (f.type.split('/')[1] || 'png').replace('jpeg', 'jpg'); return new File([f], 'pasted-' + stamp + (n ? '-' + n : '') + '.' + ext, { type: f.type }); }).filter(Boolean);
+        if (addFiles(pasted) && !(e.clipboardData.getData('text/plain') || '').trim()) { e.preventDefault(); }
+        input.focus();
+    });
+    filesBox.addEventListener('click', (e) => { const b = e.target.closest('[data-rm]'); if (b) { files.splice(Number(b.dataset.rm), 1); renderFiles(); } });
+    $('aqaHide').addEventListener('click', () => { askHide = true; render(); body.scrollTop = 0; });
+    async function hideForMe() {
+        try {
+            const r = await post({ action: 'set_user_enabled', enabled: '0' });
+            if (!r.ok) { askHide = false; state.messages.push({ role: 'assistant', text: r.data.message || 'تعذّر حفظ الإعداد.', error: true }); render(); return; }
+            state.messages = []; state.open = false; save();
+            panel.remove(); $('aqaLaunch').remove();
+        } catch (e) { askHide = false; render(); }
+    }
+    body.addEventListener('click', (e) => {
+        if (e.target.closest('[data-hide-yes]')) { hideForMe(); return; }
+        if (e.target.closest('[data-hide-no]')) { askHide = false; render(); return; }
+        const s = e.target.closest('[data-sugg]'); if (s) { useSuggestion(s.dataset.sugg); return; }
+        const c = e.target.closest('[data-confirm]'); if (c) { confirmCard(c.dataset.confirm); return; }
+        const ej = e.target.closest('[data-ejar]'); if (ej) { const [key, act] = ej.dataset.ejar.split('|'); ejarAction(key, act); return; }
+        const u = e.target.closest('[data-unit]');
+        if (u) { const [key, idx] = u.dataset.unit.split('|'); const [mi, ai] = key.split(':').map(Number); const a = state.messages[mi]?.actions?.[ai]; const unit = a?.data?.units?.[Number(idx)]; if (unit && safeUrl(unit.url)) { location.href = safeUrl(unit.url); } return; }
+        const x = e.target.closest('[data-cancel]');
+        if (x) { const [mi, ai] = x.dataset.cancel.split(':').map(Number); const a = state.messages[mi]?.actions?.[ai]; if (a) { a.cancelled = true; state.messages.push({ role: 'assistant', text: 'تم الإلغاء، لم يُحفظ شيء.' }); save(); render(); } }
+    });
+    body.addEventListener('change', (e) => {
+        const pk = e.target.closest('[data-ejar-pick]');
+        if (pk) { const [key, what] = pk.dataset.ejarPick.split('|'); ejarPick(key, what, pk.value); }
+    });
+    panel.addEventListener('dragover', (e) => e.preventDefault());
+    panel.addEventListener('drop', (e) => { e.preventDefault(); addFiles(e.dataTransfer.files); });
+    setWide(!!state.wide);
+    if (state.open) { setOpen(true); }
+
+    // ---- Prefill hand-off: fill the target screen's fields once, then let the user review and save.
+    function applyPrefill() {
+        let p = null;
+        try { p = JSON.parse(sessionStorage.getItem(PREFILL_KEY) || 'null'); } catch (e) {}
+        if (!p || p.path !== location.pathname || Date.now() - (p.at || 0) > 180000) { return; }
+        try { sessionStorage.removeItem(PREFILL_KEY); } catch (e) {}
+        let filled = 0;
+        Object.keys(p.fields || {}).forEach((name) => {
+            const value = p.fields[name];
+            document.getElementsByName(name).forEach((el) => {
+                if (el.type === 'radio' || el.type === 'checkbox') {
+                    if (String(el.value) !== value) { return; }
+                    el.checked = true;
+                } else if (el.type === 'file' || el.type === 'hidden') {
+                    return;
+                } else {
+                    el.value = value;
+                }
+                ['input', 'keyup', 'change', 'blur'].forEach((t) => el.dispatchEvent(new Event(t, { bubbles: true })));
+                if (window.jQuery) { window.jQuery(el).trigger('change'); }
+                el.classList.add('aqa-filled');
+                filled++;
+            });
+        });
+        if (!filled) { return; }
+        const banner = document.createElement('div');
+        banner.className = 'aqa-banner';
+        banner.innerHTML = '<i class="bi bi-robot"></i><span>عبّأ المساعد الذكي الحقول المظللة باللون الأخضر — راجعها وأكمل الباقي ثم احفظ.</span><button type="button" aria-label="إغلاق">&times;</button>';
+        banner.querySelector('button').addEventListener('click', () => banner.remove());
+        document.body.appendChild(banner);
+        setTimeout(() => banner.remove(), 15000);
+    }
+    if (document.readyState === 'complete') { setTimeout(applyPrefill, 600); } else { window.addEventListener('load', () => setTimeout(applyPrefill, 600)); }
+})();
+</script>

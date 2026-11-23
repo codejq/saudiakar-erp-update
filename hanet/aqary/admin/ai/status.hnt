@@ -1,0 +1,395 @@
+<?php
+/**
+ * AI Integration Status Dashboard
+ * لوحة معلومات الذكاء الاصطناعي
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "لوحة معلومات الذكاء الاصطناعي";
+$sc_id = "301";
+include_once "../../nocash.hnt";
+
+$canscroll = 0;
+$showdhmltazkeer = 0;
+include_once "../../header.hnt";
+
+// Include database connection and libraries
+require_once('../../connectdb.hnt');
+require_once('lib/OpenRouterAPI.class.php');
+
+
+
+// Load configuration
+$config_data = require('config/api_config.hnt');
+$ai_config = $config_data['config'];
+$ai_models = $config_data['models'];
+
+// Check if tables exist
+$tables_status = [];
+$required_tables = ['ai_usage_log', 'ai_cache', 'ai_generated_content'];
+
+foreach ($required_tables as $table) {
+    $check_sql = "SHOW TABLES LIKE ?";
+    $stmt = mysqli_prepare($link, $check_sql);
+    if ($stmt) {
+        mysqli_stmt_bind_param($stmt, 's', $table);
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
+        $tables_status[$table] = ($result && mysqli_num_rows($result) > 0);
+        mysqli_stmt_close($stmt);
+    } else {
+        $tables_status[$table] = false;
+    }
+}
+
+// Get today's usage stats
+$today_sql = "SELECT
+              COUNT(*) as total_requests,
+              SUM(total_tokens) as total_tokens,
+              SUM(cost) as total_cost,
+              AVG(response_time) as avg_response_time
+              FROM ai_usage_log
+              WHERE DATE(created_date) = CURDATE()";
+$stmt = mysqli_prepare($link, $today_sql);
+if ($stmt) {
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $today_stats = mysqli_fetch_assoc($result);
+    if (!$today_stats['total_requests']) {
+        $today_stats = [
+            'total_requests' => 0,
+            'total_tokens' => 0,
+            'total_cost' => 0,
+            'avg_response_time' => 0
+        ];
+    }
+    mysqli_stmt_close($stmt);
+} else {
+    $today_stats = [
+        'total_requests' => 0,
+        'total_tokens' => 0,
+        'total_cost' => 0,
+        'avg_response_time' => 0
+    ];
+}
+
+// Get monthly usage stats
+$month_sql = "SELECT
+              COUNT(*) as total_requests,
+              SUM(total_tokens) as total_tokens,
+              SUM(cost) as total_cost
+              FROM ai_usage_log
+              WHERE MONTH(created_date) = MONTH(CURDATE())
+              AND YEAR(created_date) = YEAR(CURDATE())";
+$stmt = mysqli_prepare($link, $month_sql);
+if ($stmt) {
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $month_stats = mysqli_fetch_assoc($result);
+    if (!$month_stats['total_requests']) {
+        $month_stats = [
+            'total_requests' => 0,
+            'total_tokens' => 0,
+            'total_cost' => 0
+        ];
+    }
+    mysqli_stmt_close($stmt);
+} else {
+    $month_stats = [
+        'total_requests' => 0,
+        'total_tokens' => 0,
+        'total_cost' => 0
+    ];
+}
+
+// Get cache stats
+$cache_sql = "SELECT
+              COUNT(*) as total_cached,
+              SUM(hit_count) as total_hits,
+              COUNT(CASE WHEN expires_at > NOW() THEN 1 END) as active_cached
+              FROM ai_cache";
+$stmt = mysqli_prepare($link, $cache_sql);
+if ($stmt) {
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $cache_stats = mysqli_fetch_assoc($result);
+    mysqli_stmt_close($stmt);
+} else {
+    $cache_stats = [
+        'total_cached' => 0,
+        'total_hits' => 0,
+        'active_cached' => 0
+    ];
+}
+
+// Get top features
+$features_sql = "SELECT feature, COUNT(*) as count, SUM(cost) as cost
+                FROM ai_usage_log
+                WHERE DATE(created_date) = CURDATE()
+                GROUP BY feature
+                ORDER BY count DESC
+                LIMIT 5";
+$stmt = mysqli_prepare($link, $features_sql);
+$top_features = [];
+if ($stmt) {
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    while ($row = mysqli_fetch_assoc($result)) {
+        $top_features[] = $row;
+    }
+    mysqli_stmt_close($stmt);
+}
+
+// Calculate budget percentages
+$daily_budget_used = ($today_stats['total_cost'] / $ai_config['daily_budget']) * 100;
+$monthly_budget_used = ($month_stats['total_cost'] / $ai_config['monthly_budget']) * 100;
+
+// System health checks
+$health_checks = [
+    'api_key_configured' => !empty($ai_config['deepseek_api_key']) || !empty($ai_config['api_key']),
+    'tables_installed' => !in_array(false, $tables_status),
+    'curl_enabled' => function_exists('curl_init'),
+    'cache_working' => $tables_status['ai_cache'] ?? false,
+    'logging_working' => $tables_status['ai_usage_log'] ?? false
+];
+
+$system_healthy = !in_array(false, $health_checks);
+?>
+<style>
+        body {
+            background: #f8f9fa;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .status-card {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+        .stat-box {
+            text-align: center;
+            padding: 20px;
+            border-radius: 8px;
+            background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+            color: white;
+        }
+        .stat-number {
+            font-size: 32px;
+            font-weight: bold;
+        }
+        .stat-label {
+            font-size: 14px;
+            opacity: 0.9;
+            margin-top: 8px;
+        }
+        .health-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-left: 8px;
+        }
+        .health-ok { background: #28a745; }
+        .health-error { background: #dc3545; }
+        .health-warning { background: #ffc107; }
+        .progress-custom {
+            height: 25px;
+            border-radius: 8px;
+            font-weight: 600;
+        }
+        .table-custom {
+            font-size: 14px;
+        }
+        .badge-custom {
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid py-4">
+        <div class="row mb-4">
+            <div class="col-12">
+                <h2>🤖 لوحة معلومات الذكاء الاصطناعي</h2>
+                <p class="text-muted">مراقبة الاستخدام والتكاليف والأداء</p>
+            </div>
+        </div>
+
+        <!-- System Health -->
+        <div class="status-card">
+            <h5 class="mb-3">🏥 حالة النظام</h5>
+            <div class="row">
+                <div class="col-md-6">
+                    <p>
+                        <span class="health-indicator <?php echo $health_checks['api_key_configured'] ? 'health-ok' : 'health-error'; ?>"></span>
+                        <strong>API Key:</strong>
+                        <?php echo $health_checks['api_key_configured'] ? 'مُكوّن ✓' : 'غير مُكوّن ✗'; ?>
+                    </p>
+                    <p>
+                        <span class="health-indicator <?php echo $health_checks['tables_installed'] ? 'health-ok' : 'health-error'; ?>"></span>
+                        <strong>قاعدة البيانات:</strong>
+                        <?php echo $health_checks['tables_installed'] ? 'مُثبتة ✓' : 'غير مُثبتة ✗'; ?>
+                    </p>
+                    <p>
+                        <span class="health-indicator <?php echo $health_checks['curl_enabled'] ? 'health-ok' : 'health-error'; ?>"></span>
+                        <strong>cURL:</strong>
+                        <?php echo $health_checks['curl_enabled'] ? 'مفعل ✓' : 'غير مفعل ✗'; ?>
+                    </p>
+                </div>
+                <div class="col-md-6">
+                    <p>
+                        <span class="health-indicator <?php echo $health_checks['cache_working'] ? 'health-ok' : 'health-error'; ?>"></span>
+                        <strong>التخزين المؤقت:</strong>
+                        <?php echo $health_checks['cache_working'] ? 'يعمل ✓' : 'لا يعمل ✗'; ?>
+                    </p>
+                    <p>
+                        <span class="health-indicator <?php echo $health_checks['logging_working'] ? 'health-ok' : 'health-error'; ?>"></span>
+                        <strong>السجلات:</strong>
+                        <?php echo $health_checks['logging_working'] ? 'تعمل ✓' : 'لا تعمل ✗'; ?>
+                    </p>
+                    <p>
+                        <span class="health-indicator <?php echo $system_healthy ? 'health-ok' : 'health-error'; ?>"></span>
+                        <strong>الحالة العامة:</strong>
+                        <?php echo $system_healthy ? 'سليم ✓' : 'يحتاج إصلاح ✗'; ?>
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Daily Stats -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="stat-box">
+                    <div class="stat-number"><?php echo number_format($today_stats['total_requests']); ?></div>
+                    <div class="stat-label">طلبات اليوم</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-box">
+                    <div class="stat-number"><?php echo number_format($today_stats['total_tokens']); ?></div>
+                    <div class="stat-label">عدد الكلمات (Tokens)</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-box">
+                    <div class="stat-number">$<?php echo number_format($today_stats['total_cost'], 4); ?></div>
+                    <div class="stat-label">التكلفة اليوم</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-box">
+                    <div class="stat-number"><?php echo number_format($cache_stats['total_hits']); ?></div>
+                    <div class="stat-label">استخدام Cache</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Budget Usage -->
+        <div class="status-card">
+            <h5 class="mb-3">💰 استخدام الميزانية</h5>
+
+            <div class="mb-4">
+                <div class="d-flex justify-content-between mb-2">
+                    <span><strong>الميزانية اليومية:</strong></span>
+                    <span>$<?php echo number_format($today_stats['total_cost'], 4); ?> / $<?php echo number_format($ai_config['daily_budget'], 2); ?></span>
+                </div>
+                <div class="progress progress-custom">
+                    <div class="progress-bar <?php echo $daily_budget_used > 80 ? 'bg-danger' : 'bg-success'; ?>"
+                         style="width: <?php echo min($daily_budget_used, 100); ?>%">
+                        <?php echo number_format($daily_budget_used, 1); ?>%
+                    </div>
+                </div>
+            </div>
+
+            <div class="mb-3">
+                <div class="d-flex justify-content-between mb-2">
+                    <span><strong>الميزانية الشهرية:</strong></span>
+                    <span>$<?php echo number_format($month_stats['total_cost'], 2); ?> / $<?php echo number_format($ai_config['monthly_budget'], 2); ?></span>
+                </div>
+                <div class="progress progress-custom">
+                    <div class="progress-bar <?php echo $monthly_budget_used > 80 ? 'bg-danger' : 'bg-success'; ?>"
+                         style="width: <?php echo min($monthly_budget_used, 100); ?>%">
+                        <?php echo number_format($monthly_budget_used, 1); ?>%
+                    </div>
+                </div>
+            </div>
+
+            <?php if ($daily_budget_used > 80 || $monthly_budget_used > 80): ?>
+            <div class="alert alert-warning mt-3" role="alert">
+                ⚠️ تحذير: اقتربت من حد الميزانية. قد يتم إيقاف الخدمة قريباً.
+            </div>
+            <?php endif; ?>
+        </div>
+
+        <!-- Top Features -->
+        <?php if (count($top_features) > 0): ?>
+        <div class="status-card">
+            <h5 class="mb-3">📊 الميزات الأكثر استخداماً (اليوم)</h5>
+            <table class="table table-custom">
+                <thead>
+                    <tr>
+                        <th>الميزة</th>
+                        <th>عدد الطلبات</th>
+                        <th>التكلفة</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($top_features as $feature): ?>
+                    <tr>
+                        <td><?php echo htmlspecialchars($feature['feature']); ?></td>
+                        <td><span class="badge badge-custom bg-primary"><?php echo number_format($feature['count']); ?></span></td>
+                        <td>$<?php echo number_format($feature['cost'], 4); ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php endif; ?>
+
+        <!-- Monthly Summary -->
+        <div class="status-card">
+            <h5 class="mb-3">📈 ملخص الشهر</h5>
+            <div class="row">
+                <div class="col-md-4">
+                    <p><strong>إجمالي الطلبات:</strong> <?php echo number_format($month_stats['total_requests']); ?></p>
+                </div>
+                <div class="col-md-4">
+                    <p><strong>إجمالي الكلمات:</strong> <?php echo number_format($month_stats['total_tokens']); ?></p>
+                </div>
+                <div class="col-md-4">
+                    <p><strong>إجمالي التكلفة:</strong> $<?php echo number_format($month_stats['total_cost'], 2); ?></p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Configuration -->
+        <div class="status-card">
+            <h5 class="mb-3">⚙️ الإعدادات الحالية</h5>
+            <div class="row">
+                <div class="col-md-6">
+                    <p><strong>النموذج الافتراضي:</strong> <?php echo htmlspecialchars($ai_config['default_model']); ?></p>
+                    <p><strong>الحد الأقصى للطلبات (دقيقة):</strong> <?php echo $ai_config['max_requests_per_minute']; ?></p>
+                    <p><strong>الحد الأقصى للطلبات (ساعة):</strong> <?php echo $ai_config['max_requests_per_hour']; ?></p>
+                </div>
+                <div class="col-md-6">
+                    <p><strong>التخزين المؤقت:</strong> <?php echo $ai_config['cache_enabled'] ? 'مفعل ✓' : 'معطل ✗'; ?></p>
+                    <p><strong>مدة التخزين:</strong> <?php echo ($ai_config['cache_duration'] / 3600); ?> ساعة</p>
+                    <p><strong>السجلات:</strong> <?php echo $ai_config['log_enabled'] ? 'مفعلة ✓' : 'معطلة ✗'; ?></p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quick Actions -->
+        <div class="status-card">
+            <h5 class="mb-3">🚀 إجراءات سريعة</h5>
+            <a href="examples/test_ui.hnt" class="btn btn-primary me-2">اختبار الـ API</a>
+        </div>
+    </div>
+
+<?php
+require('../../foter.hnt');
+?>

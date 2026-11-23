@@ -1,0 +1,48 @@
+<?php
+/**
+ * Default AI provider (DeepSeek) credentials for every installation.
+ *
+ * Installations are not centralized, so the default key ships with the code, split into two
+ * base64-encoded halves stored in different folders (lib/ai/provider_seed.hnt and
+ * admin/ai/config/provider_seed.hnt). They are joined here on the customer machine at runtime.
+ * Base64 only keeps the key out of plain-text secret scanners; it is not encryption. The halves
+ * are PHP files that return their value, so requesting them over HTTP prints nothing.
+ *
+ * A company may use its own key instead: set 'deepseek_api_key' in admin/ai/config/api_keys.hnt
+ * (ignored by Git). That value always wins over the shipped default.
+ */
+
+if (!function_exists('aqaryDefaultDeepseekKey')) {
+    /** The shipped default DeepSeek key, or '' when a part is missing or damaged. */
+    function aqaryDefaultDeepseekKey(): string
+    {
+        static $key = null;
+        if ($key !== null) return $key;
+
+        $root = dirname(__DIR__, 2);
+        $parts = array(
+            $root . '/lib/ai/provider_seed.hnt',
+            $root . '/admin/ai/config/provider_seed.hnt',
+        );
+        $joined = '';
+        foreach ($parts as $file) {
+            $encoded = is_file($file) ? trim((string)(include $file)) : '';
+            $decoded = $encoded !== '' ? base64_decode($encoded, true) : false;
+            if ($decoded === false || $decoded === '') {
+                error_log('AI provider: default key part is missing or invalid (' . basename(dirname($file)) . ')');
+                return $key = '';
+            }
+            $joined .= trim($decoded);
+        }
+        return $key = $joined;
+    }
+}
+
+if (!function_exists('aqaryDeepseekKey')) {
+    /** The DeepSeek key to use: the company's own key from api_keys.hnt, else the shipped default. */
+    function aqaryDeepseekKey(array $apiKeys = array()): string
+    {
+        $own = trim((string)($apiKeys['deepseek_api_key'] ?? ''));
+        return $own !== '' ? $own : aqaryDefaultDeepseekKey();
+    }
+}

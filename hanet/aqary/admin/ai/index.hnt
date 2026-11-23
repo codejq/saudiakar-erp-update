@@ -1,0 +1,771 @@
+<?php
+/**
+ * AI Integration Module - Main Dashboard
+ * نظام الذكاء الاصطناعي
+ *
+ * @charset UTF-8
+ * @version 2.0
+ */
+
+$sc_title = "الذكاء الاصطناعي - AI Integration";
+$sc_id = "300";
+include_once "../../nocash.hnt";
+
+$canscroll = 0;
+$showdhmltazkeer = 0;
+include_once "../../header.hnt";
+
+// Include database connection
+require_once('../../connectdb.hnt');
+
+// Load configuration
+$config_data = require('config/api_config.hnt');
+$ai_config = $config_data['config'];
+$features = $ai_config['features'];
+
+// Check if setup is needed
+$setup_needed = false;
+if (empty($ai_config['deepseek_api_key']) && empty($ai_config['api_key'])) {
+    $setup_needed = true;
+}
+
+// Check if tables exist
+$tables_exist = true;
+$required_tables = ['ai_usage_log', 'ai_cache', 'ai_generated_content'];
+foreach ($required_tables as $table) {
+    $check_sql = "SHOW TABLES LIKE '" . mysqli_real_escape_string($link, $table) . "'";
+    $result = mysqli_query($link, $check_sql);
+    if (!$result || mysqli_num_rows($result) == 0) {
+        $tables_exist = false;
+    }
+}
+
+// Get quick stats if tables exist
+$total_requests = 0;
+$total_cost = 0;
+$monthly_requests = 0;
+if ($tables_exist) {
+    // Today's stats
+    $stats_sql = "SELECT COUNT(*) as requests, SUM(cost) as cost
+                  FROM ai_usage_log
+                  WHERE DATE(created_date) = CURDATE()";
+    $stmt = mysqli_prepare($link, $stats_sql);
+    if ($stmt) {
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
+        if ($result) {
+            $stats = mysqli_fetch_assoc($result);
+            $total_requests = $stats['requests'] ?? 0;
+            $total_cost = $stats['cost'] ?? 0;
+        }
+        mysqli_stmt_close($stmt);
+    }
+
+    // Monthly stats
+    $monthly_sql = "SELECT COUNT(*) as requests FROM ai_usage_log WHERE MONTH(created_date) = MONTH(CURDATE())";
+    $stmt = mysqli_prepare($link, $monthly_sql);
+    if ($stmt) {
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
+        if ($result) {
+            $stats = mysqli_fetch_assoc($result);
+            $monthly_requests = $stats['requests'] ?? 0;
+        }
+        mysqli_stmt_close($stmt);
+    }
+}
+
+$is_admin = ($_SESSION['userforv'] == 'admin');
+?>
+
+<style>
+    body {
+        background: #f5f7fa;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+
+    /* Hero Section */
+    .hero-banner {
+        background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 50%, #0d47a1 100%);
+        color: white;
+        padding: 48px 32px;
+        border-radius: 16px;
+        margin-bottom: 32px;
+        box-shadow: 0 8px 32px rgba(6, 109, 150, 0.2);
+        position: relative;
+        overflow: hidden;
+    }
+
+    .hero-banner::before {
+        content: '';
+        position: absolute;
+        top: -50%;
+        right: -20%;
+        width: 500px;
+        height: 500px;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 50%;
+    }
+
+    .hero-content {
+        position: relative;
+        z-index: 1;
+    }
+
+    .hero-title {
+        font-size: 36px;
+        font-weight: 700;
+        margin-bottom: 12px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+    }
+
+    .hero-subtitle {
+        font-size: 16px;
+        opacity: 0.95;
+        font-weight: 300;
+    }
+
+    /* Stats Cards */
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 16px;
+        margin-bottom: 32px;
+    }
+
+    .stat-card {
+        background: white;
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+        transition: all 0.3s ease;
+        border: 1px solid #e9ecef;
+    }
+
+    .stat-card:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+    }
+
+    .stat-icon {
+        width: 48px;
+        height: 48px;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 24px;
+        margin-bottom: 12px;
+    }
+
+    .stat-icon.blue { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); }
+    .stat-icon.green { background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); }
+    .stat-icon.purple { background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%); }
+    .stat-icon.orange { background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%); }
+
+    .stat-value {
+        font-size: 28px;
+        font-weight: 700;
+        color: #2c3e50;
+        margin-bottom: 4px;
+    }
+
+    .stat-label {
+        font-size: 13px;
+        color: #6c757d;
+        font-weight: 500;
+    }
+
+    /* Section Headers */
+    .section-header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 24px;
+        padding-bottom: 12px;
+        border-bottom: 2px solid #e9ecef;
+    }
+
+    .section-title {
+        font-size: 22px;
+        font-weight: 700;
+        color: #2c3e50;
+        margin: 0;
+    }
+
+    .section-icon {
+        font-size: 28px;
+    }
+
+    /* Feature Cards */
+    .features-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 16px;
+        margin-bottom: 40px;
+    }
+
+    .feature-card {
+        background: white;
+        border-radius: 14px;
+        padding: 28px 24px;
+        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        cursor: pointer;
+        text-decoration: none;
+        color: inherit;
+        display: block;
+        border: 2px solid transparent;
+        position: relative;
+        overflow: hidden;
+    }
+
+    .feature-card::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 4px;
+        background: linear-gradient(90deg, #189c2aff 0%, #066d96ff 100%);
+        transform: scaleX(0);
+        transition: transform 0.3s ease;
+    }
+
+    .feature-card:hover::before {
+        transform: scaleX(1);
+    }
+
+    .feature-card:hover {
+        transform: translateY(-8px);
+        box-shadow: 0 12px 32px rgba(6, 109, 150, 0.15);
+        border-color: #066d96ff;
+    }
+
+    .feature-card.disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        pointer-events: none;
+    }
+
+    .feature-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 16px;
+    }
+
+    .feature-icon {
+        font-size: 42px;
+        margin-bottom: 4px;
+    }
+
+    .feature-badges {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+    }
+
+    .badge-new, .badge-free, .badge-popular {
+        font-size: 10px;
+        padding: 3px 8px;
+        border-radius: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .badge-new {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+    }
+
+    .badge-free {
+        background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);
+        color: white;
+    }
+
+    .badge-popular {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        color: white;
+    }
+
+    .feature-title {
+        font-size: 18px;
+        font-weight: 700;
+        margin-bottom: 8px;
+        color: #2c3e50;
+    }
+
+    .feature-description {
+        font-size: 13px;
+        color: #6c757d;
+        line-height: 1.6;
+        margin-bottom: 16px;
+        min-height: 40px;
+    }
+
+    .feature-meta {
+        display: flex;
+        gap: 16px;
+        font-size: 12px;
+        color: #95a5a6;
+        padding-top: 12px;
+        border-top: 1px solid #f0f0f0;
+    }
+
+    .feature-meta-item {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+    /* Quick Actions */
+    .quick-actions {
+        background: white;
+        border-radius: 14px;
+        padding: 24px;
+        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+        margin-bottom: 32px;
+    }
+
+    .quick-action-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 24px;
+        border-radius: 10px;
+        font-weight: 600;
+        text-decoration: none;
+        transition: all 0.3s ease;
+        font-size: 14px;
+        border: 2px solid;
+    }
+
+    .quick-action-btn.primary {
+        background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+        color: white;
+        border-color: transparent;
+    }
+
+    .quick-action-btn.primary:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 16px rgba(6, 109, 150, 0.3);
+        color: white;
+    }
+
+    .quick-action-btn.secondary {
+        background: white;
+        color: #066d96ff;
+        border-color: #066d96ff;
+    }
+
+    .quick-action-btn.secondary:hover {
+        background: #066d96ff;
+        color: white;
+    }
+
+    /* Setup Alert */
+    .setup-alert {
+        background: linear-gradient(135deg, #ffeaa7 0%, #fdcb6e 100%);
+        border-radius: 14px;
+        padding: 28px;
+        margin-bottom: 32px;
+        box-shadow: 0 4px 16px rgba(253, 203, 110, 0.3);
+    }
+
+    .setup-alert h5 {
+        font-weight: 700;
+        margin-bottom: 16px;
+        color: #2c3e50;
+    }
+
+    /* Category Tabs */
+    .category-tabs {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 24px;
+        flex-wrap: wrap;
+    }
+
+    .category-tab {
+        padding: 10px 20px;
+        border-radius: 24px;
+        background: white;
+        border: 2px solid #e9ecef;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        font-weight: 600;
+        font-size: 14px;
+        color: #6c757d;
+    }
+
+    .category-tab:hover, .category-tab.active {
+        background: linear-gradient(135deg, #189c2aff 0%, #066d96ff 100%);
+        color: white;
+        border-color: transparent;
+        transform: translateY(-2px);
+    }
+
+    /* Info Box */
+    .info-box {
+        background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+        border-radius: 14px;
+        padding: 24px;
+        margin-top: 32px;
+        border-left: 4px solid #066d96ff;
+    }
+
+    .info-box h6 {
+        font-weight: 700;
+        color: #066d96ff;
+        margin-bottom: 12px;
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+        .hero-title {
+            font-size: 28px;
+        }
+
+        .features-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .stats-grid {
+            grid-template-columns: repeat(2, 1fr);
+        }
+    }
+</style>
+</head>
+<body>
+    <div class="container-fluid px-4 py-4">
+        <!-- Hero Banner -->
+        <div class="hero-banner">
+            <div class="hero-content">
+                <div class="hero-title">
+                    <i class="bi bi-robot"></i>
+                    <span>الذكاء الاصطناعي</span>
+                </div>
+                <div class="hero-subtitle">
+                    قوة الذكاء الاصطناعي في خدمتك - أتمت مهامك، وفّر وقتك، وحسّن إنتاجيتك
+                </div>
+            </div>
+        </div>
+
+        <!-- Setup Alert -->
+        <?php if ($setup_needed || !$tables_exist): ?>
+        <div class="setup-alert">
+            <h5><i class="bi bi-exclamation-triangle-fill me-2"></i>الإعداد الأولي مطلوب</h5>
+            <p class="mb-3">يرجى إتمام الخطوات التالية لبدء استخدام الذكاء الاصطناعي:</p>
+            <ol class="mb-3">
+                <?php if ($setup_needed): ?>
+                <li>إضافة مفتاح OpenRouter API في ملف الإعدادات (<code>config/api_config.hnt</code>)</li>
+                <?php endif; ?>
+                <?php if (!$tables_exist): ?>
+                <li>تشغيل <a href="install/index.hnt" style="color: #066d96; font-weight: 700;">إعداد قاعدة البيانات</a></li>
+                <?php endif; ?>
+            </ol>
+            <a href="QUICK_START.md" class="quick-action-btn primary" target="_blank">
+                <i class="bi bi-book"></i>
+                دليل البدء السريع
+            </a>
+        </div>
+        <?php endif; ?>
+
+        <!-- Quick Stats -->
+        <?php if ($is_admin && $tables_exist && !$setup_needed): ?>
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon blue">
+                    <i class="bi bi-activity"></i>
+                </div>
+                <div class="stat-value"><?php echo number_format($total_requests); ?></div>
+                <div class="stat-label">طلبات اليوم</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon green">
+                    <i class="bi bi-currency-dollar"></i>
+                </div>
+                <div class="stat-value">$<?php echo number_format($total_cost, 4); ?></div>
+                <div class="stat-label">تكلفة اليوم</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon purple">
+                    <i class="bi bi-graph-up"></i>
+                </div>
+                <div class="stat-value"><?php echo number_format($monthly_requests); ?></div>
+                <div class="stat-label">طلبات هذا الشهر</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon orange">
+                    <i class="bi bi-cpu"></i>
+                </div>
+                <div class="stat-value"><?php echo htmlspecialchars($ai_config['default_model'], ENT_QUOTES, 'UTF-8'); ?></div>
+                <div class="stat-label">النموذج الافتراضي</div>
+            </div>
+        </div>
+        <?php endif; ?>
+
+        <!-- Quick Actions -->
+        <?php if (!$setup_needed && $tables_exist && $is_admin): ?>
+        <div class="quick-actions">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-3">
+                <div>
+                    <h6 class="mb-1 fw-bold" style="color: #2c3e50;">أدوات المطورين</h6>
+                    <p class="mb-0 text-muted small">أدوات متقدمة للمطورين والمديرين فقط</p>
+                </div>
+                <div class="d-flex gap-2 flex-wrap">
+                    <a href="status.hnt" class="quick-action-btn secondary">
+                        <i class="bi bi-graph-up-arrow"></i>
+                        لوحة المعلومات
+                    </a>
+                    <a href="examples/test_ui.hnt" class="quick-action-btn secondary">
+                        <i class="bi bi-code-square"></i>
+                        اختبار API
+                    </a>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
+
+        <!-- All AI Features - Real Estate First -->
+        <div class="section-header">
+            <span class="section-icon">✨</span>
+            <h4 class="section-title">جميع الميزات المتاحة</h4>
+        </div>
+        <div class="features-grid">
+            <!-- 1. Property Description Generator - MOST IMPORTANT -->
+            <a href="../include/amlak/addamlak.hnt" class="feature-card <?php echo !$features['property_description'] ? 'disabled' : ''; ?>">
+                <div class="feature-header">
+                    <div class="feature-icon">🏠</div>
+                    <div class="feature-badges">
+                        <span class="badge-popular">الأكثر استخداماً</span>
+                    </div>
+                </div>
+                <div class="feature-title">مولد وصف العقارات</div>
+                <div class="feature-description">إنشاء أوصاف تسويقية احترافية للعقارات تلقائياً بثوانٍ</div>
+                <div class="feature-meta">
+                    <span class="feature-meta-item"><i class="bi bi-graph-up"></i> ROI: 95%</span>
+                    <span class="feature-meta-item"><i class="bi bi-clock"></i> 30 دقيقة/عقار</span>
+                </div>
+            </a>
+
+            <!-- 2. Property Valuation -->
+            <a href="features/property_valuation_ui.hnt" class="feature-card">
+                <div class="feature-header">
+                    <div class="feature-icon">💰</div>
+                    <div class="feature-badges">
+                        <span class="badge-popular">موثوق</span>
+                    </div>
+                </div>
+                <div class="feature-title">التقييم العقاري الذكي</div>
+                <div class="feature-description">تقييم دقيق للعقارات بناءً على بيانات السوق الرسمية</div>
+                <div class="feature-meta">
+                    <span class="feature-meta-item"><i class="bi bi-patch-check-fill"></i> دقة: 85%</span>
+                    <span class="feature-meta-item"><i class="bi bi-shield-fill-check"></i> وزارة العدل</span>
+                </div>
+            </a>
+
+            <!-- 3. Image Generator for Properties -->
+            <a href="features/image_generator_ui.hnt" class="feature-card">
+                <div class="feature-header">
+                    <div class="feature-icon">🎨</div>
+                    <div class="feature-badges">
+                        <span class="badge-popular">شائع</span>
+                        <span class="badge-free">مجاني</span>
+                    </div>
+                </div>
+                <div class="feature-title">مولد صور العقارات</div>
+                <div class="feature-description">إنشاء صور احترافية باستخدام FLUX.1 أو Stable Diffusion أو DALL-E</div>
+                <div class="feature-meta">
+                    <span class="feature-meta-item"><i class="bi bi-lightning-charge-fill"></i> FLUX.1</span>
+                    <span class="feature-meta-item"><i class="bi bi-star-fill"></i> SD XL</span>
+                </div>
+            </a>
+
+            <!-- 4. Image Analysis for Properties -->
+            <a href="features/image_analysis_ui.hnt" class="feature-card">
+                <div class="feature-header">
+                    <div class="feature-icon">🖼️</div>
+                    <div class="feature-badges">
+                        <span class="badge-new">جديد</span>
+                    </div>
+                </div>
+                <div class="feature-title">تحليل صور العقارات</div>
+                <div class="feature-description">وصف تلقائي وتحليل ذكي لصور العقارات باستخدام Vision AI</div>
+                <div class="feature-meta">
+                    <span class="feature-meta-item"><i class="bi bi-eye-fill"></i> GPT-4 Vision</span>
+                    <span class="feature-meta-item"><i class="bi bi-bezier2"></i> Claude Vision</span>
+                </div>
+            </a>
+
+            <!-- 5. Market Analysis -->
+            <a href="features/market_analysis_ui.hnt" class="feature-card <?php echo !$features['market_analysis'] ? 'disabled' : ''; ?>">
+                <div class="feature-header">
+                    <div class="feature-icon">📊</div>
+                </div>
+                <div class="feature-title">تحليل سوق العقارات</div>
+                <div class="feature-description">تحليل اتجاهات السوق العقاري وتوقعات الأسعار</div>
+                <div class="feature-meta">
+                    <span class="feature-meta-item"><i class="bi bi-graph-up"></i> ROI: 70%</span>
+                    <span class="feature-meta-item"><i class="bi bi-reception-4"></i> عمق التحليل</span>
+                </div>
+            </a>
+
+            <!-- 6. Lead Scoring for Real Estate -->
+            <a href="features/lead_scoring_ui.hnt" class="feature-card <?php echo !$features['lead_scoring'] ? 'disabled' : ''; ?>">
+                <div class="feature-header">
+                    <div class="feature-icon">🎯</div>
+                </div>
+                <div class="feature-title">تقييم العملاء المحتملين</div>
+                <div class="feature-description">تصنيف وتقييم فرص البيع تلقائياً بدقة عالية</div>
+                <div class="feature-meta">
+                    <span class="feature-meta-item"><i class="bi bi-bullseye"></i> دقة: 85%</span>
+                    <span class="feature-meta-item"><i class="bi bi-graph-up"></i> ROI: 80%</span>
+                </div>
+            </a>
+
+            <!-- 7. Audio to Text -->
+            <a href="features/audio_to_text_ui.hnt" class="feature-card">
+                <div class="feature-header">
+                    <div class="feature-icon">🎤</div>
+                    <div class="feature-badges">
+                        <span class="badge-new">جديد</span>
+                        <span class="badge-free">مجاني</span>
+                    </div>
+                </div>
+                <div class="feature-title">تحويل الصوت لنص</div>
+                <div class="feature-description">تحويل المكالمات والملاحظات الصوتية إلى نص بدقة عالية</div>
+                <div class="feature-meta">
+                    <span class="feature-meta-item"><i class="bi bi-mic-fill"></i> Whisper</span>
+                    <span class="feature-meta-item"><i class="bi bi-lightning-fill"></i> سريع</span>
+                </div>
+            </a>
+
+            <!-- 8. Text to Speech -->
+            <a href="features/text_to_speech_ui.hnt" class="feature-card">
+                <div class="feature-header">
+                    <div class="feature-icon">🔊</div>
+                    <div class="feature-badges">
+                        <span class="badge-new">جديد</span>
+                        <span class="badge-free">مجاني</span>
+                    </div>
+                </div>
+                <div class="feature-title">تحويل النص لصوت</div>
+                <div class="feature-description">تحويل النصوص إلى كلام طبيعي بجودة عالية - يدعم العربية والإنجليزية</div>
+                <div class="feature-meta">
+                    <span class="feature-meta-item"><i class="bi bi-translate"></i> عربي/English</span>
+                    <span class="feature-meta-item"><i class="bi bi-download"></i> تحميل</span>
+                </div>
+            </a>
+
+            <!-- 9. Email Generator -->
+            <a href="features/email_generator_ui.hnt" class="feature-card <?php echo !$features['email_generator'] ? 'disabled' : ''; ?>">
+                <div class="feature-header">
+                    <div class="feature-icon">📧</div>
+                </div>
+                <div class="feature-title">مولد رسائل البريد</div>
+                <div class="feature-description">كتابة رسائل احترافية للعملاء والموردين بأسلوب مخصص</div>
+                <div class="feature-meta">
+                    <span class="feature-meta-item"><i class="bi bi-graph-up"></i> ROI: 90%</span>
+                    <span class="feature-meta-item"><i class="bi bi-clock"></i> 15 دقيقة/رسالة</span>
+                </div>
+            </a>
+
+            <!-- 10. Report Generator -->
+            <a href="features/report_generator_ui.hnt" class="feature-card <?php echo !$features['report_generator'] ? 'disabled' : ''; ?>">
+                <div class="feature-header">
+                    <div class="feature-icon">📈</div>
+                </div>
+                <div class="feature-title">مولد التقارير</div>
+                <div class="feature-description">إنشاء تقارير تحليلية ذكية ومفصلة من بياناتك</div>
+                <div class="feature-meta">
+                    <span class="feature-meta-item"><i class="bi bi-graph-up"></i> ROI: 85%</span>
+                    <span class="feature-meta-item"><i class="bi bi-clock"></i> 2 ساعة/تقرير</span>
+                </div>
+            </a>
+
+            <!-- 11. AI Chatbot Assistant -->
+            <a href="features/chatbot.hnt" class="feature-card <?php echo !$features['chatbot'] ? 'disabled' : ''; ?>">
+                <div class="feature-header">
+                    <div class="feature-icon">💬</div>
+                </div>
+                <div class="feature-title">مساعد AI التفاعلي</div>
+                <div class="feature-description">دردشة ذكية للإجابة على أسئلتك ومساعدتك في مهامك</div>
+                <div class="feature-meta">
+                    <span class="feature-meta-item"><i class="bi bi-clock-history"></i> 24/7</span>
+                    <span class="feature-meta-item"><i class="bi bi-chat-dots-fill"></i> تفاعلي</span>
+                </div>
+            </a>
+
+            <!-- 12. Model Selection Settings -->
+            <a href="models.hnt" class="feature-card">
+                <div class="feature-header">
+                    <div class="feature-icon">⚙️</div>
+                </div>
+                <div class="feature-title">اختيار النموذج</div>
+                <div class="feature-description">تخصيص نماذج الذكاء الاصطناعي المفضلة للدردشة والصور والصوت</div>
+                <div class="feature-meta">
+                    <span class="feature-meta-item"><i class="bi bi-sliders"></i> تخصيص</span>
+                    <span class="feature-meta-item"><i class="bi bi-cpu"></i> نماذج متعددة</span>
+                </div>
+            </a>
+        </div>
+
+        <!-- Info Box -->
+        <div class="info-box">
+            <h6><i class="bi bi-lightbulb-fill me-2"></i>هل تعلم؟</h6>
+            <ul class="mb-0 small">
+                <li class="mb-2">استخدام الذكاء الاصطناعي يوفر حتى <strong>70% من وقت العمل</strong> اليومي</li>
+                <li class="mb-2">التكلفة الشهرية المتوقعة: <strong>$0-15</strong> فقط مع عائد استثمار يصل إلى <strong>3000%</strong></li>
+                <li class="mb-2">ميزة <strong>تحويل الصوت لنص</strong> متاحة <span class="badge-free">مجاناً</span> باستخدام Groq API</li>
+                <li class="mb-2">ميزة <strong>تحويل النص لصوت</strong> متاحة <span class="badge-free">مجاناً</span> باستخدام Speechify API - 50,000 حرف شهرياً مع 1000+ صوت</li>
+                <li class="mb-2">ميزة <strong>إنشاء الصور</strong> متاحة <span class="badge-free">مجاناً</span> باستخدام Together AI أو Hugging Face</li>
+                <li>جميع البيانات محفوظة ومشفرة بأعلى معايير الأمان</li>
+            </ul>
+        </div>
+
+        <!-- Footer -->
+        <div class="text-center mt-5 text-muted">
+            <p class="mb-2 small">
+                <i class="bi bi-shield-check me-1"></i>
+                Powered by Anthropic, Groq & OpenAI
+            </p>
+            <p class="mb-0 small">
+                • <a href="status.hnt" style="color: #066d96;">الإحصائيات</a>
+              
+            </p>
+        </div>
+    </div>
+
+
+<script>
+// Smooth scroll animation for feature cards
+document.querySelectorAll('.feature-card').forEach(card => {
+    card.addEventListener('mouseenter', function() {
+        this.style.transition = 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)';
+    });
+});
+
+// Add loading animation when clicking feature cards
+document.querySelectorAll('.feature-card:not(.disabled)').forEach(card => {
+    card.addEventListener('click', function(e) {
+        const icon = this.querySelector('.feature-icon');
+        icon.style.transform = 'rotate(360deg)';
+        icon.style.transition = 'transform 0.6s ease';
+        setTimeout(() => {
+            icon.style.transform = 'rotate(0deg)';
+        }, 600);
+    });
+});
+</script>
+
+<?php
+require('../../foter.hnt');
+?>

@@ -1,0 +1,905 @@
+<?php
+/**
+ * In-app AI assistant (floating chat in foter.hnt, endpoint admin/ai/assistant/api.hnt).
+ *
+ * One message:
+ *  1. attachments are read by the local Indra OCR service (lib/ocr/ocr_runtime.hnt);
+ *  2. instructions, context, the screens this user may open, the conversation and the OCR text go to the
+ *     default AI provider (DeepSeek, through OpenRouterAPI so users' model settings and usage logs apply);
+ *  3. the model's JSON answer becomes a reply, a screen to open, related screens and at most one action:
+ *     lookups are answered here from the company's own data (respecting screen permissions and the
+ *     restricted users' assigned properties); create actions come back as drafts the user confirms.
+ *     Only "create tenant" is saved from the chat. Contracts and vouchers open their normal screen
+ *     pre-filled, so all of its calendar, installment, ZATCA and accounting logic still applies.
+ */
+
+require_once __DIR__ . '/catalog.hnt';
+require_once __DIR__ . '/prompt.hnt';
+require_once dirname(__DIR__, 3) . '/lib/screen_permissions.hnt';
+require_once dirname(__DIR__, 3) . '/lib/ocr/ocr_runtime.hnt';
+require_once dirname(__DIR__) . '/lib/OpenRouterAPI.class.php';
+require_once __DIR__ . '/ejar.hnt';
+
+final class AqaryAssistant
+{
+    public const MAX_FILES = 5;
+    public const MAX_FILE_BYTES = 10485760;
+    public const MAX_HISTORY = 12;
+    public const MAX_SCREENS = 40;
+    public const SCREEN_KEY = 'ai_assistant';
+
+    private $link;
+    private $userId;
+    private $restricted = null;
+    private $assigned = array();
+
+    public function __construct(mysqli $link, int $userId)
+    {
+        $this->link = $link;
+        $this->userId = $userId;
+    }
+
+    /** Company switch in `global` (missing row = enabled). */
+    public function enabled(): bool
+    {
+        $row = $this->row("SELECT valuribalevalue FROM global WHERE variblename='ai_assistant_enabled' ORDER BY id DESC LIMIT 1");
+        return !$row || trim((string)$row['valuribalevalue']) !== '0';
+    }
+
+    /** Company switch (global ai_assistant_enabled). Only users who may edit system options (screen 84) change it. */
+    public function setCompanyEnabled(bool $on): void
+    {
+        if (!aqaryScreenCan($this->link, '84', 'edits')) throw new InvalidArgumentException('ليست لديك صلاحية تعديل خيارات النظام.');
+        $value = $on ? '1' : '0';
+        $row = $this->row("SELECT id FROM global WHERE variblename='ai_assistant_enabled' ORDER BY id DESC LIMIT 1");
+        $stmt = $row
+            ? $this->link->prepare("UPDATE global SET valuribalevalue=? WHERE variblename='ai_assistant_enabled'")
+            : $this->link->prepare("INSERT INTO global (variblename, valuribalevalue, formuid) VALUES ('ai_assistant_enabled', ?, 'ai-assistant-setting')");
+        if (!$stmt) throw new RuntimeException($this->link->error);
+        $stmt->execute(array($value));
+        $stmt->close();
+    }
+
+    /**
+     * OCR provider for this company (global rows; missing = the bundled local service).
+     * @return array{provider: string, url: string, key: string, has_key: bool}
+     */
+    public function ocrSettings(): array
+    {
+        $provider = $this->globalValue('ai_ocr_provider') === 'remote' ? 'remote' : 'local';
+        $url = (string)$this->globalValue('ai_ocr_remote_url');
+        $stored = (string)$this->globalValue('ai_ocr_remote_key');
+        $key = $stored !== '' ? (string)base64_decode($stored, true) : '';
+        return array('provider' => $provider, 'url' => $url, 'key' => $key, 'has_key' => $key !== '');
+    }
+
+    /** Remote OCR config for AqaryOcrRuntime::read(), or null for the local service. */
+    public function ocrRemote(): ?array
+    {
+        $settings = $this->ocrSettings();
+        return $settings['provider'] === 'remote' ? array('url' => $settings['url'], 'key' => $settings['key']) : null;
+    }
+
+    /**
+     * Saves the OCR provider (screen 84 edits). An empty $key keeps the saved key; $clearKey removes it.
+     * @throws InvalidArgumentException with an Arabic message
+     */
+    public function setOcrSettings(string $provider, string $url, string $key, bool $clearKey = false): void
+    {
+        if (!aqaryScreenCan($this->link, '84', 'edits')) throw new InvalidArgumentException('ليست لديك صلاحية تعديل خيارات النظام.');
+        $provider = $provider === 'remote' ? 'remote' : 'local';
+        $url = trim($url);
+        $key = trim($key);
+        if ($url !== '') {
+            $url = AqaryOcrRuntime::normalizeRemoteUrl($url);
+            if ($url === '') throw new InvalidArgumentException('عنوان خدمة OCR غير صحيح. اكتب عنواناً يبدأ بـ http:// أو https://');
+        }
+        if ($provider === 'remote' && $url === '') throw new InvalidArgumentException('اكتب عنوان خدمة OCR الخارجية.');
+        if (strlen($key) > 512 || preg_match('/[\x00-\x1F\x7F]/', $key)) throw new InvalidArgumentException('مفتاح API غير صالح.');
+        $this->setGlobal('ai_ocr_provider', $provider);
+        $this->setGlobal('ai_ocr_remote_url', $url);
+        if ($clearKey) $this->setGlobal('ai_ocr_remote_key', '');
+        elseif ($key !== '') $this->setGlobal('ai_ocr_remote_key', base64_encode($key));
+    }
+
+    private function globalValue(string $name): ?string
+    {
+        $row = $this->row('SELECT valuribalevalue FROM global WHERE variblename=? ORDER BY id DESC LIMIT 1', array($name));
+        return $row ? trim((string)$row['valuribalevalue']) : null;
+    }
+
+    private function setGlobal(string $name, string $value): void
+    {
+        $row = $this->row('SELECT id FROM global WHERE variblename=? ORDER BY id DESC LIMIT 1', array($name));
+        $stmt = $row
+            ? $this->link->prepare('UPDATE global SET valuribalevalue=? WHERE variblename=?')
+            : $this->link->prepare("INSERT INTO global (valuribalevalue, variblename, formuid) VALUES (?, ?, 'ai-assistant-setting')");
+        if (!$stmt) throw new RuntimeException($this->link->error);
+        $stmt->execute(array($value, $name));
+        $stmt->close();
+    }
+
+    /** The user's own preference (user.ai_assistant_enabled; a missing column = not migrated yet = on). */
+    public function userEnabled(): bool
+    {
+        try {
+            $row = $this->row('SELECT ai_assistant_enabled FROM user WHERE userid=? LIMIT 1', array($this->userId));
+            return !$row || intval($row['ai_assistant_enabled']) !== 0;
+        } catch (Throwable $error) {
+            return true;
+        }
+    }
+
+    /** Saves the user's own preference. @throws InvalidArgumentException before the migration added the column */
+    public function setUserEnabled(bool $on): void
+    {
+        try {
+            $stmt = $this->link->prepare('UPDATE user SET ai_assistant_enabled=? WHERE userid=?');
+        } catch (Throwable $error) {
+            $stmt = false;
+        }
+        if (!$stmt) throw new InvalidArgumentException('افتح إدارة الأملاك أولاً لتثبيت تحديث النظام ثم أعد المحاولة.');
+        $stmt->execute(array($on ? '1' : '0', (string)$this->userId));
+        $stmt->close();
+    }
+
+    public function allowed(): bool
+    {
+        return $this->userId > 0 && aqaryScreenCan($this->link, self::SCREEN_KEY, 'sees');
+    }
+
+    /** @return array{ready: bool, reason: ?string, message: ?string, model: string, ocr: array} */
+    public function status(): array
+    {
+        $config = $this->aiConfig();
+        $reason = null;
+        if (!$this->enabled()) $reason = 'disabled';
+        elseif (!$this->userEnabled()) $reason = 'user_off';
+        elseif (!$this->allowed()) $reason = 'permission';
+        elseif (empty($config['deepseek_api_key']) && empty($config['api_key'])) $reason = 'provider';
+        $messages = array(
+            'disabled' => 'المساعد الذكي متوقف لهذه الشركة.',
+            'user_off' => 'أوقفت المساعد الذكي لحسابك. يمكنك تشغيله من الملف الشخصي.',
+            'permission' => 'ليست لديك صلاحية استخدام المساعد الذكي. راجع مدير النظام.',
+            'provider' => 'لم يُعدّ مزوّد الذكاء الاصطناعي بعد.',
+        );
+        $ocrSettings = $this->ocrSettings();
+        $ocr = array('provider' => $ocrSettings['provider'], 'installed' => AqaryOcrRuntime::isInstalled(),
+            'installing' => AqaryOcrRuntime::isInstalling(), 'supported' => AqaryOcrRuntime::supported());
+        // A remote OCR server needs nothing installed here; the widget only checks "installed".
+        if ($ocrSettings['provider'] === 'remote') $ocr['installed'] = $ocrSettings['url'] !== '';
+        return array(
+            'ready' => $reason === null, 'reason' => $reason, 'message' => $reason ? $messages[$reason] : null,
+            'model' => (string)($config['assistant_model'] ?? $config['default_model'] ?? ''), 'ocr' => $ocr,
+        );
+    }
+
+    /**
+     * @param list<array{role: string, text: string}> $messages
+     * @param list<array{name: string, type: string, tmp_name: string, size: int}> $files
+     */
+    public function chat(array $messages, array $files, string $currentUrl): array
+    {
+        $status = $this->status();
+        if (!$status['ready']) return $this->answer($status['message']);
+
+        // 1. OCR of the attachments.
+        $reads = array();
+        $ocrText = '';
+        $ocrRemote = $files ? $this->ocrRemote() : null;
+        foreach (array_slice($files, 0, self::MAX_FILES) as $i => $file) {
+            $name = mb_substr((string)$file['name'], 0, 120);
+            try {
+                if ($file['size'] > self::MAX_FILE_BYTES) throw new RuntimeException('حجم الملف أكبر من 10 ميجابايت.');
+                $read = AqaryOcrRuntime::read((string)file_get_contents($file['tmp_name']), $file['type'], 'auto', $ocrRemote);
+                $reads[] = array('name' => $name, 'text' => $read['text'], 'rtl' => $read['rtl'], 'ms' => $read['ms']);
+                $ocrText .= "\n\n--- Attachment " . ($i + 1) . ": {$name} ---\n"
+                    . ($read['text'] !== '' ? mb_substr($read['text'], 0, 12000) : '(no text could be read)');
+            } catch (Throwable $error) {
+                $reads[] = array('name' => $name, 'text' => '', 'error' => $error->getMessage());
+            }
+        }
+
+        $last = end($messages);
+        $message = (string)($last['text'] ?? '');
+
+        // An Ejar unified contract (منصة إيجار) is imported step by step (ejar.hnt), unless the user asks a question about it.
+        if (!preg_match('/[؟?]/u', $message)) {
+            foreach ($reads as $read) {
+                if (!empty($read['text']) && AqaryEjarImport::looksLikeEjar($read['text'])) {
+                    $ejar = $this->ejarAnswer($read['text'], $reads);
+                    if ($ejar !== null) return $ejar;
+                    break;
+                }
+            }
+        }
+
+        // 2. Prompt: context, matching screens, conversation, new message, OCR text, format reminder last.
+        $screens = aqaryAssistantScreensFor($this->link);
+        $ranked = self::rankScreens($message . ' ' . $ocrText, $screens);
+        $shown = count($screens) <= self::MAX_SCREENS ? $screens
+            : array_intersect_key($screens, array_flip(array_slice(array_keys($ranked), 0, self::MAX_SCREENS)));
+
+        $prompt = $this->context($currentUrl) . "\n\nScreens you may use (key | title | words):\n";
+        foreach ($shown as $key => $screen) {
+            $prompt .= $key . ' | ' . $screen['ar'] . ' / ' . $screen['en'] . ' | ' . $screen['k'] . "\n";
+        }
+        $history = array_slice($messages, 0, -1);
+        if ($history) {
+            $prompt .= "\nConversation so far:\n";
+            foreach (array_slice($history, -self::MAX_HISTORY) as $m) {
+                $prompt .= ($m['role'] === 'user' ? 'User: ' : 'Assistant: ') . mb_substr((string)$m['text'], 0, 2000) . "\n";
+            }
+        }
+        $prompt .= "\nUser's new message:\n" . mb_substr($message, 0, 4000);
+        if ($ocrText !== '') $prompt .= "\n\nAttached files, as read by OCR (may contain small reading errors):" . $ocrText;
+        $prompt .= "\n\n" . AqaryAssistantPrompt::FORMAT_REMINDER;
+
+        // 3. The model call (default provider; rate limits, budget and usage log of the AI module apply).
+        try {
+            $config = $this->aiConfig();
+            $ai = new OpenRouterAPI($this->link);
+            $content = $ai->chat(array(
+                array('role' => 'system', 'content' => AqaryAssistantPrompt::INSTRUCTIONS),
+                array('role' => 'user', 'content' => $prompt),
+            ), array(
+                'model' => (string)($config['assistant_model'] ?? $config['default_model']),
+                'response_format' => array('type' => 'json_object'),
+                'temperature' => 0.2,
+                // A cap, not a cost (DeepSeek thinking is off in OpenRouterAPI; OpenRouter models may still reason).
+                'max_tokens' => 3000,
+                'enforce_limits' => true,
+                'log_feature' => 'assistant',
+            ));
+        } catch (Throwable $error) {
+            error_log('AI assistant model call: ' . $error->getMessage());
+            return $this->answer('تعذّر الحصول على رد من نموذج الذكاء الاصطناعي، حاول مرة أخرى بعد قليل.', null, array(), array(), $reads);
+        }
+        $json = self::parseJson((string)$content);
+        $content = trim((string)$content);
+
+        // 4. Screens to open / suggest, only from the user's own list.
+        $openKey = is_string($json['open_screen'] ?? null) && isset($screens[$json['open_screen']]) ? $json['open_screen'] : null;
+        if (!$openKey && empty($json['action']['type']) && self::asksToOpen($message)) {
+            $top = array_slice($ranked, 0, 2, true);
+            $scores = array_values($top);
+            if ($scores && $scores[0] >= 2 && $scores[0] > ($scores[1] ?? 0)) $openKey = array_key_first($top);
+        }
+        $navigate = $openKey ? array('title' => $screens[$openKey]['ar'], 'url' => $screens[$openKey]['url']) : null;
+        $links = array();
+        foreach (array_slice((array)($json['help_screens'] ?? array()), 0, 3) as $key) {
+            if (is_string($key) && isset($screens[$key]) && $key !== $openKey) {
+                $links[] = array('title' => $screens[$key]['ar'], 'url' => $screens[$key]['url']);
+            }
+        }
+
+        // 5. Reply and action.
+        $reply = '';
+        foreach (array('reply', 'response', 'answer', 'message', 'text') as $field) {
+            if (is_string($json[$field] ?? null) && trim($json[$field]) !== '') {
+                $reply = trim($json[$field]);
+                break;
+            }
+        }
+        if ($reply === '' && !$json && $content !== '' && $content[0] !== '{') $reply = $content;
+
+        $actions = array();
+        $action = is_array($json['action'] ?? null) ? $json['action'] : null;
+        if ($action && !empty($action['type'])) {
+            try {
+                $handled = $this->handleAction((string)$action['type'], $action);
+                if ($handled['reply'] !== null) $reply = $handled['reply'];
+                $links = array_merge($handled['links'], $links);
+                if ($handled['card']) {
+                    $actions[] = $handled['card'];
+                    if ($reply === '') $reply = 'هذه مسودة، راجعها ثم أكّد.';
+                }
+            } catch (Throwable $error) {
+                error_log('AI assistant action ' . $action['type'] . ': ' . $error->getMessage());
+                $reply = 'تعذّر تنفيذ الطلب على البيانات. حاول مرة أخرى أو افتح الشاشة المناسبة.';
+            }
+        }
+        if ($reply === '' && $navigate) $reply = 'جارٍ فتح ' . $navigate['title'] . '…';
+        if ($reply === '' && !$actions && !$links) {
+            $reply = 'لم أفهم الطلب. أعد صياغته من فضلك، أو اختر إحدى هذه الشاشات:';
+            foreach (array_slice($ranked, 0, 3, true) as $key => $score) {
+                if ($score > 0) $links[] = array('title' => $screens[$key]['ar'], 'url' => $screens[$key]['url']);
+            }
+        }
+        if ($reads && count(array_filter($reads, function ($r) { return isset($r['error']); })) === count($reads)) {
+            $reply = trim($reply . "\n\nملاحظة: تعذّرت قراءة المرفق — " . $reads[0]['error']);
+        }
+        return $this->answer($reply, $navigate, $links, $actions, $reads);
+    }
+
+    /** The Ejar import card for an attached contract; null when the model says it is not an Ejar contract. */
+    private function ejarAnswer(string $text, array $reads): ?array
+    {
+        if (!aqaryScreenCan($this->link, '42', 'adds')) {
+            return $this->answer('هذا عقد من منصة إيجار، لكن ليست لديك صلاحية إنشاء عقود الإيجار. راجع مدير النظام.', null, array(), array(), $reads);
+        }
+        try {
+            $import = new AqaryEjarImport($this->link, $this->userId);
+            $data = $import->extract($text, $this->aiConfig());
+            if (!$data) return null;
+            $card = $import->card($data, $this->canCreateTenant());
+        } catch (Throwable $error) {
+            error_log('AI assistant Ejar import: ' . $error->getMessage());
+            return $this->answer('تعذّر استخراج بيانات عقد إيجار من المرفق، حاول مرة أخرى بعد قليل.', null, array(), array(), $reads);
+        }
+        $number = $card['data']['contract']['number'];
+        $reply = 'هذا عقد إيجار موحّد من منصة إيجار' . ($number ? ' رقم ' . $number : '') . '. سأضيفه للنظام خطوة بخطوة: العقار، ثم الوحدة، ثم المستأجر، ثم أفتح شاشة العقد معبّأة بكل بياناته.';
+        if ($card['data']['existing_contract']) $reply .= "\nتنبيه: يوجد عقد مسجّل بنفس الرقم في النظام.";
+        return $this->answer($reply, null, array(), array($card), $reads);
+    }
+
+    /** Ejar import steps confirmed in the chat card (building + unit, unit only, remember deed/address). */
+    public function confirmEjar(string $step, array $data): array
+    {
+        if (!$this->allowed()) throw new InvalidArgumentException('ليست لديك صلاحية استخدام المساعد الذكي.');
+        $import = new AqaryEjarImport($this->link, $this->userId);
+        if ($step === 'ejar_building') return $import->confirmBuilding($data);
+        if ($step === 'ejar_unit') return $import->confirmUnit($data);
+        if ($step === 'ejar_remember') return $import->rememberBuilding($data);
+        throw new InvalidArgumentException('إجراء غير معروف.');
+    }
+
+    /** @return array{reply: ?string, links: array, card: ?array} */
+    private function handleAction(string $type, array $action): array
+    {
+        $query = self::clean($action['query'] ?? null) ?? '';
+        $none = array('reply' => null, 'links' => array(), 'card' => null);
+        switch ($type) {
+            case 'lookup_tenant':
+                return $this->lookupTenant($query !== '' ? $query : (string)self::clean($action['tenant_query'] ?? null));
+            case 'lookup_property':
+                return $this->lookupProperty($query !== '' ? $query : (string)self::clean($action['property_query'] ?? null));
+            case 'lookup_vacant_units':
+                return $this->lookupVacant($query !== '' ? $query : (string)self::clean($action['property_query'] ?? null));
+            case 'lookup_overdue':
+                return $this->lookupOverdue($query !== '' ? $query : (string)self::clean($action['property_query'] ?? null));
+            case 'create_tenant':
+                if (!$this->canCreateTenant()) return array('reply' => 'ليست لديك صلاحية إضافة مستأجر. راجع مدير النظام.') + $none;
+                return array('reply' => null, 'links' => array(), 'card' => $this->tenantCard((array)($action['tenant'] ?? array()), (array)($action['missing'] ?? array())));
+            case 'draft_contract':
+                if (!aqaryScreenCan($this->link, '42', 'adds')) return array('reply' => 'ليست لديك صلاحية إنشاء عقود الإيجار.') + $none;
+                return array('reply' => null, 'links' => array(), 'card' => $this->contractCard($action));
+            case 'draft_rent_receipt':
+                if (!aqaryScreenCan($this->link, '41', 'adds')) return array('reply' => 'ليست لديك صلاحية إنشاء سندات القبض.') + $none;
+                return $this->rentReceiptCard((string)(self::clean($action['tenant_query'] ?? null) ?? $query));
+            case 'draft_receipt_voucher':
+            case 'draft_payment_voucher':
+                $payment = $type === 'draft_payment_voucher';
+                if (!aqaryScreenCan($this->link, $payment ? 'voucher_payments' : 'voucher_receipts', 'adds')) {
+                    return array('reply' => 'ليست لديك صلاحية إنشاء ' . ($payment ? 'سندات الصرف.' : 'سندات القبض.')) + $none;
+                }
+                return array('reply' => null, 'links' => array(), 'card' => $this->voucherCard($payment, (array)($action['voucher'] ?? array())));
+        }
+        return $none;
+    }
+
+    // ------------------------------------------------------------------ lookups
+
+    private function lookupTenant(string $query): array
+    {
+        $tenants = $this->findTenants($query, 5);
+        if (!$tenants) return array('reply' => 'لم أجد مستأجراً يطابق "' . $query . '".', 'links' => array(), 'card' => null);
+        $t = $tenants[0];
+        $id = intval($t['mostagerid']);
+        $units = $this->tenantUnits($id);
+        $arrears = $this->tenantArrears($id, array_column($units, 'idsubaqar'));
+        $contract = $this->row("SELECT rakam3akd, end3aqd, status, annualprice FROM egar WHERE mostagerid=? ORDER BY rakam3akdid DESC LIMIT 1", array($id));
+
+        $parts = array($t['mostagername']);
+        if ($t['mostageridnumber'] !== '') $parts[] = 'الهوية ' . $t['mostageridnumber'];
+        if ($t['mostagertel'] !== '') $parts[] = 'الجوال ' . $t['mostagertel'];
+        $reply = implode(' · ', $parts) . '.';
+        if ($units) {
+            $reply .= "\nالوحدات: " . implode('، ', array_map(function ($u) { return trim($u['aqarname'] . ' - ' . $u['subtype'] . ' ' . $u['rakam']); }, $units)) . '.';
+        } else {
+            $reply .= "\nلا توجد وحدة مؤجرة له حالياً.";
+        }
+        if ($contract) {
+            $reply .= "\nآخر عقد: رقم " . $contract['rakam3akd'] . ($contract['end3aqd'] > 0 ? '، ينتهي ' . date('Y-m-d', intval($contract['end3aqd'])) : '')
+                . '، الإيجار السنوي ' . number_format((float)$contract['annualprice'], 2) . '.';
+        }
+        $reply .= "\n" . ($arrears['count'] > 0
+            ? 'المتأخرات: ' . $arrears['count'] . ' قسط بمبلغ ' . number_format($arrears['amount'], 2) . ' ريال (أقدمها ' . date('Y-m-d', $arrears['oldest']) . ').'
+            : 'لا توجد أقساط متأخرة.');
+        if ($arrears['next']) $reply .= ' القسط القادم ' . date('Y-m-d', $arrears['next']['date']) . ' بمبلغ ' . number_format($arrears['next']['amount'], 2) . '.';
+        if (count($tenants) > 1) $reply .= "\nيوجد أيضاً: " . implode('، ', array_map(function ($x) { return $x['mostagername']; }, array_slice($tenants, 1))) . '.';
+
+        $links = array();
+        if (aqaryScreenCan($this->link, '58', 'sees')) $links[] = array('title' => 'كشف حساب المستأجر', 'url' => '/aqary/admin/include/amlak/kashf_7esabmostager.hnt?mostagerid=' . $id);
+        if (aqaryScreenCan($this->link, '96', 'sees')) $links[] = array('title' => 'بيانات المستأجر', 'url' => '/aqary/admin/include/amlak/editmostager.hnt?mostagerid=' . $id);
+        if ($units && aqaryScreenCan($this->link, '41', 'adds')) $links[] = array('title' => 'سند قبض إيجار', 'url' => '/aqary/admin/include/amlak/sanad.hnt?idsubaqar=' . intval($units[0]['idsubaqar']));
+        return array('reply' => $reply, 'links' => $links, 'card' => null);
+    }
+
+    private function lookupProperty(string $query): array
+    {
+        $p = $this->findProperty($query);
+        if (!$p) return array('reply' => 'لم أجد عقاراً يطابق "' . $query . '".', 'links' => array(), 'card' => null);
+        $id = intval($p['idaqar']);
+        $c = $this->row("SELECT COUNT(*) total, SUM(mostagerid>0) occupied FROM amlakdetails WHERE idaqar=?", array($id));
+        $o = $this->overdueTotals($id);
+        $total = intval($c['total'] ?? 0);
+        $occupied = intval($c['occupied'] ?? 0);
+        $reply = $p['aqarname'] . ($p['ownername'] !== '' ? ' (المالك: ' . $p['ownername'] . ')' : '') . ': '
+            . $total . ' وحدة، المؤجر ' . $occupied . '، الشاغر ' . ($total - $occupied) . '.'
+            . "\n" . ($o['count'] > 0 ? 'المتأخرات: ' . $o['count'] . ' قسط بمبلغ ' . number_format($o['amount'], 2) . ' ريال.' : 'لا توجد أقساط متأخرة.');
+        $links = array();
+        if (aqaryScreenCan($this->link, '39', 'sees')) $links[] = array('title' => 'حالة الإيجار لهذا العقار', 'url' => '/aqary/admin/include/amlak/egarstatus.hnt?searchbyidaqar=' . $id);
+        if ($total - $occupied > 0 && aqaryScreenCan($this->link, '42', 'adds')) $links[] = array('title' => 'عقد إيجار جديد', 'url' => '/aqary/admin/include/amlak/egar.hnt?hnt_dll=1&idaqar=' . $id);
+        return array('reply' => $reply, 'links' => $links, 'card' => null);
+    }
+
+    private function lookupVacant(string $query): array
+    {
+        $propertyId = 0;
+        $propertyName = '';
+        if ($query !== '') {
+            $p = $this->findProperty($query);
+            if (!$p) return array('reply' => 'لم أجد عقاراً يطابق "' . $query . '".', 'links' => array(), 'card' => null);
+            $propertyId = intval($p['idaqar']);
+            $propertyName = $p['aqarname'];
+        }
+        $where = 'd.mostagerid=0' . ($propertyId ? ' AND d.idaqar=' . $propertyId : '') . $this->scopeSql('d.idaqar');
+        $count = $this->row("SELECT COUNT(*) n FROM amlakdetails d WHERE {$where}");
+        $rows = $this->rows("SELECT d.idsubaqar, d.idaqar, d.rakam, d.price, a.aqarname, COALESCE(s.aqarsubtypename,'') subtype
+            FROM amlakdetails d LEFT JOIN amlak a ON a.idaqar=d.idaqar LEFT JOIN aqarsubtype s ON s.aqarsubtype=d.aqarsubtype
+            WHERE {$where} ORDER BY a.aqarname, d.rakam LIMIT 12");
+        $n = intval($count['n'] ?? 0);
+        if (!$n) return array('reply' => 'لا توجد وحدات شاغرة' . ($propertyName ? ' في ' . $propertyName : '') . '.', 'links' => array(), 'card' => null);
+        $lines = array_map(function ($r) {
+            return trim($r['aqarname'] . ' - ' . $r['subtype'] . ' ' . $r['rakam']) . ($r['price'] > 0 ? ' (' . number_format((float)$r['price']) . ' سنوياً)' : '');
+        }, $rows);
+        $reply = 'الوحدات الشاغرة' . ($propertyName ? ' في ' . $propertyName : '') . ': ' . $n . "\n" . implode("\n", $lines) . ($n > count($rows) ? "\n…" : '');
+        $links = array();
+        if (aqaryScreenCan($this->link, '44', 'sees')) $links[] = array('title' => 'بحث الوحدات غير المؤجرة', 'url' => '/aqary/admin/include/amlak/freeamlak.hnt?aqarsubtype=2');
+        if (aqaryScreenCan($this->link, '42', 'adds')) {
+            $links[] = array('title' => 'تأجير ' . trim($rows[0]['subtype'] . ' ' . $rows[0]['rakam']), 'url' => '/aqary/admin/include/amlak/egar.hnt?hnt_dll=1&idaqar=' . intval($rows[0]['idaqar']) . '&idsubaqar=' . intval($rows[0]['idsubaqar']));
+        }
+        return array('reply' => $reply, 'links' => $links, 'card' => null);
+    }
+
+    private function lookupOverdue(string $query): array
+    {
+        $propertyId = 0;
+        $propertyName = '';
+        if ($query !== '') {
+            $p = $this->findProperty($query);
+            if (!$p) return array('reply' => 'لم أجد عقاراً يطابق "' . $query . '".', 'links' => array(), 'card' => null);
+            $propertyId = intval($p['idaqar']);
+            $propertyName = $p['aqarname'];
+        }
+        $o = $this->overdueTotals($propertyId);
+        if (!$o['count']) return array('reply' => 'لا توجد أقساط متأخرة' . ($propertyName ? ' في ' . $propertyName : '') . '.', 'links' => array(), 'card' => null);
+        $top = $this->rows("SELECT m.mostagerid, m.mostagername, COUNT(*) n, SUM(" . self::REMAINING . ") amount
+            FROM amlakdetails d JOIN aksat k ON k.idsubaqar=d.idsubaqar AND k.iscomplete=0
+            JOIN mostagereen m ON m.mostagerid=d.mostagerid
+            WHERE d.mostagerid>0 AND k.kastdate>0 AND k.kastdate<?" . ($propertyId ? ' AND d.idaqar=' . $propertyId : '') . $this->scopeSql('d.idaqar') . "
+            GROUP BY m.mostagerid, m.mostagername ORDER BY amount DESC LIMIT 5", array(time()));
+        $reply = 'المتأخرات' . ($propertyName ? ' في ' . $propertyName : '') . ': ' . $o['count'] . ' قسط بمبلغ ' . number_format($o['amount'], 2) . ' ريال لدى ' . $o['tenants'] . ' مستأجر.'
+            . "\nالأعلى: " . implode('، ', array_map(function ($r) { return $r['mostagername'] . ' (' . number_format((float)$r['amount'], 2) . ')'; }, $top)) . '.';
+        $links = array();
+        if (aqaryScreenCan($this->link, '39', 'sees')) {
+            $links[] = array('title' => 'حالة الإيجار', 'url' => '/aqary/admin/include/amlak/egarstatus.hnt' . ($propertyId ? '?searchbyidaqar=' . $propertyId : ''));
+        }
+        return array('reply' => $reply, 'links' => $links, 'card' => null);
+    }
+
+    // ------------------------------------------------------------------ drafts
+
+    private function tenantCard(array $t, array $missing = array()): array
+    {
+        $data = array(
+            'name' => self::clean($t['name'] ?? null, 244),
+            'id_number' => self::clean(self::digits($t['id_number'] ?? null), 50),
+            'id_type' => self::clean($t['id_type'] ?? null, 100),
+            'nationality' => self::clean($t['nationality'] ?? null, 50),
+            'phone' => self::clean(self::digits($t['phone'] ?? null), 100),
+            'email' => self::clean($t['email'] ?? null, 100),
+            'address' => self::clean($t['address'] ?? null, 244),
+            'work' => self::clean($t['work'] ?? null, 100),
+            'vat_number' => self::clean(self::digits($t['vat_number'] ?? null), 100),
+        );
+        $missing = array_values(array_filter(array_map('strval', $missing)));
+        if (!$data['name']) $missing[] = 'name';
+        $card = array('type' => 'create_tenant', 'data' => $data, 'missing' => array_values(array_unique($missing)), 'existing' => null);
+        if ($data['id_number']) {
+            $existing = $this->row("SELECT mostagerid, mostagername FROM mostagereen WHERE mostageridnumber=? LIMIT 1", array($data['id_number']));
+            if ($existing) $card['existing'] = array('id' => intval($existing['mostagerid']), 'name' => $existing['mostagername'],
+                'url' => '/aqary/admin/include/amlak/editmostager.hnt?mostagerid=' . intval($existing['mostagerid']));
+        }
+        return $card;
+    }
+
+    private function contractCard(array $action): array
+    {
+        $missing = array();
+        $terms = (array)($action['contract'] ?? array());
+        $tenantId = 0;
+        $tenantLabel = null;
+        $newTenant = null;
+        $tq = self::clean($action['tenant_query'] ?? null);
+        if ($tq) {
+            $found = $this->findTenants($tq, 1);
+            if ($found) {
+                $tenantId = intval($found[0]['mostagerid']);
+                $tenantLabel = $found[0]['mostagername'];
+            }
+        }
+        if (!$tenantId && !empty($action['tenant']) && is_array($action['tenant'])) {
+            $newTenant = $this->tenantCard($action['tenant']);
+            if ($newTenant['existing']) {
+                $tenantId = $newTenant['existing']['id'];
+                $tenantLabel = $newTenant['existing']['name'];
+                $newTenant = null;
+            } elseif (!$newTenant['data']['name']) {
+                $newTenant = null;
+            }
+        }
+        if (!$tenantId && !$newTenant) $missing[] = 'tenant';
+        if ($newTenant && !$this->canCreateTenant()) $missing[] = 'tenant_permission';
+
+        $propertyId = 0;
+        $propertyLabel = null;
+        $unitId = 0;
+        $unitLabel = null;
+        $unitPrice = null;
+        $pq = self::clean($action['property_query'] ?? null);
+        if ($pq && ($p = $this->findProperty($pq))) {
+            $propertyId = intval($p['idaqar']);
+            $propertyLabel = $p['aqarname'];
+            $vacant = $this->rows("SELECT d.idsubaqar, d.rakam, d.price, COALESCE(s.aqarsubtypename,'') subtype FROM amlakdetails d
+                LEFT JOIN aqarsubtype s ON s.aqarsubtype=d.aqarsubtype WHERE d.idaqar=? AND d.mostagerid=0 ORDER BY d.rakam", array($propertyId));
+            $uq = self::clean(self::digits($action['unit_query'] ?? null));
+            $matches = array_values(array_filter($vacant, function ($u) use ($uq, $vacant) {
+                return ($uq !== null && trim((string)$u['rakam']) === $uq) || (!$uq && count($vacant) === 1);
+            }));
+            if ($matches) {
+                $u = $matches[0];
+                $unitId = intval($u['idsubaqar']);
+                $unitLabel = trim($u['subtype'] . ' ' . $u['rakam']);
+                $unitPrice = $u['price'] > 0 ? (float)$u['price'] : null;
+                // Same number for different unit types (e.g. a flat 10 and a room 10): let the user choose on the screen.
+                if (count($matches) > 1) $missing[] = 'unit_ambiguous';
+            }
+            if (!$unitId) $missing[] = $vacant ? 'unit' : 'no_vacant_unit';
+        } else {
+            $missing[] = 'property';
+        }
+
+        $annual = is_numeric($terms['annual_rent'] ?? null) ? (float)$terms['annual_rent'] : $unitPrice;
+        $duration = is_numeric($terms['duration_months'] ?? null) ? max(1, min(120, intval($terms['duration_months']))) : 12;
+        $data = array(
+            'tenant_id' => $tenantId ?: null, 'tenant_label' => $tenantLabel, 'tenant' => $newTenant ? $newTenant['data'] : null,
+            'property_id' => $propertyId ?: null, 'property_label' => $propertyLabel,
+            'unit_id' => $unitId ?: null, 'unit_label' => $unitLabel,
+            'annual_rent' => $annual, 'duration_months' => $duration,
+            'start_date' => self::date($terms['start_date'] ?? null) ?? date('Y-m-d'),
+            'notes' => self::clean($terms['notes'] ?? null, 500),
+        );
+        $url = '/aqary/admin/include/amlak/egar.hnt?hnt_dll=1'
+            . ($propertyId ? '&idaqar=' . $propertyId : '') . ($unitId ? '&idsubaqar=' . $unitId : '') . ($tenantId ? '&mostagerid=' . $tenantId : '');
+        return array('type' => 'draft_contract', 'data' => $data, 'missing' => array_values(array_unique($missing)), 'url' => $url);
+    }
+
+    private function rentReceiptCard(string $tenantQuery): array
+    {
+        $found = $tenantQuery !== '' ? $this->findTenants($tenantQuery, 1) : array();
+        if (!$found) return array('reply' => 'حدد المستأجر الذي سيُقبض منه (الاسم أو رقم الهوية أو الجوال).', 'links' => array(), 'card' => null);
+        $id = intval($found[0]['mostagerid']);
+        $units = $this->tenantUnits($id);
+        if (!$units) return array('reply' => $found[0]['mostagername'] . ' ليست له وحدة مؤجرة حالياً. يمكنك استخدام سند قبض حر.', 'links' => array(), 'card' => null);
+        $arrears = $this->tenantArrears($id, array_column($units, 'idsubaqar'));
+        $options = array();
+        foreach ($units as $u) {
+            $options[] = array('label' => trim($u['aqarname'] . ' - ' . $u['subtype'] . ' ' . $u['rakam']),
+                'url' => '/aqary/admin/include/amlak/sanad.hnt?idsubaqar=' . intval($u['idsubaqar']));
+        }
+        return array('reply' => null, 'links' => array(), 'card' => array('type' => 'draft_rent_receipt', 'missing' => array(), 'data' => array(
+            'tenant_label' => $found[0]['mostagername'], 'units' => $options,
+            'arrears_count' => $arrears['count'], 'arrears_amount' => round($arrears['amount'], 2),
+        )));
+    }
+
+    private function voucherCard(bool $payment, array $v): array
+    {
+        $methods = array('cash' => 1, 'cheque' => 2, 'transfer' => 4, 'other' => 3);
+        $method = is_string($v['payment_method'] ?? null) && isset($methods[$v['payment_method']]) ? $v['payment_method'] : 'cash';
+        $data = array(
+            'party_name' => self::clean($v['party_name'] ?? null, 245),
+            'amount' => is_numeric($v['amount'] ?? null) ? round((float)$v['amount'], 2) : null,
+            'date' => self::date($v['date'] ?? null) ?? date('Y-m-d'),
+            'description' => self::clean($v['description'] ?? null, 245),
+            'payment_method' => $method,
+            'notes' => self::clean($v['notes'] ?? null, 500),
+        );
+        $missing = array();
+        if (!$data['party_name']) $missing[] = $payment ? 'beneficiary' : 'payer';
+        if ($data['amount'] === null || $data['amount'] <= 0) $missing[] = 'amount';
+        return array('type' => $payment ? 'draft_payment_voucher' : 'draft_receipt_voucher', 'data' => $data, 'missing' => $missing,
+            'url' => '/aqary/admin/hnt-office/recive_voucher.hnt' . ($payment ? '?paymentvou=1' : ''));
+    }
+
+    // ------------------------------------------------------------------ confirm (the only direct write)
+
+    public function canCreateTenant(): bool
+    {
+        return aqaryScreenCanAny($this->link, array('42', '96'), 'adds');
+    }
+
+    /** Saves a confirmed tenant draft. @return array{message: string, url: string, tenant_id: int, tenant_label: string} */
+    public function confirmTenant(array $d): array
+    {
+        if (!$this->allowed() || !$this->canCreateTenant()) throw new InvalidArgumentException('ليست لديك صلاحية إضافة مستأجر.');
+        $f = array();
+        foreach (array('name' => 244, 'id_number' => 50, 'id_type' => 100, 'nationality' => 50, 'phone' => 100,
+                     'email' => 100, 'address' => 244, 'work' => 100, 'vat_number' => 100) as $key => $max) {
+            $value = trim((string)($d[$key] ?? ''));
+            if (mb_strlen($value) > $max) throw new InvalidArgumentException('القيمة طويلة جداً: ' . $key);
+            $f[$key] = $value;
+        }
+        if ($f['name'] === '') throw new InvalidArgumentException('اسم المستأجر مطلوب.');
+        if ($f['email'] !== '' && !filter_var($f['email'], FILTER_VALIDATE_EMAIL)) throw new InvalidArgumentException('البريد الإلكتروني غير صحيح.');
+        $f['id_number'] = self::digits($f['id_number']) ?? '';
+        $f['phone'] = self::digits($f['phone']) ?? '';
+
+        $this->link->begin_transaction();
+        try {
+            if ($f['id_number'] !== '') {
+                $existing = $this->row("SELECT mostagerid, mostagername FROM mostagereen WHERE mostageridnumber=? LIMIT 1 FOR UPDATE", array($f['id_number']));
+                if ($existing) throw new InvalidArgumentException('يوجد مستأجر بنفس رقم الهوية: ' . $existing['mostagername'] . ' (#' . intval($existing['mostagerid']) . ').');
+            }
+            $formuid = 'ai-assistant-' . bin2hex(random_bytes(8));
+            $stmt = $this->link->prepare("INSERT INTO mostagereen
+                (mostagername, mostageridnumber, mostageridtype, mostagergensia, mostagertel, mostageremail, mostageraddress, work, mostagervatnumber, note, formuid)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)");
+            if (!$stmt) throw new RuntimeException($this->link->error);
+            $note = 'أضيف من المساعد الذكي بواسطة المستخدم #' . $this->userId . ' في ' . date('Y-m-d H:i');
+            $stmt->execute(array($f['name'], $f['id_number'], $f['id_type'], $f['nationality'], $f['phone'], $f['email'], $f['address'], $f['work'], $f['vat_number'], $note, $formuid));
+            $id = intval($stmt->insert_id);
+            $stmt->close();
+            $this->link->commit();
+        } catch (Throwable $error) {
+            $this->link->rollback();
+            throw $error;
+        }
+        return array('message' => 'تم إضافة المستأجر ' . $f['name'] . ' (#' . $id . ').', 'tenant_id' => $id, 'tenant_label' => $f['name'],
+            'url' => '/aqary/admin/include/amlak/editmostager.hnt?mostagerid=' . $id,
+            'contract_url' => aqaryScreenCan($this->link, '42', 'adds') ? '/aqary/admin/include/amlak/egar.hnt?hnt_dll=1&mostagerid=' . $id : null);
+    }
+
+    // ------------------------------------------------------------------ data helpers
+
+    /** Remaining amount of an installment row `k` (legacy rows keep amount_remaining at 0). */
+    private const REMAINING = "CASE WHEN k.amount_remaining>0 THEN k.amount_remaining ELSE GREATEST(k.kastvalue-COALESCE(k.amount_paid,0),0) END";
+
+    /** Restricted users (group > 2, as in egarstatus.hnt) only see their assigned properties. */
+    private function scopeSql(string $column): string
+    {
+        if ($this->restricted === null) {
+            $user = $this->row("SELECT u.groupid, COALESCE(g.allprevilage,0) allprevilage FROM user u LEFT JOIN usergroups g ON g.groupid=u.groupid WHERE u.userid=? LIMIT 1", array($this->userId));
+            $this->restricted = !$user || (intval($user['groupid']) > 2 && empty($user['allprevilage']));
+            if ($this->restricted) {
+                foreach ($this->rows("SELECT idaqar FROM amlak WHERE users LIKE ?", array('%,' . $this->userId . ',%')) as $r) {
+                    $this->assigned[] = intval($r['idaqar']);
+                }
+            }
+        }
+        if (!$this->restricted) return '';
+        return $this->assigned ? " AND {$column} IN (" . implode(',', $this->assigned) . ')' : ' AND 1=0';
+    }
+
+    private function findTenants(string $query, int $limit): array
+    {
+        $query = trim($query);
+        if ($query === '') return array();
+        $digits = self::digits($query);
+        $scope = $this->scopeSql('d.idaqar');
+        $scopeSql = $scope === '' ? '' : " AND EXISTS (SELECT 1 FROM amlakdetails d WHERE d.mostagerid=m.mostagerid{$scope})";
+        if ($digits !== null && strlen($digits) >= 5 && strlen($digits) === strlen(preg_replace('/\s+/', '', $query))) {
+            return $this->rows("SELECT m.mostagerid, m.mostagername, m.mostageridnumber, m.mostagertel FROM mostagereen m
+                WHERE (m.mostageridnumber=? OR m.mostagertel LIKE ?){$scopeSql} ORDER BY m.mostageridnumber=? DESC LIMIT " . intval($limit),
+                array($digits, '%' . $digits . '%', $digits));
+        }
+        return $this->rows("SELECT m.mostagerid, m.mostagername, m.mostageridnumber, m.mostagertel FROM mostagereen m
+            WHERE m.mostagername LIKE ?{$scopeSql} ORDER BY m.mostagername=? DESC, CHAR_LENGTH(m.mostagername) LIMIT " . intval($limit),
+            array(self::namePattern($query), $query));
+    }
+
+    private function findProperty(string $query): ?array
+    {
+        $query = trim($query);
+        if ($query === '') return null;
+        $scope = $this->scopeSql('a.idaqar');
+        if (ctype_digit($query)) {
+            $row = $this->row("SELECT a.idaqar, a.aqarname, a.ownername FROM amlak a WHERE a.idaqar=?{$scope} LIMIT 1", array(intval($query)));
+            if ($row) return $row;
+        }
+        $sql = "SELECT a.idaqar, a.aqarname, a.ownername FROM amlak a WHERE a.aqarname LIKE ?{$scope}
+            ORDER BY a.aqarname=? DESC, CHAR_LENGTH(a.aqarname) LIMIT 1";
+        $row = $this->row($sql, array(self::namePattern($query), $query));
+        if ($row) return $row;
+        // The model may rephrase a long name: retry with its most distinctive (longest) word.
+        $words = preg_split('/[^\p{L}\p{N}]+/u', $query, -1, PREG_SPLIT_NO_EMPTY) ?: array();
+        usort($words, function ($x, $y) { return mb_strlen($y) <=> mb_strlen($x); });
+        if (count($words) > 1 && mb_strlen($words[0]) >= 4) {
+            return $this->row($sql, array(self::namePattern($words[0]), $query));
+        }
+        return null;
+    }
+
+    private function tenantUnits(int $tenantId): array
+    {
+        return $this->rows("SELECT d.idsubaqar, d.idaqar, d.rakam, COALESCE(a.aqarname,'') aqarname, COALESCE(s.aqarsubtypename,'') subtype
+            FROM amlakdetails d LEFT JOIN amlak a ON a.idaqar=d.idaqar LEFT JOIN aqarsubtype s ON s.aqarsubtype=d.aqarsubtype
+            WHERE d.mostagerid=?" . $this->scopeSql('d.idaqar') . " ORDER BY a.aqarname, d.rakam LIMIT 20", array($tenantId));
+    }
+
+    /** Overdue and next installment of a tenant: by unit, or by contract for rows without a unit (see aksat/egar data model). */
+    private function tenantArrears(int $tenantId, array $unitIds): array
+    {
+        $unitIds = array_map('intval', $unitIds);
+        $unitSql = $unitIds ? 'k.idsubaqar IN (' . implode(',', $unitIds) . ') OR ' : '';
+        $match = "({$unitSql}(k.idsubaqar=0 AND k.egar_id IN (SELECT rakam3akdid FROM egar WHERE mostagerid=" . intval($tenantId) . ")))";
+        $now = time();
+        $o = $this->row("SELECT COUNT(*) n, SUM(" . self::REMAINING . ") amount, MIN(k.kastdate) oldest FROM aksat k
+            WHERE k.iscomplete=0 AND k.kastdate>0 AND k.kastdate<? AND {$match}", array($now));
+        $next = $this->row("SELECT k.kastdate, " . self::REMAINING . " amount FROM aksat k
+            WHERE k.iscomplete=0 AND k.kastdate>=? AND {$match} ORDER BY k.kastdate LIMIT 1", array($now));
+        return array('count' => intval($o['n'] ?? 0), 'amount' => (float)($o['amount'] ?? 0), 'oldest' => intval($o['oldest'] ?? 0),
+            'next' => $next ? array('date' => intval($next['kastdate']), 'amount' => (float)$next['amount']) : null);
+    }
+
+    /** Overdue totals over rented units (same basis as the rent-status screen). */
+    private function overdueTotals(int $propertyId): array
+    {
+        $row = $this->row("SELECT COUNT(*) n, SUM(" . self::REMAINING . ") amount, COUNT(DISTINCT d.mostagerid) tenants
+            FROM amlakdetails d JOIN aksat k ON k.idsubaqar=d.idsubaqar AND k.iscomplete=0
+            WHERE d.mostagerid>0 AND k.kastdate>0 AND k.kastdate<?" . ($propertyId ? ' AND d.idaqar=' . intval($propertyId) : '') . $this->scopeSql('d.idaqar'),
+            array(time()));
+        return array('count' => intval($row['n'] ?? 0), 'amount' => (float)($row['amount'] ?? 0), 'tenants' => intval($row['tenants'] ?? 0));
+    }
+
+    private function rows(string $sql, array $params = array()): array
+    {
+        $stmt = $this->link->prepare($sql);
+        if (!$stmt) throw new RuntimeException($this->link->error);
+        $stmt->execute($params ? array_map(function ($v) { return is_string($v) ? $v : (string)$v; }, $params) : null);
+        $result = $stmt->get_result();
+        $rows = $result ? $result->fetch_all(MYSQLI_ASSOC) : array();
+        $stmt->close();
+        return $rows;
+    }
+
+    private function row(string $sql, array $params = array()): ?array
+    {
+        $rows = $this->rows($sql, $params);
+        return $rows[0] ?? null;
+    }
+
+    private function aiConfig(): array
+    {
+        static $config = null;
+        if ($config === null) {
+            $data = require dirname(__DIR__) . '/config/api_config.hnt';
+            $config = (array)($data['config'] ?? array());
+        }
+        return $config;
+    }
+
+    private function context(string $currentUrl): string
+    {
+        $days = array('الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت');
+        $lines = array(
+            'Today: ' . date('Y-m-d') . ' (' . $days[intval(date('w'))] . ')',
+            'User: ' . trim((string)($_SESSION['namev'] ?? $_SESSION['usernamev'] ?? '')) . ' — reply language: Arabic unless the user writes English',
+            'Currency: SAR',
+        );
+        if ($currentUrl !== '') $lines[] = 'The user is on: ' . mb_substr($currentUrl, 0, 200);
+        return implode("\n", $lines);
+    }
+
+    // ------------------------------------------------------------------ text helpers
+
+    public static function parseJson(string $content): array
+    {
+        $content = trim(preg_replace('/^```(?:json)?\s*|\s*```$/u', '', trim($content)));
+        $json = json_decode($content, true);
+        if (!is_array($json)) {
+            $start = strpos($content, '{');
+            $end = strrpos($content, '}');
+            if ($start !== false && $end > $start) $json = json_decode(substr($content, $start, $end - $start + 1), true);
+        }
+        return is_array($json) ? $json : array();
+    }
+
+    public static function normalize(string $text): string
+    {
+        $text = mb_strtolower($text);
+        $text = preg_replace('/[\x{064B}-\x{065F}\x{0670}\x{0640}]/u', '', $text) ?? $text;
+        $text = strtr($text, array('أ' => 'ا', 'إ' => 'ا', 'آ' => 'ا', 'ة' => 'ه', 'ى' => 'ي', 'ؤ' => 'و', 'ئ' => 'ي'));
+        return preg_replace('/(?<![\p{L}])(?:[وبلف]?ال)(?=\p{L}{2,})/u', '', $text) ?? $text;
+    }
+
+    /** @return array<string,int> screen key => score, best first */
+    public static function rankScreens(string $text, array $screens): array
+    {
+        $stop = array('افتح', 'اذهب', 'اعرض', 'صفحه', 'شاشه', 'الي', 'على', 'علي', 'في', 'من', 'لي', 'لو', 'سمحت', 'open', 'show', 'go', 'to', 'the', 'page', 'screen', 'me', 'please');
+        $words = array_values(array_unique(array_filter(preg_split('/[^\p{L}\p{N}]+/u', self::normalize($text)) ?: array(),
+            function ($w) use ($stop) { return mb_strlen($w) >= 2 && !in_array($w, $stop, true); })));
+        $phrase = implode(' ', $words);
+        $scores = array();
+        foreach ($screens as $key => $screen) {
+            $title = self::normalize($screen['ar'] . ' ' . $screen['en']);
+            $haystack = $title . ' ' . self::normalize($screen['k']);
+            $score = 0;
+            foreach ($words as $word) {
+                if (mb_strpos($title, $word) !== false) $score += 2;
+                elseif (mb_strpos($haystack, $word) !== false) $score += 1;
+            }
+            if ($phrase !== '' && (self::normalize($screen['ar']) === $phrase || self::normalize($screen['en']) === $phrase)) $score += 3;
+            $scores[$key] = $score;
+        }
+        arsort($scores);
+        return $scores;
+    }
+
+    private static function asksToOpen(string $message): bool
+    {
+        return (bool)preg_match('/^\s*(?:لو\s+سمحت\s+)?(?:افتح|إفتح|اذهب|إذهب|روح|اعرض|ورني|أرني|خذني|open|go\s+to|show(?:\s+me)?|take\s+me\s+to)/iu', $message);
+    }
+
+    /**
+     * LIKE pattern tolerant to Arabic spelling (أ/ا, ة/ه, ى/ي), diacritics and extra words in between.
+     * Uses "%" rather than "_": over the legacy latin1 connection one Arabic letter can occupy two
+     * characters of a double-encoded column, so a single-character wildcard would miss it.
+     */
+    private static function namePattern(string $query): string
+    {
+        $query = preg_replace('/[\x{064B}-\x{065F}\x{0670}\x{0640}]/u', '', trim($query)) ?? trim($query);
+        // Punctuation ("-", "_", "/", ...) separates words; it also removes LIKE's own wildcards.
+        $query = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $query) ?? $query;
+        $query = preg_replace('/[أإآاةهىي]/u', '%', $query);
+        $words = preg_split('/\s+/u', $query, -1, PREG_SPLIT_NO_EMPTY) ?: array();
+        return '%' . implode('%', $words) . '%';
+    }
+
+    /** Converts Arabic-Indic and Persian digits to Western digits, nothing else. */
+    private static function westernDigits(string $value): string
+    {
+        return strtr(trim($value), array('٠' => '0', '١' => '1', '٢' => '2', '٣' => '3', '٤' => '4', '٥' => '5', '٦' => '6', '٧' => '7', '٨' => '8', '٩' => '9',
+            '۰' => '0', '۱' => '1', '۲' => '2', '۳' => '3', '۴' => '4', '۵' => '5', '۶' => '6', '۷' => '7', '۸' => '8', '۹' => '9'));
+    }
+
+    /** A number-like value (ID, phone) in Western digits without spaces/dashes; other text unchanged; null when empty. */
+    private static function digits($value): ?string
+    {
+        if (!is_scalar($value)) return null;
+        $value = self::westernDigits((string)$value);
+        if (preg_match('/^[\d\s\-+()]+$/', $value)) $value = preg_replace('/[^\d+]/', '', $value);
+        return $value === '' ? null : $value;
+    }
+
+    private static function clean($value, int $max = 190): ?string
+    {
+        $value = is_scalar($value) ? trim((string)$value) : '';
+        return $value === '' || strtolower($value) === 'null' ? null : mb_substr($value, 0, $max);
+    }
+
+    private static function date($value): ?string
+    {
+        if (!is_string($value)) return null;
+        $value = self::westernDigits($value);
+        if (!preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $value, $m) || !checkdate(intval($m[2]), intval($m[3]), intval($m[1]))) return null;
+        return $value;
+    }
+
+    private function answer(?string $reply, ?array $navigate = null, array $links = array(), array $actions = array(), array $reads = array()): array
+    {
+        return array('reply' => (string)$reply, 'navigate' => $navigate, 'links' => array_values($links), 'actions' => $actions, 'attachments' => $reads);
+    }
+}

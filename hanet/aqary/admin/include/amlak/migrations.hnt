@@ -1229,7 +1229,43 @@ HTML;
         		$this->ensureScreen($areaKey, $areaName, intval($cashCustodyHubRow['screenid']), 'cash-custody-area-screen');
         	}
         }
+
+        // AI assistant (floating chat in foter.hnt): one keyed screen under the AI hub (300).
+        // Groups inherit the hub permissions once, when the screen is first created.
+        $this->ensureScreen('ai_assistant', 'المساعد الذكي', 300, 'ai-assistant-screen');
+        // Each user's own on/off switch (profile page); on by default. The company-wide switch is
+        // global.ai_assistant_enabled (missing row = on), set from System Options.
+        $this->query("ALTER TABLE user ADD COLUMN IF NOT EXISTS ai_assistant_enabled TINYINT(1) NOT NULL DEFAULT 1");
+        // Document OCR screen (admin/ocr.hnt), also under the AI hub.
+        $this->ensureScreen('ocr_reader', 'التعرف الضوئي للمستندات', 300, 'ocr-reader-screen');
+        // Ejar contract import (assistant): deed number and national address recognise the building next time.
+        $this->query("ALTER TABLE amlak
+            ADD COLUMN IF NOT EXISTS deed_number VARCHAR(100) NOT NULL DEFAULT '',
+            ADD COLUMN IF NOT EXISTS national_address VARCHAR(244) NOT NULL DEFAULT ''");
+        $this->installOcrRuntime();
+
         $this->applyAccounting();
+    }
+
+    /**
+     * Installs the bundled offline OCR runtime (lib/ocr/package -> <root>/ocr-service) for the
+     * assistant's document reading. It is per installation, not per company: after the first
+     * success later runs only compare the version marker. Never fails the migration: a server that
+     * cannot run it (non-Windows, missing zip extension) keeps the assistant working without OCR,
+     * and the assistant retries the install on the first attachment.
+     */
+    private function installOcrRuntime(): void
+    {
+        try {
+            require_once dirname(__DIR__, 3) . '/lib/ocr/ocr_runtime.hnt';
+            if (!AqaryOcrRuntime::supported()) return;
+            $result = AqaryOcrRuntime::install();
+            if (!$result['ok'] && $result['status'] !== 'busy') {
+                error_log('Amlak migration: OCR runtime not installed: ' . $result['message']);
+            }
+        } catch (Throwable $error) {
+            error_log('Amlak migration: OCR runtime install error: ' . $error->getMessage());
+        }
     }
 
     /** Free-voucher hub: keyed row, else legacy unkeyed 135, else a new keyed row (preferring 135). */

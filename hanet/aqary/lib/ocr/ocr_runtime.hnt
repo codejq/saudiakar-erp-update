@@ -1,0 +1,451 @@
+<?php
+/**
+ * Local Indra OCR service: offline install, on-demand start, and document reading.
+ *
+ * Shipping: lib/ocr/package/ holds ocr-runtime.zip split into parts (each under 50 MB for Git)
+ * plus manifest.json with SHA-256 checksums. The zip contains the OCR service, its trained models
+ * and an embedded Windows Python 3.12 with every package preinstalled, so customer servers need
+ * neither Python nor internet access.
+ *
+ * Install (AqaryOcrRuntime::install, called by AmlakMigrations and lazily by the assistant):
+ * verifies the parts, joins them, verifies the zip, extracts it into <root>/ocr-service,
+ * and writes aqary_ocr.env with a random per-installation token. Safe to call again: it does
+ * nothing when the same version is installed, and a running older version is stopped first.
+ *
+ * Run: PHP starts python\pythonw.exe aqary_run.py bound to 127.0.0.1 only when /health fails
+ * (no Windows service or admin rights needed). The service is never exposed over the web.
+ *
+ * Remote: a company may instead point to another Indra-compatible OCR server (System Options ->
+ * المساعد الذكي). read()/remoteHealth() then call that URL with its API key (sent as X-Ocr-Token and
+ * as a Bearer token) and nothing is installed or started locally. The local equivalent of that key
+ * is OCR_TOKEN in ocr-service/aqary_ocr.env.
+ */
+
+final class AqaryOcrRuntime
+{
+    public const DEFAULT_PORT = 5095;
+    public const MEDIA = array('image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp', 'image/tiff', 'application/pdf');
+    private const MARKER = '.aqary-runtime.json';
+    private const ENV = 'aqary_ocr.env';
+
+    /** Application root (Y:\ on the share, the served aqary folder on the server). */
+    public static function root(): string
+    {
+        return dirname(__DIR__, 2);
+    }
+
+    public static function packageDir(): string
+    {
+        return __DIR__ . DIRECTORY_SEPARATOR . 'package';
+    }
+
+    public static function runtimeDir(): string
+    {
+        return self::root() . DIRECTORY_SEPARATOR . 'ocr-service';
+    }
+
+    public static function supported(): bool
+    {
+        return PHP_OS_FAMILY === 'Windows' && PHP_INT_SIZE === 8;
+    }
+
+    /** @return array|null the package manifest */
+    public static function manifest(): ?array
+    {
+        $file = self::packageDir() . DIRECTORY_SEPARATOR . 'manifest.json';
+        $data = is_file($file) ? json_decode((string)file_get_contents($file), true) : null;
+        return is_array($data) && !empty($data['version']) && !empty($data['parts']) ? $data : null;
+    }
+
+    /** @return array|null what is installed (marker written after a successful install) */
+    public static function installedInfo(): ?array
+    {
+        $file = self::runtimeDir() . DIRECTORY_SEPARATOR . self::MARKER;
+        $data = is_file($file) ? json_decode((string)file_get_contents($file), true) : null;
+        return is_array($data) ? $data : null;
+    }
+
+    public static function isInstalled(): bool
+    {
+        $manifest = self::manifest();
+        $info = self::installedInfo();
+        return $manifest && $info && ($info['version'] ?? '') === $manifest['version']
+            && is_file(self::runtimeDir() . '\\python\\pythonw.exe')
+            && is_file(self::runtimeDir() . DIRECTORY_SEPARATOR . 'aqary_run.py');
+    }
+
+    /** True while another request is installing. */
+    public static function isInstalling(): bool
+    {
+        $handle = @fopen(self::root() . DIRECTORY_SEPARATOR . 'ocr-service.install.lock', 'c');
+        if (!$handle) return false;
+        $free = flock($handle, LOCK_EX | LOCK_NB);
+        if ($free) flock($handle, LOCK_UN);
+        fclose($handle);
+        return !$free;
+    }
+
+    /**
+     * Installs or upgrades the runtime from the shipped parts.
+     *
+     * @return array{ok: bool, status: string, message: string}
+     *         status: installed | already | busy | unsupported | missing | failed
+     */
+    public static function install(): array
+    {
+        if (!self::supported()) return self::result(false, 'unsupported', 'OCR runtime requires 64-bit Windows.');
+        if (!class_exists('ZipArchive')) return self::result(false, 'unsupported', 'PHP zip extension is not enabled.');
+        $manifest = self::manifest();
+        if (!$manifest) return self::result(false, 'missing', 'OCR package manifest is missing.');
+        if (self::isInstalled()) return self::result(true, 'already', 'OCR runtime ' . $manifest['version'] . ' is installed.');
+
+        $lock = @fopen(self::root() . DIRECTORY_SEPARATOR . 'ocr-service.install.lock', 'c');
+        if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) {
+            if ($lock) fclose($lock);
+            return self::result(false, 'busy', 'OCR runtime is being installed by another request.');
+        }
+
+        @set_time_limit(0);
+        @ignore_user_abort(true);
+        $staging = self::root() . DIRECTORY_SEPARATOR . 'ocr-service.staging';
+        try {
+            if (self::isInstalled()) return self::result(true, 'already', 'OCR runtime is installed.');
+            self::removeTree($staging);
+            if (!@mkdir($staging, 0775, true) && !is_dir($staging)) throw new RuntimeException('Cannot create ' . $staging);
+
+            // 1. Verify each part, then join them into one zip and verify that too.
+            $zipPath = $staging . DIRECTORY_SEPARATOR . 'ocr-runtime.zip';
+            $out = fopen($zipPath, 'wb');
+            if (!$out) throw new RuntimeException('Cannot write ' . $zipPath);
+            foreach ($manifest['parts'] as $part) {
+                $file = self::packageDir() . DIRECTORY_SEPARATOR . basename((string)$part['file']);
+                if (!is_file($file) || filesize($file) !== intval($part['size'])) {
+                    fclose($out);
+                    throw new RuntimeException('Package part missing or incomplete: ' . basename($file));
+                }
+                if (!hash_equals(strtolower((string)$part['sha256']), hash_file('sha256', $file))) {
+                    fclose($out);
+                    throw new RuntimeException('Package part checksum mismatch: ' . basename($file));
+                }
+                $in = fopen($file, 'rb');
+                stream_copy_to_stream($in, $out);
+                fclose($in);
+            }
+            fclose($out);
+            if (!hash_equals(strtolower((string)$manifest['zip_sha256']), hash_file('sha256', $zipPath))) {
+                throw new RuntimeException('Joined OCR package checksum mismatch.');
+            }
+
+            // 2. Extract into staging.
+            $target = $staging . DIRECTORY_SEPARATOR . 'ocr-service';
+            $zip = new ZipArchive();
+            if ($zip->open($zipPath) !== true) throw new RuntimeException('Cannot open the OCR package.');
+            for ($i = 0; $i < $zip->numFiles; $i++) {
+                $name = (string)$zip->getNameIndex($i);
+                if (strpos($name, '..') !== false || preg_match('#^([a-z]:|[\\\\/])#i', $name)) {
+                    $zip->close();
+                    throw new RuntimeException('Unsafe path in OCR package: ' . $name);
+                }
+            }
+            $extracted = $zip->extractTo($target);
+            $zip->close();
+            @unlink($zipPath);
+            if (!$extracted || !is_file($target . '\\python\\pythonw.exe')) throw new RuntimeException('OCR package extraction failed.');
+
+            // 3. Keep the token of an existing install (or create one), then swap folders.
+            $old = self::runtimeDir();
+            $token = self::readEnv()['OCR_TOKEN'] ?? '';
+            if (!preg_match('/^[a-f0-9]{48}$/', $token)) $token = bin2hex(random_bytes(24));
+            $port = intval(self::readEnv()['AQARY_OCR_PORT'] ?? self::DEFAULT_PORT) ?: self::DEFAULT_PORT;
+            self::writeFile($target . DIRECTORY_SEPARATOR . self::ENV,
+                "# Written by Aqary (lib/ocr/ocr_runtime.hnt). Keep private.\r\nOCR_TOKEN={$token}\r\nAQARY_OCR_PORT={$port}\r\nOCR_THREADS=2\r\n");
+
+            if (is_dir($old)) {
+                self::stop();
+                $retired = $old . '.old-' . date('YmdHis');
+                if (!@rename($old, $retired)) throw new RuntimeException('Cannot replace the old OCR runtime (is it still running?).');
+                self::removeTree($retired);
+            }
+            if (!@rename($target, $old)) throw new RuntimeException('Cannot move the OCR runtime into place.');
+            self::writeFile($old . DIRECTORY_SEPARATOR . self::MARKER, json_encode(array(
+                'version' => $manifest['version'], 'installed_at' => date('c'), 'php' => PHP_VERSION,
+            ), JSON_PRETTY_PRINT));
+            return self::result(true, 'installed', 'OCR runtime ' . $manifest['version'] . ' installed.');
+        } catch (Throwable $error) {
+            error_log('OCR runtime install: ' . $error->getMessage());
+            return self::result(false, 'failed', $error->getMessage());
+        } finally {
+            self::removeTree($staging);
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    /** @return array<string,string> settings from aqary_ocr.env */
+    private static function readEnv(): array
+    {
+        $file = self::runtimeDir() . DIRECTORY_SEPARATOR . self::ENV;
+        $values = array();
+        if (!is_file($file)) return $values;
+        foreach (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: array() as $line) {
+            $line = trim($line);
+            if ($line === '' || $line[0] === '#' || strpos($line, '=') === false) continue;
+            list($key, $value) = explode('=', $line, 2);
+            $values[trim($key)] = trim($value);
+        }
+        return $values;
+    }
+
+    private static function port(): int
+    {
+        return intval(self::readEnv()['AQARY_OCR_PORT'] ?? self::DEFAULT_PORT) ?: self::DEFAULT_PORT;
+    }
+
+    private static function token(): string
+    {
+        return (string)(self::readEnv()['OCR_TOKEN'] ?? '');
+    }
+
+    /** The local service's API key (OCR_TOKEN in aqary_ocr.env); empty before the first install. */
+    public static function localToken(): string
+    {
+        return self::token();
+    }
+
+    /** Local service address, shown in the settings page. */
+    public static function localUrl(): string
+    {
+        return self::baseUrl();
+    }
+
+    /**
+     * Normalises a remote OCR server address: http(s) only, no credentials, no query,
+     * no trailing /health or /v1/ocr.
+     * @return string the base URL, or '' when invalid
+     */
+    public static function normalizeRemoteUrl(string $url): string
+    {
+        $url = trim($url);
+        $parts = parse_url($url);
+        if (!$parts || !in_array(strtolower((string)($parts['scheme'] ?? '')), array('http', 'https'), true)
+            || empty($parts['host']) || isset($parts['user']) || isset($parts['pass'])) return '';
+        $url = (string)preg_replace('/[?#].*$/', '', $url);
+        $url = (string)preg_replace('#/(v1/ocr|health)/?$#i', '', rtrim($url, '/'));
+        return rtrim($url, '/');
+    }
+
+    /** @return array{ok: bool, detail: string} health of a remote OCR server */
+    public static function remoteHealth(string $url, string $key, float $timeout = 8.0): array
+    {
+        $base = self::normalizeRemoteUrl($url);
+        if ($base === '') return array('ok' => false, 'detail' => 'invalid URL');
+        $response = self::http('GET', '/health', null, null, $timeout, array('url' => $base, 'key' => $key));
+        if ($response['status'] === 200) {
+            $json = json_decode($response['body'], true);
+            return array('ok' => true, 'detail' => is_array($json) ? (string)($json['engine'] ?? 'ok') : 'ok');
+        }
+        return array('ok' => false, 'detail' => $response['error'] ?: ('HTTP ' . $response['status']));
+    }
+
+    private static function baseUrl(): string
+    {
+        return 'http://127.0.0.1:' . self::port();
+    }
+
+    /** @return array{ok: bool, detail: string} */
+    public static function health(float $timeout = 2.0): array
+    {
+        if (!self::isInstalled()) return array('ok' => false, 'detail' => 'not installed');
+        $response = self::http('GET', '/health', null, null, $timeout);
+        if ($response['status'] === 200) {
+            $json = json_decode($response['body'], true);
+            return array('ok' => true, 'detail' => (string)($json['engine'] ?? 'ok'));
+        }
+        return array('ok' => false, 'detail' => $response['error'] ?: ('HTTP ' . $response['status']));
+    }
+
+    /**
+     * Makes sure the service answers, installing and starting it when needed.
+     *
+     * @return array{ok: bool, status: string, message: string}
+     *         status: running | started | installing | unsupported | missing | failed
+     */
+    public static function ensureRunning(bool $allowInstall = true): array
+    {
+        if (!self::supported()) return self::result(false, 'unsupported', 'OCR requires 64-bit Windows.');
+        if (!self::isInstalled()) {
+            if (!$allowInstall) return self::result(false, self::isInstalling() ? 'installing' : 'missing', 'OCR runtime is not installed yet.');
+            $install = self::install();
+            if (!$install['ok']) return self::result(false, $install['status'] === 'busy' ? 'installing' : $install['status'], $install['message']);
+        }
+        if (self::health()['ok']) return self::result(true, 'running', 'OCR service is running.');
+
+        // One starter at a time; the others wait for it and then see the service up.
+        $lock = @fopen(self::root() . DIRECTORY_SEPARATOR . 'ocr-service.run.lock', 'c');
+        if ($lock) flock($lock, LOCK_EX);
+        try {
+            if (self::health()['ok']) return self::result(true, 'running', 'OCR service is running.');
+            if (!function_exists('proc_open')) return self::result(false, 'failed', 'proc_open is disabled in PHP.');
+            $dir = self::runtimeDir();
+            $log = $dir . DIRECTORY_SEPARATOR . 'ocr-service.log';
+            if (is_file($log) && filesize($log) > 5 * 1024 * 1024) @rename($log, $log . '.1');
+            $command = array($dir . '\\python\\pythonw.exe', $dir . '\\aqary_run.py',
+                '--host', '127.0.0.1', '--port', (string)self::port(), '--threads', (string)(intval(self::readEnv()['OCR_THREADS'] ?? 2) ?: 2));
+            $process = @proc_open($command, array(
+                0 => array('file', 'NUL', 'r'),
+                1 => array('file', $log, 'a'),
+                2 => array('file', $log, 'a'),
+            ), $pipes, $dir, null, array('bypass_shell' => true, 'create_new_console' => true));
+            if (!is_resource($process)) return self::result(false, 'failed', 'Could not start the OCR service.');
+            $status = proc_get_status($process);
+            self::writeFile($dir . DIRECTORY_SEPARATOR . 'ocr-service.pid', (string)intval($status['pid'] ?? 0));
+            // The process keeps running after this request: the handle is intentionally not closed.
+
+            $deadline = microtime(true) + 30;
+            while (microtime(true) < $deadline) {
+                usleep(400000);
+                if (self::health(1.5)['ok']) return self::result(true, 'started', 'OCR service started.');
+                $now = proc_get_status($process);
+                if (empty($now['running'])) {
+                    return self::result(false, 'failed', 'OCR service stopped while starting (see ocr-service/ocr-service.log).');
+                }
+            }
+            return self::result(false, 'failed', 'OCR service did not answer in time.');
+        } finally {
+            if ($lock) {
+                flock($lock, LOCK_UN);
+                fclose($lock);
+            }
+        }
+    }
+
+    /** Stops the service this runtime started (used before an upgrade). */
+    public static function stop(): void
+    {
+        $pidFile = self::runtimeDir() . DIRECTORY_SEPARATOR . 'ocr-service.pid';
+        $pid = is_file($pidFile) ? intval(file_get_contents($pidFile)) : 0;
+        if ($pid > 0 && function_exists('exec')) {
+            @exec('taskkill /F /T /PID ' . $pid . ' 2>NUL');
+            usleep(500000);
+        }
+        @unlink($pidFile);
+    }
+
+    /**
+     * Reads a document with OCR.
+     *
+     * @param array{url: string, key: string}|null $remote another OCR server instead of the local one
+     * @return array{text: string, markdown: string, plate_text: ?string, rtl: bool, ms: int, pages: int,
+     *               page_list: list<array{index: int, text: string, markdown: string, confidence: ?float}>}
+     * @throws RuntimeException with an Arabic message for the user
+     */
+    public static function read(string $bytes, string $mediaType, string $mode = 'auto', ?array $remote = null): array
+    {
+        if (!in_array($mediaType, self::MEDIA, true)) {
+            throw new RuntimeException('لا يمكن قراءة هذا النوع من الملفات (' . $mediaType . '). أرفق صورة أو PDF.');
+        }
+        if ($remote !== null) {
+            $remote = array('url' => self::normalizeRemoteUrl((string)($remote['url'] ?? '')), 'key' => (string)($remote['key'] ?? ''));
+            if ($remote['url'] === '') throw new RuntimeException('عنوان خدمة قراءة المستندات الخارجية غير صحيح. راجع إعدادات المساعد الذكي.');
+        }
+        $running = $remote !== null ? array('ok' => true) : self::ensureRunning(true);
+        if (!$running['ok']) {
+            $why = $running['status'] === 'installing' ? 'جارٍ تجهيز خدمة قراءة المستندات لأول مرة، حاول بعد دقيقة.' : 'خدمة قراءة المستندات غير متاحة حالياً.';
+            error_log('OCR unavailable: ' . $running['message']);
+            throw new RuntimeException($why);
+        }
+        $mode = in_array($mode, array('auto', 'document', 'plate'), true) ? $mode : 'auto';
+        $response = self::http('POST', '/v1/ocr?mode=' . $mode, $bytes, $mediaType, 150.0, $remote);
+        if ($response['status'] === 503) {
+            usleep(1500000);
+            $response = self::http('POST', '/v1/ocr?mode=' . $mode, $bytes, $mediaType, 150.0, $remote);
+        }
+        if ($response['status'] !== 200) {
+            error_log('OCR read failed' . ($remote ? ' (remote)' : '') . ': HTTP ' . $response['status'] . ' ' . $response['error'] . ' ' . substr($response['body'], 0, 300));
+            if ($remote && in_array($response['status'], array(401, 403), true)) throw new RuntimeException('رفضت خدمة قراءة المستندات الخارجية مفتاح API. راجع إعدادات المساعد الذكي.');
+            if ($remote && $response['status'] === 0) throw new RuntimeException('تعذّر الاتصال بخدمة قراءة المستندات الخارجية.');
+            throw new RuntimeException('تعذّرت قراءة المرفق (HTTP ' . $response['status'] . ').');
+        }
+        $json = json_decode($response['body'], true) ?: array();
+        $pageList = array();
+        foreach ((array)($json['pages'] ?? array()) as $i => $page) {
+            if (!is_array($page)) continue;
+            $confs = array_map(function ($line) { return floatval($line['conf'] ?? 0); }, array_filter((array)($page['lines'] ?? array()), 'is_array'));
+            $pageList[] = array(
+                'index' => intval($page['index'] ?? $i),
+                'text' => trim((string)($page['text'] ?? '')),
+                'markdown' => trim((string)($page['markdown'] ?? $page['text'] ?? '')),
+                'confidence' => $confs ? array_sum($confs) / count($confs) : null,
+            );
+        }
+        return array(
+            'text' => trim((string)($json['text'] ?? '')),
+            'markdown' => trim((string)($json['markdown'] ?? $json['text'] ?? '')),
+            'plate_text' => isset($json['plateText']) ? (string)$json['plateText'] : null,
+            'rtl' => !empty($json['rtl']),
+            'ms' => intval($json['ms'] ?? 0),
+            'pages' => count($pageList),
+            'page_list' => $pageList,
+        );
+    }
+
+    /**
+     * @param array{url: string, key: string}|null $remote null = the local service
+     * @return array{status: int, body: string, error: string}
+     */
+    private static function http(string $method, string $path, ?string $body, ?string $type, float $timeout, ?array $remote = null): array
+    {
+        $ch = curl_init(($remote ? $remote['url'] : self::baseUrl()) . $path);
+        $key = $remote ? (string)$remote['key'] : self::token();
+        $headers = array('X-Ocr-Token: ' . $key);
+        if ($remote && $key !== '') $headers[] = 'Authorization: Bearer ' . $key;
+        if ($type !== null) $headers[] = 'Content-Type: ' . $type;
+        curl_setopt_array($ch, array(
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CUSTOMREQUEST => $method,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_CONNECTTIMEOUT_MS => $remote ? 5000 : 1500,
+            CURLOPT_TIMEOUT_MS => intval($timeout * 1000),
+        ));
+        if ($remote) {
+            // Customer servers often lack a CA bundle or use self-signed certificates: don't verify TLS.
+            curl_setopt_array($ch, array(CURLOPT_FOLLOWLOCATION => false, CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+                CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => 0));
+        } else {
+            curl_setopt_array($ch, array(CURLOPT_PROXY => '', CURLOPT_NOPROXY => '*'));
+        }
+        if ($body !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+        $responseBody = curl_exec($ch);
+        $result = array(
+            'status' => intval(curl_getinfo($ch, CURLINFO_HTTP_CODE)),
+            'body' => is_string($responseBody) ? $responseBody : '',
+            'error' => (string)curl_error($ch),
+        );
+        return $result;
+    }
+
+    private static function writeFile(string $file, string $content): void
+    {
+        if (@file_put_contents($file, $content, LOCK_EX) === false) throw new RuntimeException('Cannot write ' . $file);
+    }
+
+    private static function removeTree(string $path): void
+    {
+        if (!file_exists($path)) return;
+        if (is_file($path) || is_link($path)) {
+            @unlink($path);
+            return;
+        }
+        $items = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+        foreach ($items as $item) {
+            $item->isDir() && !$item->isLink() ? @rmdir($item->getPathname()) : @unlink($item->getPathname());
+        }
+        @rmdir($path);
+    }
+
+    /** @return array{ok: bool, status: string, message: string} */
+    private static function result(bool $ok, string $status, string $message): array
+    {
+        return array('ok' => $ok, 'status' => $status, 'message' => $message);
+    }
+}

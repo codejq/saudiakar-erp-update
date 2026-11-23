@@ -1,0 +1,97 @@
+<?php
+/**
+ * AI assistant endpoint (used by the floating chat in assistant/widget.hnt).
+ *   GET  ?action=status                      readiness + OCR state
+ *   POST action=chat     messages (JSON), files[] (images/PDF), current_url, csrf_token
+ *   POST action=confirm  type=create_tenant|ejar_building|ejar_unit|ejar_remember, data (JSON), csrf_token
+ */
+$is_ajax_request = true;
+require_once dirname(__DIR__, 3) . '/reqloginajax.hnt';
+require_once __DIR__ . '/service.hnt';
+date_default_timezone_set('Asia/Riyadh');
+header('Content-Type: application/json; charset=utf-8');
+header('X-Content-Type-Options: nosniff');
+
+function aiAssistantReply(array $data, int $status = 200): void
+{
+    http_response_code($status);
+    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+try {
+    $assistantUserId = intval($_SESSION['useridv'] ?? 0);
+    if ($assistantUserId <= 0) aiAssistantReply(array('ok' => false, 'message' => 'انتهت الجلسة. سجّل الدخول مرة أخرى.'), 401);
+    // reqloginajax.hnt runs extract($_REQUEST): never trust $link before checking it.
+    if (!($link instanceof mysqli)) aiAssistantReply(array('ok' => false, 'message' => 'تعذّر الاتصال بقاعدة البيانات.'), 500);
+
+    $assistantAction = (string)($_GET['action'] ?? $_POST['action'] ?? 'status');
+    $assistantMethod = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+    if ($assistantAction !== 'status') {
+        $sent = (string)($_SERVER['HTTP_X_CSRF_TOKEN'] ?? $_POST['csrf_token'] ?? '');
+        $expected = (string)($_SESSION['ai_assistant_csrf'] ?? '');
+        if ($assistantMethod !== 'POST') aiAssistantReply(array('ok' => false, 'message' => 'طريقة الطلب غير مسموحة.'), 405);
+        if ($expected === '' || !hash_equals($expected, $sent)) aiAssistantReply(array('ok' => false, 'message' => 'انتهت صلاحية الصفحة. حدّث الصفحة وحاول مرة أخرى.'), 419);
+    }
+    // OCR and the model can take a while: release the session lock so other pages keep working.
+    session_write_close();
+
+    $assistant = new AqaryAssistant($link, $assistantUserId);
+
+    if ($assistantAction === 'status') {
+        aiAssistantReply(array('ok' => true) + $assistant->status());
+    }
+
+    if ($assistantAction === 'chat') {
+        @set_time_limit(240);
+        $raw = json_decode((string)($_POST['messages'] ?? '[]'), true);
+        $messages = array();
+        foreach (array_slice(is_array($raw) ? $raw : array(), -40) as $m) {
+            if (!is_array($m) || !in_array($m['role'] ?? '', array('user', 'assistant'), true)) continue;
+            $messages[] = array('role' => $m['role'], 'text' => mb_substr((string)($m['text'] ?? ''), 0, 8000));
+        }
+        if (!$messages || end($messages)['role'] !== 'user') aiAssistantReply(array('ok' => false, 'message' => 'الرسالة الأخيرة يجب أن تكون من المستخدم.'), 422);
+
+        $files = array();
+        if (!empty($_FILES['files']['name']) && is_array($_FILES['files']['name'])) {
+            foreach ($_FILES['files']['name'] as $i => $name) {
+                if (intval($_FILES['files']['error'][$i] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) continue;
+                $tmp = (string)$_FILES['files']['tmp_name'][$i];
+                if (!is_uploaded_file($tmp)) continue;
+                // Trust the content, not the browser's declared type.
+                $type = function_exists('mime_content_type') ? (string)mime_content_type($tmp) : (string)$_FILES['files']['type'][$i];
+                $files[] = array('name' => basename((string)$name), 'type' => $type, 'tmp_name' => $tmp, 'size' => intval($_FILES['files']['size'][$i]));
+            }
+        }
+        $currentUrl = (string)($_POST['current_url'] ?? '');
+        aiAssistantReply(array('ok' => true) + $assistant->chat($messages, $files, $currentUrl));
+    }
+
+    if ($assistantAction === 'set_user_enabled') {
+        // The user's own switch (profile page / hide button). Allowed even when the user has no assistant access.
+        try {
+            $assistant->setUserEnabled(($_POST['enabled'] ?? '1') === '1');
+        } catch (InvalidArgumentException $error) {
+            aiAssistantReply(array('ok' => false, 'message' => $error->getMessage()), 422);
+        }
+        aiAssistantReply(array('ok' => true, 'message' => 'تم حفظ الإعداد.'));
+    }
+
+    if ($assistantAction === 'confirm') {
+        $type = (string)($_POST['type'] ?? '');
+        $data = json_decode((string)($_POST['data'] ?? '{}'), true);
+        $ejarSteps = array('ejar_building', 'ejar_unit', 'ejar_remember');
+        if (($type !== 'create_tenant' && !in_array($type, $ejarSteps, true)) || !is_array($data)) aiAssistantReply(array('ok' => false, 'message' => 'إجراء غير معروف.'), 422);
+        try {
+            if (in_array($type, $ejarSteps, true)) aiAssistantReply(array('ok' => true) + $assistant->confirmEjar($type, $data));
+            aiAssistantReply(array('ok' => true) + $assistant->confirmTenant($data));
+        } catch (InvalidArgumentException $error) {
+            aiAssistantReply(array('ok' => false, 'message' => $error->getMessage()), 422);
+        }
+    }
+
+    aiAssistantReply(array('ok' => false, 'message' => 'إجراء غير معروف.'), 400);
+} catch (Throwable $error) {
+    error_log('AI assistant API: ' . $error->getMessage() . ' @ ' . $error->getFile() . ':' . $error->getLine());
+    aiAssistantReply(array('ok' => false, 'message' => 'حدث خطأ غير متوقع. حاول مرة أخرى.'), 500);
+}

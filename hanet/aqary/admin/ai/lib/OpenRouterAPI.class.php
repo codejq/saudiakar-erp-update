@@ -34,10 +34,31 @@ class OpenRouterAPI {
         $this->models = $config_data['models'];
         $this->errors = $config_data['errors'];
 
-        // Validate API key
-        if (empty($this->config['api_key'])) {
+        // Validate API keys: DeepSeek (default) or OpenRouter must be usable.
+        if (!$this->providerAvailable('deepseek') && !$this->providerAvailable('openrouter')) {
             throw new Exception($this->errors['api_key_missing']);
         }
+    }
+
+    /**
+     * Provider for a model ID. OpenRouter IDs carry a vendor prefix ("openai/gpt-4o");
+     * DeepSeek's own API uses bare IDs ("deepseek-flash").
+     */
+    public function providerFor($model) {
+        return strpos((string)$model, '/') !== false ? 'openrouter' : 'deepseek';
+    }
+
+    /** True when the provider has a key configured. */
+    public function providerAvailable($provider) {
+        if ($provider === 'deepseek') {
+            return !empty($this->config['deepseek_api_key']);
+        }
+        return !empty($this->config['api_key']);
+    }
+
+    /** True when the model can be called with the configured keys. */
+    private function modelUsable($model) {
+        return trim((string)$model) !== '' && $this->providerAvailable($this->providerFor($model));
     }
 
     /**
@@ -69,7 +90,8 @@ class OpenRouterAPI {
         $row = mysqli_fetch_assoc($result);
         mysqli_stmt_close($stmt);
 
-        if ($row && !empty($row['preferred_model'])) {
+        // A saved choice is kept; it is used whenever its provider has a key.
+        if ($row && !empty($row['preferred_model']) && $this->modelUsable($row['preferred_model'])) {
             return $row['preferred_model'];
         }
 
@@ -87,7 +109,8 @@ class OpenRouterAPI {
 
         $addCandidate = function($model) use (&$candidates) {
             $model = trim((string)$model);
-            if ($model !== '' && !in_array($model, $candidates, true)) {
+            // Skip models whose provider has no key (e.g. OpenRouter models without an OpenRouter key).
+            if ($model !== '' && $this->modelUsable($model) && !in_array($model, $candidates, true)) {
                 $candidates[] = $model;
             }
         };
@@ -100,6 +123,10 @@ class OpenRouterAPI {
             if (isset($modelConfig['id'])) {
                 $addCandidate($modelConfig['id']);
             }
+        }
+
+        if (empty($candidates)) {
+            throw new Exception($this->errors['api_key_missing']);
         }
 
         return $candidates;
@@ -133,6 +160,10 @@ class OpenRouterAPI {
             'max_tokens' => $options['max_tokens'],
             'temperature' => $options['temperature']
         ];
+        // e.g. ['type' => 'json_object'] (supported by DeepSeek and most OpenRouter models)
+        if (!empty($options['response_format'])) {
+            $data['response_format'] = $options['response_format'];
+        }
 
         $response = $this->makeRequest('/chat/completions', $data);
 
@@ -245,8 +276,19 @@ class OpenRouterAPI {
         $options = array_merge([
             'model' => $default_model,
             'max_tokens' => $this->config['max_tokens'],
-            'temperature' => $this->config['temperature']
+            'temperature' => $this->config['temperature'],
+            'enforce_limits' => false, // true: apply the rate limit and budget checks of complete()
+            'log_feature' => null      // e.g. 'assistant': record the call in ai_usage_log
         ], $options);
+
+        if ($options['enforce_limits']) {
+            if (!$this->checkRateLimit()) {
+                throw new Exception($this->errors['rate_limit_exceeded']);
+            }
+            if (!$this->checkBudget()) {
+                throw new Exception($this->errors['budget_exceeded']);
+            }
+        }
 
         $candidateModels = $this->getModelCandidates($options['model']);
         $lastException = null;
@@ -273,25 +315,52 @@ class OpenRouterAPI {
             throw $lastException;
         }
 
+        if (!empty($options['log_feature'])) {
+            $previousFeature = $_REQUEST['feature'] ?? null;
+            $_REQUEST['feature'] = (string)$options['log_feature'];
+            $lastMessage = end($messages);
+            $this->logRequest((string)($lastMessage['content'] ?? ''), $text, $this->last_model, $this->last_usage);
+            if ($previousFeature === null) {
+                unset($_REQUEST['feature']);
+            } else {
+                $_REQUEST['feature'] = $previousFeature;
+            }
+        }
+
         return $text;
     }
 
     /**
-     * Make HTTP request to OpenRouter API
+     * Make HTTP request to the provider of the requested model (DeepSeek or OpenRouter)
      *
      * @param string $endpoint API endpoint
      * @param array $data Request data
      * @return array|false Response data or false on error
      */
     private function makeRequest($endpoint, $data) {
-        $url = $this->config['base_url'] . $endpoint;
+        $provider = $this->providerFor($data['model'] ?? '');
+        $providerName = $provider === 'deepseek' ? 'DeepSeek' : 'OpenRouter';
 
-        $headers = [
-            'Content-Type: application/json',
-            'Authorization: Bearer ' . $this->config['api_key'],
-            'HTTP-Referer: ' . $this->config['site_url'],
-            'X-Title: ' . $this->config['site_name']
-        ];
+        if ($provider === 'deepseek') {
+            // Thinking off for every DeepSeek call: reasoning tokens are billed as output and, measured on an
+            // Ejar contract, gave the same answer with ~82% fewer output tokens and ~7x faster.
+            if ($endpoint === '/chat/completions' && !isset($data['thinking'])) {
+                $data['thinking'] = ['type' => 'disabled'];
+            }
+            $url = rtrim($this->config['deepseek_base_url'] ?? 'https://api.deepseek.com', '/') . $endpoint;
+            $headers = [
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . ($this->config['deepseek_api_key'] ?? ''),
+            ];
+        } else {
+            $url = $this->config['base_url'] . $endpoint;
+            $headers = [
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . $this->config['api_key'],
+                'HTTP-Referer: ' . $this->config['site_url'],
+                'X-Title: ' . $this->config['site_name']
+            ];
+        }
 
         $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -311,14 +380,14 @@ class OpenRouterAPI {
         //curl_close($ch);
 
         if ($error) {
-            $error_msg = "خطأ في الاتصال بـ OpenRouter API: " . $error . " | API Connection Error: " . $error;
-            error_log("OpenRouter API Error: " . $error);
+            $error_msg = "خطأ في الاتصال بـ {$providerName} API: " . $error . " | API Connection Error: " . $error;
+            error_log("{$providerName} API Error: " . $error);
             throw new Exception($error_msg);
         }
 
         if ($http_code !== 200) {
-            $error_msg = "خطأ من OpenRouter API (HTTP $http_code): $response | API HTTP Error ($http_code): $response";
-            error_log("OpenRouter API HTTP Error: " . $http_code . " - " . $response);
+            $error_msg = "خطأ من {$providerName} API (HTTP $http_code): $response | API HTTP Error ($http_code): $response";
+            error_log("{$providerName} API HTTP Error: " . $http_code . " - " . $response);
             throw new Exception($error_msg);
         }
 
