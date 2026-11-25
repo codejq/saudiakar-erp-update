@@ -453,32 +453,35 @@ class UBLInvoiceGenerator {
         $taxAmount->setAttribute('currencyID', ZatcaPhase2Config::CURRENCY_CODE);
         $taxTotal->appendChild($taxAmount);
 
-        // TaxSubtotal (BG-23) — required by BR-CO-18
-        $taxSubtotal = $this->createElement('cac:TaxSubtotal');
+        // TaxSubtotal (BG-23) — required by BR-CO-18, one per VAT category
+        $breakdown = $this->invoiceData['tax_breakdown'] ?? [
+            ['category' => 'S', 'percent' => 15, 'taxable' => $this->invoiceData['base_amount'], 'vat' => $this->invoiceData['vat_amount']]
+        ];
+        foreach ($breakdown as $group) {
+            $taxSubtotal = $this->createElement('cac:TaxSubtotal');
 
-        $taxableAmt = $this->createElement(
-            'cbc:TaxableAmount',
-            ZatcaPhase2Config::formatAmount($this->invoiceData['base_amount'])
-        );
-        $taxableAmt->setAttribute('currencyID', ZatcaPhase2Config::CURRENCY_CODE);
-        $taxSubtotal->appendChild($taxableAmt);
+            $taxableAmt = $this->createElement('cbc:TaxableAmount', ZatcaPhase2Config::formatAmount($group['taxable']));
+            $taxableAmt->setAttribute('currencyID', ZatcaPhase2Config::CURRENCY_CODE);
+            $taxSubtotal->appendChild($taxableAmt);
 
-        $subtotalTaxAmt = $this->createElement(
-            'cbc:TaxAmount',
-            ZatcaPhase2Config::formatAmount($this->invoiceData['vat_amount'])
-        );
-        $subtotalTaxAmt->setAttribute('currencyID', ZatcaPhase2Config::CURRENCY_CODE);
-        $taxSubtotal->appendChild($subtotalTaxAmt);
+            $subtotalTaxAmt = $this->createElement('cbc:TaxAmount', ZatcaPhase2Config::formatAmount($group['vat']));
+            $subtotalTaxAmt->setAttribute('currencyID', ZatcaPhase2Config::CURRENCY_CODE);
+            $taxSubtotal->appendChild($subtotalTaxAmt);
 
-        $taxCategory = $this->createElement('cac:TaxCategory');
-        $taxCategory->appendChild($this->createElement('cbc:ID', 'S'));
-        $taxCategory->appendChild($this->createElement('cbc:Percent', '15.00'));
-        $taxScheme = $this->createElement('cac:TaxScheme');
-        $taxScheme->appendChild($this->createElement('cbc:ID', 'VAT'));
-        $taxCategory->appendChild($taxScheme);
-        $taxSubtotal->appendChild($taxCategory);
+            $taxCategory = $this->createElement('cac:TaxCategory');
+            $taxCategory->appendChild($this->createElement('cbc:ID', $group['category']));
+            $taxCategory->appendChild($this->createElement('cbc:Percent', number_format($group['percent'], 2, '.', '')));
+            if (!empty($group['code'])) {
+                $taxCategory->appendChild($this->createElement('cbc:TaxExemptionReasonCode', $group['code']));
+                $taxCategory->appendChild($this->createElement('cbc:TaxExemptionReason', $group['reason']));
+            }
+            $taxScheme = $this->createElement('cac:TaxScheme');
+            $taxScheme->appendChild($this->createElement('cbc:ID', 'VAT'));
+            $taxCategory->appendChild($taxScheme);
+            $taxSubtotal->appendChild($taxCategory);
 
-        $taxTotal->appendChild($taxSubtotal);
+            $taxTotal->appendChild($taxSubtotal);
+        }
 
         $this->invoice->appendChild($taxTotal);
     }
@@ -590,8 +593,8 @@ class UBLInvoiceGenerator {
 
             // Classified Tax Category
             $taxCategory = $this->createElement('cac:ClassifiedTaxCategory');
-            $taxCategory->appendChild($this->createElement('cbc:ID', 'S'));
-            $taxCategory->appendChild($this->createElement('cbc:Percent', '15.00'));
+            $taxCategory->appendChild($this->createElement('cbc:ID', $lineData['tax_category'] ?? 'S'));
+            $taxCategory->appendChild($this->createElement('cbc:Percent', number_format($lineData['tax_percent'] ?? 15, 2, '.', '')));
             $taxScheme = $this->createElement('cac:TaxScheme');
             $taxScheme->appendChild($this->createElement('cbc:ID', 'VAT'));
             $taxCategory->appendChild($taxScheme);

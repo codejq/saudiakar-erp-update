@@ -18,6 +18,8 @@ $canEdit = receiptCommissionCan($db, $screen, 'edits');
 if (empty($_SESSION['receipt_review_csrf'])) $_SESSION['receipt_review_csrf'] = bin2hex(random_bytes(24));
 
 $ready = receiptSyncReady($db);
+$taxReady = $ready && zatcaTaxColumnsReady($db);
+$taxEnabled = $taxReady && zatcaTaxLinesEnabled($db, $zatca_environment ?? '');
 $manager = new AccountingManager($db, (int)($_SESSION['useridv'] ?? 0));
 $integration = new AmlakAccountingIntegration($db, $manager);
 $messages = [];
@@ -58,6 +60,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($action === 'release') {
         $result = $integration->releaseHeldReceipt((int)($_POST['receipt_id'] ?? 0), is_array($_POST['parts'] ?? null) ? $_POST['parts'] : []);
         $messages[] = !empty($result['success']) ? ['success', 'تم اعتماد تفاصيل السند؛ سيظهر في المزامنة التالية.'] : ['danger', $result['message']];
+    } elseif ($action === 'tax_settings') {
+        $values = ['zatca_item_tax_lines' => empty($_POST['item_tax_lines']) ? '' : '1', 'zatca_water_services_category' => ($_POST['water_services'] ?? '') === 'O' ? 'O' : ''];
+        foreach ($values as $key => $value) receiptCommissionQuery($db, "INSERT INTO acc_system_settings (setting_key,setting_value,setting_category,description_ar,formuid) VALUES (?,?,'amlak_integration',?,UUID())
+            ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)", [$key, $value, $key === 'zatca_item_tax_lines' ? 'إرسال تصنيف ضريبة البنود للهيئة' : 'تصنيف المياه والخدمات بلا ضريبة'])->close();
+        $messages[] = ['success', 'تم حفظ إعدادات التصنيف الضريبي.'];
+    } elseif ($action === 'tax_items' && $taxReady) {
+        $saved = 0;
+        foreach (array_slice((array)($_POST['items'] ?? []), 0, 200, true) as $itemId => $value) {
+            if (!is_array($value)) continue;
+            $category = is_string($value['category'] ?? null) ? $value['category'] : '';
+            $reason = mb_substr(trim(is_string($value['reason'] ?? null) ? $value['reason'] : ''), 0, 200, 'UTF-8');
+            if (!isset(ZATCA_ITEM_CATEGORIES[$category])) continue;
+            if ($reason === '') { $messages[] = ['warning', 'اكتب سبب عدم الخضوع للضريبة للبند #' . (int)$itemId . '.']; continue; }
+            $statement = receiptCommissionQuery($db, "UPDATE acc_invoice_items t JOIN acc_invoices i ON i.invoice_id=t.invoice_id SET t.tax_category=?,t.tax_reason_code=?,t.tax_reason_text=?
+                WHERE t.item_id=? AND t.vat_rate=0 AND i.sanad_id>0 AND i.status<>'cancelled' AND COALESCE(i.zatca_status,'')<>'submitted' AND COALESCE(i.zatca_uuid,'')=''",
+                [$category, ZATCA_ITEM_CATEGORIES[$category][0], $reason, (int)$itemId]);
+            $saved += max(0, $statement->affected_rows);
+            $statement->close();
+        }
+        $messages[] = ['success', 'تم تحديث تصنيف ' . $saved . ' بند.'];
     } elseif ($action === 'accounts') {
         $saved = true;
         foreach ($accountSettings as $key => $label) {
@@ -78,6 +100,11 @@ if ($ready) {
     $held = receiptCommissionRows($db, "SELECT c.*,sanad.mostagername,sanad.depositeamount,sanad.sanaddate,sanad.mybyan,sanad.kastid AS installment
         FROM sanad_components c JOIN sanad ON sanad.idsanad=c.idsanad WHERE c.status='review' AND " . amlakSyncDateSql($db, 'sanaddate') . ' ORDER BY sanad.sanaddate,c.idsanad LIMIT 50');
 }
+// The settings may have just been saved.
+$taxEnabled = $taxReady && zatcaTaxLinesEnabled($db, $zatca_environment ?? '');
+$taxItems = !$taxReady ? [] : receiptCommissionRows($db, "SELECT t.*,i.invoice_number,i.customer_name FROM acc_invoice_items t JOIN acc_invoices i ON i.invoice_id=t.invoice_id
+    WHERE t.vat_rate=0 AND i.sanad_id>0 AND i.status<>'cancelled' AND i.reversed_date IS NULL AND COALESCE(i.zatca_status,'')<>'submitted' AND COALESCE(i.zatca_uuid,'')=''
+    ORDER BY COALESCE(t.tax_category,'')<>'',i.invoice_id DESC,t.item_id LIMIT 100");
 $approved = $approvedLines = $approvedLinks = [];
 if ($ready) {
     $approved = receiptCommissionRows($db, "SELECT j.entry_id,j.entry_number,j.entry_date,j.description,j.notes,j.reference_type,i.invoice_id,i.invoice_number,i.sanad_id
@@ -130,8 +157,7 @@ $receiptUrl = '/aqary/admin/include/amlak/selectprintform.hnt?formtype=recivevou
                             <td><?= accountingLinkEsc($draft['customer_name']) ?></td>
                             <td><?= accountingLinkEsc(implode(' | ', $parts)) ?>
                                 <?php if ($draft['zatca_status'] === 'submitted'): ?><span class="badge text-bg-info">أُرسلت للهيئة</span><?php endif; ?>
-                                <?php if ($taxable && $untaxed): ?><div class="small text-danger">فاتورة مختلطة: الإرسال الحالي للهيئة يسجل كل البنود بضريبة 15%.</div>
-                                <?php elseif ($untaxed): ?><div class="small text-danger">بلا ضريبة: الإرسال الحالي للهيئة يسجل كل البنود بضريبة 15%.</div><?php endif; ?></td>
+                                <?php if ($untaxed): ?><div class="small <?= $taxEnabled ? 'text-muted' : 'text-danger' ?>"><?= $taxable ? 'فاتورة مختلطة' : 'بلا ضريبة' ?>: <?= $taxEnabled ? 'تُرسل للهيئة حسب تصنيف البنود أدناه.' : 'الإرسال للهيئة موقوف حتى تفعيل تصنيف البنود.' ?></div><?php endif; ?></td>
                             <td class="text-end"><?= number_format((float)$draft['vat_amount'], 2) ?></td>
                             <td class="text-end fw-bold"><?= number_format((float)$draft['total_amount'], 2) ?></td>
                             <td><button type="button" class="btn btn-sm btn-outline-primary text-nowrap" onclick="openReceiptEntries(<?= (int)$draft['invoice_id'] ?>)"><i class="bi bi-journal-text me-1"></i><?= $canEdit ? 'عرض وتعديل القيد' : 'عرض القيد' ?></button></td>
@@ -190,6 +216,37 @@ $receiptUrl = '/aqary/admin/include/amlak/selectprintform.hnt?formtype=recivevou
             <?php if (!$approved): ?><p class="text-center text-muted mb-0">لا توجد قيود مرحلة.</p><?php endif; ?>
         </div>
     </div>
+
+    <?php if ($taxReady): ?>
+    <div class="card mb-4">
+        <div class="card-header fw-bold">تصنيف البنود بلا ضريبة (للإرسال للهيئة)</div>
+        <div class="card-body">
+            <form method="post" class="row g-3 align-items-end mb-3">
+                <input type="hidden" name="csrf_token" value="<?= $token ?>"><input type="hidden" name="action" value="tax_settings">
+                <div class="col-md-4"><label class="form-label">المياه والخدمات بلا ضريبة</label>
+                    <select class="form-select" name="water_services" <?= $canEdit ? '' : 'disabled' ?>><option value="">أختار لكل بند</option>
+                        <option value="O" <?= zatcaTaxSetting($db, 'zatca_water_services_category') === 'O' ? 'selected' : '' ?>>خارج نطاق الضريبة (محصلة لحساب الغير)</option></select></div>
+                <div class="col-md-5"><div class="form-check"><input class="form-check-input" type="checkbox" id="itemTaxLines" name="item_tax_lines" value="1" <?= zatcaTaxSetting($db, 'zatca_item_tax_lines') === '1' ? 'checked' : '' ?> <?= $canEdit ? '' : 'disabled' ?>>
+                    <label class="form-check-label" for="itemTaxLines">تفعيل إرسال البنود بتصنيفها في بيئة الإنتاج (بعد نجاح التجربة)</label></div>
+                    <div class="small text-muted">البيئة الحالية: <?= accountingLinkEsc($zatca_environment ?? '') ?> - <?= $taxEnabled ? 'الإرسال بالتصنيف مفعل' : 'الإرسال بالتصنيف غير مفعل' ?>. في البيئات التجريبية يعمل دائماً.</div></div>
+                <?php if ($canEdit): ?><div class="col-md-3"><button class="btn btn-outline-primary w-100">حفظ الإعدادات</button></div><?php endif; ?>
+            </form>
+            <?php if (!$taxItems): ?><p class="text-center text-muted mb-0">لا توجد بنود بلا ضريبة بانتظار الإرسال.</p><?php else: ?>
+            <form method="post">
+                <input type="hidden" name="csrf_token" value="<?= $token ?>"><input type="hidden" name="action" value="tax_items">
+                <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>الفاتورة</th><th>العميل</th><th>البند</th><th class="text-end">المبلغ</th><th>التصنيف</th><th>السبب</th></tr></thead><tbody>
+                <?php foreach ($taxItems as $item): $itemId = (int)$item['item_id']; ?><tr>
+                    <td><a target="_blank" rel="noopener" href="modules/invoices/view.hnt?id=<?= (int)$item['invoice_id'] ?>"><?= accountingLinkEsc($item['invoice_number']) ?></a></td>
+                    <td><?= accountingLinkEsc($item['customer_name']) ?></td><td><?= accountingLinkEsc($item['item_description']) ?></td><td class="text-end"><?= number_format((float)$item['line_total'], 2) ?></td>
+                    <td><select class="form-select form-select-sm" name="items[<?= $itemId ?>][category]" <?= $canEdit ? '' : 'disabled' ?>><option value="">-- اختر --</option>
+                        <?php foreach (ZATCA_ITEM_CATEGORIES as $category => [$code, $label]): ?><option value="<?= $category ?>" <?= $item['tax_category'] === $category ? 'selected' : '' ?>><?= accountingLinkEsc($category . ' - ' . $label) ?></option><?php endforeach; ?></select></td>
+                    <td><input class="form-control form-control-sm" maxlength="200" name="items[<?= $itemId ?>][reason]" value="<?= accountingLinkEsc($item['tax_reason_text']) ?>" <?= $canEdit ? '' : 'disabled' ?>></td>
+                </tr><?php endforeach; ?></tbody></table></div>
+                <?php if ($canEdit): ?><button class="btn btn-primary">حفظ التصنيف</button><?php endif; ?>
+            </form><?php endif; ?>
+        </div>
+    </div>
+    <?php endif; ?>
 
     <form method="post" class="card mb-4">
         <div class="card-header fw-bold">حسابات المزامنة</div>

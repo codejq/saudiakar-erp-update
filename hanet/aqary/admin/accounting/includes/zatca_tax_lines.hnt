@@ -1,0 +1,95 @@
+<?php
+/**
+ * Tax category of invoice items, and the lines and VAT summary sent to ZATCA.
+ * S standard 15%, E exempt, O outside VAT. Nothing is guessed: an item without VAT
+ * and without a saved category is refused. Signing, QR and submission are not here.
+ */
+const ZATCA_ITEM_CATEGORIES = [
+    'E' => ['VATEX-SA-30', 'معفى: إيجار سكني'],
+    'O' => ['VATEX-SA-OOS', 'خارج نطاق الضريبة'],
+];
+
+function zatcaTaxColumnsReady($db): bool {
+    $result = $db->query("SELECT COUNT(*) n FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='acc_invoice_items'
+        AND COLUMN_NAME IN ('tax_category','tax_reason_code','tax_reason_text')");
+    return $result && (int)$result->fetch_assoc()['n'] === 3;
+}
+
+function zatcaTaxSetting($db, string $key): string {
+    $key = $db->real_escape_string($key);
+    $result = $db->query("SELECT setting_value FROM acc_system_settings WHERE setting_key='{$key}' LIMIT 1");
+    $row = $result ? $result->fetch_assoc() : null;
+    return trim((string)($row['setting_value'] ?? ''));
+}
+
+/** Test environments always use the new lines; production only after it is switched on. */
+function zatcaTaxLinesEnabled($db, $environment): bool {
+    if (!zatcaTaxColumnsReady($db)) return false;
+    return in_array($environment, ['sandbox', 'simulation'], true) || zatcaTaxSetting($db, 'zatca_item_tax_lines') === '1';
+}
+
+/** Saved category of one receipt part, or null when the user must choose. */
+function zatcaReceiptItemCategory(string $part, int $vatCents, int $contractVatType, string $waterServices): ?array {
+    if ($vatCents > 0) return ['S', '', ''];
+    if ($part === 'insurance') return ['O', 'VATEX-SA-OOS', 'تأمين مسترد'];
+    // vat_type 1 is the contract's own "residential" choice.
+    if ($part === 'rent' && $contractVatType === 1) return ['E', 'VATEX-SA-30', 'إيجار سكني'];
+    if (in_array($part, ['water', 'services'], true) && $waterServices === 'O') return ['O', 'VATEX-SA-OOS', 'مبالغ محصلة لحساب الغير بلا ربح'];
+    return null;
+}
+
+/**
+ * Returns ['error' => text] or ['lines' => [...], 'breakdown' => [...]]; empty lists keep the
+ * previous single-line invoice.
+ */
+function zatcaInvoiceTaxLines(array $invoice, array $items, bool $enabled): array {
+    $none = ['lines' => [], 'breakdown' => []];
+    $zero = array_filter($items, function ($item) { return (float)$item['vat_rate'] == 0; });
+    $isReceipt = (int)($invoice['sanad_id'] ?? 0) > 0;
+    if (!$enabled) {
+        return $isReceipt && $zero ? ['error' => 'إرسال فواتير السندات التي تحتوي بنوداً بلا ضريبة موقوف حتى تفعيل تصنيف البنود من صفحة مراجعة فواتير السندات.'] : $none;
+    }
+    if (!$items) return $isReceipt ? ['error' => 'الفاتورة بلا بنود.'] : $none;
+    $cents = function ($value) { return (int)round((float)$value * 100); };
+    $lines = $groups = [];
+    $net = 0;
+    foreach (array_values($items) as $index => $item) {
+        $name = trim((string)$item['item_description']);
+        $rate = round((float)$item['vat_rate'], 2);
+        $lineNet = $cents(round((float)$item['quantity'] * (float)$item['unit_price'], 2));
+        if ($lineNet <= 0) return ['error' => 'مبلغ البند غير صحيح: ' . $name];
+        if ($cents($item['discount'] ?? 0) !== 0) return ['error' => 'الإرسال بتصنيف البنود لا يدعم الخصم على البند: ' . $name];
+        $category = (string)($item['tax_category'] ?? '');
+        $code = (string)($item['tax_reason_code'] ?? '');
+        $reason = trim((string)($item['tax_reason_text'] ?? ''));
+        if ($rate == 15.0) {
+            if ($category !== '' && $category !== 'S') return ['error' => 'ضريبة البند لا تطابق تصنيفه: ' . $name];
+            [$category, $code, $reason] = ['S', '', ''];
+        } elseif ($rate == 0.0) {
+            if (!isset(ZATCA_ITEM_CATEGORIES[$category])) return ['error' => 'اختر تصنيف الضريبة للبند: ' . $name];
+            if ($code !== ZATCA_ITEM_CATEGORIES[$category][0] || $reason === '') return ['error' => 'سبب عدم خضوع البند للضريبة غير مكتمل: ' . $name];
+        } else {
+            return ['error' => 'نسبة ضريبة غير مدعومة للبند: ' . $name];
+        }
+        $lineVat = $category === 'S' ? (int)round($lineNet * 0.15) : 0;
+        $net += $lineNet;
+        $lines[] = ['id' => $index + 1, 'name' => $name, 'quantity' => $item['quantity'], 'unit_price' => $item['unit_price'], 'line_total' => $lineNet / 100,
+            'vat_amount' => $lineVat / 100, 'tax_category' => $category, 'tax_percent' => $category === 'S' ? 15 : 0];
+        if (!isset($groups[$category])) $groups[$category] = ['category' => $category, 'percent' => $category === 'S' ? 15 : 0, 'taxable' => 0, 'vat' => 0, 'code' => $code, 'reasons' => []];
+        $groups[$category]['taxable'] += $lineNet;
+        if ($reason !== '') $groups[$category]['reasons'][$reason] = true;
+    }
+    $storedVat = $cents($invoice['vat_amount']);
+    if (abs($net - $cents($invoice['subtotal'])) > 0) return ['error' => 'مجموع البنود لا يساوي صافي الفاتورة.'];
+    if ($cents($invoice['total_amount']) !== $net + $storedVat) return ['error' => 'إجمالي الفاتورة لا يساوي الصافي مع الضريبة.'];
+    $expectedVat = isset($groups['S']) ? (int)round($groups['S']['taxable'] * 0.15) : 0;
+    // Split receipts may differ by a rounding halala; anything more is wrong data.
+    if (abs($expectedVat - $storedVat) > (isset($groups['S']) ? 2 : 0)) return ['error' => 'ضريبة الفاتورة لا تطابق ضريبة بنودها.'];
+    if (isset($groups['S'])) $groups['S']['vat'] = $storedVat;
+    $breakdown = [];
+    foreach ($groups as $group) {
+        $breakdown[] = ['category' => $group['category'], 'percent' => $group['percent'], 'taxable' => $group['taxable'] / 100, 'vat' => $group['vat'] / 100,
+            'code' => $group['code'], 'reason' => implode('، ', array_keys($group['reasons']))];
+    }
+    return ['lines' => $lines, 'breakdown' => $breakdown];
+}

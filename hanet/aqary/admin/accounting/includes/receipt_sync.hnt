@@ -5,6 +5,7 @@
  */
 require_once __DIR__ . '/sync_start_date.hnt';
 require_once __DIR__ . '/receipt_entry_edit.hnt';
+require_once __DIR__ . '/zatca_tax_lines.hnt';
 require_once __DIR__ . '/../../include/amlak/receipt_components_store.hnt';
 
 const RECEIPT_INVOICE_ITEMS = [
@@ -144,12 +145,15 @@ trait ReceiptInvoiceSync {
             $tenantRow = (int)$receipt['mostagerid'] > 0 ? (receiptCommissionRows($this->db, 'SELECT * FROM mostagereen WHERE mostagerid=?', [(int)$receipt['mostagerid']])[0] ?? []) : [];
             $vatNumber = trim((string)($receipt['mostagervatnumber'] ?: ($tenantRow['mostagervatnumber'] ?? '')));
             $items = [];
+            $contractVat = (int)$context['egar_id'] > 0 ? (int)(receiptCommissionRows($this->db, 'SELECT vat_type FROM egar WHERE rakam3akdid=?', [(int)$context['egar_id']])[0]['vat_type'] ?? 0) : 0;
+            $waterServices = zatcaTaxSetting($this->db, 'zatca_water_services_category');
             foreach (RECEIPT_INVOICE_ITEMS as $key => [$label, $vatKey]) {
                 if ($components[$key] === 0) continue;
                 $vat = $vatKey !== '' ? $components[$vatKey] : 0;
                 $place = trim(implode(' - ', array_filter([$context['property_name'] ?? '', $receipt['period']])));
                 $items[] = ['description' => mb_substr($label . ($place !== '' ? ' - ' . $place : ''), 0, 250, 'UTF-8'),
-                    'price' => $components[$key] / 100, 'rate' => $vat > 0 ? RECEIPT_COMPONENT_VAT_PERCENT : 0, 'total' => ($components[$key] + $vat) / 100];
+                    'price' => $components[$key] / 100, 'rate' => $vat > 0 ? RECEIPT_COMPONENT_VAT_PERCENT : 0, 'total' => ($components[$key] + $vat) / 100,
+                    'tax' => zatcaReceiptItemCategory($key, $vat, $contractVat, $waterServices)];
             }
             $totals = receiptInvoiceTotals($components);
             $invoice = $this->accountingManager->createReceiptDraftInvoice([
