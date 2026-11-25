@@ -129,17 +129,22 @@ trait ReceiptInvoiceSync {
         return ['status' => 'review', 'warnings' => json_encode([$warning], JSON_UNESCAPED_UNICODE)] + $stored;
     }
 
-    /** Cancel a draft and make it again from its receipt. */
+    /** Fill a draft again from its receipt, keeping its number. A receipt that must be reviewed first loses its draft. */
     public function rebuildReceiptInvoice($invoiceId) {
-        $invoice = receiptCommissionRows($this->db, 'SELECT sanad_id FROM acc_invoices WHERE invoice_id=?', [(int)$invoiceId])[0] ?? null;
-        $void = $this->voidReceiptInvoice($invoiceId);
-        if (empty($void['success'])) return $void;
-        $result = $this->createDraftFromSanad((int)$invoice['sanad_id']);
-        if (!empty($result['success'])) return ['success' => true, 'message' => 'أعيد بناء المسودة من السند.'];
-        return ['success' => false, 'rebuilt' => true, 'message' => 'أُلغيت المسودة. ' . ($result['message'] ?? 'أعد المزامنة.')];
+        $invoice = receiptCommissionRows($this->db, 'SELECT sanad_id,invoice_number FROM acc_invoices WHERE invoice_id=?', [(int)$invoiceId])[0] ?? null;
+        if (!$invoice || (int)$invoice['sanad_id'] <= 0) return ['success' => false, 'message' => 'الفاتورة غير مرتبطة بسند قبض.'];
+        $result = $this->createDraftFromSanad((int)$invoice['sanad_id'], (int)$invoiceId);
+        if (!empty($result['draft'])) return ['success' => true, 'message' => 'أعيد بناء المسودة ' . $invoice['invoice_number'] . ' من سند القبض #' . (int)$invoice['sanad_id'] . ' بنفس الرقم.'];
+        if (!empty($result['held'])) {
+            $void = $this->voidReceiptInvoice($invoiceId);
+            if (empty($void['success'])) return $void;
+            return ['success' => false, 'message' => 'أُلغيت المسودة ' . $invoice['invoice_number'] . ' لأن السند #' . (int)$invoice['sanad_id'] . ' يحتاج مراجعتك. ' . $result['message']];
+        }
+        return ['success' => false, 'message' => $result['message'] ?? 'تعذر إعادة بناء المسودة.'];
     }
 
-    public function createDraftFromSanad($receiptId) {
+    /** $rebuildId: a draft of the same receipt to fill again, keeping its number. */
+    public function createDraftFromSanad($receiptId, int $rebuildId = 0) {
         $receiptId = (int)$receiptId;
         try {
             if (!receiptSyncReady($this->db)) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث المزامنة.');
@@ -162,7 +167,12 @@ trait ReceiptInvoiceSync {
                 $this->db->commit();
                 return ['success' => true, 'existing' => true, 'entry_id' => (int)$entry['entry_id']];
             }
-            $live = receiptCommissionRows($this->db, "SELECT invoice_id,invoice_number FROM acc_invoices WHERE sanad_id=? AND status<>'cancelled' LIMIT 1", [$receiptId]);
+            if ($rebuildId > 0) {
+                $draft = receiptCommissionRows($this->db, 'SELECT * FROM acc_invoices WHERE invoice_id=? FOR UPDATE', [$rebuildId])[0] ?? null;
+                if (!$draft || (int)$draft['sanad_id'] !== $receiptId || $draft['status'] !== 'draft') throw new RuntimeException('الفاتورة ليست مسودة.');
+                if (trim((string)$draft['zatca_uuid']) !== '' || $draft['zatca_status'] === 'submitted') throw new RuntimeException('أُرسلت الفاتورة للهيئة؛ تحتاج إشعاراً دائناً.');
+            }
+            $live = receiptCommissionRows($this->db, "SELECT invoice_id,invoice_number FROM acc_invoices WHERE sanad_id=? AND status<>'cancelled' AND invoice_id<>? LIMIT 1", [$receiptId, $rebuildId]);
             if ($live) {
                 $this->db->commit();
                 return ['success' => true, 'existing' => true, 'invoice_id' => (int)$live[0]['invoice_id'], 'invoice_number' => $live[0]['invoice_number']];
@@ -204,7 +214,7 @@ trait ReceiptInvoiceSync {
                 'customer_address' => (string)($tenantRow['mostageraddress'] ?? ''),
                 'subtotal' => ($totals['total'] - $totals['vat']) / 100, 'vat_amount' => $totals['vat'] / 100, 'total_amount' => $totals['total'] / 100,
                 'notes' => 'سند قبض رقم ' . $receiptId . ($receipt['mybyan'] !== '' ? ' - ' . $receipt['mybyan'] : ''),
-            ], $items);
+            ], $items, $rebuildId);
             $this->db->commit();
             return ['success' => true, 'draft' => true] + $invoice;
         } catch (Throwable $error) {
@@ -214,6 +224,14 @@ trait ReceiptInvoiceSync {
         }
     }
 
+    /** A setting pointing at the wrong kind of account must not be posted. */
+    private function receiptAccountOfType(int $id, string $type, string $label): int {
+        $row = $id > 0 ? (receiptCommissionRows($this->db, 'SELECT account_code,account_name_ar,account_type FROM acc_chart_of_accounts WHERE account_id=?', [$id])[0] ?? null) : null;
+        if (!$row) throw new RuntimeException('حساب "' . $label . '" غير محدد في إعدادات المحاسبة.');
+        if ($row['account_type'] !== $type) throw new RuntimeException('حساب "' . $label . '" في إعدادات المحاسبة مضبوط على ' . $row['account_code'] . ' - ' . $row['account_name_ar'] . ' وهو ليس حساب ' . ($type === 'liability' ? 'التزامات' : 'إيرادات') . '. صححه من إعدادات المحاسبة.');
+        return $id;
+    }
+
     /** Credit side of the invoice: whose money each part is. */
     private function receiptInvoiceCredits(array $components, array $property): array {
         $hasProperty = !empty($property);
@@ -221,8 +239,7 @@ trait ReceiptInvoiceSync {
         $owner = function () { return $this->receiptInvoiceSettingId('default_owner_payable_account_id', 'ذمم الملاك'); };
         $vat = function () {
             $id = $this->accountId('default_invoice_vat_account_id', '2121');
-            if ($id <= 0) throw new RuntimeException('حساب ضريبة القيمة المضافة غير محدد.');
-            return $id;
+            return $this->receiptAccountOfType($id, 'liability', 'ضريبة القيمة المضافة');
         };
         $toOwner = function ($field) use ($property, $officeOwns) { return !$officeOwns && ($property[$field] ?? '') === 'malek'; };
         if (($components['rent'] || $components['rent_vat']) && !$hasProperty) throw new RuntimeException('الإيجار يحتاج عقاراً مرتبطاً بالسند.');
@@ -232,8 +249,7 @@ trait ReceiptInvoiceSync {
         };
         $add('rent', 'إيجار', $officeOwns ? function () {
             $id = $this->accountId('default_invoice_revenue_account_id', '4100');
-            if ($id <= 0) throw new RuntimeException('حساب إيرادات التأجير غير محدد.');
-            return $id;
+            return $this->receiptAccountOfType($id, 'revenue', 'إيرادات التأجير');
         } : $owner);
         $add('rent_vat', 'ضريبة الإيجار', !$officeOwns && ($property['rent_vat_filed_by'] ?? 'office') === 'owner' ? $owner : $vat);
         $add('commission', 'عمولة', function () { return $this->receiptInvoiceSettingId('default_commission_revenue_account_id', 'إيراد العمولات'); });

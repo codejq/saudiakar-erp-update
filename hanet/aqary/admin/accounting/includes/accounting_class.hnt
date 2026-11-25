@@ -1561,13 +1561,14 @@ class AccountingManager {
      * Draft invoice of a receipt: no journal entry. Caller owns the transaction.
      * Seller fields stay NULL so the company's own data is used everywhere.
      */
-    public function createReceiptDraftInvoice(array $data, array $items) {
+    public function createReceiptDraftInvoice(array $data, array $items, int $rebuildId = 0) {
         $lockName = 'acc-invoice-number:' . substr(hash('sha256', receiptCommissionRows($this->db, 'SELECT DATABASE() db')[0]['db']), 0, 40);
         if (empty(receiptCommissionRows($this->db, 'SELECT GET_LOCK(?,5) a', [$lockName])[0]['a'])) {
             throw new RuntimeException('ترقيم الفواتير مشغول، حاول مجدداً.');
         }
         try {
-            $number = $this->generateInvoiceNumber($data['invoice_type']);
+            $number = $rebuildId > 0 ? receiptCommissionRows($this->db, 'SELECT invoice_number FROM acc_invoices WHERE invoice_id=?', [$rebuildId])[0]['invoice_number']
+                : $this->generateInvoiceNumber($data['invoice_type']);
             $row = $data + [
                 'invoice_number' => $number, 'due_date' => $data['invoice_date'], 'paid_amount' => 0, 'remaining_amount' => $data['total_amount'],
                 'payment_status' => 'unpaid', 'status' => 'draft', 'seller_source' => 'company', 'created_by' => $this->userId,
@@ -1576,9 +1577,16 @@ class AccountingManager {
             // Older installations may lack optional columns such as seller_source.
             $columns = array_column(receiptCommissionRows($this->db, 'SHOW COLUMNS FROM acc_invoices'), 'Field');
             $row = array_intersect_key($row, array_flip($columns));
-            receiptCommissionQuery($this->db, 'INSERT INTO acc_invoices (' . implode(',', array_keys($row)) . ')
-                VALUES (' . implode(',', array_fill(0, count($row), '?')) . ')', array_values($row))->close();
-            $invoiceId = (int)$this->db->insert_id;
+            if ($rebuildId > 0) {
+                unset($row['formuid'], $row['created_by'], $row['invoice_number']);
+                receiptCommissionQuery($this->db, 'UPDATE acc_invoices SET ' . implode('=?,', array_keys($row)) . '=? WHERE invoice_id=?', array_merge(array_values($row), [$rebuildId]))->close();
+                receiptCommissionQuery($this->db, 'DELETE FROM acc_invoice_items WHERE invoice_id=?', [$rebuildId])->close();
+                $invoiceId = $rebuildId;
+            } else {
+                receiptCommissionQuery($this->db, 'INSERT INTO acc_invoices (' . implode(',', array_keys($row)) . ')
+                    VALUES (' . implode(',', array_fill(0, count($row), '?')) . ')', array_values($row))->close();
+                $invoiceId = (int)$this->db->insert_id;
+            }
             foreach ($items as $item) {
                 receiptCommissionQuery($this->db, 'INSERT INTO acc_invoice_items (invoice_id,item_description,quantity,unit_price,vat_rate,discount,line_total) VALUES (?,?,1,?,?,0,?)',
                     [$invoiceId, $item['description'], $item['price'], $item['rate'], $item['total']])->close();
@@ -1590,7 +1598,7 @@ class AccountingManager {
         } finally {
             receiptCommissionRows($this->db, 'SELECT RELEASE_LOCK(?) r', [$lockName]);
         }
-        $this->logAudit('create', 'receipt_draft_invoice', $invoiceId, null, ['sanad_id' => $data['sanad_id']]);
+        $this->logAudit($rebuildId > 0 ? 'update' : 'create', 'receipt_draft_invoice', $invoiceId, null, ['sanad_id' => $data['sanad_id']]);
         return ['invoice_id' => $invoiceId, 'invoice_number' => $number];
     }
 
