@@ -102,6 +102,15 @@ if ($maksanad == 2) {
     $services = $rowks['services'];
     $totalPidAmount = $rowks['dof3at'] + $depositeamount;
 
+    // One calculator decides VAT and the split of this receipt (null before the migration).
+    require_once __DIR__ . '/receipt_components_store.hnt';
+    $receiptBreakdown = $renewfromoutside ? null
+        : receiptComponentsPrepare($link, $kastid, $depositeamount, is_array($rowegar ?? null) ? $rowegar : null, $rowks['dof3at']);
+    if ($receiptBreakdown !== null) {
+        $commesion_vat = $receiptBreakdown['full']['commission_vat'] / 100;
+        $depositeamount_vat = $receiptBreakdown['full']['rent_vat'] / 100;
+    }
+
     if ($totalPidAmount  >= ($commesion_vat + $depositeamount_vat + $rowks['kastvalue']) ||
         abs($totalPidAmount  - ($commesion_vat + $depositeamount_vat + $rowks['kastvalue'])) < 0.2) {
         $sql = "UPDATE aksat SET iscomplete=1 WHERE kastid='$kastid'";
@@ -155,6 +164,18 @@ if ($maksanad == 2) {
         $mywater = 0;
         $services = 0;
     }
+    $mytamen = 0;
+    $receiptCommissionVat = $commesion_vat;
+    $receiptRentVat = $total_vat;
+    if ($receiptBreakdown !== null) {
+        $receiptParts = receiptComponentsMoney($receiptBreakdown['components']);
+        $mysa3ee = $receiptParts['commission'];
+        $mywater = $receiptParts['water'];
+        $services = $receiptParts['services'];
+        $mytamen = $receiptParts['insurance'];
+        $receiptCommissionVat = $receiptParts['commission_vat'];
+        $receiptRentVat = $receiptParts['rent_vat'];
+    }
 
     // Insert revenue record
     $sql = "INSERT INTO eradat SET
@@ -171,6 +192,7 @@ if ($maksanad == 2) {
         mysa3ee='$mysa3ee',
         mywater='$mywater',
         services='$services',
+        tamen='$mytamen',
         bankid='$bankid',
         formuid='" . $receiptFormUid . "'";
 
@@ -195,8 +217,8 @@ if ($maksanad == 2) {
         cheqdate1='$cheqdate1',
         attachedimages='" . (isset($_POST['attachedimages']) ? mysql_real_escape_string($_POST['attachedimages'], $link) : '') . "',
         kastid='$kastid',
-        commesion_vat='$commesion_vat',
-        depositeamount_vat='$total_vat',
+        commesion_vat='$receiptCommissionVat',
+        depositeamount_vat='$receiptRentVat',
         payment_type='$nakda',
         bankid='$bankid',
         sales_representative_userid='" . $salesCommission['representative_userid'] . "',
@@ -210,6 +232,7 @@ if ($maksanad == 2) {
         if (!mysql_query($sql, $link)) throw new RuntimeException('تعذر حفظ سند القبض.');
         $idsanad = mysql_insert_id();
 
+        if ($receiptBreakdown !== null && $idsanad > 0) receiptComponentsStore($link, $idsanad, $receiptBreakdown);
         if ($receiptCommissionShares !== null) receiptCommissionSave($link,$idsanad,$receiptCommissionShares);
 
         if ($idsanad > 0) {
@@ -227,7 +250,7 @@ if ($maksanad == 2) {
             require('../../../phpqrcode.php');
             $vat_number = isset($vat_number) ? $vat_number : '';
             $barcodedata = "سند قبض رقم : $idsanad \r\n العميل: $mostagername  \r\n  المبلغ : $depositeamount
-                \r\n الضريبة : " . ($depositeamount_vat + $commesion_vat) . " \r\n الرقم الضريبي : $vat_number
+                \r\n الضريبة : " . ($receiptBreakdown !== null ? $receiptRentVat + $receiptCommissionVat : $depositeamount_vat + $commesion_vat) . " \r\n الرقم الضريبي : $vat_number
                 \r\n البيان : $mybyan \r\n تاريخ الدفع  :   " . date("d/m/Y", $paymentdate) . " \r\n تاريخ الاصدار : " . date("d/m/Y") . "
             ";
             $brcodetext = $barcodedata;

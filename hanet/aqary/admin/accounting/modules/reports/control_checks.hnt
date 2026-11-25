@@ -1,0 +1,57 @@
+<?php
+/** Consistency checks between rental and accounting. Nothing is corrected here. */
+$sc_title = 'فحص سلامة المزامنة';
+$syncReport = [
+    'key' => 'control_checks', 'icon' => 'bi-clipboard2-check', 'desc' => 'مقارنة السندات والفواتير والقيود وكشف التكرار أو الاختلاف',
+    'filters' => ['date'],
+    'build' => function ($db, $f) {
+        syncReportNeed(receiptSyncReady($db) && accountingReversalReady($db));
+        $from = $f['date_from'];
+        $to = $f['date_to'];
+        $period = syncReportPeriod('s.sanaddate', $f) . ' AND ' . str_replace('sanaddate', 's.sanaddate', amlakSyncDateSql($db, 'sanaddate'));
+        $start = amlakSyncStartDate($db);
+        $live = "j.status='posted' AND COALESCE(j.reversed_by_entry_id,0)=0 AND COALESCE(j.reference_type,'')<>'reversal'";
+        $between = "BETWEEN '{$from}' AND '{$to}'";
+        $receivable = syncReportAccount($db, 'default_receivable_account_id', 'ذمم العملاء', '1121');
+        $parts = 'c.rent+c.rent_vat+c.commission+c.commission_vat+c.water+c.services+c.insurance+c.other+c.other_vat';
+        $checks = [
+            ['قيود مرحّلة غير متوازنة', 'entry', "SELECT j.entry_id id,j.entry_number t FROM acc_journal_entries j JOIN acc_journal_entry_lines l ON l.entry_id=j.entry_id
+                WHERE j.status='posted' AND j.entry_date {$between} GROUP BY j.entry_id,j.entry_number HAVING ABS(SUM(l.debit_amount)-SUM(l.credit_amount))>0.004"],
+            ['تفاصيل السند لا تساوي مبلغه', 'receipt', "SELECT s.idsanad id,s.kastid t FROM sanad s JOIN sanad_components c ON c.idsanad=s.idsanad WHERE c.status='ok' AND ABS({$parts}+c.unclassified-s.depositeamount)>0.004 AND {$period}"],
+            ['أكثر من فاتورة قائمة لسند واحد', 'receipt', "SELECT s.idsanad id,s.kastid t FROM sanad s JOIN acc_invoices i ON i.sanad_id=s.idsanad AND i.status<>'cancelled' WHERE {$period} GROUP BY s.idsanad,s.kastid HAVING COUNT(*)>1"],
+            ['إجمالي الفاتورة لا يساوي تفاصيل السند', 'invoice', "SELECT i.invoice_id id,i.invoice_number t FROM acc_invoices i JOIN sanad_components c ON c.idsanad=i.sanad_id
+                WHERE i.status<>'cancelled' AND i.invoice_date {$between} AND (ABS(i.total_amount-({$parts}))>0.004 OR ABS(i.vat_amount-(c.rent_vat+c.commission_vat+c.other_vat))>0.004)"],
+            ['أكثر من قيد قبض قائم لسند واحد', 'receipt', "SELECT s.idsanad id,s.kastid t FROM sanad s JOIN acc_journal_entries j ON j.sanad_id=s.idsanad AND j.reference_type='sanad' AND {$live} WHERE {$period} GROUP BY s.idsanad,s.kastid HAVING COUNT(*)>1"],
+            ['فاتورة سند مرحّلة بلا قيد فاتورة أو قيد قبض', 'invoice', "SELECT i.invoice_id id,i.invoice_number t FROM acc_invoices i WHERE i.sanad_id>0 AND i.status='posted' AND i.reversed_date IS NULL AND i.invoice_date {$between}
+                AND (NOT EXISTS (SELECT 1 FROM acc_journal_entries j WHERE j.invoice_id=i.invoice_id AND j.reference_type='invoice' AND {$live})
+                OR NOT EXISTS (SELECT 1 FROM acc_journal_entries j WHERE j.sanad_id=i.sanad_id AND j.reference_type='sanad' AND {$live}))"],
+            ['فاتورة سند بقي منها رصيد على العميل', 'invoice', "SELECT i.invoice_id id,i.invoice_number t FROM acc_invoices i JOIN acc_journal_entries j ON j.invoice_id=i.invoice_id AND j.status='posted'
+                JOIN acc_journal_entry_lines l ON l.entry_id=j.entry_id AND l.account_id={$receivable} WHERE i.sanad_id>0 AND i.status='posted' AND i.invoice_date {$between} GROUP BY i.invoice_id,i.invoice_number HAVING ABS(SUM(l.debit_amount-l.credit_amount))>0.004"],
+            ['قيد معكوس لا يطابق قيده العكسي', 'entry', "SELECT j.entry_id id,j.entry_number t FROM acc_journal_entries j LEFT JOIN acc_journal_entries r ON r.entry_id=j.reversed_by_entry_id
+                WHERE j.reversed_by_entry_id>0 AND j.entry_date {$between} AND (r.entry_id IS NULL OR r.status<>'posted' OR ABS(r.total_debit-j.total_debit)>0.004)"],
+            ['حركة عقارية قبل تاريخ بدء المزامنة', 'entry', "SELECT j.entry_id id,j.entry_number t FROM acc_journal_entries j WHERE {$live} AND j.entry_date {$between} AND j.entry_date<'{$start}'
+                AND j.reference_type IN ('sanad','masrofat','office_expense','sanadsarf','deposit_settlement')"],
+            ['قيد سند أو تسليم بلا عقار أو مالك', 'entry', "SELECT j.entry_id id,j.entry_number t FROM acc_journal_entries j LEFT JOIN sanad s ON s.idsanad=j.sanad_id LEFT JOIN sanadsarf p ON p.sanadid=j.sanadsarf_id
+                WHERE {$live} AND j.entry_date {$between} AND j.entry_date>='{$start}' AND ((j.reference_type='sanad' AND s.idaqar>0) OR (j.reference_type='sanadsarf' AND p.aqarid>0))
+                AND (COALESCE(j.aqar_id,0)=0 OR COALESCE(j.owner_id,0)=0)"],
+        ];
+        if (depositSettlementReady($db)) $checks[] = ['تسوية تأمين لا تساوي الرد والتلفيات', 'plain', "SELECT settlement_id id,'' t FROM deposit_settlements WHERE ABS(insurance-refund-damages)>0.004 AND " . syncReportPeriod('settlement_date', $f)];
+        $rows = [];
+        $failed = 0;
+        foreach ($checks as [$label, $kind, $sql]) {
+            $found = receiptCommissionRows($db, $sql);
+            if (!$found) { $rows[] = ['check' => $label, 'count' => 0, 'state' => ['سليم', 'success'], 'example' => '']; continue; }
+            $failed++;
+            foreach (array_slice($found, 0, 20) as $index => $item) {
+                if ($kind === 'entry') $cell = syncReportEntryCell(['entry_id' => $item['id'], 'entry_number' => $item['t']]);
+                elseif ($kind === 'receipt') $cell = syncReportReceiptCell($item['id'], $item['t']);
+                elseif ($kind === 'invoice') $cell = syncReportInvoiceCell($item['id'], $item['t']);
+                else $cell = '#' . (int)$item['id'];
+                $rows[] = ['check' => $index ? '' : $label, 'count' => $index ? '' : count($found), 'state' => $index ? '' : ['يحتاج مراجعة', 'danger'], 'example' => $cell];
+            }
+        }
+        return ['columns' => ['check' => ['الفحص', 'text'], 'count' => ['العدد', 'text'], 'state' => ['النتيجة', 'badge'], 'example' => ['السجل', 'text']], 'rows' => $rows,
+            'cards' => ['عدد الفحوصات' => count($checks), 'سليم' => count($checks) - $failed, 'يحتاج مراجعة' => $failed], 'notes' => ['هذا التقرير للعرض فقط ولا يعدّل شيئاً. يعرض أول 20 سجلاً لكل فحص.']];
+    },
+];
+require __DIR__ . '/../../includes/sync_report_page.hnt';

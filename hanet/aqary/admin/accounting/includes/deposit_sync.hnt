@@ -1,0 +1,117 @@
+<?php
+/** Posting of insurance settlements (refund and damages). */
+require_once __DIR__ . '/sync_start_date.hnt';
+require_once __DIR__ . '/../../include/amlak/deposit_settlement_helpers.hnt';
+
+/** Settlements with money to post; the owner keeping everything needs no entry. */
+function depositSyncWhere($db): string {
+    $start = (int)strtotime(amlakSyncStartDate($db) . ' 00:00:00');
+    return "settlement_date>={$start} AND COALESCE(accounting_entry_id,0)=0 AND (holder='office' OR owner_expense>0)";
+}
+
+function depositSyncCountSql($db): string {
+    return depositSettlementReady($db) ? 'SELECT COUNT(*) AS total FROM deposit_settlements WHERE ' . depositSyncWhere($db) : 'SELECT 0 AS total';
+}
+
+function depositSyncListSql($db): string {
+    return depositSettlementReady($db) ? 'SELECT settlement_id FROM deposit_settlements WHERE ' . depositSyncWhere($db) . ' ORDER BY settlement_date,settlement_id LIMIT 100'
+        : 'SELECT 0 AS settlement_id FROM DUAL WHERE 1=0';
+}
+
+/** Expenses made by a settlement are posted with it, not by the expense sync. */
+function depositExpenseExclusionSql($db): string {
+    return depositSettlementReady($db) ? ' AND NOT EXISTS (SELECT 1 FROM deposit_settlements ds WHERE ds.expense_id=masrofat.idmasrof)' : '';
+}
+
+trait DepositSync {
+    private function depositOfExpense($expenseId): bool {
+        return depositSettlementReady($this->db)
+            && !empty(receiptCommissionRows($this->db, 'SELECT settlement_id FROM deposit_settlements WHERE expense_id=? LIMIT 1', [(int)$expenseId]));
+    }
+
+    /** Damages paid to the owner with a delivery; null when their settlement is not posted yet. */
+    private function depositCreditOfDelivery($deliveryId): ?float {
+        if (!depositSettlementReady($this->db)) return 0.0;
+        $total = 0.0;
+        foreach (receiptCommissionRows($this->db, 'SELECT owner_credit,accounting_entry_id,settlement_date FROM deposit_settlements WHERE owner_sanadsarf_id=?', [(int)$deliveryId]) as $row) {
+            if ((int)$row['accounting_entry_id'] <= 0 && amlakSyncIsInPeriod($this->db, $row['settlement_date'])) return null;
+            $total += (float)$row['owner_credit'];
+        }
+        return round($total, 2);
+    }
+
+    public function createEntryFromDeposit($settlementId) {
+        try {
+            if (!depositSettlementReady($this->db)) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث تسوية التأمين.');
+            $this->db->begin_transaction();
+            $row = receiptCommissionRows($this->db, 'SELECT * FROM deposit_settlements WHERE settlement_id=? FOR UPDATE', [(int)$settlementId])[0] ?? null;
+            if (!$row) throw new RuntimeException('التسوية غير موجودة.');
+            if ((int)$row['accounting_entry_id'] > 0) {
+                $this->db->commit();
+                return ['success' => true, 'existing' => true, 'entry_id' => (int)$row['accounting_entry_id']];
+            }
+            if (!amlakSyncIsInPeriod($this->db, $row['settlement_date'])) throw new RuntimeException('تاريخ الحركة يسبق تاريخ بدء المزامنة.');
+            // The insurance must be in the ledger before it is paid out.
+            foreach (receiptCommissionRows($this->db, 'SELECT s.idsanad,s.sanaddate FROM aksat k JOIN sanad_components c ON c.kastid=k.kastid JOIN sanad s ON s.idsanad=c.idsanad
+                WHERE k.egar_id=? AND c.insurance>0', [(int)$row['egar_id']]) as $receipt) {
+                if (amlakSyncIsInPeriod($this->db, $receipt['sanaddate']) && !$this->sourceEntry('sanad_id', (int)$receipt['idsanad'], 'sanad')) {
+                    throw new RuntimeException('اعتمد فاتورة سند القبض #' . (int)$receipt['idsanad'] . ' أولاً.');
+                }
+            }
+            $context = $this->buildPropertyContext((int)$row['idaqar'], (int)$row['idsubaqar']);
+            $costCenter = $context['cost_center_id'];
+            $refund = round((float)$row['refund'], 2);
+            $officeIncome = round((float)$row['office_income'], 2);
+            $ownerCredit = round((float)$row['owner_credit'], 2);
+            $usesBank = (int)$row['bankid'] > 0 || in_array((int)$row['payment_type'], [2, 4, 5], true);
+            $cash = $usesBank ? $this->bankLedgerAccount($row['bankid'], $this->accountId('default_payment_bank_account_id', '1112')) : $this->accountId('default_payment_cash_account_id', '1111');
+            if ($refund > 0 && $cash <= 0) throw new RuntimeException('حساب الصندوق أو البنك غير مهيأ.');
+            $debitAccount = $row['holder'] === 'office' ? $this->receiptInvoiceSettingId('default_deposits_account_id', 'تأمينات المستأجرين')
+                : $this->receiptInvoiceSettingId('default_owner_recoverable_account_id', 'مصروفات مستردة من الملاك');
+            $debit = round($row['holder'] === 'office' ? (float)$row['insurance'] : (float)$row['owner_expense'], 2);
+            if ($debit <= 0 || abs($debit - $refund - $officeIncome - $ownerCredit) > 0.001) throw new RuntimeException('مبالغ التسوية غير متطابقة أو لا يوجد ما يرحّل.');
+            $label = 'تأمين المستأجر ' . $row['tenant_name'];
+            $lines = [['account_id' => $debitAccount, 'description' => 'تسوية ' . $label, 'debit_amount' => $debit, 'credit_amount' => 0, 'cost_center_id' => $costCenter]];
+            if ($refund > 0) $lines[] = ['account_id' => $cash, 'description' => 'رد ' . $label, 'debit_amount' => 0, 'credit_amount' => $refund, 'cost_center_id' => $costCenter];
+            if ($officeIncome > 0) $lines[] = ['account_id' => $this->receiptInvoiceSettingId('default_other_revenue_account_id', 'إيرادات أخرى'),
+                'description' => 'تلفيات للمكتب - ' . $label, 'debit_amount' => 0, 'credit_amount' => $officeIncome, 'cost_center_id' => $costCenter];
+            if ($ownerCredit > 0) $lines[] = ['account_id' => $this->receiptInvoiceSettingId('default_owner_payable_account_id', 'ذمم الملاك'),
+                'description' => 'تلفيات للمالك - ' . $label, 'debit_amount' => 0, 'credit_amount' => $ownerCredit, 'cost_center_id' => $costCenter];
+            $result = $this->accountingManager->createJournalEntry([
+                'entry_date' => $this->timestampDate($row['settlement_date']), 'entry_type' => 'payment', 'journal_id' => $this->accountingManager->getDefaultJournalIdByCode('PAY'),
+                'tenant_id' => (int)$row['mostagerid'] ?: null, 'owner_id' => $context['owner_id'], 'aqar_id' => (int)$row['idaqar'], 'subaqar_id' => (int)$row['idsubaqar'], 'egar_id' => (int)$row['egar_id'],
+                'reference_type' => 'deposit_settlement', 'reference_id' => (int)$settlementId,
+                'description' => 'تسوية ' . $label . ($row['notes'] !== '' ? ' - ' . $row['notes'] : ''), 'status' => 'posted',
+            ], $lines);
+            if (empty($result['success'])) throw new RuntimeException($result['message'] ?? $result['error'] ?? 'تعذر ترحيل التسوية.');
+            receiptCommissionQuery($this->db, 'UPDATE deposit_settlements SET accounting_entry_id=? WHERE settlement_id=?', [(int)$result['entry_id'], (int)$settlementId])->close();
+            $this->db->commit();
+            return $result;
+        } catch (Throwable $error) {
+            $this->db->rollback();
+            error_log('Deposit sync: ' . $error->getMessage());
+            return ['success' => false, 'message' => $error instanceof RuntimeException ? $error->getMessage() : 'تعذر ترحيل تسوية التأمين.'];
+        }
+    }
+
+    /** Caller owns the transaction. */
+    private function reverseDeposit(int $settlementId, array $entry, string $reason, string $date): array {
+        $row = receiptCommissionRows($this->db, 'SELECT * FROM deposit_settlements WHERE settlement_id=? FOR UPDATE', [$settlementId])[0] ?? null;
+        if ($row) {
+            if ((int)$row['owner_sanadsarf_id'] > 0 && accountingLockReason($this->db, 'sanadsarf', $row['owner_sanadsarf_id']) !== '') {
+                throw new RuntimeException('سُلّمت التلفيات للمالك في تسليم مرحّل: اعكس قيد التسليم أولاً.');
+            }
+            if ((int)$row['expense_id'] > 0) {
+                $expense = receiptCommissionRows($this->db, 'SELECT idaqar,tasfia FROM masrofat WHERE idmasrof=?', [(int)$row['expense_id']])[0] ?? null;
+                if ($expense && trim((string)$expense['tasfia']) !== '') {
+                    foreach (receiptCommissionRows($this->db, 'SELECT sanadid FROM sanadsarf WHERE tasfia=? AND aqarid=?', [$expense['tasfia'], (int)$expense['idaqar']]) as $delivery) {
+                        if (accountingLockReason($this->db, 'sanadsarf', $delivery['sanadid']) !== '') throw new RuntimeException('خُصم رد التأمين في تسليم مرحّل: اعكس قيد التسليم أولاً.');
+                    }
+                }
+            }
+        }
+        $id = $this->postReversal($entry, $reason, $date);
+        receiptCommissionQuery($this->db, 'UPDATE deposit_settlements SET accounting_entry_id=NULL WHERE settlement_id=?', [$settlementId])->close();
+        return [$id];
+    }
+}

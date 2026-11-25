@@ -1,0 +1,31 @@
+<?php
+/** Owner account statement with a running balance and source links. */
+$sc_title = 'كشف حساب مالك';
+$syncReport = [
+    'key' => 'owner_statement', 'icon' => 'bi-person-vcard', 'desc' => 'حركة حساب المالك: إيرادات وخصومات وتسليمات مع روابط المصدر',
+    'filters' => ['date', 'owner_id', 'aqar_id', 'subaqar_id', 'egar_id'],
+    'build' => function ($db, $f) {
+        $columns = ['date' => ['التاريخ', 'date'], 'entry' => ['القيد', 'text'], 'account' => ['الحساب', 'text'], 'description' => ['البيان', 'text'], 'debit' => ['مدين', 'money', true],
+            'credit' => ['دائن', 'money', true], 'balance' => ['الرصيد', 'money'], 'links' => ['الروابط', 'links']];
+        if (!$f['owner_id']) return ['columns' => $columns, 'rows' => [], 'empty' => 'اختر المالك لعرض كشف حسابه.'];
+        $payable = syncReportAccount($db, 'default_owner_payable_account_id', 'ذمم الملاك', '2111');
+        $recoverable = syncReportAccount($db, 'default_owner_recoverable_account_id', 'مصروفات مستردة من الملاك');
+        [$where, $params] = syncReportEntryWhere($f);
+        $from = "FROM acc_journal_entry_lines l JOIN acc_journal_entries je ON je.entry_id=l.entry_id JOIN acc_chart_of_accounts a ON a.account_id=l.account_id
+            WHERE je.status='posted' AND l.account_id IN ({$payable},{$recoverable}){$where}";
+        $opening = (float)receiptCommissionRows($db, "SELECT COALESCE(SUM(l.credit_amount-l.debit_amount),0) t {$from} AND je.entry_date<?", array_merge($params, [$f['date_from']]))[0]['t'];
+        $lines = receiptCommissionRows($db, "SELECT je.entry_id,je.entry_number,je.entry_date,l.description,l.debit_amount,l.credit_amount,a.account_code,a.account_name_ar {$from}
+            AND je.entry_date BETWEEN ? AND ? ORDER BY je.entry_date,je.entry_id,l.line_number", array_merge($params, [$f['date_from'], $f['date_to']]));
+        $links = accountingEntryLinks($db, array_column($lines, 'entry_id'));
+        $balance = $opening;
+        $rows = [['date' => $f['date_from'], 'description' => 'رصيد أول المدة', 'debit' => '', 'credit' => '', 'balance' => $opening]];
+        foreach ($lines as $line) {
+            $balance = round($balance + $line['credit_amount'] - $line['debit_amount'], 2);
+            $rows[] = ['date' => $line['entry_date'], 'entry' => syncReportEntryCell($line), 'account' => $line['account_code'] . ' ' . $line['account_name_ar'], 'description' => $line['description'],
+                'debit' => $line['debit_amount'], 'credit' => $line['credit_amount'], 'balance' => $balance, 'links' => $links[(int)$line['entry_id']] ?? []];
+        }
+        return ['columns' => $columns, 'rows' => $rows, 'cards' => ['رصيد أول المدة' => $opening, 'دائن (له)' => (float)array_sum(array_column($lines, 'credit_amount')),
+            'مدين (عليه)' => (float)array_sum(array_column($lines, 'debit_amount')), 'الرصيد الختامي' => (float)$balance]];
+    },
+];
+require __DIR__ . '/../../includes/sync_report_page.hnt';

@@ -48,8 +48,14 @@ if (isset($_GET['export']) && in_array($_GET['export'], ['csv', 'xls', 'template
     if ($_search)    $_where[] = "(entry_number LIKE '%$_search%' OR description LIKE '%$_search%')";
     if ($_status)    $_where[] = "status = '$_status'";
     if ($_etype)     $_where[] = "entry_type = '$_etype'";
+    $_date_from = $db->real_escape_string($_date_from); $_date_to = $db->real_escape_string($_date_to);
     if ($_date_from) $_where[] = "entry_date >= '$_date_from'";
     if ($_date_to)   $_where[] = "entry_date <= '$_date_to'";
+    foreach (['entry_id', 'aqar_id', 'subaqar_id', 'tenant_id', 'owner_id', 'egar_id'] as $_dim) {
+        if (!empty($_GET[$_dim])) $_where[] = $_dim . ' = ' . (int)$_GET[$_dim];
+    }
+    if (!empty($_GET['invoice_id'])) $_where[] = "COALESCE(NULLIF(invoice_id,0),IF(reference_type='invoice',reference_id,NULL)) = " . (int)$_GET['invoice_id'];
+    if (!empty($_GET['sanad_id']))   $_where[] = "COALESCE(NULLIF(sanad_id,0),IF(reference_type='sanad',reference_id,NULL)) = " . (int)$_GET['sanad_id'];
     $_wc = !empty($_where) ? 'WHERE ' . implode(' AND ', $_where) : '';
 
     $_er = $db->query("SELECT * FROM acc_journal_entries $_wc ORDER BY entry_date DESC, entry_id DESC");
@@ -134,6 +140,23 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
     $response = ['success' => false, 'message' => ''];
 
     switch ($action) {
+        case 'reverse_entry':
+            require_once __DIR__ . '/../../includes/amlak_integration.hnt';
+            $reverseToken = $_POST['csrf_token'] ?? '';
+            if (!is_string($reverseToken) || empty($_SESSION['entry_reverse_csrf']) || !hash_equals($_SESSION['entry_reverse_csrf'], $reverseToken)) {
+                $response = ['success' => false, 'message' => 'انتهت صلاحية النموذج. أعد تحميل الصفحة.'];
+                break;
+            }
+            if (!receiptCommissionCan($db, 'accounting_reverse', 'edits')) {
+                $response = ['success' => false, 'message' => 'ليس لديك صلاحية عكس القيود.'];
+                break;
+            }
+            $reverseManager = new AccountingManager($db, (int)($_SESSION['useridv'] ?? 0));
+            $reversal = new AmlakAccountingIntegration($db, $reverseManager);
+            $response = $reversal->reverseEntry((int)($_POST['entry_id'] ?? 0), is_string($_POST['reason'] ?? null) ? $_POST['reason'] : '',
+                is_string($_POST['credit_note'] ?? null) ? $_POST['credit_note'] : '');
+            break;
+
         case 'create_entry':
             if (empty($_POST['entry_date'])) {
                 $response = ['success' => false, 'error' => 'Entry date is required', 'message' => 'تاريخ القيد مطلوب'];
@@ -190,6 +213,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
             $checkEntry = $db->query("SELECT entry_id, status FROM acc_journal_entries WHERE entry_id = $entryId");
             if (!$checkEntry || $checkEntry->num_rows == 0) {
                 $response = ['success' => false, 'error' => 'Entry not found', 'message' => 'القيد غير موجود'];
+                break;
+            }
+            // Posted = locked: correct it with a reversal.
+            if ($checkEntry->fetch_assoc()['status'] !== 'draft') {
+                $response = ['success' => false, 'message' => 'القيد مرحّل ولا يمكن تعديله. استخدم القيد العكسي.'];
                 break;
             }
 
@@ -466,8 +494,29 @@ foreach (['dateFrom', 'dateTo'] as $_df) {
     }
 }
 
+$status = $db->real_escape_string($status);
+$entryType = $db->real_escape_string($entryType);
+$dateFrom = $db->real_escape_string($dateFrom);
+$dateTo = $db->real_escape_string($dateTo);
+
+// Reference filters: building, unit, tenant, owner, contract, invoice, receipt.
+$referenceFilters = [];
+foreach (['entry_id', 'aqar_id', 'subaqar_id', 'tenant_id', 'owner_id', 'egar_id', 'invoice_id', 'sanad_id'] as $referenceKey) {
+    if (!empty($_GET[$referenceKey])) $referenceFilters[$referenceKey] = (int)$_GET[$referenceKey];
+}
+$referenceQuery = $referenceFilters ? '&' . http_build_query($referenceFilters) : '';
+
 // Build WHERE clause
 $where = [];
+foreach ($referenceFilters as $referenceKey => $referenceValue) {
+    if ($referenceKey === 'invoice_id') {
+        $where[] = "COALESCE(NULLIF(invoice_id,0),IF(reference_type='invoice',reference_id,NULL)) = $referenceValue";
+    } elseif ($referenceKey === 'sanad_id') {
+        $where[] = "COALESCE(NULLIF(sanad_id,0),IF(reference_type='sanad',reference_id,NULL)) = $referenceValue";
+    } else {
+        $where[] = "$referenceKey = $referenceValue";
+    }
+}
 if ($search) {
     $where[] = "(entry_number LIKE '%$search%' OR description LIKE '%$search%')";
 }
@@ -501,6 +550,13 @@ if ($entriesResult) {
         $entries[] = $row;
     }
 }
+
+require_once __DIR__ . '/../../includes/entry_links.hnt';
+$entryLinks = accountingEntryLinks($db, array_column($entries, 'entry_id'));
+
+require_once __DIR__ . '/../../../include/amlak/accounting_lock.hnt';
+$canReverseEntries = accountingReversalReady($db) && receiptCommissionCan($db, 'accounting_reverse', 'edits');
+if ($canReverseEntries && empty($_SESSION['entry_reverse_csrf'])) $_SESSION['entry_reverse_csrf'] = bin2hex(random_bytes(24));
 
 // Get all accounts for dropdown
 $accounts = $accountingManager->getAllAccounts(['is_active' => 1, 'is_leaf' => 1]);
@@ -629,6 +685,7 @@ if (!empty($entries)) {
                 if ($entryType) $_eq .= '&entry_type='. urlencode($entryType);
                 if ($dateFrom)  $_eq .= '&date_from=' . urlencode($dateFrom);
                 if ($dateTo)    $_eq .= '&date_to='   . urlencode($dateTo);
+                $_eq .= $referenceQuery;
                 ?>
                 <a href="index.hnt?export=csv<?= $_eq ?>" class="btn btn-outline-light btn-lg">
                     <i class="bi bi-filetype-csv me-2"></i>تصدير CSV
@@ -697,13 +754,38 @@ if (!empty($entries)) {
                         <span class="input-group-text"><i class="bi bi-calendar3"></i></span>
                     </div>
                 </div>
+                <?php
+                $referenceSelects = [
+                    'aqar_id' => ['العقار', $dimensionOptions['properties'], 'property_id', 'property_name'],
+                    'subaqar_id' => ['الوحدة', $dimensionOptions['units'], 'unit_id', 'unit_name'],
+                    'tenant_id' => ['المستأجر', $dimensionOptions['tenants'], 'tenant_id', 'tenant_name'],
+                    'owner_id' => ['المالك', $dimensionOptions['owners'], 'owner_id', 'owner_name'],
+                    'invoice_id' => ['الفاتورة', $dimensionOptions['invoices'], 'invoice_id', 'invoice_number'],
+                ];
+                foreach ($referenceSelects as $referenceKey => [$referenceLabel, $referenceRows, $referenceIdColumn, $referenceNameColumn]):
+                ?>
+                <div class="col-md-2">
+                    <label class="form-label"><?= $referenceLabel ?></label>
+                    <select class="form-select" name="<?= $referenceKey ?>">
+                        <option value="">الكل</option>
+                        <?php foreach ($referenceRows as $referenceRow): ?>
+                        <option value="<?= (int)$referenceRow[$referenceIdColumn] ?>" <?= ($referenceFilters[$referenceKey] ?? 0) === (int)$referenceRow[$referenceIdColumn] ? 'selected' : '' ?>><?= accountingLinkEsc($referenceRow[$referenceNameColumn]) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <?php endforeach; ?>
+                <div class="col-md-2">
+                    <label class="form-label">رقم سند القبض</label>
+                    <input type="number" min="1" class="form-control" name="sanad_id" value="<?= $referenceFilters['sanad_id'] ?? '' ?>">
+                </div>
+                <?php if (!empty($referenceFilters['egar_id'])): ?><input type="hidden" name="egar_id" value="<?= $referenceFilters['egar_id'] ?>"><?php endif; ?>
                 <div class="col-md-1 d-flex align-items-end">
                     <button type="submit" class="btn btn-primary w-100">
                         <i class="bi bi-search"></i>
                     </button>
                 </div>
             </form>
-            <?php if ($search || $status || $entryType || $dateFrom || $dateTo): ?>
+            <?php if ($search || $status || $entryType || $dateFrom || $dateTo || $referenceFilters): ?>
             <div class="mt-2">
                 <a href="index.hnt" class="btn btn-sm btn-outline-secondary">
                     <i class="bi bi-x-circle me-1"></i>مسح الفلاتر
@@ -743,9 +825,15 @@ if (!empty($entries)) {
                         </button>
                         <?php elseif ($entry['status'] == 'posted'): ?>
                         <span class="badge bg-success badge-status">مرحل</span>
-                        <button class="btn btn-sm btn-primary ms-2" onclick="editEntry(<?php echo $entry['entry_id']; ?>)">
-                            <i class="bi bi-pencil me-1"></i>تعديل
+                        <?php if ((int)($entry['reversed_by_entry_id'] ?? 0) > 0): ?>
+                        <span class="badge bg-secondary badge-status">معكوس</span>
+                        <?php elseif (($entry['reference_type'] ?? '') === 'reversal'): ?>
+                        <span class="badge bg-dark badge-status">قيد عكسي</span>
+                        <?php elseif ($canReverseEntries): ?>
+                        <button class="btn btn-sm btn-outline-danger ms-2" onclick="openReverseEntry(<?php echo (int)$entry['entry_id']; ?>, '<?php echo accountingLinkEsc($entry['entry_number']); ?>')">
+                            <i class="bi bi-arrow-counterclockwise me-1"></i>عكس القيد
                         </button>
+                        <?php endif; ?>
                         <?php else: ?>
                         <span class="badge bg-danger badge-status">ملغي</span>
                         <?php endif; ?>
@@ -753,7 +841,8 @@ if (!empty($entries)) {
                 </div>
 
                 <div class="mb-3">
-                    <strong>الوصف:</strong> <?php echo $entry['description']; ?>
+                    <strong>الوصف:</strong> <?php echo accountingLinkEsc($entry['description']); ?>
+                    <div class="mt-2"><?php echo accountingRenderEntryLinks($entryLinks[(int)$entry['entry_id']] ?? []); ?></div>
                 </div>
 
                 <?php
@@ -803,7 +892,7 @@ if (!empty($entries)) {
                     <!-- Previous -->
                     <?php if ($page > 1): ?>
                     <li class="page-item">
-                        <a class="page-link" href="?page=<?= $page - 1 ?><?= $search ? '&search=' . urlencode($search) : '' ?><?= $status ? '&status=' . $status : '' ?><?= $entryType ? '&entry_type=' . $entryType : '' ?><?= $dateFrom ? '&date_from=' . $dateFrom : '' ?><?= $dateTo ? '&date_to=' . $dateTo : '' ?>">
+                        <a class="page-link" href="?page=<?= $page - 1 ?><?= $search ? '&search=' . urlencode($search) : '' ?><?= $status ? '&status=' . $status : '' ?><?= $entryType ? '&entry_type=' . $entryType : '' ?><?= $dateFrom ? '&date_from=' . $dateFrom : '' ?><?= $dateTo ? '&date_to=' . $dateTo : '' ?><?= $referenceQuery ?>">
                             السابق
                         </a>
                     </li>
@@ -817,7 +906,7 @@ if (!empty($entries)) {
                     for ($i = $startPage; $i <= $endPage; $i++):
                     ?>
                     <li class="page-item <?= $i == $page ? 'active' : '' ?>">
-                        <a class="page-link" href="?page=<?= $i ?><?= $search ? '&search=' . urlencode($search) : '' ?><?= $status ? '&status=' . $status : '' ?><?= $entryType ? '&entry_type=' . $entryType : '' ?><?= $dateFrom ? '&date_from=' . $dateFrom : '' ?><?= $dateTo ? '&date_to=' . $dateTo : '' ?>">
+                        <a class="page-link" href="?page=<?= $i ?><?= $search ? '&search=' . urlencode($search) : '' ?><?= $status ? '&status=' . $status : '' ?><?= $entryType ? '&entry_type=' . $entryType : '' ?><?= $dateFrom ? '&date_from=' . $dateFrom : '' ?><?= $dateTo ? '&date_to=' . $dateTo : '' ?><?= $referenceQuery ?>">
                             <?= $i ?>
                         </a>
                     </li>
@@ -826,7 +915,7 @@ if (!empty($entries)) {
                     <!-- Next -->
                     <?php if ($page < $totalPages): ?>
                     <li class="page-item">
-                        <a class="page-link" href="?page=<?= $page + 1 ?><?= $search ? '&search=' . urlencode($search) : '' ?><?= $status ? '&status=' . $status : '' ?><?= $entryType ? '&entry_type=' . $entryType : '' ?><?= $dateFrom ? '&date_from=' . $dateFrom : '' ?><?= $dateTo ? '&date_to=' . $dateTo : '' ?>">
+                        <a class="page-link" href="?page=<?= $page + 1 ?><?= $search ? '&search=' . urlencode($search) : '' ?><?= $status ? '&status=' . $status : '' ?><?= $entryType ? '&entry_type=' . $entryType : '' ?><?= $dateFrom ? '&date_from=' . $dateFrom : '' ?><?= $dateTo ? '&date_to=' . $dateTo : '' ?><?= $referenceQuery ?>">
                             التالي
                         </a>
                     </li>
@@ -841,6 +930,51 @@ if (!empty($entries)) {
         </div>
     </div>
 </div>
+
+<?php if ($canReverseEntries): ?>
+<div class="modal fade" id="reverseEntryModal" tabindex="-1">
+    <div class="modal-dialog"><div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">عكس القيد <span id="reverseEntryNumber"></span></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+            <p class="text-muted">ينشأ قيد معاكس بتاريخ اليوم ويبقى القيد الأصلي. سند القبض تُعكس فاتورته وتحصيله معاً.</p>
+            <input type="hidden" id="reverseEntryId">
+            <label class="form-label" for="reverseReason">السبب *</label>
+            <textarea class="form-control mb-3" id="reverseReason" rows="2" maxlength="500"></textarea>
+            <label class="form-label" for="reverseCreditNote">رقم الإشعار الدائن (فقط إذا أُرسلت الفاتورة للهيئة)</label>
+            <input type="text" class="form-control" id="reverseCreditNote" maxlength="100">
+        </div>
+        <div class="modal-footer"><button type="button" class="btn btn-danger" id="reverseEntrySubmit">عكس القيد</button></div>
+    </div></div>
+</div>
+<script>
+function openReverseEntry(id, number) {
+    document.getElementById('reverseEntryId').value = id;
+    document.getElementById('reverseEntryNumber').textContent = number;
+    document.getElementById('reverseReason').value = '';
+    document.getElementById('reverseCreditNote').value = '';
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('reverseEntryModal')).show();
+}
+document.getElementById('reverseEntrySubmit').addEventListener('click', function () {
+    const button = this;
+    const formData = new FormData();
+    formData.append('ajax_action', 'reverse_entry');
+    formData.append('csrf_token', <?= json_encode($_SESSION['entry_reverse_csrf']) ?>);
+    formData.append('entry_id', document.getElementById('reverseEntryId').value);
+    formData.append('reason', document.getElementById('reverseReason').value);
+    formData.append('credit_note', document.getElementById('reverseCreditNote').value);
+    button.disabled = true;
+    fetch('index.hnt', {method: 'POST', body: formData})
+        .then(response => response.json())
+        .then(data => {
+            button.disabled = false;
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('reverseEntryModal')).hide();
+            showResultModal(data.success, data.message);
+            if (data.success) setTimeout(() => location.reload(), 1500);
+        })
+        .catch(() => { button.disabled = false; showResultModal(false, 'تعذر الاتصال بالخادم'); });
+});
+</script>
+<?php endif; ?>
 
 <!-- Add Entry Modal -->
 <div class="modal fade" id="addEntryModal" tabindex="-1">

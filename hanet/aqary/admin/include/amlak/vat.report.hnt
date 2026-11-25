@@ -1,0 +1,690 @@
+<?php
+/**
+ * VAT Tax Declarations Report
+ * Generates detailed VAT reports for specific date ranges with export capabilities
+ */
+
+$sc_title = "الإقرارات الضريبية";
+$sc_id = "136";
+
+include_once "../../../nocash.hnt";
+
+// Export of the whole period, before any HTML output
+if (($_GET['export'] ?? '') === 'xls') {
+    include_once "../../../reqloginajax.hnt";
+    require_once '../uCal.class.hnt';
+    require_once __DIR__ . '/receipt_search.hnt';
+    $receiptFilters = receiptSearchFilters(['startfrom' => $_GET['start_date'] ?? '', 'enddate' => $_GET['end_date'] ?? ''] + $_GET, new uCal);
+    if (!$receiptFilters['from'] || !$receiptFilters['to']) {
+        http_response_code(400);
+        header('Content-Type: text/plain; charset=UTF-8');
+        exit('اختر فترة صحيحة أولاً.');
+    }
+    [$receiptWhere, $receiptValues] = receiptSearchWhere($receiptFilters);
+    $receiptRows = receiptCommissionRows($link, "SELECT s.idsanad, s.mostagername, (s.commesion_vat + s.depositeamount_vat) AS vat, s.depositeamount, s.recivername, s.mybyan, a.aqarname, s.sanaddate, s.period
+        FROM sanad s LEFT JOIN amlak a ON a.idaqar = s.idaqar {$receiptWhere} AND (s.commesion_vat > 0 OR s.depositeamount_vat > 0)
+        ORDER BY " . RECEIPT_DATE_ORDER_SQL . " DESC, s.idsanad DESC", $receiptValues);
+    $cell = function ($value) {
+        $value = (string)$value;
+        // Stored text must not run as a spreadsheet formula.
+        if ($value !== '' && !is_numeric($value) && strpos("=+-@\t\r", $value[0]) !== false) $value = "'" . $value;
+        return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    };
+    $cents = 0;
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="VAT_Report_' . date('Ymd_His') . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1"><tr>';
+    foreach (['رقم السند', 'اسم المستأجر', 'الضريبة', 'مبلغ السند', 'المستلم', 'البيان', 'العقار', 'التاريخ', 'ملاحظة'] as $heading) echo '<th>' . $heading . '</th>';
+    echo '</tr>';
+    foreach ($receiptRows as $row) {
+        $cents += (int)round($row['vat'] * 100);
+        $tooLarge = (float)$row['vat'] > (float)$row['depositeamount'];
+        echo '<tr><td>' . implode('</td><td>', array_map($cell, [$row['idsanad'], $row['mostagername'], $row['vat'], $row['depositeamount'], $row['recivername'], 'ضريبة ' . $row['mybyan'],
+            $row['aqarname'], (int)$row['sanaddate'] < 86400 ? $row['period'] : date('d/m/Y', (int)$row['sanaddate']), $tooLarge ? 'الضريبة أكبر من مبلغ السند' : ''])) . '</td></tr>';
+    }
+    echo '<tr><th colspan="2">إجمالي الفترة</th><th>' . number_format($cents / 100, 2, '.', '') . '</th><td colspan="6"></td></tr></table></body></html>';
+    exit;
+}
+
+$_SERVER['HTTP_REFERER'] = "index.hnt";
+
+if (isset($_REQUEST['report']) && $_REQUEST['report']) {
+    include_once "../../../report_header.hnt";
+} else {
+    include_once "../../../header.hnt";
+}
+
+require '../arabicTools.class.hnt';
+require '../uCal.class.hnt';
+$dcal = new uCal;
+require_once __DIR__ . '/receipt_search.hnt';
+
+// The form and the page links both use GET, so paging keeps the period.
+$receiptFilters = receiptSearchFilters(['startfrom' => $_GET['start_date'] ?? '', 'enddate' => $_GET['end_date'] ?? ''] + $_GET, $dcal);
+$receiptPeriodSet = $receiptFilters['from'] && $receiptFilters['to'];
+$intial_start = date('d/m/Y', $receiptFilters['from'] ?: strtotime('-3 months'));
+$intial_end = date('d/m/Y', $receiptFilters['to'] ?: time());
+?>
+
+<style>
+.vat-report-container {
+    background: #f8f9fa;
+    min-height: 100vh;
+    padding: 1.5rem 0;
+}
+
+.page-header {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.filter-card {
+    background: white;
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+}
+
+.filter-card h3 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #1e293b;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.filter-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.form-group label {
+    display: block;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: #475569;
+    margin-bottom: 0.25rem;
+}
+
+.form-control {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    font-size: 0.875rem;
+}
+
+.form-control:focus {
+    outline: none;
+    border-color: #0891b2;
+    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
+}
+
+.date-input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    direction: ltr;
+    text-align: right;
+}
+
+.action-buttons {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 1rem;
+}
+
+.btn {
+    padding: 0.5rem 1rem;
+    border: none;
+    border-radius: 6px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    text-decoration: none;
+    color: white;
+}
+
+.btn:hover {
+    text-decoration: none;
+    color: white;
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+}
+
+.btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(8, 145, 178, 0.3);
+}
+
+.btn-success {
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    color: white;
+}
+
+.btn-success:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(16, 185, 129, 0.3);
+}
+
+.btn-warning {
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    color: white;
+}
+
+.btn-secondary {
+    background: linear-gradient(135deg, #64748b 0%, #475569 100%);
+    color: white;
+}
+
+.btn-danger {
+    background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+    color: white;
+}
+
+.stats-bar {
+    background: white;
+    border-radius: 8px;
+    padding: 1rem 1.5rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 1rem;
+}
+
+.stats-info {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #1e293b;
+    font-weight: 600;
+}
+
+.stats-count {
+    color: #0891b2;
+    font-size: 1.25rem;
+}
+
+.pagination {
+    display: flex;
+    gap: 0.25rem;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.page-btn {
+    min-width: 36px;
+    height: 36px;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid #cbd5e1;
+    background: white;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    transition: all 0.2s ease;
+}
+
+.page-btn:hover {
+    background: #f8fafc;
+    border-color: #0891b2;
+}
+
+.page-btn.active {
+    background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+    color: white;
+    border-color: #0891b2;
+}
+
+.results-table {
+    background: white;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+    margin-bottom: 2rem;
+}
+
+.report-header {
+    background: linear-gradient(135deg, #f8fafc 0%, #e9ecef 100%);
+    padding: 1rem;
+    text-align: center;
+    font-weight: 600;
+    color: #1e293b;
+    font-size: 1rem;
+    border-bottom: 2px solid #e2e8f0;
+}
+
+.table-responsive {
+    overflow-x: auto;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+thead {
+    background: linear-gradient(135deg, #f8fafc 0%, #e9ecef 100%);
+}
+
+thead th {
+    padding: 1rem;
+    text-align: center;
+    font-weight: 600;
+    color: #1e293b;
+    border-bottom: 2px solid #e2e8f0;
+    font-size: 0.875rem;
+}
+
+tbody tr {
+    border-bottom: 1px solid #e2e8f0;
+    transition: background-color 0.2s ease;
+}
+
+tbody tr:hover {
+    background-color: #f8fafc;
+}
+
+tbody td {
+    padding: 0.75rem 1rem;
+    text-align: center;
+    font-size: 0.875rem;
+    color: #475569;
+}
+
+.total-row {
+    background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+    font-weight: 700;
+    color: #92400e;
+}
+
+.total-row td {
+    padding: 1rem;
+    font-size: 1.1rem;
+}
+
+@media (max-width: 768px) {
+    .filter-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .stats-bar {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .action-buttons {
+        flex-direction: column;
+        width: 100%;
+    }
+
+    .btn {
+        width: 100%;
+        justify-content: center;
+    }
+
+    thead th.hide-mobile,
+    tbody td.hide-mobile {
+        display: none;
+    }
+}
+
+@media print {
+    .screenonly {
+        display: none !important;
+    }
+
+    .page-header,
+    .filter-card,
+    .stats-bar {
+        box-shadow: none !important;
+    }
+}
+</style>
+
+<div class="vat-report-container" dir="rtl">
+    <div class="container-fluid">
+
+        <!-- Page Header -->
+        <div class="page-header screenonly">
+            <h1>
+                <i class="bi bi-file-earmark-spreadsheet"></i>
+                <?= $sc_title ?>
+            </h1>
+            <p class="mb-0 mt-2" style="opacity: 0.95; font-size: 0.95rem;">
+                إعداد وعرض الإقرارات الضريبية الدورية
+            </p>
+        </div>
+
+        <!-- Filter Card -->
+        <div class="filter-card screenonly">
+            <h3>
+                <i class="bi bi-calendar-range"></i>
+                اختيار الفترة الزمنية للتقرير
+            </h3>
+            <form method="get" action="?" id="reportForm">
+                <input type="hidden" name="formuid" value="<?= str_replace('.', '', microtime() . rand(11111, 99999)); ?>">
+                <input type="hidden" name="report" id="report" value="0">
+
+                <div class="filter-grid">
+                    <div class="form-group">
+                        <label>بدء من تاريخ</label>
+                        <input type="text"
+                               name="start_date"
+                               id="start_date"
+                               class="date-input"
+                               placeholder="DD/MM/YYYY"
+                               value="<?= htmlspecialchars($intial_start) ?>"
+                               required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>إلى تاريخ</label>
+                        <input type="text"
+                               name="end_date"
+                               id="end_date"
+                               class="date-input"
+                               placeholder="DD/MM/YYYY"
+                               value="<?= htmlspecialchars($intial_end) ?>"
+                               required>
+                    </div>
+                </div>
+
+                <div class="action-buttons">
+                    <button type="submit" class="btn btn-primary">
+                        <i class="bi bi-eye"></i>
+                        عرض التقرير
+                    </button>
+                    <button type="button" class="btn btn-success" onclick="openPrintView()">
+                        <i class="bi bi-printer"></i>
+                        عرض تقرير للطباعة
+                    </button>
+                    <button type="button" class="btn btn-warning" onclick="exportToExcel()">
+                        <i class="bi bi-file-earmark-excel"></i>
+                        تصدير إلى Excel
+                    </button>
+                    <button type="button" class="btn btn-secondary" onclick="window.location.href='?';">
+                        <i class="bi bi-arrow-counterclockwise"></i>
+                        إعادة تعيين
+                    </button>
+                    <button type="button" class="btn btn-success" onclick="window.location.href='vat.hnt';">
+                        <i class="bi bi-arrow-right-circle"></i>
+                        عودة
+                    </button>
+                </div>
+            </form>
+        </div>
+
+<?php
+// Exit early if no date range selected
+if (!$receiptPeriodSet) {
+    echo "</div></div>"; // Close containers
+    if (isset($_REQUEST['report']) && $_REQUEST['report']) {
+        include_once "../../../report_foter.hnt";
+    } else {
+        include_once "../../../foter.hnt";
+    }
+    exit();
+}
+
+[$receiptWhere, $receiptValues] = receiptSearchWhere($receiptFilters);
+$receiptWhere .= ($receiptWhere === '' ? ' WHERE ' : ' AND ') . '(s.commesion_vat > 0 OR s.depositeamount_vat > 0)';
+
+// Pagination
+$receiptCount = receiptCommissionRows($link, "SELECT COUNT(*) AS receipts, COALESCE(SUM(s.commesion_vat + s.depositeamount_vat), 0) AS total
+    FROM sanad s LEFT JOIN amlak a ON a.idaqar = s.idaqar {$receiptWhere}", $receiptValues)[0];
+$rownum = (int)$receiptCount['receipts'];
+$rowperpage = $receiptFilters['rowperpage'];
+$pagenum = (int)ceil($rownum / $rowperpage);
+$receiptPage = max(1, min($receiptFilters['page'], $pagenum));
+$limit = ($receiptPage - 1) * $rowperpage . ',' . $rowperpage;
+// Printing shows the whole period.
+if (!empty($_GET['report'])) {
+    $pagenum = 1;
+    $limit = '0,' . max(1, $rownum);
+}
+?>
+
+        <!-- Stats and Pagination Bar -->
+        <div class="stats-bar screenonly">
+            <div class="stats-info">
+                <i class="bi bi-file-text"></i>
+                عدد السندات: <span class="stats-count"><?= number_format($rownum) ?></span> سند
+            </div>
+
+            <div class="pagination">
+                <?php
+                $xi = 1;
+                if ($pagenum == 1) {
+                    $xi = 2;
+                }
+
+                while ($xi <= $pagenum) {
+                    $activeClass = ($receiptPage == $xi) ? 'active' : '';
+
+                    if (($xi > ($receiptPage - 4) && $xi < ($receiptPage + 4)) ||
+                        $xi == 1 || $xi == $pagenum ||
+                        $xi < 4 || $xi > ($pagenum - 4)) {
+                        echo "<button type='button' class='page-btn {$activeClass}' onclick=\"window.location.href='?" . htmlspecialchars(http_build_query(array_diff_key(receiptSearchQuery($receiptFilters), ['startfrom' => 1, 'enddate' => 1])
+                            + ['start_date' => $intial_start, 'end_date' => $intial_end, 'report' => empty($_REQUEST['report']) ? 0 : 1, 'page' => $xi]), ENT_QUOTES, 'UTF-8') . "'\">{$xi}</button>";
+                    } elseif ($xi == ($receiptPage - 4) || $xi == ($receiptPage + 4)) {
+                        echo "<span style='padding: 0 0.25rem;'>...</span>";
+                    }
+                    $xi++;
+                }
+                ?>
+            </div>
+        </div>
+
+        <!-- Results Table -->
+        <div class="results-table">
+            <div class="report-header">
+                تقرير الضرائب المحصلة عن الفترة من <?= htmlspecialchars($intial_start) ?> إلى <?= htmlspecialchars($intial_end) ?>
+            </div>
+
+            <div class="table-responsive">
+                <table id="vatReportTable">
+                    <thead>
+                        <tr>
+                            <th>رقم السند</th>
+                            <th class="hide-mobile">اسم المستأجر</th>
+                            <th>المبلغ</th>
+                            <th class="hide-mobile">المستلم</th>
+                            <th>البيان</th>
+                            <th>العقار</th>
+                            <th>التاريخ</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php
+                        $receiptRows = receiptCommissionRows($link, "SELECT s.idsanad, s.period, s.mostagerid, s.mostagername,
+                                s.recivername, s.mybyan, s.sanadrakam, s.idaqar, s.idsubaqar, a.aqarname,
+                                s.sanaddate, s.cheqnumber, s.cheqon, s.cheqdate1, s.attachedimages,
+                                s.kastid, s.depositeamount AS receipt_amount,
+                                (s.commesion_vat + s.depositeamount_vat) as depositeamount
+                                FROM sanad s LEFT JOIN amlak a ON a.idaqar = s.idaqar {$receiptWhere}
+                                ORDER BY " . RECEIPT_DATE_ORDER_SQL . " DESC, s.idsanad DESC
+                                LIMIT {$limit}", $receiptValues);
+                        $counx = 0;
+                        $totalsum = (float)$receiptCount['total'];
+
+                        foreach ($receiptRows as $row) {
+                            $counx++;
+
+                            // Format date
+                            if ((int)$row['sanaddate'] < 86400) {
+                                $dhd = htmlspecialchars((string)$row['period'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                            } elseif ($hnt_dll || $hnt_supper_dll == 5) {
+                                $dhd = date("d/m/Y", $row['sanaddate']);
+                            } else {
+                                $dhd = ArabicTools::arabicDate('hj:d/m/Y', $row['sanaddate']);
+                            }
+
+                            $vatTooLarge = (float)$row['depositeamount'] > (float)$row['receipt_amount'];
+                            echo "<tr" . ($vatTooLarge ? " style='background:#fde2e2' title='الضريبة أكبر من مبلغ السند - راجع السند'" : "") . ">
+                                <td>{$row['idsanad']}</td>
+                                <td class='hide-mobile'>" . htmlspecialchars((string)$row['mostagername'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "</td>
+                                <td>" . number_format($row['depositeamount'], 2) . "</td>
+                                <td class='hide-mobile'>" . htmlspecialchars((string)$row['recivername'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "</td>
+                                <td>ضريبة " . htmlspecialchars((string)$row['mybyan'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "</td>
+                                <td>" . htmlspecialchars((string)$row['aqarname'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "</td>
+                                <td>{$dhd}</td>
+                            </tr>";
+                        }
+
+                        if ($counx == 0) {
+                            echo "<tr><td colspan='7' style='padding: 2rem; text-align: center; color: #64748b;'>
+                                <i class='bi bi-inbox' style='font-size: 3rem; display: block; margin-bottom: 1rem; opacity: 0.5;'></i>
+                                لا توجد سندات ضريبية تطابق معايير البحث
+                            </td></tr>";
+                        }
+                        ?>
+                    </tbody>
+                    <?php if ($counx > 0): ?>
+                    <tfoot>
+                        <tr class="total-row">
+                            <td colspan="7">
+                                <i class="bi bi-calculator"></i>
+                                إجمالي الفترة كاملة: <span style="font-size: 1.3rem;"><?= number_format($totalsum, 2) ?></span> ر.س
+                            </td>
+                        </tr>
+                    </tfoot>
+                    <?php endif; ?>
+                </table>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script>
+/**
+ * VAT Report - Modern JavaScript
+ */
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('VAT Report page initialized');
+
+    // Initialize date inputs
+    initializeDateInputs();
+});
+
+/**
+ * Initialize date input validation
+ */
+function initializeDateInputs() {
+    const dateInputs = document.querySelectorAll('.date-input');
+
+    dateInputs.forEach(input => {
+        input.addEventListener('input', function() {
+            // Allow only numbers and slashes
+            this.value = this.value.replace(/[^\d/]/g, '');
+
+            // Auto-format as DD/MM/YYYY
+            let value = this.value.replace(/\//g, '');
+            if (value.length >= 2) {
+                value = value.substring(0, 2) + '/' + value.substring(2);
+            }
+            if (value.length >= 5) {
+                value = value.substring(0, 5) + '/' + value.substring(5, 9);
+            }
+            this.value = value;
+        });
+
+        // Validate on blur
+        input.addEventListener('blur', function() {
+            validateDate(this);
+        });
+    });
+}
+
+/**
+ * Validate date format DD/MM/YYYY
+ */
+function validateDate(input) {
+    const value = input.value;
+    const pattern = /^(\d{2})\/(\d{2})\/(\d{4})$/;
+    const match = value.match(pattern);
+
+    if (!match) {
+        input.setCustomValidity('الرجاء إدخال التاريخ بالصيغة DD/MM/YYYY');
+        return false;
+    }
+
+    const day = parseInt(match[1], 10);
+    const month = parseInt(match[2], 10);
+    const year = parseInt(match[3], 10);
+
+    if (day < 1 || day > 31 || month < 1 || month > 12 || year < 1900) {
+        input.setCustomValidity('التاريخ المدخل غير صحيح');
+        return false;
+    }
+
+    input.setCustomValidity('');
+    return true;
+}
+
+/**
+ * Open print view
+ */
+function openPrintView() {
+    const form = document.getElementById('reportForm');
+    const reportInput = document.getElementById('report');
+
+    // Set report flag
+    reportInput.value = '1';
+
+    // Submit form
+    form.submit();
+    reportInput.value = '0';
+}
+
+/**
+ * Export the whole period to Excel
+ */
+function exportToExcel() {
+    const query = new URLSearchParams({
+        start_date: document.getElementById('start_date').value,
+        end_date: document.getElementById('end_date').value,
+        export: 'xls'
+    });
+    window.location.href = '?' + query.toString();
+}
+</script>
+
+<?php
+if (!empty($_REQUEST['report'])) {
+    include_once "../../../report_foter.hnt";
+} else {
+    include_once "../../../foter.hnt";
+}
+?>

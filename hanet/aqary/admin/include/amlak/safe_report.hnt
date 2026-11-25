@@ -42,6 +42,17 @@ $arabicTools = new ArabicTools();
 $arabicNum = new Arabic_num();
 
 // Handle liquidation request
+require_once __DIR__ . '/accounting_lock.hnt';
+$property_lock = $tasfia == 1 ? accountingPropertyLockReason($link, $idaqar) : '';
+if ($property_lock !== '') {
+    if ($is_ajax_request) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['success' => false, 'message' => $property_lock], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    echo '<div class="alert alert-danger">' . htmlspecialchars($property_lock) . '</div>';
+    $tasfia = 0;
+}
 if ($tasfia == 1 && $idaqar > 0) {
     $sql = "UPDATE eradat SET idaqar='-" . intval($idaqar) . "' WHERE idaqar='" . intval($idaqar) . "'";
     mysql_query($sql, $link);
@@ -293,8 +304,15 @@ if (!$is_ajax_request) {
         $commission_formula = "";
     }
 
+    // VAT the office files and commission VAT are not the property's income.
+    require_once __DIR__ . '/receipt_components_store.hnt';
+    $vat_withheld = 0;
+    $vat_property = receiptCommissionRows($link, 'SELECT * FROM amlak WHERE idaqar=?', array(intval($idaqar)))[0] ?? array();
+    $vat_income = receiptCommissionRows($link, 'SELECT * FROM eradat WHERE idaqar=? AND paymentdate>? AND paymentdate<?', array(intval($idaqar), intval($startfrom), intval($enddate)));
+    foreach (receiptDeliveryBreakdowns($link, $vat_income, $vat_property) as $vat_part) $vat_withheld += receiptWithheldFromOwner($vat_part);
+
     // Calculate net income
-    $net_income = $erad - $masrof - $myper;
+    $net_income = $erad - $masrof - $myper - $vat_withheld;
     ?>
 
     <!-- Financial Report -->
@@ -373,6 +391,18 @@ if (!$is_ajax_request) {
                 <small class="text-muted">(<?= $arabicNum->numtostr(intval($myper)) ?> <?= $myomla ?> فقط لا غير)</small>
             </div>
         </div>
+
+        <?php if ($vat_withheld > 0) { ?>
+        <div class="report-row">
+            <div class="report-label">
+                <i class="bi bi-bank text-danger me-2"></i>
+                ضريبة محجوزة لدى المكتب
+            </div>
+            <div class="report-value">
+                <strong><?= number_format($vat_withheld, 2) ?> <?= $myomla ?></strong>
+            </div>
+        </div>
+        <?php } ?>
 
         <div class="report-row net-income-row">
             <div class="report-label">

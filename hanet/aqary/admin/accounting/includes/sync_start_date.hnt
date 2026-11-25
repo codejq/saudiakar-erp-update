@@ -1,0 +1,42 @@
+<?php
+/**
+ * First source date that rental sync may post, per company. Anything earlier
+ * belongs to the opening entry and is never synchronized.
+ */
+const AMLAK_SYNC_DEFAULT_START = '2026-11-01';
+
+function amlakSyncValidDate($value) {
+    $date = DateTimeImmutable::createFromFormat('!Y-m-d', (string)$value);
+    return $date && $date->format('Y-m-d') === (string)$value && (int)$date->format('Y') >= 2000;
+}
+
+function amlakSyncStartDate($db) {
+    static $dates = [];
+    $key = spl_object_id($db);
+    if (!isset($dates[$key])) {
+        $value = '';
+        $result = $db->query("SELECT setting_value FROM acc_system_settings WHERE setting_key='amlak_sync_start_date' LIMIT 1");
+        if ($result && ($row = $result->fetch_assoc())) $value = trim((string)$row['setting_value']);
+        $dates[$key] = amlakSyncValidDate($value) ? $value : AMLAK_SYNC_DEFAULT_START;
+    }
+    return $dates[$key];
+}
+
+/** Source dates are Unix seconds; some legacy rows hold milliseconds. */
+function amlakSyncNormalizeTimestamp($value) {
+    $timestamp = (int)$value;
+    return $timestamp > 20000000000 ? (int)floor($timestamp / 1000) : $timestamp;
+}
+
+function amlakSyncIsInPeriod($db, $value) {
+    return amlakSyncNormalizeTimestamp($value) >= strtotime(amlakSyncStartDate($db) . ' 00:00:00');
+}
+
+/** SQL condition for one of the known source date columns. */
+function amlakSyncDateSql($db, $column) {
+    if (!in_array($column, ['sanaddate', 'payeddate', 'sanadate'], true)) {
+        throw new InvalidArgumentException('Unknown sync date column');
+    }
+    $start = (int)strtotime(amlakSyncStartDate($db) . ' 00:00:00');
+    return "(IF({$column}>20000000000,FLOOR({$column}/1000),{$column})>={$start})";
+}

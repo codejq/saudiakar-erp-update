@@ -1,0 +1,436 @@
+<?php
+/**
+ * Reset Property Data - Clear all property data
+ * Modern refactored version with Bootstrap 5 and AJAX
+ */
+
+// Extract POST variables
+extract($_REQUEST);
+
+// Initialize variables
+$idaqar = isset($idaqar) ? intval($idaqar) : 0;
+$deleteaqar = isset($deleteaqar) ? intval($deleteaqar) : 0;
+$step = isset($step) ? intval($step) : 1;
+$ajax = isset($ajax) ? intval($ajax) : 0;
+
+$sc_title = "تصفير بيانات عقار";
+$sc_id = "57";
+
+include_once "../../../nocash.hnt";
+include_once "../../../header.hnt";
+require '../arabicTools.class.hnt';
+include_once "amlakfunctions.hnt";
+
+// Handle AJAX delete request
+if ($ajax == 1 && $deleteaqar) {
+    // Get property details first
+    $property_sql = "SELECT aqarname FROM amlak WHERE idaqar='" . intval($deleteaqar) . "'";
+    $property_row = mysql_fetch_array(mysql_query($property_sql, $link));
+
+    if (!$property_row) {
+        echo json_encode([
+            'success' => false,
+            'message' => 'العقار غير موجود'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    }
+
+    require_once __DIR__ . '/accounting_lock.hnt';
+    $property_lock = accountingPropertyLockReason($link, $deleteaqar);
+    if ($property_lock !== '') {
+        echo json_encode(['success' => false, 'message' => $property_lock], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    }
+
+    // Log the deletion
+    loginfo("critical", "delete", "تصفير بيانات العقار: {$property_row['aqarname']}", "", "amlak", $deleteaqar, $link);
+
+    // Get all sub-properties
+    $sql = "SELECT * FROM amlakdetails WHERE idaqar='" . intval($deleteaqar) . "'";
+    $result = mysql_query($sql, $link);
+
+    while ($row = mysql_fetch_array($result)) {
+        mysql_query("DELETE FROM aksat WHERE idsubaqar='" . intval($row['idsubaqar']) . "'", $link);
+        mysql_query("DELETE FROM eradat WHERE idsubaqar='" . intval($row['idsubaqar']) . "'", $link);
+    }
+
+    // Delete all related records
+    mysql_query("DELETE FROM masrofat WHERE idaqar='" . intval($deleteaqar) . "'", $link);
+    mysql_query("DELETE FROM sanad WHERE idaqar='" . intval($deleteaqar) . "'", $link);
+    mysql_query("DELETE FROM sanadsarf WHERE aqarid='" . intval($deleteaqar) . "'", $link);
+    mysql_query("DELETE FROM amlakdetails WHERE idaqar='" . intval($deleteaqar) . "'", $link);
+    mysql_query("DELETE FROM amlak WHERE idaqar='" . intval($deleteaqar) . "'", $link);
+
+    echo json_encode([
+        'success' => true,
+        'message' => 'تم تصفير بيانات العقار بنجاح'
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit();
+}
+?>
+
+<!-- Main Content -->
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <!-- Page Header -->
+            <div class="card mb-4 shadow-sm border-0">
+                <div class="card-header text-white" style="background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%);">
+                    <h4 class="mb-0">
+                        <i class="bi bi-trash3 me-2"></i>
+                        <?= $sc_title ?>
+                    </h4>
+                </div>
+            </div>
+
+            <?php if ($step != 2) { ?>
+            <!-- Step 1: Select Property and Verification Code -->
+            <div class="card shadow-sm">
+                <div class="card-body p-4">
+                    <div class="alert alert-danger mb-4" role="alert">
+                        <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                        <strong>تحذير خطير:</strong> عملية تصفير بيانات العقار ستحذف جميع البيانات المرتبطة بالعقار بشكل نهائي ولا يمكن التراجع عنها.
+                    </div>
+
+                    <form id="verificationForm">
+                        <input type="hidden" name="formuid" id="formuid"
+                               value="<?= str_replace('.', '', microtime(true) . rand(11111, 99999) . rand(11111, 99999) . rand(111, 999) . rand(111, 999)); ?>">
+
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label for="idaqar" class="form-label">
+                                    <i class="bi bi-building me-1"></i>
+                                    اختر العقار المراد تصفير بياناته
+                                </label>
+                                <select name="idaqar" id="idaqar" class="form-select form-select-lg" required>
+                                    <option value="">اختر العقار</option>
+                                    <?php
+                                    $sql = "SELECT idaqar, aqarname FROM amlak ORDER BY aqarname";
+                                    $result = mysql_query($sql, $link);
+                                    while ($row = mysql_fetch_array($result)) {
+                                        $selected = ($idaqar == $row['idaqar']) ? 'selected' : '';
+                                        echo "<option value='" . $row['idaqar'] . "' $selected>" . htmlspecialchars($row['aqarname']) . "</option>";
+                                    }
+                                    ?>
+                                </select>
+                            </div>
+
+                            <div class="col-md-3">
+                                <label for="code" class="form-label">
+                                    <i class="bi bi-shield-lock me-1"></i>
+                                    كود التأكيد
+                                </label>
+                                <input type="text" class="form-control form-control-lg" name="code" id="code"
+                                       placeholder="أدخل كود التأكيد" required>
+                            </div>
+
+                            <div class="col-md-3">
+                                <label for="codeh" class="form-label">
+                                    <i class="bi bi-key me-1"></i>
+                                    الكود الصحيح
+                                </label>
+                                <input type="text" class="form-control form-control-lg" name="codeh" id="codeh"
+                                       value="<?= rand(101, 999); ?>" readonly style="background-color: #f3f4f6;">
+                            </div>
+                        </div>
+
+                        <div class="mt-4 d-flex gap-2">
+                            <button type="submit" class="btn btn-danger btn-lg">
+                                <i class="bi bi-arrow-right me-2"></i>
+                                التالي
+                            </button>
+                            <a href="reports.hnt" class="btn btn-secondary btn-lg">
+                                <i class="bi bi-x-circle me-2"></i>
+                                إلغاء
+                            </a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            <?php } ?>
+
+            <?php if ($step == 2) {
+                $sql = "SELECT * FROM amlak WHERE idaqar='" . intval($idaqar) . "'";
+                $row = mysql_fetch_array(mysql_query($sql, $link));
+
+                if (!$row) { ?>
+                    <div class="card shadow-sm">
+                        <div class="card-body p-4">
+                            <div class="alert alert-danger" role="alert">
+                                <i class="bi bi-exclamation-circle-fill me-2"></i>
+                                <strong>خطأ:</strong> العقار غير موجود
+                            </div>
+                            <button type="button" class="btn btn-secondary" onclick="window.location.href='restorsingleaqar.hnt';">
+                                <i class="bi bi-arrow-left me-2"></i>
+                                عودة
+                            </button>
+                        </div>
+                    </div>
+                <?php exit();
+                }
+
+                // Get statistics
+                $stats_details = mysql_fetch_array(mysql_query("SELECT COUNT(*) as count FROM amlakdetails WHERE idaqar='" . intval($idaqar) . "'", $link));
+                $stats_sanad = mysql_fetch_array(mysql_query("SELECT COUNT(*) as count FROM sanad WHERE idaqar='" . intval($idaqar) . "'", $link));
+                $stats_masrofat = mysql_fetch_array(mysql_query("SELECT COUNT(*) as count FROM masrofat WHERE idaqar='" . intval($idaqar) . "'", $link));
+
+                // Get total eradat and aksat from subproperties
+                $total_eradat = 0;
+                $total_aksat = 0;
+                $subproperties = mysql_query("SELECT idsubaqar FROM amlakdetails WHERE idaqar='" . intval($idaqar) . "'", $link);
+                while ($subprop = mysql_fetch_array($subproperties)) {
+                    $eradat_count = mysql_fetch_array(mysql_query("SELECT COUNT(*) as count FROM eradat WHERE idsubaqar='" . intval($subprop['idsubaqar']) . "'", $link));
+                    $aksat_count = mysql_fetch_array(mysql_query("SELECT COUNT(*) as count FROM aksat WHERE idsubaqar='" . intval($subprop['idsubaqar']) . "'", $link));
+                    $total_eradat += $eradat_count['count'];
+                    $total_aksat += $aksat_count['count'];
+                }
+                ?>
+
+                <!-- Step 2: Confirm Deletion -->
+                <div class="card shadow-sm mb-4">
+                    <div class="card-header bg-danger text-white">
+                        <h5 class="mb-0">
+                            <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                            تحذير: تأكيد تصفير بيانات العقار
+                        </h5>
+                    </div>
+                    <div class="card-body p-4">
+                        <div class="alert alert-danger mb-4" role="alert">
+                            <h5 class="alert-heading">
+                                <i class="bi bi-exclamation-octagon me-2"></i>
+                                تحذير خطير!
+                            </h5>
+                            <p class="mb-0">سيتم حذف جميع بيانات العقار التالي من البرنامج بشكل نهائي ولا يمكن التراجع عن هذا الإجراء.</p>
+                        </div>
+
+                        <!-- Property Details -->
+                        <div class="card bg-light mb-4">
+                            <div class="card-header">
+                                <h6 class="mb-0">
+                                    <i class="bi bi-building me-2"></i>
+                                    بيانات العقار
+                                </h6>
+                            </div>
+                            <div class="card-body">
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <div class="mb-2">
+                                            <small class="text-muted">اسم العقار</small>
+                                            <h5 class="mb-0"><?= htmlspecialchars($row['aqarname']) ?></h5>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="mb-2">
+                                            <small class="text-muted">العنوان</small>
+                                            <h6 class="mb-0"><?= htmlspecialchars($row['aqaraddress']) ?></h6>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <div class="mb-2">
+                                            <small class="text-muted">اسم المالك</small>
+                                            <h6 class="mb-0"><?= htmlspecialchars($row['ownername']) ?></h6>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <div class="mb-2">
+                                            <small class="text-muted">الجوال</small>
+                                            <h6 class="mb-0"><?= htmlspecialchars($row['mobile']) ?></h6>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <div class="mb-2">
+                                            <small class="text-muted">الهاتف</small>
+                                            <h6 class="mb-0"><?= htmlspecialchars($row['phone']) ?></h6>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Statistics -->
+                        <div class="card bg-light mb-4">
+                            <div class="card-header">
+                                <h6 class="mb-0">
+                                    <i class="bi bi-graph-up me-2"></i>
+                                    البيانات التي سيتم حذفها
+                                </h6>
+                            </div>
+                            <div class="card-body">
+                                <div class="row g-3 text-center">
+                                    <div class="col-md-2">
+                                        <div class="p-3 bg-white rounded">
+                                            <i class="bi bi-house-door text-danger" style="font-size: 2rem;"></i>
+                                            <h4 class="mb-0 mt-2 text-danger"><?= $stats_details['count'] ?></h4>
+                                            <small class="text-muted">وحدة</small>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="p-3 bg-white rounded">
+                                            <i class="bi bi-receipt text-danger" style="font-size: 2rem;"></i>
+                                            <h4 class="mb-0 mt-2 text-danger"><?= $stats_sanad['count'] ?></h4>
+                                            <small class="text-muted">سند قبض</small>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="p-3 bg-white rounded">
+                                            <i class="bi bi-cash-stack text-danger" style="font-size: 2rem;"></i>
+                                            <h4 class="mb-0 mt-2 text-danger"><?= $total_eradat ?></h4>
+                                            <small class="text-muted">إيراد</small>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="p-3 bg-white rounded">
+                                            <i class="bi bi-calendar-check text-danger" style="font-size: 2rem;"></i>
+                                            <h4 class="mb-0 mt-2 text-danger"><?= $total_aksat ?></h4>
+                                            <small class="text-muted">قسط</small>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="p-3 bg-white rounded">
+                                            <i class="bi bi-wallet2 text-danger" style="font-size: 2rem;"></i>
+                                            <h4 class="mb-0 mt-2 text-danger"><?= $stats_masrofat['count'] ?></h4>
+                                            <small class="text-muted">مصروف</small>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="p-3 bg-white rounded">
+                                            <i class="bi bi-building text-danger" style="font-size: 2rem;"></i>
+                                            <h4 class="mb-0 mt-2 text-danger">1</h4>
+                                            <small class="text-muted">عقار</small>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Warning List -->
+                        <div class="alert alert-warning mb-4" role="alert">
+                            <h6 class="alert-heading">
+                                <i class="bi bi-info-circle me-2"></i>
+                                سيتم حذف البيانات التالية:
+                            </h6>
+                            <ul class="mb-0">
+                                <li>جميع وحدات العقار (<?= $stats_details['count'] ?> وحدة)</li>
+                                <li>جميع سندات القبض (<?= $stats_sanad['count'] ?> سند)</li>
+                                <li>جميع الإيرادات (<?= $total_eradat ?> إيراد)</li>
+                                <li>جميع الأقساط (<?= $total_aksat ?> قسط)</li>
+                                <li>جميع المصروفات (<?= $stats_masrofat['count'] ?> مصروف)</li>
+                                <li>جميع سندات الصرف المرتبطة</li>
+                                <li>بيانات العقار الأساسية</li>
+                            </ul>
+                        </div>
+
+                        <div class="d-flex gap-2">
+                            <button type="button" class="btn btn-danger btn-lg <?= "policy_" . $sc_id . "_deleetes" ?>"
+                                    onclick="confirmDelete(<?= $row['idaqar'] ?>)">
+                                <i class="bi bi-trash3 me-2"></i>
+                                موافق، احذف هذا العقار نهائياً
+                            </button>
+                            <button type="button" class="btn btn-secondary btn-lg" onclick="window.location.href='restorsingleaqar.hnt';">
+                                <i class="bi bi-x-circle me-2"></i>
+                                إلغاء
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            <?php } ?>
+        </div>
+    </div>
+</div>
+
+<script>
+// Modern ES6+ JavaScript
+
+// Handle verification form submission
+document.getElementById('verificationForm')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+
+    const idaqar = document.getElementById('idaqar').value;
+    const code = document.getElementById('code').value;
+    const codeh = document.getElementById('codeh').value;
+
+    if (!idaqar) {
+        alert('يرجى اختيار العقار');
+        return;
+    }
+
+    if (code !== codeh) {
+        alert('كود التأكيد غير صحيح');
+        return;
+    }
+
+    window.location.href = `restorsingleaqar.hnt?step=2&idaqar=${idaqar}`;
+});
+
+// Confirm and delete property
+const confirmDelete = async (idaqar) => {
+    const confirmText = 'هل أنت متأكد تماماً من تصفير بيانات هذا العقار؟\n\n' +
+                       'سيتم حذف:\n' +
+                       '- جميع الوحدات\n' +
+                       '- جميع السندات\n' +
+                       '- جميع الإيرادات\n' +
+                       '- جميع الأقساط\n' +
+                       '- جميع المصروفات\n' +
+                       '- بيانات العقار\n\n' +
+                       'هذا الإجراء لا يمكن التراجع عنه!';
+
+    if (!confirm(confirmText)) {
+        return;
+    }
+
+    // Second confirmation
+    const secondConfirm = prompt('للتأكيد النهائي، اكتب كلمة "حذف" بالعربية:');
+    if (secondConfirm !== 'حذف') {
+        alert('تم إلغاء العملية');
+        return;
+    }
+
+    try {
+        const formData = new FormData();
+        formData.append('deleteaqar', idaqar);
+        formData.append('ajax', '1');
+
+        const response = await fetch(window.location.href, {
+            method: 'POST',
+            body: formData
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            // Show success message
+            const alertDiv = document.createElement('div');
+            alertDiv.className = 'alert alert-success alert-dismissible fade show position-fixed top-0 start-50 translate-middle-x mt-3';
+            alertDiv.style.zIndex = '9999';
+            alertDiv.innerHTML = `
+                <i class="bi bi-check-circle-fill me-2"></i>
+                <strong>${result.message}</strong>
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            `;
+
+            document.body.appendChild(alertDiv);
+
+            // Redirect after 2 seconds
+            setTimeout(() => {
+                window.location.href = 'reports.hnt';
+            }, 2000);
+        } else {
+            alert(result.message || 'حدث خطأ أثناء تصفير بيانات العقار');
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('حدث خطأ أثناء تصفير بيانات العقار');
+    }
+};
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', () => {
+    // Focus on first input
+    const firstInput = document.querySelector('select, input[type="text"]:not([readonly])');
+    if (firstInput) {
+        firstInput.focus();
+    }
+});
+</script>
+
+<?php require('../../../foter.hnt'); ?>

@@ -392,6 +392,11 @@ if ($payment_type > 0) {
     $payment_type_filter = " AND e.sanadrakam IN (SELECT sanadrakam FROM sanad WHERE payment_type = '" . intval($payment_type) . "')";
 }
 
+require_once __DIR__ . '/receipt_components_store.hnt';
+$componentsReady = receiptComponentsReady($link);
+$vatWithheldSql = $componentsReady ? "COALESCE(SUM(COALESCE(rc.commission_vat,0) + CASE WHEN a.rent_income_to='office' OR a.rent_vat_filed_by<>'owner' THEN COALESCE(rc.rent_vat,0) ELSE 0 END), 0)" : '0';
+$componentsJoin = $componentsReady ? 'LEFT JOIN sanad_components rc ON rc.idsanad = CAST(e.sanadrakam AS UNSIGNED)' : '';
+
 // Query to get aggregated income by building
 $sql = "SELECT
             a.idaqar,
@@ -403,7 +408,8 @@ $sql = "SELECT
             SUM(e.tamen) as total_tamen,
             SUM(e.mywater) as total_water,
             SUM(e.mysa3ee) as total_commission,
-            SUM(e.services) as total_services
+            SUM(e.services) as total_services,
+            $vatWithheldSql as vat_withheld
         FROM amlak a
         LEFT JOIN eradat e ON a.idaqar = e.idaqar
             AND e.paymentdate > '" . intval($startfrom) . "'
@@ -411,6 +417,7 @@ $sql = "SELECT
             $tasfia_filter
             $bankid_filter
             $payment_type_filter
+        $componentsJoin
         GROUP BY a.idaqar, a.aqarname, a.addwaterto, a.addtameento
         HAVING transaction_count > 0
         ORDER BY a.aqarname";
@@ -442,6 +449,7 @@ $result = mysql_query($sql, $link);
     $grand_total_commission = 0;
     $grand_total_services = 0;
     $grand_total_net = 0;
+    $grand_total_vat = 0;
 
     while ($row = mysql_fetch_array($result)) {
         // Calculate net income based on property settings
@@ -456,7 +464,8 @@ $result = mysql_query($sql, $link);
             $tamen_deduction = $row['total_tamen'];
         }
 
-        $net_income = $row['total_amount'] - $row['total_commission'] - $row['total_services'] - $water_deduction - $tamen_deduction;
+        $net_income = $row['total_amount'] - $row['total_commission'] - $row['total_services'] - $water_deduction - $tamen_deduction - $row['vat_withheld'];
+        $grand_total_vat += $row['vat_withheld'];
 
         $grand_total_amount += $row['total_amount'];
         $grand_total_tamen += $row['total_tamen'];
@@ -491,6 +500,7 @@ $result = mysql_query($sql, $link);
                             </tbody>
                         </table>
                     </div>
+                    <?php if ($grand_total_vat > 0) { ?><p class="text-muted mt-2 mb-0">صافي الإيراد لا يشمل ضريبة محصلة يوردها المكتب: <strong><?= number_format($grand_total_vat, 2) ?></strong></p><?php } ?>
                 </div>
             </div>
 

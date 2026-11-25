@@ -1,0 +1,115 @@
+<?php
+/**
+ * Names and source links for journal entries: building, unit, tenant, owner,
+ * contract, invoice, receipt, owner delivery and expense. Read only.
+ */
+function accountingLinkEsc($value) {
+    return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+/** Missing optional tables or columns only remove that link; they never break the page. */
+function accountingLinkRows($db, $sql) {
+    try {
+        $result = $db->query($sql);
+        return $result ? $result->fetch_all(MYSQLI_ASSOC) : [];
+    } catch (Throwable $error) {
+        error_log('Accounting links: ' . $error->getMessage());
+        return [];
+    }
+}
+
+function accountingLinkNames($db, $table, $idColumn, $labelSql, $ids) {
+    $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+    if (!$ids) return [];
+    $names = [];
+    foreach (accountingLinkRows($db, "SELECT {$idColumn} AS id, {$labelSql} AS label FROM {$table} WHERE {$idColumn} IN (" . implode(',', $ids) . ')') as $row) {
+        $names[(int)$row['id']] = (string)$row['label'];
+    }
+    return $names;
+}
+
+/** Returns [entry_id => list of [icon, text, url, title]] for the given entries. */
+function accountingEntryLinks($db, array $entryIds) {
+    $entryIds = array_values(array_unique(array_filter(array_map('intval', $entryIds))));
+    if (!$entryIds) return [];
+    $entries = accountingLinkRows($db, 'SELECT entry_id,aqar_id,subaqar_id,tenant_id,owner_id,egar_id,
+        COALESCE(NULLIF(invoice_id,0),IF(reference_type=\'invoice\',reference_id,NULL)) AS invoice_id,
+        COALESCE(NULLIF(sanad_id,0),IF(reference_type=\'sanad\',reference_id,NULL)) AS sanad_id,
+        COALESCE(NULLIF(sanadsarf_id,0),IF(reference_type=\'sanadsarf\',reference_id,NULL)) AS sanadsarf_id,
+        COALESCE(NULLIF(masrofat_id,0),IF(reference_type IN (\'masrofat\',\'office_expense\'),reference_id,NULL)) AS masrofat_id
+        FROM acc_journal_entries WHERE entry_id IN (' . implode(',', $entryIds) . ')');
+    // An invoice entry traces back to its receipt through the invoice.
+    $invoiceReceipts = [];
+    $invoiceIds = array_values(array_unique(array_filter(array_map('intval', array_column($entries, 'invoice_id')))));
+    if ($invoiceIds) foreach (accountingLinkRows($db, 'SELECT invoice_id,sanad_id FROM acc_invoices WHERE sanad_id>0 AND invoice_id IN (' . implode(',', $invoiceIds) . ')') as $row) $invoiceReceipts[(int)$row['invoice_id']] = (int)$row['sanad_id'];
+    foreach ($entries as &$linkEntry) if (!$linkEntry['sanad_id']) $linkEntry['sanad_id'] = $invoiceReceipts[(int)$linkEntry['invoice_id']] ?? null;
+    unset($linkEntry);
+    $column = function ($name) use ($entries) { return array_column($entries, $name); };
+    $buildings = accountingLinkNames($db, 'amlak', 'idaqar', 'aqarname', $column('aqar_id'));
+    $units = accountingLinkNames($db, 'amlakdetails', 'idsubaqar', "IF(rakam<>'',rakam,CONCAT('#',idsubaqar))", $column('subaqar_id'));
+    $tenants = accountingLinkNames($db, 'mostagereen', 'mostagerid', 'mostagername', $column('tenant_id'));
+    $owners = accountingLinkNames($db, 'amlakowner', 'ownerid', 'ownername', $column('owner_id'));
+    $contracts = accountingLinkNames($db, 'egar', 'rakam3akdid', "IF(rakam3akd<>'',rakam3akd,CONCAT('#',rakam3akdid))", $column('egar_id'));
+    $invoices = accountingLinkNames($db, 'acc_invoices', 'invoice_id', 'invoice_number', $column('invoice_id'));
+    // A free receipt prints with its own template type.
+    $receipts = accountingLinkNames($db, 'sanad', 'idsanad', "IF(kastid IN ('','0') OR kastid IS NULL,'free2','')", $column('sanad_id'));
+    $deliveries = accountingLinkNames($db, 'sanadsarf', 'sanadid', 'sanadid', $column('sanadsarf_id'));
+    $expenseVouchers = accountingLinkNames($db, 'payment_voucher', 'expense_id', 'id', $column('masrofat_id'));
+
+    $reversals = [];
+    if (accountingLinkRows($db, "SHOW COLUMNS FROM acc_journal_entries LIKE 'reversed_entry_id'")) {
+        foreach (accountingLinkRows($db, 'SELECT e.entry_id,r.entry_id AS pair_id,r.entry_number,e.reversed_by_entry_id>0 AS was_reversed FROM acc_journal_entries e
+            JOIN acc_journal_entries r ON r.entry_id=COALESCE(NULLIF(e.reversed_by_entry_id,0),NULLIF(e.reversed_entry_id,0))
+            WHERE e.entry_id IN (' . implode(',', $entryIds) . ')') as $row) $reversals[(int)$row['entry_id']] = $row;
+    }
+    $amlak = '/aqary/admin/include/amlak/';
+    $links = [];
+    foreach ($entries as $entry) {
+        $list = [];
+        if (isset($reversals[(int)$entry['entry_id']])) {
+            $pair = $reversals[(int)$entry['entry_id']];
+            $list[] = ['bi-arrow-counterclockwise', ($pair['was_reversed'] ? 'معكوس بالقيد ' : 'يعكس القيد ') . $pair['entry_number'],
+                '/aqary/admin/accounting/modules/journal_entries/index.hnt?entry_id=' . (int)$pair['pair_id'], 'القيد المقابل'];
+        }
+        $building = (int)$entry['aqar_id'];
+        $unit = (int)$entry['subaqar_id'];
+        if (isset($invoices[(int)$entry['invoice_id']])) $list[] = ['bi-receipt', 'فاتورة ' . $invoices[(int)$entry['invoice_id']],
+            '/aqary/admin/accounting/modules/invoices/view.hnt?id=' . (int)$entry['invoice_id'], 'الفاتورة'];
+        $receipt = (int)$entry['sanad_id'];
+        if (isset($receipts[$receipt])) $list[] = ['bi-cash-coin', 'سند قبض #' . $receipt,
+            $amlak . 'selectprintform.hnt?formtype=recivevoucher&id=' . $receipt . ($receipts[$receipt] !== '' ? '&voucer_type=' . $receipts[$receipt] : ''), 'سند القبض'];
+        $delivery = (int)$entry['sanadsarf_id'];
+        if (isset($deliveries[$delivery])) $list[] = ['bi-box-arrow-up', 'تسليم مالك #' . $delivery,
+            $amlak . 'selectprintform.hnt?formtype=paymentvaoucher&id=' . $delivery, 'سند التسليم'];
+        $expense = (int)$entry['masrofat_id'];
+        if ($expense > 0) $list[] = ['bi-cart-dash', 'مصروف #' . $expense, isset($expenseVouchers[$expense])
+            ? $amlak . 'selectprintform.hnt?formtype=recivevoucher&id=' . (int)$expenseVouchers[$expense] . '&paymentvou=1&voucer_type=free' : '', 'المصروف'];
+        if (isset($buildings[$building])) $list[] = ['bi-building', $buildings[$building], $amlak . 'showeditaqar.hnt?idaqar=' . $building, 'العقار'];
+        if (isset($units[$unit])) $list[] = ['bi-door-open', 'وحدة ' . $units[$unit],
+            $building > 0 ? $amlak . 'showeditaqar.hnt?idaqar=' . $building . '&idsubaqar=' . $unit : '', 'الوحدة'];
+        if (isset($tenants[(int)$entry['tenant_id']])) $list[] = ['bi-person', $tenants[(int)$entry['tenant_id']],
+            $amlak . 'kashf_7esabmostager.hnt?mostagerid=' . (int)$entry['tenant_id'], 'المستأجر'];
+        if (isset($owners[(int)$entry['owner_id']])) $list[] = ['bi-person-badge', $owners[(int)$entry['owner_id']],
+            '/aqary/admin/accounting/modules/journal_entries/index.hnt?owner_id=' . (int)$entry['owner_id'], 'المالك: عرض قيوده'];
+        if (isset($contracts[(int)$entry['egar_id']])) $list[] = ['bi-file-earmark-text', 'عقد ' . $contracts[(int)$entry['egar_id']],
+            '/aqary/admin/accounting/modules/journal_entries/index.hnt?egar_id=' . (int)$entry['egar_id'], 'العقد: عرض قيوده'];
+        $links[(int)$entry['entry_id']] = $list;
+    }
+    return $links;
+}
+
+function accountingRenderEntryLinks(array $links) {
+    $html = '';
+    foreach ($links as $link) {
+        [$icon, $text, $url, $title] = $link;
+        $inner = '<i class="bi ' . accountingLinkEsc($icon) . ' me-1"></i>' . accountingLinkEsc($text);
+        $html .= $url !== ''
+            ? '<a class="badge text-bg-light border text-decoration-none me-1 mb-1" target="_blank" rel="noopener" href="' . accountingLinkEsc($url) . '" title="' . accountingLinkEsc($title) . '">' . $inner . '</a>'
+            : '<span class="badge text-bg-light border me-1 mb-1" title="' . accountingLinkEsc($title) . '">' . $inner . '</span>';
+    }
+    return $html;
+}
+
+function accountingEntryPageLink($entryId, $entryNumber) {
+    return '<a target="_blank" rel="noopener" href="/aqary/admin/accounting/modules/journal_entries/index.hnt?entry_id=' . (int)$entryId . '">' . accountingLinkEsc($entryNumber) . '</a>';
+}

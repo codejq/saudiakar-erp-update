@@ -5,8 +5,8 @@ require"header.php";
 if($_REQUEST['qid'])
 {
 mysql_query("update users set uniqid='' where uniqid='".trim($_REQUEST['qid'])."'");
-echo "<div align=center><h1>طھظ… طھظپط¹ظٹظ„ ط­ط³ط§ط¨ظƒ ط¨ظ†ط¬ط§ط­ </h1>
-<a href='index.php'>ط§ظ„ط¹ظˆط¯ط© ظ„ظ„ط±ط¦ظٹط³ظٹط© </a>
+echo "<div align=center><h1>تم تفعيل حسابك بنجاح </h1>
+<a href='index.php'>العودة للرئيسية </a>
 
 </div>";
 
@@ -30,7 +30,7 @@ if($_POST['register'])
 	$row = mysql_fetch_array(mysql_query($sql));
 	if($row['dd'] > 0 ) 
 	{
-		$error_str = " ط§ظ„ط±ط¬ط§ط، ط§ط®طھظٹط§ط± ط§ط³ظ… ظ…ط³طھط®ط¯ظ… ط¢ط®ط± ط­ظٹط« ط§ظ† ط§ط³ظ… ط§ظ„ظ…ط³طھط®ط¯ظ… ظ…ظˆط¬ظˆط¯ ظ…ط³ط¨ظ‚ط§ ";
+		$error_str = " الرجاء اختيار اسم مستخدم آخر حيث ان اسم المستخدم موجود مسبقا ";
 		require("./templates/register_form_templet.php");
 		exit();
 	}
@@ -39,8 +39,8 @@ if($_POST['register'])
 	$row = mysql_fetch_array(mysql_query($sql));
 	if($row['dd'] > 0 ) 
 	{
-		$error_str = " ط§ظ„ط¨ط±ظٹط¯ ظ…ط³طھط®ط¯ظ… ظ…ظ† ظ‚ط¨ظ„ ط§ظ†ظ‚ط± ظ‡ظ†ط§ ظ„ط§ط±ط³ط§ظ„ ط§ط³ظ…
-	<a href='recoveruser_password.php?user_email=".trim($_POST['user_email'])."'>	ط§ظ„ظ…ط³طھط®ط¯ظ… ظˆظƒظ„ظ…ط© ط§ظ„ظ…ط±ظˆط± ظ„ط¨ط±ظٹط¯ظƒ </a>	";
+		$error_str = " البريد مستخدم من قبل انقر هنا لارسال اسم
+	<a href='recoveruser_password.php?user_email=".trim($_POST['user_email'])."'>	المستخدم وكلمة المرور لبريدك </a>	";
 		require("./templates/register_form_templet.php");
 		exit();
 	}
@@ -52,7 +52,7 @@ if($_POST['register'])
 	$row = mysql_fetch_array(mysql_query($sql));
 	if($row['dd'] > 0 ) 
 	{
-		$error_str = " ط§ظ„ط¨ط±ظٹط¯ ط§ظ„ظ…ط¯ط®ظ„ ظ…ط³ط¬ظ„ ظ…ط³ط¨ظ‚ط§ ظٹظ…ظƒظ†ظƒ   ط§ط³طھط¹ط§ط¯ط© ظƒظ„ظ…ط© ط§ظ„ظ…ط±ظˆط± ظ…ظ† ظ‡ظ†ط§ <a href='recoveruser_password.php'>ط§ط³طھط¹ط§ط¯ط© ظƒظ„ظ…ط© ط§ظ„ظ…ط±ظˆط± </a> ";
+		$error_str = " البريد المدخل مسجل مسبقا يمكنك   استعادة كلمة المرور من هنا <a href='recoveruser_password.php'>استعادة كلمة المرور </a> ";
 		require("./templates/register_form_templet.php");
 		exit();
 	}
@@ -66,24 +66,24 @@ if($_POST['register'])
 		
 		//*******activation mail 
 		$charset='utf-8';
-		$mailsendername = "ظ…ظˆظ‚ط¹ ظ…ط¹ظ„ظ…ط§طھ ط§ظ„ط³ط¹ظˆط¯ظٹط© " ;
+		$mailsendername = "موقع معلمات السعودية " ;
 		$mailsendername="=?$charset?B?".base64_encode($mailsendername)."?=\n";
-		$mailsubject = "طھظپط¹ظٹظ„ ط­ط³ط§ط¨ظƒ ظپظٹ ظ…ظˆظ‚ط¹ ط§ظ„ظ…ط¹ظ„ظ…ط§طھ   " ;
+		$mailsubject = "تفعيل حسابك في موقع المعلمات   " ;
 		$mailsubject="=?$charset?B?".base64_encode($mailsubject)."?=\n";
 		$mailbody="<html dir=rtl><head>
 					<meta http-equiv='Content-Language' content='ar-sa'>
 					<meta http-equiv='Content-Type' content='text/html; charset=utf-8'>
 					<body>
-					ط§ظ„ط³ظ„ط§ظ… ط¹ظ„ظٹظƒظ… ظˆط±ط­ظ…ط© ط§ظ„ظ„ظ‡ ظˆط¨ط±ظƒط§طھظ‡ 
+					السلام عليكم ورحمة الله وبركاته 
 					<br>
-					ط§ظ†ظ‚ط± ط¹ظ„ظ‰ ط§ظ„ط±ط§ط¨ط· ط§ظ„طھط§ظ„ظٹ ظ„طھظپط¹ظٹظ„ ط­ط³ط§ط¨ظƒ ظپظٹ ظ…ظˆظ‚ط¹ ط§ظ„ظ…ط¹ظ„ظ…ط§طھ 
+					انقر على الرابط التالي لتفعيل حسابك في موقع المعلمات 
 					<br>
 					<a href=\"http://ksateachers.com/register.php?qid=$uqid\" target='_blank'>
 					http://ksateachers.com/register.php?qid=$uqid</a>
 					<br>
  
 					<br>
-					طھط­ظٹط§طھظٹ 
+					تحياتي 
 					<br>
 					$userinfo[user_realname]
 
@@ -108,7 +108,7 @@ if($_POST['register'])
 	
 	if($_POST['user_password'] != $_POST['user_password2'])
 	{
-		$error_str = "  ظƒظ„ظ…ط© ط§ظ„ظ…ط±ظˆط± ط§ظ„ظ…ط¯ط®ظ„ط© ظ…ط®طھظ„ظپط© ط¹ظ† ط§ط¹ط§ط¯ط© ظƒظ„ظ…ط© ط§ظ„ظ…ط±ظˆط± ";
+		$error_str = "  كلمة المرور المدخلة مختلفة عن اعادة كلمة المرور ";
 	}
  
 
@@ -116,8 +116,8 @@ if($_POST['register'])
 
 if($_REQUEST['thankyou'])
 {
-	$thanksmessage = "ط´ظƒط±ط§ ظ„ظƒ طھظ… طھط³ط¬ظٹظ„ظƒ ط¨ظ†ط¬ط§ط­  <br> طھظ… ط§ط±ط³ط§ظ„ ط¨ط±ظٹط¯ ط§ظ„طھظپط¹ظٹظ„ ط§ظ„ظٹ ط¨ط±ظٹط¯ظƒ ظ‚ظ… ط¨ط§طھط¨ط§ط¹ ط§ظ„طھط¹ظ„ظٹظ…ط§طھ ظ„ط§ط³طھظƒظ…ط§ظ„ ط§ظ„طھظپط¹ظٹظ„  ";
-	require("t./templates/hankyou_templet.php");
+	$thanksmessage = "شكرا لك تم تسجيلك بنجاح  <br> تم ارسال بريد التفعيل الي بريدك قم باتباع التعليمات لاستكمال التفعيل  ";
+	require("./templates/thankyou_templet.php");
 	exit();
 }
 
@@ -134,7 +134,7 @@ if(!$logedin)
 }
 else
 {
-	$thanksmessage = "ط§ظ†طھ ظ…ط³ط¬ظ„ ط¨ط§ظ„ظ…ظˆظ‚ط¹ ط¨ط§ظ„ظپط¹ظ„   ";
+	$thanksmessage = "انت مسجل بالموقع بالفعل   ";
 	require("./templates/thankyou_templet.php");
 }
 

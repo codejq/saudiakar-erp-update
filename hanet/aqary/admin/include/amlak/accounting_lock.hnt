@@ -1,0 +1,95 @@
+<?php
+/**
+ * Posted = locked: management screens ask here before changing a synchronized record.
+ * To correct one: reverse its entry in accounting, fix it, then sync again.
+ */
+require_once __DIR__ . '/receipt_commission_helpers.hnt';
+
+function accountingReversalReady($link): bool {
+    static $ready = [];
+    $key = spl_object_id($link);
+    if (!isset($ready[$key])) {
+        $ready[$key] = count(receiptCommissionRows($link, "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE()
+            AND ((TABLE_NAME='acc_journal_entries' AND COLUMN_NAME IN ('reversed_by_entry_id','reversed_entry_id'))
+                OR (TABLE_NAME='acc_invoices' AND COLUMN_NAME='reversed_date'))")) === 3;
+    }
+    return $ready[$key];
+}
+
+/** Restricts journal queries to entries that were not reversed. */
+function accountingLiveEntrySql($link): string {
+    return accountingReversalReady($link) ? ' AND COALESCE(reversed_by_entry_id,0)=0' : '';
+}
+
+function accountingTablesExist($link): bool {
+    static $exists = [];
+    $key = spl_object_id($link);
+    if (!isset($exists[$key])) {
+        $exists[$key] = !empty(receiptCommissionRows($link, "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE()
+            AND TABLE_NAME='acc_journal_entries' AND COLUMN_NAME='masrofat_id'"));
+    }
+    return $exists[$key];
+}
+
+/** Arabic reason when the record is posted; empty string when it may be changed. */
+function accountingLockReason($link, string $type, $id): string {
+    $sources = ['sanad' => ['sanad_id', "'sanad'"], 'sanadsarf' => ['sanadsarf_id', "'sanadsarf'"], 'masrofat' => ['masrofat_id', "'masrofat','office_expense'"]];
+    if (!isset($sources[$type])) throw new InvalidArgumentException('Unknown accounting source');
+    $id = (int)$id;
+    if ($id <= 0) return '';
+    if ($type === 'masrofat' && receiptCommissionRows($link, "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='deposit_settlements'")
+        && receiptCommissionRows($link, 'SELECT settlement_id FROM deposit_settlements WHERE expense_id=? LIMIT 1', [$id])) {
+        return 'المصروف تابع لتسوية تأمين مستأجر؛ يعدل من شاشة التسوية.';
+    }
+    if (!accountingTablesExist($link)) return '';
+    [$column, $references] = $sources[$type];
+    $entries = receiptCommissionRows($link, "SELECT entry_number FROM acc_journal_entries WHERE ({$column}=? OR (reference_type IN ({$references}) AND reference_id=?))
+        AND status<>'cancelled'" . accountingLiveEntrySql($link) . ' LIMIT 1', [$id, $id]);
+    return $entries ? 'هذه الحركة مرحّلة محاسبياً بالقيد ' . $entries[0]['entry_number'] . '. اعكس القيد من المحاسبة أولاً.' : '';
+}
+
+/** Reason when any live posted entry belongs to the property. */
+function accountingPropertyLockReason($link, $propertyId): string {
+    if ((int)$propertyId <= 0 || !accountingTablesExist($link)) return '';
+    return receiptCommissionRows($link, "SELECT entry_id FROM acc_journal_entries WHERE aqar_id=? AND status='posted'
+        AND COALESCE(reference_type,'')<>'reversal'" . accountingLiveEntrySql($link) . ' LIMIT 1', [(int)$propertyId])
+        ? 'للعقار قيود محاسبية مرحّلة؛ لا يمكن حذف بياناته أو تصفيرها.' : '';
+}
+
+/** Delete an unposted owner delivery and return its income (and expenses) to the waiting list. */
+function accountingDeleteDelivery($link, $deliveryId): void {
+    $link->begin_transaction();
+    try {
+        $row = receiptCommissionRows($link, 'SELECT * FROM sanadsarf WHERE sanadid=? FOR UPDATE', [(int)$deliveryId])[0] ?? null;
+        if (!$row) throw new RuntimeException('السند غير موجود');
+        $reason = accountingLockReason($link, 'sanadsarf', $deliveryId);
+        if ($reason !== '') throw new RuntimeException($reason);
+        $marker = trim((string)$row['tasfia']);
+        if ((int)$row['iderad'] > 0 && $marker !== '') {
+            $others = receiptCommissionRows($link, 'SELECT sanadid FROM sanadsarf WHERE tasfia=? AND aqarid=? AND sanadid<>? LIMIT 1 FOR UPDATE', [$marker, (int)$row['aqarid'], (int)$deliveryId]);
+            $expenses = receiptCommissionRows($link, 'SELECT idmasrof FROM masrofat WHERE tasfia=? AND idaqar=? LIMIT 1 FOR UPDATE', [$marker, (int)$row['aqarid']]);
+            // Expenses of a batch are shared between its vouchers, so one cannot leave alone.
+            if ($others && $expenses) throw new RuntimeException('السند جزء من تسليم مجمع خُصمت منه مصروفات؛ لا يمكن حذفه منفرداً.');
+            receiptCommissionQuery($link, "UPDATE eradat SET tasfia='' WHERE iderad=? AND tasfia=?", [(int)$row['iderad'], $marker])->close();
+            if (!$others) receiptCommissionQuery($link, "UPDATE masrofat SET tasfia='' WHERE tasfia=? AND idaqar=?", [$marker, (int)$row['aqarid']])->close();
+        }
+        if ((int)$row['iderad'] === 0 && $marker !== '' && (int)$row['aqarid'] > 0) {
+            // A full settlement closed several vouchers together; reopen them all, unless one is posted.
+            foreach (receiptCommissionRows($link, 'SELECT sanadid FROM sanadsarf WHERE tasfia=? AND aqarid=? AND iderad=0 AND sanadid<>? FOR UPDATE', [$marker, (int)$row['aqarid'], (int)$deliveryId]) as $other) {
+                if (accountingLockReason($link, 'sanadsarf', $other['sanadid']) !== '') throw new RuntimeException('سند آخر من نفس التصفية مرحّل محاسبياً؛ اعكس قيده أولاً.');
+            }
+            receiptCommissionQuery($link, "UPDATE eradat e LEFT JOIN sanadsarf d ON d.iderad=e.iderad AND d.iderad>0 SET e.tasfia='' WHERE e.tasfia=? AND e.idaqar=? AND d.sanadid IS NULL", [$marker, (int)$row['aqarid']])->close();
+            receiptCommissionQuery($link, "UPDATE masrofat SET tasfia='' WHERE tasfia=? AND idaqar=?", [$marker, (int)$row['aqarid']])->close();
+            receiptCommissionQuery($link, "UPDATE sanadsarf SET tasfia='' WHERE tasfia=? AND aqarid=? AND iderad=0", [$marker, (int)$row['aqarid']])->close();
+        }
+        // Insurance damages delivered with this voucher wait for the next one.
+        if (receiptCommissionRows($link, "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='deposit_settlements'")) {
+            receiptCommissionQuery($link, 'UPDATE deposit_settlements SET owner_sanadsarf_id=0 WHERE owner_sanadsarf_id=?', [(int)$deliveryId])->close();
+        }
+        receiptCommissionQuery($link, 'DELETE FROM sanadsarf WHERE sanadid=?', [(int)$deliveryId])->close();
+        $link->commit();
+    } catch (Throwable $error) {
+        $link->rollback();
+        throw $error;
+    }
+}

@@ -1,0 +1,161 @@
+<?php
+/**
+ * Receipt calculator: pure functions, no database access and no output.
+ * Rules are recorded in ACCOUNTING_RENTAL_SYNC.md (section 1.1). Money is handled in cents.
+ * Loading and storing: receipt_components_store.hnt.
+ */
+const RECEIPT_COMPONENT_VAT_PERCENT = 15;
+const RECEIPT_COMPONENT_KEYS = ['rent', 'rent_vat', 'commission', 'commission_vat', 'water', 'services', 'insurance', 'other', 'other_vat', 'unclassified'];
+
+function receiptComponentsCents($value): int {
+    return (int)round((float)$value * 100);
+}
+
+function receiptComponentsMoney(array $cents): array {
+    return array_map(function ($value) { return $value / 100; }, $cents);
+}
+
+/**
+ * Everything the tenant owes for one installment, in cents, plus review warnings.
+ * vat_type: 0 none, 1 commission only, 2 rent and commission. Water, services and
+ * insurance never carry VAT.
+ */
+function receiptInstallmentComponents(array $installment, array $contract): array {
+    $total = receiptComponentsCents($installment['kastvalue'] ?? 0);
+    $water = receiptComponentsCents($installment['water'] ?? 0);
+    $commission = receiptComponentsCents($installment['sa3ee'] ?? 0);
+    $services = receiptComponentsCents($installment['services'] ?? 0);
+    $storedRent = receiptComponentsCents($installment['base_rent_amount'] ?? 0);
+    $contractInsurance = receiptComponentsCents($contract['tamen'] ?? 0);
+    $isFirst = (int)($installment['kastname'] ?? 0) === 1;
+    $afterCharges = $total - $water - $commission - $services;
+    $warnings = [];
+    $insurance = 0;
+    $unclassified = 0;
+
+    if ($storedRent > 0) {
+        $rent = $storedRent;
+        // Same test as the receipt form: insurance counts only when the stored total holds it.
+        if ($isFirst && $contractInsurance > 0 && $afterCharges + 1 >= $storedRent + $contractInsurance) {
+            $insurance = $contractInsurance;
+        }
+        $unclassified = $afterCharges - $rent - $insurance;
+        if ($unclassified < 0) {
+            $warnings[] = 'قيمة القسط أقل من الإيجار والرسوم المسجلة';
+            $rent += $unclassified;
+            $unclassified = 0;
+        } elseif ($unclassified > 0) {
+            $warnings[] = 'جزء من قيمة القسط غير مصنف';
+        }
+    } else {
+        $rent = $afterCharges;
+        if ($isFirst && $contractInsurance > 0) $warnings[] = 'قسط قديم: تعذر فصل التأمين عن الإيجار';
+    }
+    if ($rent < 0) $warnings[] = 'الإيجار المحسوب سالب';
+
+    $vatType = (int)($contract['vat_type'] ?? 0);
+    $vat = function ($amount) { return (int)round(max(0, $amount) * RECEIPT_COMPONENT_VAT_PERCENT / 100); };
+    return [
+        'components' => [
+            'rent' => $rent,
+            'rent_vat' => $vatType === 2 ? $vat($rent) : 0,
+            'commission' => $commission,
+            'commission_vat' => in_array($vatType, [1, 2], true) ? $vat($commission) : 0,
+            'water' => $water,
+            'services' => $services,
+            'insurance' => $insurance,
+            // Only free receipts use these, through the review page.
+            'other' => 0,
+            'other_vat' => 0,
+            'unclassified' => $unclassified,
+        ],
+        'warnings' => $warnings,
+    ];
+}
+
+/** Split one payment over the remaining components; never negative, never above what remains. */
+function receiptSplitPayment(int $payment, array $remaining, array $fees = []): array {
+    $split = array_fill_keys(RECEIPT_COMPONENT_KEYS, 0);
+    // Older receipts recorded their fees whole; keep those and split only the rest.
+    if ($fees) {
+        $left = $payment;
+        foreach ($fees as $key => $fee) {
+            $split[$key] = max(0, min($fee, $remaining[$key], $left));
+            $left -= $split[$key];
+            $remaining[$key] = 0;
+        }
+        foreach (receiptSplitPayment($left, $remaining) as $key => $value) $split[$key] += $value;
+        return $split;
+    }
+    $open = array_filter($remaining, function ($value) { return $value > 0; });
+    $openTotal = array_sum($open);
+    $payable = min($payment, $openTotal);
+    if ($payable > 0) {
+        $fractions = [];
+        foreach ($open as $key => $value) {
+            $exact = $payable * $value;
+            $split[$key] = intdiv($exact, $openTotal);
+            $fractions[$key] = $exact % $openTotal;
+        }
+        arsort($fractions);
+        $left = $payable - array_sum($split);
+        foreach (array_keys($fractions) as $key) {
+            if ($left <= 0) break;
+            if ($split[$key] < $open[$key]) { $split[$key]++; $left--; }
+        }
+    }
+    // Up to 20 halalas is the rounding the screens already accept; more stays visible for review.
+    $extra = $payment - $payable;
+    $split[$extra <= 20 && $payable > 0 ? 'rent' : 'unclassified'] += $extra;
+    return $split;
+}
+
+/**
+ * Split a receipt proportionally (B11). $earlierAmounts are the previous receipts of the
+ * same installment in order, so all receipts together equal the installment exactly. Each
+ * is an amount, or ['amount', 'components'] (stored), or ['amount', 'fees'] (older receipt).
+ */
+function receiptComponents(array $installment, array $contract, $amount, array $earlierAmounts = [], array $fees = []): array {
+    $full = receiptInstallmentComponents($installment, $contract);
+    $warnings = $full['warnings'];
+    $remaining = $full['components'];
+    foreach ($earlierAmounts as $earlier) {
+        $used = is_array($earlier)
+            ? ($earlier['components'] ?? receiptSplitPayment(receiptComponentsCents($earlier['amount']), $remaining, $earlier['fees'] ?? []))
+            : receiptSplitPayment(receiptComponentsCents($earlier), $remaining);
+        foreach ($used as $key => $value) {
+            $remaining[$key] = max(0, $remaining[$key] - $value);
+        }
+    }
+    $payment = receiptComponentsCents($amount);
+    $open = array_sum(array_filter($remaining, function ($value) { return $value > 0; }));
+    if ($payment <= 0) $warnings[] = 'مبلغ السند غير صحيح';
+    if ($payment > $open + 20) $warnings[] = 'المبلغ أكبر من المتبقي على القسط';
+    foreach ($fees as $key => $fee) {
+        if ($fee > $remaining[$key]) $warnings[] = 'الرسوم المسجلة أكبر من رسوم القسط';
+    }
+    return ['components' => receiptSplitPayment(max(0, $payment), $remaining, $fees), 'full' => $full['components'], 'warnings' => $warnings];
+}
+
+/** Stored office percentage: 250 means 2.5. Values up to 100 are read as they are today. */
+function receiptOfficeRate($stored): float {
+    $rate = (float)$stored;
+    return $rate > 100 ? $rate / 100 : $rate;
+}
+
+/**
+ * What the owner receives from one receipt before expenses, in cents.
+ * The fee is on rent + rent VAT (B12), without VAT on the fee (B4).
+ */
+function receiptOwnerShare(array $components, array $property): array {
+    if (($property['rent_income_to'] ?? 'owner') === 'office') {
+        return ['fee' => 0, 'owner_vat' => 0, 'office_vat' => $components['rent_vat'], 'owner_net' => 0];
+    }
+    $ownerFiles = ($property['rent_vat_filed_by'] ?? 'office') === 'owner';
+    $fee = (int)round(($components['rent'] + $components['rent_vat']) * receiptOfficeRate($property['persentage'] ?? 0) / 100);
+    $ownerVat = $ownerFiles ? $components['rent_vat'] : 0;
+    $net = $components['rent'] + $ownerVat - $fee;
+    if (($property['addwaterto'] ?? '') === 'malek') $net += $components['water'];
+    if (($property['addtameento'] ?? '') === 'malek') $net += $components['insurance'];
+    return ['fee' => $fee, 'owner_vat' => $ownerVat, 'office_vat' => $components['rent_vat'] - $ownerVat, 'owner_net' => $net];
+}

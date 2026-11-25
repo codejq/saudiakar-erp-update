@@ -47,7 +47,7 @@ require_once 'sales_representative_helpers.hnt';
 $calendar = new CalendarManager();
 
 // Initialize user data from session
-$user_data = isset($_SESSION['user_data']) ? $_SESSION['user_data'] : ['name' => 'Unknown', 'userid' => 1];
+$user_data = ['name' => (string)($_SESSION['namev'] ?? ''), 'userid' => intval($_SESSION['useridv'] ?? 0)];
 
 // Get action and trim whitespace
 $action = isset($_REQUEST['action']) ? trim($_REQUEST['action']) : '';
@@ -234,10 +234,11 @@ function getInstallment($data, $link, $calendar) {
 /**
  * Record payment for installment
  */
-function recordPayment($data, $link, $user_data) {
+function recordPayment($data, $link, $user_data, $ownTransaction = true) {
     $response = ['success' => false, 'message' => '', 'data' => null];
 
-    mysql_query("START TRANSACTION", $link);
+    // The bulk payment runs many of these inside its own transaction.
+    if ($ownTransaction) mysql_query("START TRANSACTION", $link);
 
     try {
         $kastid = isset($data['kastid']) ? intval($data['kastid']) : 0;
@@ -246,7 +247,8 @@ function recordPayment($data, $link, $user_data) {
         $paymentMethod = isset($data['payment_method']) ? mysql_real_escape_string($data['payment_method']) : 'cash';
         $referenceNumber = isset($data['reference_number']) ? mysql_real_escape_string($data['reference_number']) : '';
         $notes = isset($data['notes']) ? mysql_real_escape_string($data['notes']) : '';
-        $createReceipt = isset($data['create_receipt']) && $data['create_receipt'];
+        // Money without a receipt never reaches accounting.
+        $createReceipt = true;
         $bankid  = isset($data['bankid']) ? floatval($data['bankid']) : 0;
         // Get installment
         // Get installment with contract VAT info in single query
@@ -279,21 +281,23 @@ function recordPayment($data, $link, $user_data) {
         $totalAmount = $installment['kastvalue'] + $commesion_vat + $depositeamount_vat ;
 
         // Calculate new amount paid
-        $newAmountPaid = ($installment['amount_paid'] ?? 0) + $amount;
-        $newAmountRemaining = $totalAmount - $newAmountPaid;
+        // Older screens update only one of the two paid fields; the larger one is the truth.
+        $currentPaid = max(floatval($installment['amount_paid'] ?? 0), floatval($installment['dof3at'] ?? 0));
+        $newAmountPaid = round($currentPaid + $amount, 2);
+        $newAmountRemaining = round($totalAmount - $newAmountPaid, 2);
 
         // Validate amount
         if ($amount <= 0) {
             throw new Exception('المبلغ يجب أن يكون أكبر من صفر');
         }
 
-        if ($newAmountPaid > $totalAmount) {
+        if ($newAmountPaid > $totalAmount + 0.01) {
             throw new Exception('المبلغ المدفوع أكبر من المطلوب');
         }
 
         // Determine new status
         $newStatus = 'paid';
-        if ($newAmountRemaining > 0) {
+        if ($newAmountRemaining > 0.01) {
             $newStatus = 'partial';
         }
 
@@ -308,7 +312,7 @@ function recordPayment($data, $link, $user_data) {
         }
 
         // Get old payment tracking fields for compatibility with sanad.hnt system
-        $oldDof3at = isset($installment['dof3at']) ? floatval($installment['dof3at']) : 0;
+        $oldDof3at = $currentPaid;
         $oldDof3atTafsel = isset($installment['dof3at_tafsel']) ? $installment['dof3at_tafsel'] : '';
 
         // Calculate new dof3at (old system field)
@@ -349,7 +353,9 @@ function recordPayment($data, $link, $user_data) {
                 created_by_userid = " . ($user_data['userid'] ?? 1) . ",
                 created_at = " . time();
 
-        mysql_query($sql, $link);
+        if (!mysql_query($sql, $link)) {
+            throw new Exception('فشل تسجيل تاريخ الدفعة');
+        }
         $paymentHistoryId = mysql_insert_id();
 
         // Create receipt if requested (following sanad_process.hnt approach)
@@ -366,6 +372,9 @@ function recordPayment($data, $link, $user_data) {
             $contractResult = mysql_query($sql, $link);
             $contract = mysql_fetch_assoc($contractResult);
 
+            if (!$contract || intval($contract['idaqar'] ?? 0) <= 0) {
+                throw new Exception('القسط غير مرتبط بعقد ووحدة حالياً؛ سجل الدفعة من سند القبض.');
+            }
             if ($contract) {
                 // Check if this is the first payment or a subsequent payment
                 // Only record fees (water, sa3ee, services) on FIRST payment
@@ -395,9 +404,23 @@ function recordPayment($data, $link, $user_data) {
                     }
                 }
                 $total_vat = $commesion_vat + $depositeamount_vat;
+                $receiptRentVat = $total_vat;
+                $mytamen = 0;
+                require_once __DIR__ . '/receipt_components_store.hnt';
+                $receiptBreakdown = receiptComponentsPrepare($link, $kastid, $amount, $contract, $oldDof3at);
+                if ($receiptBreakdown !== null) {
+                    $receiptParts = receiptComponentsMoney($receiptBreakdown['components']);
+                    $mysa3ee = $receiptParts['commission'];
+                    $mywater = $receiptParts['water'];
+                    $myservices = $receiptParts['services'];
+                    $mytamen = $receiptParts['insurance'];
+                    $commesion_vat = $receiptParts['commission_vat'];
+                    $receiptRentVat = $receiptParts['rent_vat'];
+                    $total_vat = $commesion_vat + $receiptRentVat;
+                }
 
                 // Generate unique form ID
-                $formuid = str_replace('.', '', microtime() . rand(11111, 99999));
+                $formuid = !empty($data['receipt_formuid']) ? mysql_real_escape_string($data['receipt_formuid'], $link) : str_replace('.', '', microtime() . rand(11111, 99999));
 
                 // Map payment method to nakda value (following sanad.hnt convention)
                 // payment_method is already numeric: 1=cash, 2=check, 3=other, 4=transfer, 5=network
@@ -439,9 +462,12 @@ function recordPayment($data, $link, $user_data) {
                         mywater='$mywater',
                         bankid = '$bankid ',
                         services='$myservices',
+                        tamen='$mytamen',
                         formuid='$formuid'";
 
-                mysql_query($sql, $link);
+                if (!mysql_query($sql, $link)) {
+                    throw new Exception('فشل تسجيل الإيراد');
+                }
 
                 // Insert receipt voucher (sanad table - following sanad_process.hnt structure)
                 $sql = "INSERT INTO sanad SET
@@ -461,7 +487,7 @@ function recordPayment($data, $link, $user_data) {
                         attachedimages='',
                         kastid='$kastid',
                         commesion_vat='$commesion_vat',
-                        depositeamount_vat='$total_vat',
+                        depositeamount_vat='$receiptRentVat',
                         payment_type='$nakda',
                         sales_representative_userid='" . $salesCommission['representative_userid'] . "',
                         sales_commission_type='" . $salesCommission['type'] . "',
@@ -471,11 +497,14 @@ function recordPayment($data, $link, $user_data) {
                         bankid = '$bankid ',
                         formuid='$formuid'";
 
-                mysql_query($sql, $link);
+                if (!mysql_query($sql, $link)) {
+                    throw new Exception('فشل حفظ سند القبض');
+                }
                 $sanadId = mysql_insert_id();
 
                 // Update sanadrakam with the auto-generated ID
                 if ($sanadId > 0) {
+                    if ($receiptBreakdown !== null) receiptComponentsStore($link, $sanadId, $receiptBreakdown);
                     mysql_query("UPDATE eradat SET sanadrakam = '$sanadId' WHERE formuid = '$formuid'", $link);
                     mysql_query("UPDATE sanad SET sanadrakam = '$sanadId' WHERE formuid = '$formuid'", $link);
 
@@ -507,7 +536,7 @@ function recordPayment($data, $link, $user_data) {
         updateContractStatusFromInstallments($installment['egar_id'], $link);
 
         // Commit transaction
-        mysql_query("COMMIT", $link);
+        if ($ownTransaction) mysql_query("COMMIT", $link);
 
         $response['success'] = true;
         $response['message'] = 'تم تسجيل الدفعة بنجاح' . ($sanadId ? ' وتم إنشاء سند القبض رقم ' . $sanadId : '');
@@ -519,7 +548,8 @@ function recordPayment($data, $link, $user_data) {
             'sanad_id' => $sanadId
         ];
 
-    } catch (Exception $e) {
+    } catch (Throwable $e) {
+        if (!$ownTransaction) throw $e;
         mysql_query("ROLLBACK", $link);
         $response['message'] = $e->getMessage();
     }
@@ -948,6 +978,18 @@ function addInstallment($data, $link, $user_data, $calendar) {
 function markAllAsPaid($data, $link, $user_data) {
     $response = ['success' => false, 'message' => '', 'data' => null];
 
+    require_once __DIR__ . '/receipt_commission_helpers.hnt';
+    $fullAccess = receiptCommissionRows($link, 'SELECT g.allprevilage FROM user u JOIN usergroups g ON g.groupid=u.groupid WHERE u.userid=?', [intval($_SESSION['useridv'] ?? 0)]);
+    $token = $data['csrf_token'] ?? '';
+    if (empty($fullAccess[0]['allprevilage'])) {
+        $response['message'] = 'هذه العملية لأصحاب الصلاحيات الكاملة فقط.';
+        return $response;
+    }
+    if (!is_string($token) || empty($_SESSION['bulk_payment_csrf']) || !hash_equals($_SESSION['bulk_payment_csrf'], $token)) {
+        $response['message'] = 'انتهت صلاحية الصفحة. أعد تحميلها.';
+        return $response;
+    }
+
     mysql_query("START TRANSACTION", $link);
 
     try {
@@ -972,12 +1014,10 @@ function markAllAsPaid($data, $link, $user_data) {
             throw new Exception('لا توجد أقساط غير مدفوعة');
         }
 
-        // Update all unpaid installments
+        // No money is received here, so the paid amounts are not changed.
         $sql = "UPDATE aksat SET
                 status = 'paid',
                 iscomplete = 1,
-                paid_date = '$now',
-                amount_paid = kastvalue + IFNULL(water, 0) + IFNULL(sa3ee, 0) + IFNULL(services, 0) + IFNULL(late_fee, 0),
                 amount_remaining = 0,
                 updated_at = '$now'
                 WHERE egar_id = '$egarId'
@@ -995,7 +1035,8 @@ function markAllAsPaid($data, $link, $user_data) {
         mysql_query("COMMIT", $link);
 
         $response['success'] = true;
-        $response['message'] = "تم تحديد $count قسط كمدفوع";
+        if (function_exists('loginfo')) loginfo('critical', 'update', "تحديد $count قسط كمدفوع بلا سندات، عقد $egarId", '', 'aksat', $egarId, $link);
+        $response['message'] = "تم تحديد $count قسط كمدفوع بلا سندات قبض";
         $response['data'] = ['updated_count' => $count];
 
     } catch (Exception $e) {
@@ -1007,116 +1048,99 @@ function markAllAsPaid($data, $link, $user_data) {
 }
 
 /**
- * Record bulk payment across multiple installments
+ * Record bulk payment across multiple installments.
+ * One receipt per installment, oldest first, through recordPayment(); all or nothing.
  */
 function bulkPayment($data, $link, $user_data) {
+    require_once __DIR__ . '/receipt_components_store.hnt';
     $response = ['success' => false, 'message' => '', 'data' => null];
+
+    if (!receiptCommissionCan($link, '41', 'adds')) {
+        $response['message'] = 'ليس لديك صلاحية إضافة سند قبض.';
+        return $response;
+    }
+    $token = $data['csrf_token'] ?? '';
+    if (!is_string($token) || empty($_SESSION['bulk_payment_csrf']) || !hash_equals($_SESSION['bulk_payment_csrf'], $token)) {
+        $response['message'] = 'انتهت صلاحية الصفحة. أعد تحميلها.';
+        return $response;
+    }
 
     mysql_query("START TRANSACTION", $link);
 
     try {
         $egarId = isset($data['egar_id']) ? intval($data['egar_id']) : 0;
-        $amount = isset($data['amount']) ? floatval($data['amount']) : 0;
-        $paymentMethod = isset($data['payment_method']) ? mysql_real_escape_string($data['payment_method']) : 'cash';
-        $referenceNumber = isset($data['reference_number']) ? mysql_real_escape_string($data['reference_number']) : '';
-
-        if (!$egarId) {
-            throw new Exception('معرف العقد مطلوب (egar_id)');
+        $uid = (string)($data['formuid'] ?? '');
+        $method = intval($data['payment_method'] ?? 0);
+        $bankId = $method === 1 ? 0 : intval($data['bankid'] ?? 0);
+        $dateParts = explode('/', trim((string)($data['payment_date'] ?? '')));
+        if ($egarId <= 0) throw new Exception('معرف العقد مطلوب');
+        if (!preg_match('/^[a-f0-9]{32}$/D', $uid)) throw new Exception('تعذر التحقق من العملية. أعد تحميل الصفحة.');
+        if (!in_array($method, [1, 2, 3, 4, 5], true)) throw new Exception('طريقة الدفع غير صحيحة');
+        if (count($dateParts) !== 3 || !ctype_digit(implode('', $dateParts)) || (intval($dateParts[2]) >= 1900 && !checkdate(intval($dateParts[1]), intval($dateParts[0]), intval($dateParts[2])))) {
+            throw new Exception('تاريخ الدفع غير صحيح');
         }
-        if ($amount <= 0) {
-            throw new Exception('المبلغ يجب أن يكون أكبر من صفر (amount)');
+        $left = receiptCommissionCents(trim((string)($data['amount'] ?? '')));
+        if ($left <= 0) throw new Exception('المبلغ يجب أن يكون أكبر من صفر');
+
+        // Serialize payments of the contract; a repeated submit returns the first result.
+        $contract = receiptCommissionRows($link, 'SELECT * FROM egar WHERE rakam3akdid=? FOR UPDATE', [$egarId])[0] ?? null;
+        if (!$contract) throw new Exception('العقد غير موجود');
+        $done = receiptCommissionRows($link, 'SELECT idsanad FROM sanad WHERE formuid LIKE ? ORDER BY idsanad', ['bulk' . $uid . '%']);
+        if ($done) {
+            mysql_query("COMMIT", $link);
+            return ['success' => true, 'message' => 'تم تنفيذ هذه الدفعة مسبقاً ولم تتكرر.', 'data' => ['receipts' => array_column($done, 'idsanad'), 'paid_count' => 0, 'partial_count' => 0]];
         }
+        $unit = receiptCommissionRows($link, 'SELECT idaqar FROM amlakdetails WHERE rakam3akdid=? LIMIT 1', [$egarId])[0] ?? null;
+        if (!$unit) throw new Exception('العقد غير مرتبط بوحدة حالياً؛ سجل الدفعة من سند القبض.');
+        $scope = receiptCommissionScope($link, 's');
+        if (!receiptCommissionRows($link, "SELECT s.idaqar FROM amlak s WHERE s.idaqar=? AND {$scope}", [intval($unit['idaqar'])])) throw new Exception('العقار خارج صلاحيات المستخدم.');
+        if ($bankId > 0 && !receiptCommissionRows($link, 'SELECT id FROM bankacounts WHERE id=? AND ownerid2 IN (0,?)', [$bankId, intval($unit['idaqar'])])) throw new Exception('الحساب البنكي غير صحيح.');
 
-        $now = time();
-        $remainingAmount = $amount;
-        $paidCount = 0;
-        $partialCount = 0;
-
-        // Get unpaid installments in chronological order
-        $sql = "SELECT * FROM aksat
-                WHERE egar_id = '$egarId'
-                AND iscomplete = 0
-                AND status NOT IN ('cancelled', 'paid')
-                ORDER BY kastdate ASC";
-
-        $result = mysql_query($sql, $link);
-
-        while ($installment = mysql_fetch_assoc($result) && $remainingAmount > 0) {
-            // Calculate total amount for this installment
-            $totalAmount = $installment['kastvalue'] +
-                          ($installment['water'] ?? 0) +
-                          ($installment['sa3ee'] ?? 0) +
-                          ($installment['services'] ?? 0) +
-                          ($installment['late_fee'] ?? 0);
-
-            $currentPaid = $installment['amount_paid'] ?? 0;
-            $amountNeeded = $totalAmount - $currentPaid;
-
-            if ($remainingAmount >= $amountNeeded) {
-                // Full payment
-                $paymentForThis = $amountNeeded;
-                $newPaid = $totalAmount;
-                $newRemaining = 0;
-                $newStatus = 'paid';
-                $isComplete = 1;
-                $paidCount++;
-            } else {
-                // Partial payment
-                $paymentForThis = $remainingAmount;
-                $newPaid = $currentPaid + $remainingAmount;
-                $newRemaining = $totalAmount - $newPaid;
-                $newStatus = 'partial';
-                $isComplete = 0;
-                $partialCount++;
-            }
-
-            // Update installment
-            $updateSql = "UPDATE aksat SET
-                            status = '$newStatus',
-                            iscomplete = '$isComplete',
-                            amount_paid = '$newPaid',
-                            amount_remaining = '$newRemaining',
-                            paid_date = " . ($isComplete ? "'$now'" : "paid_date") . ",
-                            updated_at = '$now'
-                            WHERE kastid = '{$installment['kastid']}'";
-
-            if (!mysql_query($updateSql, $link)) {
-                throw new Exception('فشل تحديث القسط: ' . mysql_error($link));
-            }
-
-            // Record payment history
-            $historySql = "INSERT INTO aksat_payment_history SET
-                            kastid = '{$installment['kastid']}',
-                            payment_date = '$now',
-                            amount_paid = '$paymentForThis',
-                            payment_method = '$paymentMethod',
-                            reference_number = '$referenceNumber',
-                            notes = 'دفعة جماعية',
-                            created_by_userid = " . ($user_data['userid'] ?? 1) . ",
-                            created_at = '$now'";
-
-            mysql_query($historySql, $link);
-
-            $remainingAmount -= $paymentForThis;
+        $installments = receiptCommissionRows($link, "SELECT * FROM aksat WHERE egar_id=? AND idsubaqar>0 AND iscomplete=0
+            AND status NOT IN ('cancelled','paid','waived') ORDER BY kastdate,kastid FOR UPDATE", [$egarId]);
+        $plan = [];
+        $open = 0;
+        foreach ($installments as $installment) {
+            $rentValue = getStoredBaseRent($installment);
+            $vatType = intval($contract['vat_type']);
+            // Same total recordPayment() checks.
+            $total = receiptComponentsCents($installment['kastvalue'])
+                + ($vatType > 0 ? receiptComponentsCents(round($installment['sa3ee'] * 0.15, 2)) : 0)
+                + ($vatType === 2 ? receiptComponentsCents(round($rentValue * 0.15, 2)) : 0);
+            $needed = $total - receiptComponentsCents(max(floatval($installment['amount_paid']), floatval($installment['dof3at'])));
+            if ($needed <= 1) continue;
+            $open += $needed;
+            $pay = min($left, $needed);
+            if ($pay > 0) $plan[] = ['kastid' => intval($installment['kastid']), 'pay' => $pay, 'full' => $pay === $needed];
+            $left -= $pay;
         }
+        if (!$plan) throw new Exception('لا توجد أقساط غير مدفوعة');
+        if ($left > 0) throw new Exception('المبلغ أكبر من إجمالي المتبقي على العقد: ' . number_format($open / 100, 2));
+        if (count($plan) > 60) throw new Exception('عدد الأقساط كبير؛ قسّم الدفعة.');
 
-        // Update contract status
-        updateContractStatusFromInstallments($egarId, $link);
-
-        // Commit transaction
+        $receipts = [];
+        $paidCount = $partialCount = 0;
+        foreach ($plan as $index => $item) {
+            $result = recordPayment([
+                'kastid' => $item['kastid'], 'amount' => number_format($item['pay'] / 100, 2, '.', ''),
+                'payment_date' => implode('/', $dateParts), 'payment_method' => (string)$method, 'bankid' => $bankId,
+                'reference_number' => (string)($data['reference_number'] ?? ''),
+                'notes' => trim('دفعة جماعية ' . (string)($data['notes'] ?? '')),
+                'create_receipt' => 1, 'receipt_formuid' => 'bulk' . $uid . $index,
+                'sales_representative_userid' => intval($contract['sales_representative_userid'] ?? 0),
+            ], $link, $user_data, false);
+            if (empty($result['data']['sanad_id'])) throw new Exception('تعذر إنشاء سند أحد الأقساط.');
+            $receipts[] = intval($result['data']['sanad_id']);
+            if ($item['full']) $paidCount++; else $partialCount++;
+        }
         mysql_query("COMMIT", $link);
-
         $response['success'] = true;
-        $response['message'] = 'تم تسجيل الدفعة الجماعية بنجاح';
-        $response['data'] = [
-            'paid_count' => $paidCount,
-            'partial_count' => $partialCount,
-            'remaining_amount' => $remainingAmount
-        ];
-
-    } catch (Exception $e) {
+        $response['message'] = 'تم تسجيل الدفعة وإنشاء ' . count($receipts) . ' سند قبض: ' . implode('، ', $receipts);
+        $response['data'] = ['paid_count' => $paidCount, 'partial_count' => $partialCount, 'receipts' => $receipts];
+    } catch (Throwable $e) {
         mysql_query("ROLLBACK", $link);
-        $response['message'] = $e->getMessage();
+        error_log('Bulk payment: ' . $e->getMessage());
+        $response['message'] = $e instanceof Exception && !($e instanceof mysqli_sql_exception) ? $e->getMessage() : 'تعذر تسجيل الدفعة الجماعية. لم يحفظ شيء.';
     }
 
     return $response;

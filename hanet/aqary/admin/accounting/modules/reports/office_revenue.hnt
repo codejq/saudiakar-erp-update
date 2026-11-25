@@ -1,0 +1,40 @@
+<?php
+/** Office income by property: commission, management fee, services, water and other. */
+$sc_title = 'إيرادات المكتب';
+$syncReport = [
+    'key' => 'office_revenue', 'icon' => 'bi-briefcase', 'desc' => 'العمولات وأتعاب الإدارة والخدمات والمياه والإيرادات الأخرى لكل عقار',
+    'filters' => ['date', 'owner_id', 'aqar_id', 'subaqar_id'],
+    'build' => function ($db, $f) {
+        $accounts = ['commission' => ['default_commission_revenue_account_id', 'عمولات (سعي)', ''], 'fee' => ['default_management_fee_account_id', 'أتعاب الإدارة', ''], 'services' => ['default_services_revenue_account_id', 'خدمات', ''],
+            'water' => ['default_water_revenue_account_id', 'مياه', ''], 'other' => ['default_other_revenue_account_id', 'أخرى', ''], 'rent' => ['default_invoice_revenue_account_id', 'إيجار عقارات المكتب', '4100']];
+        $byAccount = [];
+        $columns = ['property' => ['العقار', 'text']];
+        $select = $zero = [];
+        foreach ($accounts as $key => [$setting, $label, $fallback]) {
+            $id = syncReportAccount($db, $setting, $label, $fallback);
+            if (isset($byAccount[$id])) {
+                // Two kinds may share one account; show them together.
+                $columns[$byAccount[$id]][0] .= ' + ' . $label;
+                continue;
+            }
+            $byAccount[$id] = $key;
+            $columns[$key] = [$label, 'money', true];
+            $select[] = "SUM(IF(l.account_id={$id},l.credit_amount-l.debit_amount,0)) `{$key}`";
+        }
+        $columns['total'] = ['الإجمالي', 'money', true];
+        [$where, $params] = syncReportEntryWhere($f);
+        $rows = receiptCommissionRows($db, "SELECT COALESCE(je.aqar_id,0) aqar_id,COALESCE(MAX(p.aqarname),'') aqarname," . implode(',', $select) . ",SUM(l.credit_amount-l.debit_amount) total
+            FROM acc_journal_entry_lines l JOIN acc_journal_entries je ON je.entry_id=l.entry_id LEFT JOIN amlak p ON p.idaqar=je.aqar_id
+            WHERE je.status='posted' AND je.entry_date BETWEEN ? AND ? AND l.account_id IN (" . implode(',', array_keys($byAccount)) . "){$where} GROUP BY COALESCE(je.aqar_id,0) ORDER BY total DESC",
+            array_merge([$f['date_from'], $f['date_to']], $params));
+        foreach ($rows as &$row) {
+            $row['property'] = (int)$row['aqar_id'] ? [$row['aqarname'] !== '' ? $row['aqarname'] : '#' . $row['aqar_id'],
+                '/aqary/admin/accounting/modules/journal_entries/index.hnt?aqar_id=' . (int)$row['aqar_id']] : 'بلا عقار';
+        }
+        unset($row);
+        $cards = [];
+        foreach (array_intersect_key($columns, array_flip(['commission', 'fee', 'total'])) as $key => $column) $cards[$column[0]] = (float)array_sum(array_column($rows, $key));
+        return ['columns' => $columns, 'rows' => $rows, 'cards' => $cards, 'notes' => ['المبالغ بدون ضريبة ومن القيود المرحّلة. حساب إيجار عقارات المكتب قد يحتوي إيرادات فواتير أخرى سجلت عليه.']];
+    },
+];
+require __DIR__ . '/../../includes/sync_report_page.hnt';

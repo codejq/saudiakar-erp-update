@@ -1,5 +1,6 @@
 <?php
-require_once __DIR__ . '/receipt_commission_helpers.hnt';
+require_once __DIR__ . '/receipt_components_store.hnt';
+require_once __DIR__ . '/accounting_lock.hnt';
 
 function receiptCancellationToken() {
     if (empty($_SESSION['receipt_cancellation_token'])) $_SESSION['receipt_cancellation_token']=bin2hex(random_bytes(24));
@@ -15,8 +16,12 @@ function receiptCancellationAccountingReady($link) {
 function receiptCancellationGuard($link,$receipt) {
     if (!empty($receipt['accounting_entry_id'])) throw new RuntimeException('لا يمكن إلغاء سند مرتبط بالمحاسبة. عالج القيد المحاسبي أولاً.');
     if (receiptCancellationAccountingReady($link) && receiptCommissionRows($link,"SELECT entry_id FROM acc_journal_entries
-        WHERE sanad_id=? OR (reference_type='sanad' AND reference_id=?) LIMIT 1 FOR UPDATE",[(int)$receipt['idsanad'],(int)$receipt['idsanad']])) {
+        WHERE (sanad_id=? OR (reference_type='sanad' AND reference_id=?))" . accountingLiveEntrySql($link) . " LIMIT 1 FOR UPDATE",[(int)$receipt['idsanad'],(int)$receipt['idsanad']])) {
         throw new RuntimeException('للسند قيد محاسبي مرتبط؛ لا يمكن حذفه من إدارة الأملاك.');
+    }
+    if (receiptCommissionRows($link,"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='acc_invoices' AND COLUMN_NAME='sanad_id'")
+        && receiptCommissionRows($link,"SELECT invoice_id FROM acc_invoices WHERE sanad_id=? AND status<>'cancelled' LIMIT 1 FOR UPDATE",[(int)$receipt['idsanad']])) {
+        throw new RuntimeException('للسند فاتورة محاسبية؛ ألغ مسودتها من مراجعة الفواتير أولاً.');
     }
     if (receiptCommissionReady($link) && receiptCommissionRows($link,'SELECT m.idmasrof FROM masrofat m
         JOIN sanad_commission_splits c ON c.split_id=m.commission_split_id WHERE c.idsanad=? LIMIT 1 FOR UPDATE',[(int)$receipt['idsanad']])) {
@@ -43,6 +48,9 @@ function receiptCancellationRelink($link,$receiptId,$installmentId) {
         $installment=receiptCommissionRows($link,'SELECT kastid FROM aksat WHERE kastid=? AND idsubaqar=? FOR UPDATE',[(int)$installmentId,(int)$receipt['idsubaqar']]);
         if (!$installment) throw new RuntimeException('القسط المحدد لا ينتمي إلى وحدة السند.');
         receiptCommissionQuery($link,'UPDATE sanad SET kastid=? WHERE idsanad=?',[(int)$installmentId,(int)$receiptId])->close();
+        // The split belonged to the old installment; hold it for review.
+        if (receiptComponentsReady($link)) receiptCommissionQuery($link,"UPDATE sanad_components SET kastid=?,status='review',warnings=? WHERE idsanad=?",
+            [(int)$installmentId,json_encode(['تم نقل السند إلى قسط آخر'],JSON_UNESCAPED_UNICODE),(int)$receiptId])->close();
         $link->commit();
     } catch (Throwable $error) { $link->rollback(); throw $error; }
 }
@@ -57,11 +65,19 @@ function receiptCancellationDelete($link,$receiptId) {
             $settlements=receiptCommissionRows($link,'SELECT * FROM sanadsarf WHERE iderad=? FOR UPDATE',[(int)$revenue['iderad']]);
             foreach ($settlements as $settlement) {
                 if (!empty($settlement['accounting_entry_id']) || (receiptCancellationAccountingReady($link) && receiptCommissionRows($link,
-                    "SELECT entry_id FROM acc_journal_entries WHERE sanadsarf_id=? OR (reference_type='sanadsarf' AND reference_id=?) LIMIT 1 FOR UPDATE",
+                    "SELECT entry_id FROM acc_journal_entries WHERE (sanadsarf_id=? OR (reference_type='sanadsarf' AND reference_id=?))" . accountingLiveEntrySql($link) . " LIMIT 1 FOR UPDATE",
                     [(int)$settlement['sanadid'],(int)$settlement['sanadid']]))) throw new RuntimeException('يوجد تسليم مالك مرتبط بالمحاسبة؛ لا يمكن إلغاء السند.');
             }
         }
         // Validate every dependency before deleting anything.
+        if (receiptCommissionRows($link,"SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='deposit_settlements'")) {
+            if (receiptCommissionRows($link,'SELECT d.settlement_id FROM deposit_settlements d JOIN aksat k ON k.egar_id=d.egar_id
+                JOIN sanad_components c ON c.kastid=k.kastid WHERE c.idsanad=? AND c.insurance>0 LIMIT 1',[(int)$receiptId])) {
+                throw new RuntimeException('تمت تسوية تأمين هذا السند؛ احذف التسوية أولاً.');
+            }
+            foreach ($revenues as $revenue) receiptCommissionQuery($link,'UPDATE deposit_settlements d JOIN sanadsarf ss ON ss.sanadid=d.owner_sanadsarf_id
+                SET d.owner_sanadsarf_id=0 WHERE ss.iderad=?',[(int)$revenue['iderad']])->close();
+        }
         foreach ($revenues as $revenue) {
             receiptCommissionQuery($link,'DELETE FROM sanadsarf WHERE iderad=?',[(int)$revenue['iderad']])->close();
             receiptCommissionQuery($link,'DELETE FROM eradat WHERE iderad=?',[(int)$revenue['iderad']])->close();
@@ -72,6 +88,7 @@ function receiptCancellationDelete($link,$receiptId) {
                 [(int)$receiptId,(int)($_SESSION['useridv'] ?? 0),time(),json_encode($shares,JSON_UNESCAPED_UNICODE),'[]'])->close();
             receiptCommissionQuery($link,'DELETE FROM sanad_commission_splits WHERE idsanad=?',[(int)$receiptId])->close();
         }
+        if (receiptComponentsReady($link)) receiptCommissionQuery($link,'DELETE FROM sanad_components WHERE idsanad=?',[(int)$receiptId])->close();
         receiptCommissionQuery($link,'DELETE FROM sanad WHERE idsanad=?',[(int)$receiptId])->close();
         if ((int)$receipt['kastid']>0) receiptCommissionQuery($link,'UPDATE aksat SET dof3at=GREATEST(0,dof3at-?),iscomplete=0 WHERE kastid=?',
             [(float)$receipt['depositeamount'],(int)$receipt['kastid']])->close();

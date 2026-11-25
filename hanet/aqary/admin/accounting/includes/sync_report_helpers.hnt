@@ -1,0 +1,120 @@
+<?php
+/** Filters, cells and lookups for the rental sync reports. Read only. */
+const SYNC_REPORT_DIMENSIONS = [
+    'owner_id' => ['المالك', "SELECT ownerid id,ownername t FROM amlakowner WHERE ownername<>'' ORDER BY ownername"],
+    'aqar_id' => ['العقار', "SELECT idaqar id,aqarname t FROM amlak WHERE aqarname<>'' ORDER BY aqarname"],
+    'subaqar_id' => ['الوحدة', "SELECT d.idsubaqar id,CONCAT(COALESCE(a.aqarname,''),' - ',IF(d.rakam<>'',d.rakam,CONCAT('#',d.idsubaqar))) t
+        FROM amlakdetails d LEFT JOIN amlak a ON a.idaqar=d.idaqar ORDER BY a.aqarname,d.rakam,d.idsubaqar"],
+    'tenant_id' => ['المستأجر', "SELECT mostagerid id,mostagername t FROM mostagereen WHERE mostagername<>'' ORDER BY mostagername"],
+    'egar_id' => ['العقد', "SELECT rakam3akdid id,IF(rakam3akd<>'',rakam3akd,CONCAT('#',rakam3akdid)) t FROM egar ORDER BY rakam3akdid DESC"],
+];
+
+function syncReportDate($value, string $default): string {
+    $value = is_string($value) ? trim($value) : '';
+    if (preg_match('~^(\d{2})/(\d{2})/(\d{4})$~', $value, $part)) $value = "{$part[3]}-{$part[2]}-{$part[1]}";
+    return amlakSyncValidDate($value) ? $value : $default;
+}
+
+function syncReportFilters(array $report): array {
+    $f = ['date_from' => syncReportDate($_GET['date_from'] ?? '', date('Y-01-01')), 'date_to' => syncReportDate($_GET['date_to'] ?? '', date('Y-m-d'))];
+    if ($f['date_from'] > $f['date_to']) [$f['date_from'], $f['date_to']] = [$f['date_to'], $f['date_from']];
+    foreach (SYNC_REPORT_DIMENSIONS as $name => $unused) {
+        $f[$name] = in_array($name, $report['filters'], true) && is_scalar($_GET[$name] ?? null) ? max(0, (int)$_GET[$name]) : 0;
+    }
+    foreach ($report['selects'] ?? [] as $name => $unused) $f[$name] = is_string($_GET[$name] ?? null) ? $_GET[$name] : '';
+    return $f;
+}
+
+function syncReportOptions($db, array $filters): array {
+    $options = [];
+    foreach (SYNC_REPORT_DIMENSIONS as $name => [$label, $sql]) {
+        if (in_array($name, $filters, true)) $options[$name] = [$label, array_column(receiptCommissionRows($db, $sql), 't', 'id')];
+    }
+    return $options;
+}
+
+function syncReportSelect($db, $list): array {
+    if (is_array($list)) return $list;
+    try { return $list($db); } catch (Throwable $error) { return []; }
+}
+
+/** AND conditions for the chosen dimensions; $columns maps filter name to SQL column. */
+function syncReportWhere(array $f, array $columns): array {
+    $sql = '';
+    $params = [];
+    foreach ($columns as $name => $column) {
+        if (empty($f[$name])) continue;
+        $sql .= " AND {$column}=?";
+        $params[] = $f[$name];
+    }
+    return [$sql, $params];
+}
+
+function syncReportEntryWhere(array $f): array {
+    return syncReportWhere($f, ['owner_id' => 'je.owner_id', 'aqar_id' => 'je.aqar_id', 'subaqar_id' => 'je.subaqar_id', 'tenant_id' => 'je.tenant_id', 'egar_id' => 'je.egar_id']);
+}
+
+/** Source dates are Unix seconds; some legacy rows hold milliseconds. */
+function syncReportTime(string $column): string {
+    return "IF({$column}>20000000000,FLOOR({$column}/1000),{$column})";
+}
+
+function syncReportPeriod(string $column, array $f): string {
+    return syncReportTime($column) . ' BETWEEN ' . (int)strtotime($f['date_from'] . ' 00:00:00') . ' AND ' . (int)strtotime($f['date_to'] . ' 23:59:59');
+}
+
+function syncReportDay($timestamp): string {
+    $timestamp = amlakSyncNormalizeTimestamp($timestamp);
+    return $timestamp > 0 ? date('Y-m-d', $timestamp) : '';
+}
+
+/** The account sync posts to: the setting, else the same fallback code sync uses. */
+function syncReportAccount($db, string $key, string $label, string $fallback = ''): int {
+    $row = receiptCommissionRows($db, "SELECT a.account_id FROM acc_system_settings s JOIN acc_chart_of_accounts a ON a.account_id=CAST(s.setting_value AS UNSIGNED) AND a.is_active=1 WHERE s.setting_key=? LIMIT 1", [$key]);
+    if (!$row && $fallback !== '') $row = receiptCommissionRows($db, 'SELECT account_id FROM acc_chart_of_accounts WHERE account_code=? AND is_active=1 LIMIT 1', [$fallback]);
+    if (!$row) throw new RuntimeException('حساب "' . $label . '" غير محدد. حدده من حسابات المزامنة في مراجعة فواتير سندات القبض.');
+    return (int)$row[0]['account_id'];
+}
+
+function syncReportNeed(bool $ready): void {
+    if (!$ready) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث المزامنة.');
+}
+
+function syncReportEntryCell(array $row): array {
+    return [$row['entry_number'], '/aqary/admin/accounting/modules/journal_entries/index.hnt?entry_id=' . (int)$row['entry_id']];
+}
+
+function syncReportReceiptCell($id, $kastid = 1): array {
+    return ['#' . (int)$id, '/aqary/admin/include/amlak/selectprintform.hnt?formtype=recivevoucher&id=' . (int)$id . ((int)$kastid ? '' : '&voucer_type=free2')];
+}
+
+function syncReportInvoiceCell($id, $number) {
+    return (int)$id ? [(string)$number, '/aqary/admin/accounting/modules/invoices/view.hnt?id=' . (int)$id] : '';
+}
+
+function syncReportText($value, string $type): string {
+    if ($type === 'links') return implode(' | ', array_column(is_array($value) ? $value : [], 1));
+    if (is_array($value)) $value = $value[0] ?? '';
+    if ($type === 'money') return $value === '' ? '' : number_format((float)$value, 2, '.', '');
+    if ($type === 'int') return $value === '' ? '' : (string)(int)$value;
+    return (string)$value;
+}
+
+function syncReportCsvCell($value): string {
+    $value = (string)$value;
+    return $value !== '' && !is_numeric($value) && strpos("=+-@\t\r", $value[0]) !== false ? "'" . $value : $value;
+}
+
+function syncReportCell($value, string $type, bool $total = false): string {
+    if ($type === 'links') return is_array($value) ? accountingRenderEntryLinks($value) : '';
+    if ($type === 'badge') return is_array($value) ? '<span class="badge text-bg-' . accountingLinkEsc($value[1]) . '">' . accountingLinkEsc($value[0]) . '</span>' : accountingLinkEsc($value);
+    $text = is_array($value) ? ($value[0] ?? '') : $value;
+    $url = is_array($value) ? ($value[1] ?? '') : '';
+    if ($type === 'money') {
+        $amount = round((float)$text, 2);
+        $html = $text === '' || ($amount == 0 && !$total) ? '-' : ($amount < 0 ? '<span class="text-danger">' . number_format($amount, 2) . '</span>' : number_format($amount, 2));
+    } else {
+        $html = accountingLinkEsc($type === 'int' ? (int)$text : $text);
+    }
+    return $url !== '' ? '<a target="_blank" rel="noopener" href="' . accountingLinkEsc($url) . '">' . $html . '</a>' : $html;
+}

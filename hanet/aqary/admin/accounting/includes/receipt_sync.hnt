@@ -1,0 +1,375 @@
+<?php
+/**
+ * One reviewed draft invoice per receipt. Nothing is posted until the user approves the
+ * draft; approval posts the invoice and the cash together. Never sends anything to ZATCA.
+ */
+require_once __DIR__ . '/sync_start_date.hnt';
+require_once __DIR__ . '/receipt_entry_edit.hnt';
+require_once __DIR__ . '/../../include/amlak/receipt_components_store.hnt';
+
+const RECEIPT_INVOICE_ITEMS = [
+    'rent' => ['إيجار', 'rent_vat'],
+    'commission' => ['عمولة (سعي)', 'commission_vat'],
+    'water' => ['مياه', ''],
+    'services' => ['خدمات', ''],
+    'insurance' => ['تأمين مسترد', ''],
+    'other' => ['إيراد آخر', 'other_vat'],
+];
+
+function receiptSyncReady($db): bool {
+    static $ready = [];
+    $key = spl_object_id($db);
+    if (!isset($ready[$key])) {
+        $row = receiptCommissionRows($db, "SELECT
+            (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='acc_invoices' AND COLUMN_NAME='sanad_id') i,
+            (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='sanad_components' AND COLUMN_NAME IN ('other','other_vat')) c")[0];
+        $ready[$key] = (int)$row['i'] === 1 && (int)$row['c'] === 2 && receiptComponentsReady($db);
+    }
+    return $ready[$key];
+}
+
+/** Receipts still waiting for sync: in period, not posted, no live draft, not held. */
+function receiptSyncPendingSql($db): string {
+    $sql = amlakSyncDateSql($db, 'sanaddate') . " AND (accounting_entry_id IS NULL OR accounting_entry_id=0
+        OR NOT EXISTS (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id=sanad.accounting_entry_id AND j.status='posted'))";
+    if (receiptSyncReady($db)) {
+        $sql .= " AND NOT EXISTS (SELECT 1 FROM acc_invoices ri WHERE ri.sanad_id=sanad.idsanad AND ri.status<>'cancelled')
+            AND NOT EXISTS (SELECT 1 FROM sanad_components rc WHERE rc.idsanad=sanad.idsanad AND rc.status='review')";
+    }
+    return '(' . $sql . ')';
+}
+
+function receiptSyncCount($db, $sql): int {
+    return (int)(receiptCommissionRows($db, $sql)[0]['n'] ?? 0);
+}
+
+function receiptSyncDraftCount($db): int {
+    return receiptSyncReady($db) ? receiptSyncCount($db, "SELECT COUNT(*) n FROM acc_invoices WHERE sanad_id>0 AND status='draft'") : 0;
+}
+
+function receiptSyncHeldCount($db): int {
+    return receiptSyncReady($db) ? receiptSyncCount($db, "SELECT COUNT(*) n FROM sanad_components c JOIN sanad ON sanad.idsanad=c.idsanad
+        WHERE c.status='review' AND " . amlakSyncDateSql($db, 'sanaddate')) : 0;
+}
+
+/** Invoice total and VAT that match a receipt's components, in cents. */
+function receiptInvoiceTotals(array $components): array {
+    $vat = $components['rent_vat'] + $components['commission_vat'] + $components['other_vat'];
+    return ['total' => array_sum($components), 'vat' => $vat];
+}
+
+trait ReceiptInvoiceSync {
+    private function receiptInvoiceSettingId(string $key, string $label): int {
+        $id = $this->accountId($key, '');
+        if ($id <= 0) throw new RuntimeException('حساب "' . $label . '" غير محدد في حسابات المزامنة.');
+        return $id;
+    }
+
+    /** The ledger account of one bank, or the default bank account. */
+    private function bankLedgerAccount($bankId, int $default): int {
+        $mapped = (int)$bankId > 0 ? $this->accountId('bank_account_' . (int)$bankId, '') : 0;
+        return $mapped > 0 ? $mapped : $default;
+    }
+
+    /** Stored split, or a first split for receipts saved by older screens. */
+    private function receiptEnsureComponents(array $receipt): array {
+        $id = (int)$receipt['idsanad'];
+        $stored = receiptCommissionRows($this->db, 'SELECT * FROM sanad_components WHERE idsanad=? FOR UPDATE', [$id]);
+        if ($stored) return $stored[0];
+        $amount = receiptComponentsCents($receipt['depositeamount']);
+        $components = array_fill_keys(RECEIPT_COMPONENT_KEYS, 0);
+        $warnings = [];
+        if ((int)$receipt['kastid'] > 0) {
+            $income = receiptCommissionRows($this->db, 'SELECT * FROM eradat WHERE sanadrakam=? ORDER BY iderad', [(string)$id]);
+            $result = $income ? receiptOlderComponents($this->db, $receipt, ['amount' => $receipt['depositeamount']] + $income[0])
+                : ['components' => [], 'warnings' => ['لا يوجد إيراد مرتبط بالسند']];
+            $warnings = $result['warnings'];
+            if (count($income) > 1) $warnings[] = 'للسند أكثر من إيراد';
+            foreach ($income as $row) if (trim((string)$row['tasfia']) !== '') $warnings[] = 'تم تسليم الإيراد للمالك قبل فصل التفاصيل';
+            if ($result['components']) $components = $result['components'];
+            else $components['unclassified'] = $amount;
+        } else {
+            $vat = receiptComponentsCents($receipt['depositeamount_vat']);
+            $warnings[] = 'سند حر: حدد نوع الإيراد';
+            if ($vat >= 0 && $vat < $amount) {
+                $components['other'] = $amount - $vat;
+                $components['other_vat'] = $vat;
+            } else {
+                $components['unclassified'] = $amount;
+                $warnings[] = 'ضريبة السند أكبر من مبلغه';
+            }
+        }
+        receiptComponentsStore($this->db, $id, ['components' => $components, 'warnings' => array_values(array_unique($warnings)), 'installment_id' => (int)$receipt['kastid']]);
+        return receiptCommissionRows($this->db, 'SELECT * FROM sanad_components WHERE idsanad=?', [$id])[0];
+    }
+
+    public function createDraftFromSanad($receiptId) {
+        $receiptId = (int)$receiptId;
+        try {
+            if (!receiptSyncReady($this->db)) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث المزامنة.');
+            $tenant = receiptCommissionRows($this->db, 'SELECT mostagerid FROM sanad WHERE idsanad=?', [$receiptId]);
+            $customerId = 0;
+            // Customer linking uses its own transaction.
+            if ($tenant && (int)$tenant[0]['mostagerid'] > 0) {
+                $customer = $this->syncMostagerAsCustomer((int)$tenant[0]['mostagerid']);
+                if (empty($customer['success'])) return $customer;
+                $customerId = (int)$customer['customer_id'];
+            }
+            $this->db->begin_transaction();
+            $receipt = receiptCommissionRows($this->db, 'SELECT * FROM sanad WHERE idsanad=? FOR UPDATE', [$receiptId])[0] ?? null;
+            if (!$receipt) throw new RuntimeException('سند القبض غير موجود.');
+            if (!amlakSyncIsInPeriod($this->db, $receipt['sanaddate'])) throw new RuntimeException('تاريخ الحركة يسبق تاريخ بدء المزامنة.');
+            if (receiptComponentsCents($receipt['depositeamount']) <= 0) throw new RuntimeException('مبلغ السند غير صحيح.');
+            $entry = $this->sourceEntry('sanad_id', $receiptId, 'sanad');
+            if ($entry) {
+                receiptCommissionQuery($this->db, 'UPDATE sanad SET accounting_entry_id=? WHERE idsanad=?', [(int)$entry['entry_id'], $receiptId])->close();
+                $this->db->commit();
+                return ['success' => true, 'existing' => true, 'entry_id' => (int)$entry['entry_id']];
+            }
+            $live = receiptCommissionRows($this->db, "SELECT invoice_id,invoice_number FROM acc_invoices WHERE sanad_id=? AND status<>'cancelled' LIMIT 1", [$receiptId]);
+            if ($live) {
+                $this->db->commit();
+                return ['success' => true, 'existing' => true, 'invoice_id' => (int)$live[0]['invoice_id'], 'invoice_number' => $live[0]['invoice_number']];
+            }
+            $stored = $this->receiptEnsureComponents($receipt);
+            $components = receiptComponentsFromRow($stored);
+            if ($stored['status'] !== 'ok' || $components['unclassified'] !== 0 || array_sum($components) !== receiptComponentsCents($receipt['depositeamount'])) {
+                // Keep the saved split so the reviewer sees it.
+                if ($stored['status'] === 'ok') receiptCommissionQuery($this->db, "UPDATE sanad_components SET status='review',warnings=? WHERE idsanad=?",
+                    [json_encode(['تفاصيل السند لا تطابق مبلغه'], JSON_UNESCAPED_UNICODE), $receiptId])->close();
+                $this->db->commit();
+                return ['success' => false, 'held' => true, 'message' => 'محجوز للمراجعة: ' . implode('، ', json_decode((string)$stored['warnings'], true) ?: ['تفاصيل السند لا تطابق مبلغه'])];
+            }
+            $context = $this->resolveSanadContext($receipt);
+            $tenantRow = (int)$receipt['mostagerid'] > 0 ? (receiptCommissionRows($this->db, 'SELECT * FROM mostagereen WHERE mostagerid=?', [(int)$receipt['mostagerid']])[0] ?? []) : [];
+            $vatNumber = trim((string)($receipt['mostagervatnumber'] ?: ($tenantRow['mostagervatnumber'] ?? '')));
+            $items = [];
+            foreach (RECEIPT_INVOICE_ITEMS as $key => [$label, $vatKey]) {
+                if ($components[$key] === 0) continue;
+                $vat = $vatKey !== '' ? $components[$vatKey] : 0;
+                $place = trim(implode(' - ', array_filter([$context['property_name'] ?? '', $receipt['period']])));
+                $items[] = ['description' => mb_substr($label . ($place !== '' ? ' - ' . $place : ''), 0, 250, 'UTF-8'),
+                    'price' => $components[$key] / 100, 'rate' => $vat > 0 ? RECEIPT_COMPONENT_VAT_PERCENT : 0, 'total' => ($components[$key] + $vat) / 100];
+            }
+            $totals = receiptInvoiceTotals($components);
+            $invoice = $this->accountingManager->createReceiptDraftInvoice([
+                'sanad_id' => $receiptId,
+                // A buyer with a VAT number needs a standard invoice; others a simplified one.
+                'invoice_type' => $vatNumber !== '' ? 'standard' : 'simplified',
+                'invoice_date' => $this->timestampDate($receipt['sanaddate']),
+                'journal_id' => $this->accountingManager->getDefaultJournalIdByCode('SAL'),
+                'cost_center_id' => $context['cost_center_id'], 'tenant_id' => $context['tenant_id'], 'owner_id' => $context['owner_id'],
+                'aqar_id' => $context['aqar_id'], 'subaqar_id' => $context['subaqar_id'], 'egar_id' => $context['egar_id'],
+                'customer_type' => $customerId > 0 ? 'tenant' : 'customer', 'customer_id' => $customerId,
+                'customer_name' => (string)$receipt['mostagername'], 'customer_vat_number' => $vatNumber !== '' ? $vatNumber : null,
+                'customer_address' => (string)($tenantRow['mostageraddress'] ?? ''),
+                'subtotal' => ($totals['total'] - $totals['vat']) / 100, 'vat_amount' => $totals['vat'] / 100, 'total_amount' => $totals['total'] / 100,
+                'notes' => 'سند قبض رقم ' . $receiptId . ($receipt['mybyan'] !== '' ? ' - ' . $receipt['mybyan'] : ''),
+            ], $items);
+            $this->db->commit();
+            return ['success' => true, 'draft' => true] + $invoice;
+        } catch (Throwable $error) {
+            $this->db->rollback();
+            error_log('Receipt draft invoice: ' . $error->getMessage());
+            return ['success' => false, 'message' => $error instanceof RuntimeException ? $error->getMessage() : 'تعذر إنشاء مسودة فاتورة السند. راجع سجل الخادم.'];
+        }
+    }
+
+    /** Credit side of the invoice: whose money each part is. */
+    private function receiptInvoiceCredits(array $components, array $property): array {
+        $hasProperty = !empty($property);
+        $officeOwns = $hasProperty && ($property['rent_income_to'] ?? 'owner') === 'office';
+        $owner = function () { return $this->receiptInvoiceSettingId('default_owner_payable_account_id', 'ذمم الملاك'); };
+        $vat = function () {
+            $id = $this->accountId('default_invoice_vat_account_id', '2121');
+            if ($id <= 0) throw new RuntimeException('حساب ضريبة القيمة المضافة غير محدد.');
+            return $id;
+        };
+        $toOwner = function ($field) use ($property, $officeOwns) { return !$officeOwns && ($property[$field] ?? '') === 'malek'; };
+        if (($components['rent'] || $components['rent_vat']) && !$hasProperty) throw new RuntimeException('الإيجار يحتاج عقاراً مرتبطاً بالسند.');
+        $credits = [];
+        $add = function ($key, $label, $account) use (&$credits, $components) {
+            if ($components[$key] !== 0) $credits[] = [$account(), $label, $components[$key], $key];
+        };
+        $add('rent', 'إيجار', $officeOwns ? function () {
+            $id = $this->accountId('default_invoice_revenue_account_id', '4100');
+            if ($id <= 0) throw new RuntimeException('حساب إيرادات التأجير غير محدد.');
+            return $id;
+        } : $owner);
+        $add('rent_vat', 'ضريبة الإيجار', !$officeOwns && ($property['rent_vat_filed_by'] ?? 'office') === 'owner' ? $owner : $vat);
+        $add('commission', 'عمولة', function () { return $this->receiptInvoiceSettingId('default_commission_revenue_account_id', 'إيراد العمولات'); });
+        $add('commission_vat', 'ضريبة العمولة', $vat);
+        $add('water', 'مياه', $toOwner('addwaterto') ? $owner : function () { return $this->receiptInvoiceSettingId('default_water_revenue_account_id', 'إيراد المياه'); });
+        $add('services', 'خدمات', function () { return $this->receiptInvoiceSettingId('default_services_revenue_account_id', 'إيراد الخدمات'); });
+        $add('insurance', 'تأمين', $toOwner('addtameento') ? $owner : function () { return $this->receiptInvoiceSettingId('default_deposits_account_id', 'تأمينات المستأجرين'); });
+        $add('other', 'إيراد آخر', function () { return $this->receiptInvoiceSettingId('default_other_revenue_account_id', 'إيرادات أخرى'); });
+        $add('other_vat', 'ضريبة إيراد آخر', $vat);
+        return $credits;
+    }
+
+    /** Every check of an approval and the default invoice lines. Caller owns the transaction. */
+    private function receiptApprovalPlan($invoiceId): array {
+        if (!receiptSyncReady($this->db)) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث المزامنة.');
+        $invoice = receiptCommissionRows($this->db, 'SELECT * FROM acc_invoices WHERE invoice_id=? FOR UPDATE', [(int)$invoiceId])[0] ?? null;
+        if (!$invoice || (int)$invoice['sanad_id'] <= 0) throw new RuntimeException('الفاتورة غير مرتبطة بسند قبض.');
+        if ($invoice['status'] !== 'draft') throw new RuntimeException('الفاتورة ليست مسودة.');
+        $receiptId = (int)$invoice['sanad_id'];
+        $receipt = receiptCommissionRows($this->db, 'SELECT * FROM sanad WHERE idsanad=? FOR UPDATE', [$receiptId])[0] ?? null;
+        if (!$receipt) throw new RuntimeException('سند القبض غير موجود.');
+        if (!amlakSyncIsInPeriod($this->db, $receipt['sanaddate'])) throw new RuntimeException('تاريخ الحركة يسبق تاريخ بدء المزامنة.');
+        if ($this->sourceEntry('sanad_id', $receiptId, 'sanad')) throw new RuntimeException('للسند قيد مرحل مسبقاً؛ ألغ المسودة.');
+        $stored = receiptCommissionRows($this->db, 'SELECT * FROM sanad_components WHERE idsanad=? FOR UPDATE', [$receiptId])[0] ?? null;
+        if (!$stored || $stored['status'] !== 'ok') throw new RuntimeException('السند محجوز للمراجعة.');
+        $components = receiptComponentsFromRow($stored);
+        $totals = receiptInvoiceTotals($components);
+        if ($components['unclassified'] !== 0 || $totals['total'] !== receiptComponentsCents($receipt['depositeamount'])) throw new RuntimeException('تفاصيل السند لا تطابق مبلغه.');
+        $itemTotal = receiptComponentsCents(receiptCommissionRows($this->db, 'SELECT COALESCE(SUM(line_total),0) t FROM acc_invoice_items WHERE invoice_id=?', [(int)$invoiceId])[0]['t']);
+        if (abs(receiptComponentsCents($invoice['total_amount']) - $totals['total']) > 1 || abs(receiptComponentsCents($invoice['vat_amount']) - $totals['vat']) > 1
+            || abs($itemTotal - $totals['total']) > 2) {
+            throw new RuntimeException('عُدلت الفاتورة فأصبحت لا تطابق سند القبض أو ضريبته. صححها أو ألغ المسودة.');
+        }
+        $context = $this->resolveSanadContext($receipt);
+        $property = $context['aqar_id'] ? (receiptCommissionRows($this->db, 'SELECT * FROM amlak WHERE idaqar=?', [(int)$context['aqar_id']])[0] ?? []) : [];
+        $receivable = $this->accountId('default_receivable_account_id', '1121');
+        if ($receivable <= 0) throw new RuntimeException('حساب ذمم المستأجرين غير مهيأ.');
+        $number = $invoice['invoice_number'];
+        $lines = [['key' => 'receivable', 'account_id' => $receivable, 'description' => 'فاتورة ' . $number, 'debit_amount' => $totals['total'] / 100, 'credit_amount' => 0, 'cost_center_id' => $context['cost_center_id']]];
+        foreach ($this->receiptInvoiceCredits($components, $property) as [$account, $label, $cents, $key]) {
+            $lines[] = ['key' => $key, 'account_id' => $account, 'description' => $label . ' - فاتورة ' . $number, 'debit_amount' => 0, 'credit_amount' => $cents / 100, 'cost_center_id' => $context['cost_center_id']];
+        }
+        return ['invoice' => $invoice, 'receipt' => $receipt, 'receipt_id' => $receiptId, 'context' => $context, 'lines' => $lines];
+    }
+
+    /** The two entries approval would post. Nothing is saved. */
+    public function previewReceiptInvoice($invoiceId): array {
+        try {
+            // Building the lines can create a cost center, so everything is rolled back.
+            $this->db->begin_transaction();
+            $plan = $this->receiptApprovalPlan($invoiceId);
+            $cash = $this->buildEntryFromSanad($plan['receipt_id'], (int)$invoiceId, false);
+            if (empty($cash['success'])) throw new RuntimeException($cash['message'] ?? $cash['error'] ?? 'تعذر تجهيز قيد التحصيل.');
+            $this->db->rollback();
+            $show = function (array $lines) {
+                return array_map(function ($line) {
+                    return ['key' => $line['key'], 'mode' => receiptEntryLineMode($line['key']), 'account_id' => (int)$line['account_id'], 'description' => trim((string)$line['description']),
+                        'debit' => round((float)$line['debit_amount'], 2), 'credit' => round((float)$line['credit_amount'], 2)];
+                }, $lines);
+            };
+            return ['success' => true, 'invoice_number' => $plan['invoice']['invoice_number'], 'date' => $plan['invoice']['invoice_date'],
+                'invoice' => $show($plan['lines']), 'receipt' => $show($cash['lines'])];
+        } catch (Throwable $error) {
+            $this->db->rollback();
+            return ['success' => false, 'message' => $error instanceof RuntimeException ? $error->getMessage() : 'تعذر عرض القيد. راجع سجل الخادم.'];
+        }
+    }
+
+    /**
+     * Post the reviewed invoice and its cash in one transaction. $edited holds the reviewer's
+     * 'invoice' and 'receipt' lines; null posts the default entries.
+     */
+    public function approveReceiptInvoice($invoiceId, ?array $edited = null, bool $confirmOwner = false) {
+        try {
+            $this->db->begin_transaction();
+            $plan = $this->receiptApprovalPlan($invoiceId);
+            $invoice = $plan['invoice'];
+            $receiptId = $plan['receipt_id'];
+            $context = $plan['context'];
+            $number = $invoice['invoice_number'];
+            if (receiptCommissionReady($this->db)) receiptCommissionMaterializeLegacy($this->db, $plan['receipt']);
+            $lines = $plan['lines'];
+            $changed = false;
+            $editor = null;
+            if ($edited !== null) {
+                $accounts = array_fill_keys(array_map('intval', array_column(receiptCommissionRows($this->db, 'SELECT account_id FROM acc_chart_of_accounts WHERE is_active=1 AND is_leaf=1'), 'account_id')), true);
+                [$lines, $changed] = receiptApplyEditedLines($plan['lines'], $edited['invoice'], $accounts, 'قيد الفاتورة');
+                $owner = $this->accountId('default_owner_payable_account_id', '2111');
+                if (!$confirmOwner && $owner > 0 && receiptEntryAccountCredit($lines, $owner) !== receiptEntryAccountCredit($plan['lines'], $owner)) {
+                    throw new RuntimeException('تغير المستحق للمالك في القيد، ولن يطابق كشف المالك وتسليماته. أكد ذلك للمتابعة.');
+                }
+                $editor = function (array $defaults) use ($edited, $accounts, &$changed) {
+                    [$cashLines, $cashChanged] = receiptApplyEditedLines($defaults, $edited['receipt'], $accounts, 'قيد التحصيل');
+                    $changed = $changed || $cashChanged;
+                    return $cashLines;
+                };
+            }
+            $invoiceEntry = $this->accountingManager->createJournalEntry([
+                'entry_date' => $invoice['invoice_date'], 'entry_type' => 'auto', 'journal_id' => $invoice['journal_id'],
+                'tenant_id' => $context['tenant_id'], 'owner_id' => $context['owner_id'], 'aqar_id' => $context['aqar_id'],
+                'subaqar_id' => $context['subaqar_id'], 'egar_id' => $context['egar_id'], 'invoice_id' => (int)$invoiceId,
+                'reference_type' => 'invoice', 'reference_id' => (int)$invoiceId,
+                'description' => 'إثبات فاتورة ' . $number . ' - ' . $invoice['customer_name'], 'status' => 'posted',
+            ], $lines);
+            if (empty($invoiceEntry['success'])) throw new RuntimeException($invoiceEntry['message'] ?? $invoiceEntry['error'] ?? 'تعذر ترحيل الفاتورة.');
+            $receiptEntry = $this->buildEntryFromSanad($receiptId, (int)$invoiceId, $editor);
+            if (empty($receiptEntry['success'])) throw new RuntimeException($receiptEntry['message'] ?? $receiptEntry['error'] ?? 'تعذر ترحيل سند القبض.');
+            if ($changed) {
+                receiptCommissionQuery($this->db, "UPDATE acc_journal_entries SET notes='عُدل القيد عند الاعتماد' WHERE entry_id IN (?,?)", [(int)$invoiceEntry['entry_id'], (int)$receiptEntry['entry_id']])->close();
+            }
+            receiptCommissionQuery($this->db, "UPDATE acc_invoices SET status='posted',payment_status='paid',paid_amount=total_amount,remaining_amount=0 WHERE invoice_id=?", [(int)$invoiceId])->close();
+            receiptCommissionQuery($this->db, 'UPDATE sanad SET accounting_entry_id=? WHERE idsanad=?', [(int)$receiptEntry['entry_id'], $receiptId])->close();
+            $this->db->commit();
+            return ['success' => true, 'invoice_number' => $number, 'entry_id' => (int)$receiptEntry['entry_id'], 'changed' => $changed,
+                'message' => 'تم ترحيل قيدي الفاتورة والتحصيل ' . ($invoiceEntry['entry_number'] ?? '') . ' و ' . ($receiptEntry['entry_number'] ?? '')];
+        } catch (Throwable $error) {
+            $this->db->rollback();
+            error_log('Receipt invoice approval: ' . $error->getMessage());
+            return ['success' => false, 'message' => $error instanceof RuntimeException ? $error->getMessage() : 'تعذر اعتماد الفاتورة. راجع سجل الخادم.'];
+        }
+    }
+
+    /** Cancel a draft that was never posted nor sent; the receipt returns to the queue. */
+    public function voidReceiptInvoice($invoiceId) {
+        try {
+            $this->db->begin_transaction();
+            $invoice = receiptCommissionRows($this->db, 'SELECT * FROM acc_invoices WHERE invoice_id=? FOR UPDATE', [(int)$invoiceId])[0] ?? null;
+            if (!$invoice || (int)($invoice['sanad_id'] ?? 0) <= 0 || $invoice['status'] !== 'draft') throw new RuntimeException('لا يمكن إلغاء هذه الفاتورة.');
+            if (trim((string)$invoice['zatca_uuid']) !== '' || $invoice['zatca_status'] === 'submitted') throw new RuntimeException('أُرسلت الفاتورة للهيئة؛ تحتاج إشعاراً دائناً.');
+            receiptCommissionQuery($this->db, "UPDATE acc_invoices SET status='cancelled',remaining_amount=0 WHERE invoice_id=?", [(int)$invoiceId])->close();
+            $this->db->commit();
+            return ['success' => true];
+        } catch (Throwable $error) {
+            $this->db->rollback();
+            return ['success' => false, 'message' => $error instanceof RuntimeException ? $error->getMessage() : 'تعذر إلغاء المسودة.'];
+        }
+    }
+
+    /** Save the reviewer's split and release the receipt. */
+    public function releaseHeldReceipt($receiptId, array $input) {
+        try {
+            $this->db->begin_transaction();
+            $receiptId = (int)$receiptId;
+            $receipt = receiptCommissionRows($this->db, 'SELECT * FROM sanad WHERE idsanad=? FOR UPDATE', [$receiptId])[0] ?? null;
+            $stored = receiptCommissionRows($this->db, 'SELECT * FROM sanad_components WHERE idsanad=? FOR UPDATE', [$receiptId])[0] ?? null;
+            if (!$receipt || !$stored || $stored['status'] !== 'review') throw new RuntimeException('السند غير محجوز للمراجعة.');
+            if (receiptCommissionRows($this->db, "SELECT invoice_id FROM acc_invoices WHERE sanad_id=? AND status<>'cancelled' LIMIT 1", [$receiptId])) throw new RuntimeException('للسند فاتورة قائمة.');
+            $components = [];
+            foreach (RECEIPT_COMPONENT_KEYS as $key) {
+                if ($key === 'unclassified') { $components[$key] = 0; continue; }
+                $value = trim((string)($input[$key] ?? '0'));
+                $components[$key] = receiptCommissionCents($value === '' ? '0' : $value);
+            }
+            if (array_sum($components) !== receiptComponentsCents($receipt['depositeamount'])) throw new RuntimeException('مجموع البنود يجب أن يساوي مبلغ السند.');
+            foreach (['rent' => 'rent_vat', 'commission' => 'commission_vat', 'other' => 'other_vat'] as $base => $vat) {
+                if ($components[$vat] > 0 && abs($components[$vat] - $components[$base] * RECEIPT_COMPONENT_VAT_PERCENT / 100) > 1.01) throw new RuntimeException('الضريبة لا تساوي 15% من البند الخاضع لها.');
+            }
+            if ($components['rent'] > 0 && (int)$receipt['idaqar'] <= 0) throw new RuntimeException('الإيجار يحتاج سنداً مرتبطاً بعقار.');
+            $sets = [];
+            $params = [];
+            foreach ($components as $key => $value) { $sets[] = $key . '=?'; $params[] = number_format($value / 100, 2, '.', ''); }
+            $params[] = $receiptId;
+            receiptCommissionQuery($this->db, 'UPDATE sanad_components SET ' . implode(',', $sets) . ",status='ok',warnings='[]' WHERE idsanad=?", $params)->close();
+            // Keep the VAT reports and the undelivered income equal to the reviewed split.
+            receiptCommissionQuery($this->db, 'UPDATE sanad SET commesion_vat=?,depositeamount_vat=? WHERE idsanad=?',
+                [$components['commission_vat'] / 100, ($components['rent_vat'] + $components['other_vat']) / 100, $receiptId])->close();
+            receiptCommissionQuery($this->db, "UPDATE eradat SET mysa3ee=?,mywater=?,services=?,tamen=? WHERE sanadrakam=? AND tasfia=''",
+                [$components['commission'] / 100, $components['water'] / 100, $components['services'] / 100, $components['insurance'] / 100, (string)$receiptId])->close();
+            $this->db->commit();
+            if (function_exists('loginfo')) loginfo('critical', 'update', 'اعتماد تفاصيل سند القبض رقم ' . $receiptId, '', 'sanad', $receiptId, $this->db);
+            return ['success' => true];
+        } catch (Throwable $error) {
+            $this->db->rollback();
+            error_log('Receipt review: ' . $error->getMessage());
+            return ['success' => false, 'message' => $error instanceof RuntimeException ? $error->getMessage() : 'تعذر حفظ المراجعة.'];
+        }
+    }
+}

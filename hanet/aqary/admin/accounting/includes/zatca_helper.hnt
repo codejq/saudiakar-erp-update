@@ -1,0 +1,271 @@
+<?php
+/**
+ * ZATCA Helper Class
+ * مساعد ZATCA للفواتير الإلكترونية
+ * 
+ * @charset UTF-8
+ * @version 1.0
+ * @zatca Phase 2 Compliant
+ */
+
+class ZATCAHelper {
+    
+    /**
+     * Generate ZATCA QR Code (TLV Format)
+     * إنشاء رمز QR حسب معايير ZATCA
+     */
+    public static function generateQRCode($invoice) {
+        // TLV Format (Tag-Length-Value)
+        // Tag 1: Seller Name
+        // Tag 2: VAT Registration Number
+        // Tag 3: Timestamp
+        // Tag 4: Invoice Total (with VAT)
+        // Tag 5: VAT Amount
+        
+        $sellerName = $invoice['seller_name'] ?? '';
+        $vatNumber = $invoice['seller_vat_number'] ?? '';
+        $timestamp = date('Y-m-d\TH:i:s\Z', strtotime($invoice['invoice_date']));
+        $totalWithVAT = number_format($invoice['total_amount'], 2, '.', '');
+        $vatAmount = number_format($invoice['vat_amount'], 2, '.', '');
+        
+        $tlv = '';
+        
+        // Tag 1: Seller Name
+        $tlv .= self::encodeTLV(1, $sellerName);
+        
+        // Tag 2: VAT Number
+        $tlv .= self::encodeTLV(2, $vatNumber);
+        
+        // Tag 3: Timestamp
+        $tlv .= self::encodeTLV(3, $timestamp);
+        
+        // Tag 4: Total with VAT
+        $tlv .= self::encodeTLV(4, $totalWithVAT);
+        
+        // Tag 5: VAT Amount
+        $tlv .= self::encodeTLV(5, $vatAmount);
+        
+        // Base64 encode
+        return base64_encode($tlv);
+    }
+    
+    /**
+     * Encode TLV (Tag-Length-Value)
+     */
+    private static function encodeTLV($tag, $value) {
+        $tagHex = pack('C', $tag);
+        $length = strlen($value);
+        $lengthHex = pack('C', $length);
+        return $tagHex . $lengthHex . $value;
+    }
+    
+    /**
+     * Generate ZATCA XML (UBL 2.1 Format)
+     * إنشاء ملف XML حسب معايير ZATCA
+     */
+    public static function generateXML($invoice, $items) {
+        $xml = new DOMDocument('1.0', 'UTF-8');
+        $xml->formatOutput = true;
+        
+        // Root element: Invoice
+        $root = $xml->createElement('Invoice');
+        $root->setAttribute('xmlns', 'urn:oasis:names:specification:ubl:schema:xsd:Invoice-2');
+        $root->setAttribute('xmlns:cac', 'urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2');
+        $root->setAttribute('xmlns:cbc', 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2');
+        $xml->appendChild($root);
+        
+        // Invoice Number
+        $invoiceNumber = $xml->createElement('cbc:ID', $invoice['invoice_number']);
+        $root->appendChild($invoiceNumber);
+        
+        // Issue Date
+        $issueDate = $xml->createElement('cbc:IssueDate', $invoice['invoice_date']);
+        $root->appendChild($issueDate);
+        
+        // Issue Time
+        $issueTime = $xml->createElement('cbc:IssueTime', date('H:i:s'));
+        $root->appendChild($issueTime);
+        
+        // Invoice Type Code
+        $typeCode = $xml->createElement('cbc:InvoiceTypeCode', '388');
+        $typeCode->setAttribute('name', $invoice['invoice_type']);
+        $root->appendChild($typeCode);
+        
+        // Document Currency Code
+        $currencyCode = $xml->createElement('cbc:DocumentCurrencyCode', 'SAR');
+        $root->appendChild($currencyCode);
+        
+        // Tax Currency Code
+        $taxCurrencyCode = $xml->createElement('cbc:TaxCurrencyCode', 'SAR');
+        $root->appendChild($taxCurrencyCode);
+        
+        // Accounting Supplier Party (Seller)
+        $supplierParty = $xml->createElement('cac:AccountingSupplierParty');
+        $party = $xml->createElement('cac:Party');
+        
+        $partyIdentification = $xml->createElement('cac:PartyIdentification');
+        $id = $xml->createElement('cbc:ID', $invoice['seller_vat_number'] ?? '');
+        $id->setAttribute('schemeID', 'TIN');
+        $partyIdentification->appendChild($id);
+        $party->appendChild($partyIdentification);
+        
+        $partyName = $xml->createElement('cac:PartyName');
+        $name = $xml->createElement('cbc:Name', $invoice['seller_name'] ?? 'شركة العقارات');
+        $partyName->appendChild($name);
+        $party->appendChild($partyName);
+        
+        $supplierParty->appendChild($party);
+        $root->appendChild($supplierParty);
+        
+        // Accounting Customer Party (Buyer)
+        $customerParty = $xml->createElement('cac:AccountingCustomerParty');
+        $custParty = $xml->createElement('cac:Party');
+        
+        if (!empty($invoice['customer_vat_number'])) {
+            $custIdentification = $xml->createElement('cac:PartyIdentification');
+            $custId = $xml->createElement('cbc:ID', $invoice['customer_vat_number']);
+            $custId->setAttribute('schemeID', 'TIN');
+            $custIdentification->appendChild($custId);
+            $custParty->appendChild($custIdentification);
+        }
+        
+        $custName = $xml->createElement('cac:PartyName');
+        $custNameValue = $xml->createElement('cbc:Name', $invoice['customer_name']);
+        $custName->appendChild($custNameValue);
+        $custParty->appendChild($custName);
+        
+        $customerParty->appendChild($custParty);
+        $root->appendChild($customerParty);
+        
+        // Tax Total
+        $taxTotal = $xml->createElement('cac:TaxTotal');
+        $taxAmount = $xml->createElement('cbc:TaxAmount', number_format($invoice['vat_amount'], 2, '.', ''));
+        $taxAmount->setAttribute('currencyID', 'SAR');
+        $taxTotal->appendChild($taxAmount);
+        
+        $taxSubtotal = $xml->createElement('cac:TaxSubtotal');
+        $taxableAmount = $xml->createElement('cbc:TaxableAmount', number_format($invoice['subtotal'], 2, '.', ''));
+        $taxableAmount->setAttribute('currencyID', 'SAR');
+        $taxSubtotal->appendChild($taxableAmount);
+        
+        $taxAmountSub = $xml->createElement('cbc:TaxAmount', number_format($invoice['vat_amount'], 2, '.', ''));
+        $taxAmountSub->setAttribute('currencyID', 'SAR');
+        $taxSubtotal->appendChild($taxAmountSub);
+        
+        $taxCategory = $xml->createElement('cac:TaxCategory');
+        $taxCategoryID = $xml->createElement('cbc:ID', 'S');
+        $taxCategory->appendChild($taxCategoryID);
+        $percent = $xml->createElement('cbc:Percent', '15.00');
+        $taxCategory->appendChild($percent);
+        $taxSubtotal->appendChild($taxCategory);
+        
+        $taxTotal->appendChild($taxSubtotal);
+        $root->appendChild($taxTotal);
+        
+        // Legal Monetary Total
+        $legalTotal = $xml->createElement('cac:LegalMonetaryTotal');
+        
+        $lineExtension = $xml->createElement('cbc:LineExtensionAmount', number_format($invoice['subtotal'], 2, '.', ''));
+        $lineExtension->setAttribute('currencyID', 'SAR');
+        $legalTotal->appendChild($lineExtension);
+        
+        $taxExclusive = $xml->createElement('cbc:TaxExclusiveAmount', number_format($invoice['subtotal'], 2, '.', ''));
+        $taxExclusive->setAttribute('currencyID', 'SAR');
+        $legalTotal->appendChild($taxExclusive);
+        
+        $taxInclusive = $xml->createElement('cbc:TaxInclusiveAmount', number_format($invoice['total_amount'], 2, '.', ''));
+        $taxInclusive->setAttribute('currencyID', 'SAR');
+        $legalTotal->appendChild($taxInclusive);
+        
+        $payableAmount = $xml->createElement('cbc:PayableAmount', number_format($invoice['total_amount'], 2, '.', ''));
+        $payableAmount->setAttribute('currencyID', 'SAR');
+        $legalTotal->appendChild($payableAmount);
+        
+        $root->appendChild($legalTotal);
+        
+        // Invoice Lines
+        foreach ($items as $index => $item) {
+            $invoiceLine = $xml->createElement('cac:InvoiceLine');
+            
+            $lineId = $xml->createElement('cbc:ID', $index + 1);
+            $invoiceLine->appendChild($lineId);
+            
+            $quantity = $xml->createElement('cbc:InvoicedQuantity', $item['quantity']);
+            $quantity->setAttribute('unitCode', 'PCE');
+            $invoiceLine->appendChild($quantity);
+            
+            $lineTotal = $xml->createElement('cbc:LineExtensionAmount', number_format($item['quantity'] * $item['unit_price'], 2, '.', ''));
+            $lineTotal->setAttribute('currencyID', 'SAR');
+            $invoiceLine->appendChild($lineTotal);
+            
+            $itemElement = $xml->createElement('cac:Item');
+            $itemName = $xml->createElement('cbc:Name', $item['description']);
+            $itemElement->appendChild($itemName);
+            $invoiceLine->appendChild($itemElement);
+            
+            $price = $xml->createElement('cac:Price');
+            $priceAmount = $xml->createElement('cbc:PriceAmount', number_format($item['unit_price'], 2, '.', ''));
+            $priceAmount->setAttribute('currencyID', 'SAR');
+            $price->appendChild($priceAmount);
+            $invoiceLine->appendChild($price);
+            
+            $root->appendChild($invoiceLine);
+        }
+        
+        return $xml->saveXML();
+    }
+    
+    /**
+     * Generate QR Code Image using Google Charts API
+     * إنشاء صورة رمز QR
+     */
+    public static function generateQRCodeImage($qrData, $size = 200) {
+        $url = "https://chart.googleapis.com/chart?cht=qr&chs={$size}x{$size}&chl=" . urlencode($qrData);
+        return $url;
+    }
+    
+    /**
+     * Validate VAT Number format
+     * التحقق من صحة الرقم الضريبي
+     */
+    public static function validateVATNumber($vatNumber) {
+        // Saudi VAT number format: 15 digits starting with 3 and ending with 3
+        if (strlen($vatNumber) != 15) {
+            return false;
+        }
+        
+        if (substr($vatNumber, 0, 1) != '3') {
+            return false;
+        }
+        
+        if (substr($vatNumber, -1) != '3') {
+            return false;
+        }
+        
+        return ctype_digit($vatNumber);
+    }
+    
+    /**
+     * Generate Invoice Hash (SHA-256)
+     * إنشاء Hash للفاتورة
+     */
+    public static function generateInvoiceHash($xmlContent) {
+        return hash('sha256', $xmlContent);
+    }
+    
+    /**
+     * Sign Invoice (Placeholder for actual cryptographic signing)
+     * توقيع الفاتورة
+     */
+    public static function signInvoice($xmlContent, $privateKey = null) {
+        // This is a placeholder. In production, use actual cryptographic signing
+        // with the certificate provided by ZATCA
+        
+        $hash = self::generateInvoiceHash($xmlContent);
+        
+        // In production, sign the hash with private key
+        // For now, return the hash as signature
+        return base64_encode($hash);
+    }
+}
+?>

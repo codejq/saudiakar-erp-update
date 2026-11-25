@@ -1,0 +1,638 @@
+<?php
+
+/**
+ * WhatsApp Module Helper Functions
+ * ====================================
+ * Common functions used throughout the module
+ *
+ * @author WhatsApp Module
+ * @version 1.0
+ * @date 2025-10-16
+ */
+
+/**
+ * Redirect to database installer if tables don't exist
+ */
+function wa_redirect_to_installer($error)
+{
+    // Get the current script path
+    $currentScript = $_SERVER['SCRIPT_NAME'];
+    $baseDir = dirname($currentScript);
+
+    // Don't redirect if already on installer page
+    if (strpos($currentScript, 'database_install.php') !== false) {
+        return;
+    }
+
+    // Build installer URL
+    $protocol = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'];
+    $installerPath = $baseDir . '/database_install.php';
+    $installerUrl = $protocol . '://' . $host . $installerPath;
+
+    // Redirect
+	echo $error;exit();
+    echo "<script> window.location.href = '$installerUrl'; </script>";
+    exit();
+}
+
+/**
+ * Get setting value from database
+ * @param string $key Setting key
+ * @param string $default Default value
+ * @return string
+ */
+function wa_get_setting($key, $default = '')
+{
+    global $db;
+
+    $stmt = $db->prepare("SELECT setting_value FROM whatsapp_settings WHERE setting_key = ?");
+
+    // Check if prepare failed (table doesn't exist or other error)
+    if ($stmt === false) {
+        error_log("WhatsApp Module Error: Failed to prepare statement. Database tables may not exist. Error: " . $db->error);
+		echo ("xc  ;WhatsApp Module Error: Failed to prepare statement. Database tables may not exist. Error: " . $db->error);
+		echo "<hr>";
+		print_r($db);
+		echo "<hr>";
+        // Check if error is related to missing table
+        if (strpos($db->error, "doesn't exist") !== false || strpos($db->error, "Table") !== false) {
+            wa_redirect_to_installer($db->error);
+        }
+
+        return $default;
+    }
+
+    $stmt->bind_param("s", $key);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    if ($row = $result->fetch_assoc()) {
+        return $row['setting_value'];
+    }
+
+    return $default;
+}
+
+/**
+ * Update setting value
+ * @param string $key Setting key
+ * @param string $value Setting value
+ * @return bool
+ */
+function wa_update_setting($key, $value)
+{
+    global $db;
+
+    $stmt = $db->prepare("UPDATE whatsapp_settings SET setting_value = ? WHERE setting_key = ?");
+
+    if ($stmt === false) {
+        error_log("WhatsApp Module Error: Failed to prepare update statement. Error: " . $db->error);
+
+        // Check if error is related to missing table
+        if (strpos($db->error, "doesn't exist") !== false || strpos($db->error, "Table") !== false) {
+            wa_redirect_to_installer($db->error);
+        }
+
+        return false;
+    }
+
+    $stmt->bind_param("ss", $value, $key);
+    return $stmt->execute();
+}
+
+/**
+ * Log activity to service log
+ * @param string $action Action type
+ * @param string $description Description
+ * @param int $userId User ID
+ * @return bool
+ */
+function wa_log_activity($action, $description, $userId = null)
+{
+    global $db;
+
+    $ipAddress = $_SERVER['REMOTE_ADDR'];
+
+    if ($userId === null && isset($_SESSION['user_id'])) {
+        $userId = $_SESSION['user_id'];
+    }
+
+    $stmt = $db->prepare("INSERT INTO whatsapp_service_log (action_type, description, user_id, ip_address) VALUES (?, ?, ?, ?)");
+
+    if ($stmt === false) {
+        error_log("WhatsApp Module Error: Failed to prepare log statement. Error: " . $db->error);
+
+        // Check if error is related to missing table
+        if (strpos($db->error, "doesn't exist") !== false || strpos($db->error, "Table") !== false) {
+            wa_redirect_to_installer($db->error);
+        }
+
+        return false;
+    }
+
+    $stmt->bind_param("ssis", $action, $description, $userId, $ipAddress);
+    return $stmt->execute();
+}
+
+/**
+ * Format phone number for display
+ * @param string $phone Phone number
+ * @return string
+ */
+function wa_format_phone_display($phone)
+{
+    // Remove @s.whatsapp.net
+    $phone = str_replace('@s.whatsapp.net', '', $phone);
+
+    // Format: +966 50 123 4567
+    if (strlen($phone) >= 12) {
+        return '' . substr($phone, 0, 3) . '-' . substr($phone, 3, 2) . '-' . substr($phone, 5, 3) . '-' . substr($phone, 8);
+    }
+
+    return $phone;
+}
+
+/**
+ * Validate phone number
+ * @param string $phone Phone number
+ * @return bool
+ */
+function wa_validate_phone($phone)
+{
+    // Remove all non-numeric characters
+    $phone = preg_replace('/[^0-9]/', '', $phone);
+
+    // Check length (Saudi numbers: 9 digits without country code)
+    if (strlen($phone) < 9 || strlen($phone) > 15) {
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * Add message to queue
+ * @param array $data Message data
+ * @return int|bool Queue ID or false
+ */
+function wa_add_to_queue($data)
+{
+    global $db;
+
+    $recipient = isset($data['recipient']) ? $data['recipient'] : '';
+    $recipientName = isset($data['recipient_name']) ? $data['recipient_name'] : '';
+    $messageText = isset($data['message_text']) ? $data['message_text'] : '';
+    $attachmentPath = isset($data['attachment_path']) ? $data['attachment_path'] : null;
+    $attachmentType = isset($data['attachment_type']) ? $data['attachment_type'] : null;
+    $attachmentSize = isset($data['attachment_size']) ? $data['attachment_size'] : null;
+    $scheduledTime = isset($data['scheduled_time']) ? $data['scheduled_time'] : null;
+    $priority = isset($data['priority']) ? $data['priority'] : 5;
+    $createdBy = isset($data['created_by']) ? $data['created_by'] : (isset($_SESSION['user_id']) ? $_SESSION['user_id'] : null);
+    $metadata = isset($data['metadata']) ? json_encode($data['metadata']) : null;
+
+    $stmt = $db->prepare("
+        INSERT INTO whatsapp_queue
+        (recipient, recipient_name, message_text, attachment_path, attachment_type, attachment_size,
+         scheduled_time, priority, created_by, metadata)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ");
+
+    $stmt->bind_param(
+        "sssssisiss",
+        $recipient,
+        $recipientName,
+        $messageText,
+        $attachmentPath,
+        $attachmentType,
+        $attachmentSize,
+        $scheduledTime,
+        $priority,
+        $createdBy,
+        $metadata
+    );
+
+    if ($stmt->execute()) {
+        return $db->insert_id;
+    }
+
+    return false;
+}
+
+/**
+ * Get message from queue by ID
+ * @param int $id Queue ID
+ * @return array|null
+ */
+function wa_get_queue_message($id)
+{
+    global $db;
+
+    $stmt = $db->prepare("SELECT * FROM whatsapp_queue WHERE id = ?");
+
+    if ($stmt === false) {
+        error_log("WhatsApp Module Error: Failed to prepare queue query. Error: " . $db->error);
+
+        // Check if error is related to missing table
+        if (strpos($db->error, "doesn't exist") !== false || strpos($db->error, "Table") !== false) {
+            wa_redirect_to_installer($db->error);
+        }
+
+        return null;
+    }
+
+    $stmt->bind_param("i", $id);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    return $result->fetch_assoc();
+}
+
+/**
+ * Update message status
+ * @param int $id Queue ID
+ * @param string $status New status
+ * @param string $error Error message
+ * @return bool
+ */
+function wa_update_message_status($id, $status, $error = '')
+{
+    global $db;
+
+    if ($status == 'sent') {
+        $stmt = $db->prepare("
+            UPDATE whatsapp_queue
+            SET status = ?, sent_at = NOW(), error_message = ?
+            WHERE id = ?
+        ");
+    } else {
+        $stmt = $db->prepare("
+            UPDATE whatsapp_queue
+            SET status = ?, error_message = ?, retry_count = retry_count + 1
+            WHERE id = ?
+        ");
+    }
+
+    $stmt->bind_param("ssi", $status, $error, $id);
+    return $stmt->execute();
+}
+
+/**
+ * Get pending messages for processing
+ * @param int $limit Maximum number of messages
+ * @return array
+ */
+function wa_get_pending_messages($limit = 10)
+{
+    global $db;
+
+    $stmt = $db->prepare("
+        SELECT * FROM whatsapp_queue
+        WHERE status = 'pending'
+        AND (scheduled_time IS NULL OR scheduled_time <= NOW())
+        AND retry_count < max_retries
+        ORDER BY priority ASC, scheduled_time ASC
+        LIMIT ?
+    ");
+
+    $stmt->bind_param("i", $limit);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    $messages = array();
+    while ($row = $result->fetch_assoc()) {
+        $messages[] = $row;
+    }
+
+    return $messages;
+}
+
+/**
+ * Get message statistics
+ * @param string $dateFrom Date from (Y-m-d)
+ * @param string $dateTo Date to (Y-m-d)
+ * @return array
+ */
+function wa_get_statistics($dateFrom = null, $dateTo = null)
+{
+    global $db;
+
+    $where = "1=1";
+    $params = array();
+    $types = "";
+
+    if ($dateFrom) {
+        $where .= " AND DATE(created_at) >= ?";
+        $params[] = $dateFrom;
+        $types .= "s";
+    }
+
+    if ($dateTo) {
+        $where .= " AND DATE(created_at) <= ?";
+        $params[] = $dateTo;
+        $types .= "s";
+    }
+
+    $sql = "
+        SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) as sent,
+            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+            SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) as cancelled
+        FROM whatsapp_queue
+        WHERE $where
+    ";
+
+    $stmt = $db->prepare($sql);
+
+    if (!empty($params)) {
+        $stmt->bind_param($types, ...$params);
+    }
+
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    return $result->fetch_assoc();
+}
+
+/**
+ * Get message templates
+ * @param bool $activeOnly Get only active templates
+ * @return array
+ */
+function wa_get_templates($activeOnly = true)
+{
+    global $db;
+
+    $sql = "SELECT * FROM whatsapp_templates";
+
+    if ($activeOnly) {
+        $sql .= " WHERE is_active = 1";
+    }
+
+    $sql .= " ORDER BY template_name";
+
+    $result = $db->query($sql);
+
+    $templates = array();
+    while ($row = $result->fetch_assoc()) {
+        $templates[] = $row;
+    }
+
+    return $templates;
+}
+
+/**
+ * Get template by ID
+ * @param int $id Template ID
+ * @return array|null
+ */
+function wa_get_template($id)
+{
+    global $db;
+
+    $stmt = $db->prepare("SELECT * FROM whatsapp_templates WHERE id = ?");
+
+    if ($stmt === false) {
+        error_log("WhatsApp Module Error: Failed to prepare template query. Error: " . $db->error);
+
+        // Check if error is related to missing table
+        if (strpos($db->error, "doesn't exist") !== false || strpos($db->error, "Table") !== false) {
+            wa_redirect_to_installer($db->error);
+        }
+
+        return null;
+    }
+
+    $stmt->bind_param("i", $id);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    return $result->fetch_assoc();
+}
+
+/**
+ * Replace template variables
+ * @param string $template Template content
+ * @param array $variables Variables array
+ * @return string
+ */
+function wa_replace_template_vars($template, $variables)
+{
+    foreach ($variables as $key => $value) {
+        $template = str_replace('{' . $key . '}', $value, $template);
+    }
+
+    return $template;
+}
+
+/**
+ * Compress image before sending
+ * @param string $sourcePath Source image path
+ * @param string $targetPath Target image path
+ * @param int $quality Quality (0-100)
+ * @return bool
+ */
+function wa_compress_image($sourcePath, $targetPath, $quality = 75)
+{
+    $imageInfo = getimagesize($sourcePath);
+
+    if (!$imageInfo) {
+        return false;
+    }
+
+    $imageType = $imageInfo[2];
+
+    switch ($imageType) {
+        case IMAGETYPE_JPEG:
+            $image = imagecreatefromjpeg($sourcePath);
+            break;
+        case IMAGETYPE_PNG:
+            $image = imagecreatefrompng($sourcePath);
+            break;
+        case IMAGETYPE_GIF:
+            $image = imagecreatefromgif($sourcePath);
+            break;
+        default:
+            return false;
+    }
+
+    if (!$image) {
+        return false;
+    }
+
+    // Save compressed image
+    $result = imagejpeg($image, $targetPath, $quality);
+    imagedestroy($image);
+
+    return $result;
+}
+
+/**
+ * Clean old logs
+ * @param int $days Days to keep
+ * @return bool
+ */
+function wa_clean_old_logs($days = 90)
+{
+    global $db;
+
+    $stmt = $db->prepare("
+        DELETE FROM whatsapp_sent_log
+        WHERE sent_at < DATE_SUB(NOW(), INTERVAL ? DAY)
+    ");
+    $stmt->bind_param("i", $days);
+    $stmt->execute();
+
+    $stmt = $db->prepare("
+        DELETE FROM whatsapp_service_log
+        WHERE created_at < DATE_SUB(NOW(), INTERVAL ? DAY)
+    ");
+    $stmt->bind_param("i", $days);
+    return $stmt->execute();
+}
+
+/**
+ * Format file size
+ * @param int $bytes Bytes
+ * @return string
+ */
+function wa_format_file_size($bytes)
+{
+    if ($bytes >= 1073741824) {
+        return number_format($bytes / 1073741824, 2) . ' GB';
+    } elseif ($bytes >= 1048576) {
+        return number_format($bytes / 1048576, 2) . ' MB';
+    } elseif ($bytes >= 1024) {
+        return number_format($bytes / 1024, 2) . ' KB';
+    } else {
+        return $bytes . ' B';
+    }
+}
+
+/**
+ * Format date time in Arabic
+ * @param string $datetime DateTime string
+ * @return string
+ */
+function wa_format_datetime($datetime)
+{
+    if (!$datetime) return '-';
+
+    $timestamp = strtotime($datetime);
+    return date('Y/m/d - h:i A', $timestamp);
+}
+
+/**
+ * Get status label in Arabic
+ * @param string $status Status
+ * @return string
+ */
+function wa_get_status_label($status)
+{
+    $labels = array(
+        'pending' => 'قيد الانتظار',
+        'sending' => 'تم الارسال مجدول',
+        'sent' => 'تم الإرسال',
+        'failed' => 'فشل الإرسال',
+        'cancelled' => 'تم الإلغاء'
+    );
+
+    return isset($labels[$status]) ? $labels[$status] : $status;
+}
+
+/**
+ * Get status color class for Bootstrap
+ * @param string $status Status
+ * @return string
+ */
+function wa_get_status_color($status)
+{
+    $colors = array(
+        'pending' => 'warning',
+        'sending' => 'info',
+        'sent' => 'success',
+        'failed' => 'danger',
+        'cancelled' => 'secondary'
+    );
+
+    return isset($colors[$status]) ? $colors[$status] : 'secondary';
+}
+
+/**
+ * Check if service is running
+ * @return bool
+ */
+function wa_is_service_running()
+{
+    // Check if cURL extension is available
+    if (!function_exists('curl_init')) {
+        error_log("WhatsApp Module Error: cURL extension is not enabled. Please enable cURL in php.ini");
+        return false;
+    }
+
+    $serviceUrl = wa_get_setting('service_url', 'http://127.0.0.1:8010');
+
+    $ch = curl_init($serviceUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 3);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    curl_setopt($ch, CURLOPT_NOBODY, true); // HEAD request only
+
+    curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error = curl_error($ch);
+    //curl_close($ch);
+
+    // Service is running if we get any HTTP response (200, 404, etc)
+    // Connection refused or timeout means service is down
+    return (!$error && $httpCode > 0);
+}
+
+/**
+ * Check if account is connected
+ * @return bool
+ */
+function wa_is_account_connected()
+{
+    return (wa_get_setting('account_connected', '0') == '1');
+}
+
+/**
+ * Sanitize input
+ * @param string $input Input string
+ * @return string
+ */
+function wa_sanitize($input)
+{
+    return htmlspecialchars(trim($input), ENT_QUOTES, 'UTF-8');
+}
+
+/**
+ * Generate random string
+ * @param int $length Length
+ * @return string
+ */
+function wa_generate_random_string($length = 10)
+{
+    return substr(str_shuffle('0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'), 0, $length);
+}
+
+/**
+ * Check user permission
+ * @param string $permission Permission name
+ * @return bool
+ */
+function wa_check_permission($permission = 'whatsapp_access')
+{
+    // Implement based on your existing permission system
+    if (!isset($_SESSION['user_id'])) {
+        return false;
+    }
+
+    // Add your permission check logic here
+    return true;
+}

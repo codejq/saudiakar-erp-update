@@ -380,10 +380,15 @@ if (!$property) {
                     <i class="bi bi-plus-circle me-1"></i>
                     إضافة قسط جديد
                 </button>
+                <?php
+                require_once __DIR__ . '/receipt_commission_helpers.hnt';
+                $fullAccessGroup = receiptCommissionRows($link, 'SELECT g.allprevilage FROM user u JOIN usergroups g ON g.groupid=u.groupid WHERE u.userid=?', array(intval($_SESSION['useridv'] ?? 0)));
+                if (!empty($fullAccessGroup[0]['allprevilage'])): ?>
                 <button type="button" class="btn btn-success" onclick="markAllAsPaid()">
                     <i class="bi bi-check-all me-1"></i>
                     تحديد الكل كمدفوع
                 </button>
+                <?php endif; ?>
                 <button type="button" class="btn btn-info" onclick="calculateLateFees()">
                     <i class="bi bi-calculator me-1"></i>
                     حساب غرامات التأخير
@@ -713,12 +718,7 @@ if (!$property) {
                         <textarea class="form-control" name="notes" rows="2"></textarea>
                     </div>
 
-                    <div class="form-check mb-3">
-                        <input type="checkbox" class="form-check-input" id="create_receipt" name="create_receipt" value="1" checked>
-                        <label class="form-check-label" for="create_receipt">
-                            إنشاء سند قبض تلقائي
-                        </label>
-                    </div>
+                    <div class="alert alert-info py-2 mb-3"><i class="bi bi-receipt me-1"></i>ينشأ سند قبض لهذه الدفعة تلقائياً.</div>
                 </form>
             </div>
             <div class="modal-footer">
@@ -921,7 +921,10 @@ if (!$property) {
             </div>
             <div class="modal-body">
                 <form id="bulkPaymentForm">
+                    <?php if (empty($_SESSION['bulk_payment_csrf'])) $_SESSION['bulk_payment_csrf'] = bin2hex(random_bytes(24)); ?>
                     <input type="hidden" name="action" value="bulk_payment">
+                    <input type="hidden" name="csrf_token" value="<?= $_SESSION['bulk_payment_csrf'] ?>">
+                    <input type="hidden" name="formuid" value="<?= bin2hex(random_bytes(16)) ?>">
                     <input type="hidden" name="egar_id" value="<?= $contractId ?>">
 
                     <div class="mb-3">
@@ -941,10 +944,23 @@ if (!$property) {
                     <div class="mb-3">
                         <label class="form-label">طريقة الدفع</label>
                         <select class="form-select" name="payment_method">
-                            <option value="cash">نقدي</option>
-                            <option value="bank_transfer">تحويل بنكي</option>
-                            <option value="check">شيك</option>
-                            <option value="online">دفع إلكتروني</option>
+                            <option value="1">نقدي</option>
+                            <option value="2">شيك</option>
+                            <option value="4">تحويل</option>
+                            <option value="5">شبكة</option>
+                            <option value="3">طريقة أخرى</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">الحساب البنكي (لغير النقد)</label>
+                        <select class="form-select" name="bankid">
+                            <option value="0">-</option>
+                            <?php
+                            $bulkBanks = mysql_query("SELECT id,bankname,acountnumber FROM bankacounts WHERE ownerid2 IN (0," . intval($property['idaqar'] ?? 0) . ") ORDER BY ownerid2,id", $link);
+                            while ($bulkBanks && ($bulkBank = mysql_fetch_assoc($bulkBanks))): ?>
+                            <option value="<?= intval($bulkBank['id']) ?>"><?= htmlspecialchars($bulkBank['bankname'] . ' - ' . $bulkBank['acountnumber']) ?></option>
+                            <?php endwhile; ?>
                         </select>
                     </div>
 
@@ -1408,37 +1424,34 @@ if (!$property) {
             return;
         }
 
-        if (confirm(`هل أنت متأكد من توزيع مبلغ ${amount.toFixed(2)} ريال على الأقساط؟`)) {
+        confirm(`هل أنت متأكد من توزيع مبلغ ${amount.toFixed(2)} ريال على الأقساط؟ سينشأ سند قبض لكل قسط.`, 'تأكيد', function () {
+            const button = $('#bulkPaymentModal .modal-footer .btn').last().prop('disabled', true);
             $.ajax({
                 url: 'installments.api.hnt',
                 method: 'POST',
+                dataType: 'json',
                 data: formData,
                 success: function(response) {
                     if (response.success) {
-                        let message = `تم دفع ${response.data.paid_count} قسط`;
-                        if (response.data.partial_count > 0) {
-                            message += ` و ${response.data.partial_count} قسط جزئياً`;
-                        }
-                        if (response.data.remaining_amount > 0) {
-                            message += `\nالمبلغ المتبقي: ${parseFloat(response.data.remaining_amount).toFixed(2)} ريال`;
-                        }
-                        showToast('success', message);
+                        showToast('success', response.message);
                         bulkPaymentModal.hide();
-                        setTimeout(() => location.reload(), 1500);
+                        setTimeout(() => location.reload(), 2500);
                     } else {
+                        button.prop('disabled', false);
                         showToast('error', response.message || 'فشل في تنفيذ الدفعة الجماعية');
                     }
                 },
-                error: function(xhr, status, error) {
+                error: function() {
+                    button.prop('disabled', false);
                     showToast('error', 'حدث خطأ في الاتصال بالخادم');
                 }
             });
-        }
+        });
     }
 
     // Mark all as paid
     function markAllAsPaid() {
-     confirm('هل أنت متأكد من تحديد جميع الأقساط غير المدفوعة كمدفوعة؟\nهذا الإجراء سيؤثر على جميع الأقساط المعلقة.','تحذير',()=>Mark());
+     confirm('تنبيه: سيتم تحديد جميع الأقساط المعلقة كمدفوعة بدون سندات قبض، ولن تصل أي مبالغ إلى المحاسبة أو الضريبة أو حساب المالك. هل تريد المتابعة؟','تحذير',()=>Mark());
 
     }
 
@@ -1448,6 +1461,7 @@ if (!$property) {
                 method: 'POST',
                 data: {
                     action: 'mark_all_paid',
+                    csrf_token: $('#bulkPaymentForm [name=csrf_token]').val(),
                     egar_id: <?= $contractId ?>
                 },
                 success: function(response) {

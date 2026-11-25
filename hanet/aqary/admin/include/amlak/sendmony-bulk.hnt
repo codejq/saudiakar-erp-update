@@ -15,6 +15,8 @@ if ($is_ajax_request) {
 }
 
 require_once '../uCal.class.hnt';
+require_once __DIR__ . '/receipt_components_store.hnt';
+require_once __DIR__ . '/deposit_settlement_helpers.hnt';
 $dcal = new uCal();
 date_default_timezone_set('Asia/Riyadh');
 
@@ -72,24 +74,17 @@ function bulkDeliveryTimestamp($value, $isGregorian, $dcal) {
     return mktime(0, 0, 0, $month, $day, $year);
 }
 
-function bulkDeliveryFinancials($row, $property) {
-    $rate = floatval($property['persentage']);
-    if ($rate > 100) $rate = $rate / 100;
-    $base = floatval($row['amount']) - floatval($row['services']) - floatval($row['mysa3ee']) - floatval($row['mywater']) - floatval($row['tamen']);
-    $ownerWater = $property['addwaterto'] === 'malek' ? floatval($row['mywater']) : 0;
-    $ownerInsurance = $property['addtameento'] === 'malek' ? floatval($row['tamen']) : 0;
-    $officeCommission = round(($rate / 100) * $base, 2);
+/** Same calculation as the single delivery page and the owner statement. */
+function bulkDeliveryFinancials($row, $property, $link) {
+    $breakdown = receiptDeliveryBreakdowns($link, array($row), $property)[intval($row['iderad'])];
     return array(
-        'base' => round($base, 2),
-        'commission_rate' => $rate,
-        'office_commission' => $officeCommission,
-        'owner_net' => round($ownerWater + $ownerInsurance + $base - $officeCommission, 2),
+        'base' => $breakdown['base'],
+        'commission_rate' => $breakdown['rate'],
+        'office_commission' => $breakdown['fee'],
+        'owner_net' => $breakdown['owner_net'],
+        'withheld' => receiptWithheldFromOwner($breakdown),
+        'breakdown' => $breakdown,
     );
-}
-
-function bulkDeliveryOwnerNet($row, $property) {
-    $financials = bulkDeliveryFinancials($row, $property);
-    return $financials['owner_net'];
 }
 
 function bulkDeliveryRows($ids, $propertyId, $link, $forUpdate = false) {
@@ -169,7 +164,7 @@ if ($is_ajax_request && $action === 'create_bulk') {
         ));
     }
 
-    $propertyResult = mysql_query("SELECT idaqar, aqarname, ownername, persentage, addwaterto, addtameento FROM amlak WHERE idaqar='{$propertyId}' LIMIT 1", $link);
+    $propertyResult = mysql_query("SELECT * FROM amlak WHERE idaqar='{$propertyId}' LIMIT 1", $link);
     $property = $propertyResult ? mysql_fetch_assoc($propertyResult) : false;
     if (!$property) bulkDeliveryJson(false, 'العقار المحدد غير موجود.', array(), 404);
 
@@ -225,7 +220,7 @@ if ($is_ajax_request && $action === 'create_bulk') {
 
     $totalBeforeExpenses = 0;
     foreach ($rows as &$calculationRow) {
-        $calculationRow['financials'] = bulkDeliveryFinancials($calculationRow, $property);
+        $calculationRow['financials'] = bulkDeliveryFinancials($calculationRow, $property, $link);
         $totalBeforeExpenses += $calculationRow['financials']['owner_net'];
     }
     unset($calculationRow);
@@ -240,6 +235,9 @@ if ($is_ajax_request && $action === 'create_bulk') {
         bulkDeliveryJson(false, 'إجمالي المصروفات المحددة أكبر من أو يساوي المبلغ المستحق للمالك. ألغِ بعض المصروفات ثم حاول مجدداً.', array(), 422);
     }
 
+    // Insurance damages owed to the owner join the first voucher, without a fee.
+    $ownerCredits = depositPendingOwnerCredits($link, $propertyId, true);
+    $ownerCreditsTotal = depositCreditsTotal($ownerCredits);
     $failed = '';
     $remainingBeforeExpenses = $totalBeforeExpenses;
     $remainingPayable = $finalBatchTotal;
@@ -283,6 +281,8 @@ if ($is_ajax_request && $action === 'create_bulk') {
         $expenseShare = round($ownerNet - $settlementAmount, 2);
         $remainingBeforeExpenses = round($remainingBeforeExpenses - $ownerNet, 2);
         $remainingPayable = round($remainingPayable - $settlementAmount, 2);
+        $rowCredit = $rowIndex === 0 ? $ownerCreditsTotal : 0;
+        $settlementAmount = round($settlementAmount + $rowCredit, 2);
         $rowUid = $formUid . '-' . intval($row['iderad']);
         $rowDescription = $description . ' - تحصيل رقم ' . intval($row['iderad']);
         $rowBreakdown = '<table class="calc-table"><tr><td>رقم التحصيل</td><td>' . intval($row['iderad']) . '</td></tr>' .
@@ -290,8 +290,10 @@ if ($is_ajax_request && $action === 'create_bulk') {
                         '<tr><td>السعي/التجديد</td><td>' . number_format(floatval($row['mysa3ee']), 2) . '</td></tr>' .
                         '<tr><td>الخدمات</td><td>' . number_format(floatval($row['services']), 2) . '</td></tr>' .
                         '<tr><td>عمولة المكتب (' . number_format(floatval($financials['commission_rate']), 2) . '%)</td><td>' . number_format(floatval($financials['office_commission']), 2) . '</td></tr>' .
+                        ($financials['withheld'] > 0 ? '<tr><td>ضريبة محجوزة لدى المكتب</td><td>' . number_format($financials['withheld'], 2) . '</td></tr>' : '') .
                         '<tr><td>صافي المالك قبل المصروفات</td><td>' . number_format($ownerNet, 2) . '</td></tr>' .
                         '<tr><td>حصة التحصيل من المصروفات المخصومة</td><td>' . number_format($expenseShare, 2) . '</td></tr>' .
+                        ($rowCredit > 0 ? '<tr><td>تلفيات من تأمين المستأجر (بدون نسبة)</td><td>' . number_format($rowCredit, 2) . '</td></tr>' : '') .
                         '<tr><td>صافي التسليم</td><td>' . number_format($settlementAmount, 2) . '</td></tr>' .
                         ($rowIndex === 0 ? $expenseDetailsHtml : '') . '</table>';
         $moneySource = intval($row['source_ownerid']) > 0 ? 1 : 0;
@@ -317,6 +319,13 @@ if ($is_ajax_request && $action === 'create_bulk') {
                       WHERE iderad='" . intval($row['iderad']) . "' AND idaqar='{$propertyId}' AND tasfia='' LIMIT 1";
         if (!mysql_query($updateSql, $link) || mysql_affected_rows($link) !== 1) {
             $failed = 'تعذر تحديث التحصيل رقم ' . intval($row['iderad']) . ' لأنه تغير أثناء العملية.';
+            break;
+        }
+        try {
+            receiptKeepDeliveredComponents($link, $row, $financials['breakdown']);
+            if ($rowCredit > 0) depositMarkOwnerCredits($link, $ownerCredits, end($voucherIds));
+        } catch (Throwable $componentsError) {
+            $failed = 'تعذر حفظ تفاصيل التحصيل رقم ' . intval($row['iderad']) . '.';
             break;
         }
         $batchTotal += $settlementAmount;
@@ -357,7 +366,7 @@ if ($propertyId < 1 || empty($selectedIds) || count($selectedIds) > 1000) {
     <?php require '../../../foter.hnt'; exit;
 }
 
-$propertyResult = mysql_query("SELECT idaqar, aqarname, ownername, persentage, addwaterto, addtameento FROM amlak WHERE idaqar='{$propertyId}' LIMIT 1", $link);
+$propertyResult = mysql_query("SELECT * FROM amlak WHERE idaqar='{$propertyId}' LIMIT 1", $link);
 $property = $propertyResult ? mysql_fetch_assoc($propertyResult) : false;
 $rows = $property ? bulkDeliveryRows($selectedIds, $propertyId, $link) : array();
 if (!$property || count($rows) !== count($selectedIds)) {
@@ -377,8 +386,10 @@ $batchTotal = 0;
 $batchOfficeCommission = 0;
 $batchSaee = 0;
 $invalidRows = array();
+$batchWithheld = 0;
+$reviewRows = array();
 foreach ($rows as &$row) {
-    $rowFinancials = bulkDeliveryFinancials($row, $property);
+    $rowFinancials = bulkDeliveryFinancials($row, $property, $link);
     $row['owner_net'] = $rowFinancials['owner_net'];
     $row['office_commission'] = $rowFinancials['office_commission'];
     $row['commission_rate'] = $rowFinancials['commission_rate'];
@@ -386,9 +397,12 @@ foreach ($rows as &$row) {
     $batchOfficeCommission += $row['office_commission'];
     $batchSaee += floatval($row['mysa3ee']);
     if ($row['owner_net'] < 1) $invalidRows[] = intval($row['iderad']);
+    $batchWithheld += $rowFinancials['withheld'];
+    if ($rowFinancials['breakdown']['warnings']) $reviewRows[intval($row['iderad'])] = implode('، ', $rowFinancials['breakdown']['warnings']);
 }
 unset($row);
 $batchTotal = round($batchTotal, 2);
+$ownerCreditsTotal = depositCreditsTotal(depositPendingOwnerCredits($link, $propertyId));
 $batchOfficeCommission = round($batchOfficeCommission, 2);
 $batchSaee = round($batchSaee, 2);
 
@@ -440,6 +454,9 @@ $formUid = bulkDeliveryToken();
     <div class="alert alert-info"><i class="bi bi-info-circle me-1"></i>سينشئ النظام سند تسليم مستقل لكل تحصيل للحفاظ على الارتباطات والتقارير، ويخصم المصروفات المحددة من إجمالي الدفعة ويوزع الخصم على التحصيلات تلقائياً.</div>
     <?php if (!empty($invalidRows)) { ?><div class="alert alert-danger">لا يمكن المتابعة لأن صافي التحصيلات التالية أقل من ريال واحد: <?= bulkDeliveryEsc(implode(', ', $invalidRows)) ?></div><?php } ?>
 
+    <?php if ($ownerCreditsTotal > 0) { ?><div class="alert alert-success">تضاف للمالك تلفيات من تأمين المستأجر بدون نسبة: <strong><?= number_format($ownerCreditsTotal, 2) ?></strong></div><?php } ?>
+    <?php if ($batchWithheld > 0) { ?><div class="alert alert-info">ضريبة محجوزة لدى المكتب ولا تسلم للمالك: <strong><?= number_format($batchWithheld, 2) ?></strong></div><?php } ?>
+    <?php foreach ($reviewRows as $reviewId => $reviewText) { ?><div class="alert alert-warning py-2">التحصيل #<?= intval($reviewId) ?> يحتاج مراجعة: <?= bulkDeliveryEsc($reviewText) ?></div><?php } ?>
     <div class="row g-3 mb-4">
         <div class="col-md-3"><div class="bulk-summary"><div class="label">السعي / التجديد</div><div class="value text-primary"><?= number_format($batchSaee, 2) ?></div></div></div>
         <div class="col-md-3"><div class="bulk-summary"><div class="label">عمولة المكتب بالنسبة</div><div class="value text-danger"><?= number_format($batchOfficeCommission, 2) ?></div></div></div>
@@ -512,6 +529,7 @@ $formUid = bulkDeliveryToken();
 (function ($) {
     var isHijri = <?= $calendarType ? 'false' : 'true' ?>;
     var batchBeforeExpenses = <?= json_encode((float)$batchTotal) ?>;
+    var ownerCredits = <?= json_encode((float)$ownerCreditsTotal) ?>;
     var hasInvalidRows = <?= !empty($invalidRows) ? 'true' : 'false' ?>;
 
     function money(value) {
@@ -527,7 +545,7 @@ $formUid = bulkDeliveryToken();
         var finalTotal = Math.round((batchBeforeExpenses - expenseTotal) * 100) / 100;
         var invalidExpenses = finalTotal < 1;
         $('#bulkExpenseTotal').text(money(expenseTotal));
-        $('#bulkFinalTotal,#bulkFinalSummary').text(money(finalTotal));
+        $('#bulkFinalTotal,#bulkFinalSummary').text(money(finalTotal + ownerCredits));
         $('#bulkFinalTotal,#bulkFinalSummary').toggleClass('text-danger', invalidExpenses).toggleClass('text-success', !invalidExpenses);
         $('#bulkExpenseWarning').toggleClass('d-none', !invalidExpenses);
         $('#bulkSubmit').prop('disabled', hasInvalidRows || invalidExpenses);

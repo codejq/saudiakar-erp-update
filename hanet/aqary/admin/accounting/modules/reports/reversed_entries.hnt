@@ -1,0 +1,21 @@
+<?php
+/** Reversed entries with their reversal, reason and user. */
+$sc_title = 'القيود المعكوسة';
+$syncReport = [
+    'key' => 'reversed_entries', 'icon' => 'bi-arrow-counterclockwise', 'desc' => 'كل قيد عُكس مع القيد العكسي والسبب والمستخدم',
+    'filters' => ['date', 'owner_id', 'aqar_id', 'subaqar_id', 'tenant_id', 'egar_id'],
+    'build' => function ($db, $f) {
+        syncReportNeed(accountingReversalReady($db));
+        [$where, $params] = syncReportEntryWhere($f);
+        $lines = receiptCommissionRows($db, "SELECT je.entry_id,je.entry_number,je.entry_date,je.description,je.total_debit,r.entry_id r_id,r.entry_number r_number,r.entry_date r_date,r.notes reason,u.name,u.username
+            FROM acc_journal_entries je JOIN acc_journal_entries r ON r.entry_id=je.reversed_by_entry_id LEFT JOIN user u ON u.userid=r.created_by
+            WHERE je.reversed_by_entry_id>0 AND r.entry_date BETWEEN ? AND ?{$where} ORDER BY r.entry_date,r.entry_id", array_merge([$f['date_from'], $f['date_to']], $params));
+        $links = accountingEntryLinks($db, array_column($lines, 'entry_id'));
+        $rows = [];
+        foreach ($lines as $line) $rows[] = ['date' => $line['r_date'], 'entry' => syncReportEntryCell($line), 'entry_date' => $line['entry_date'], 'reversal' => syncReportEntryCell(['entry_id' => $line['r_id'], 'entry_number' => $line['r_number']]),
+            'description' => $line['description'], 'reason' => $line['reason'], 'user' => $line['name'] ?: $line['username'], 'amount' => $line['total_debit'], 'links' => $links[(int)$line['entry_id']] ?? []];
+        return ['columns' => ['date' => ['تاريخ العكس', 'date'], 'entry' => ['القيد الأصلي', 'text'], 'entry_date' => ['تاريخه', 'date'], 'reversal' => ['القيد العكسي', 'text'], 'description' => ['البيان', 'text'], 'reason' => ['السبب', 'text'],
+            'user' => ['المستخدم', 'text'], 'amount' => ['المبلغ', 'money', true], 'links' => ['الروابط', 'links']], 'rows' => $rows, 'empty' => 'لا توجد قيود معكوسة ضمن الفترة.'];
+    },
+];
+require __DIR__ . '/../../includes/sync_report_page.hnt';

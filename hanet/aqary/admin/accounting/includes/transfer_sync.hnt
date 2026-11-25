@@ -1,0 +1,104 @@
+<?php
+/**
+ * Movements recorded on sanad_sarf.hnt (no income row): cash/bank transfers, payments to
+ * owners, office expenses and wages. sanadsarf.qayedtype 1..10; even numbers start from the bank
+ * except 1 and 2, which move money between cash and bank.
+ */
+require_once __DIR__ . '/sync_start_date.hnt';
+
+function transferSyncWhere($db): string {
+    return amlakSyncDateSql($db, 'sanadate') . " AND iderad=0 AND qayedtype BETWEEN 1 AND 10 AND (accounting_entry_id IS NULL OR accounting_entry_id=0
+        OR NOT EXISTS (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id=sanadsarf.accounting_entry_id AND j.status='posted'))";
+}
+
+trait TransferSync {
+    public function createEntryFromTransfer($transferId) {
+        try {
+            $this->db->begin_transaction();
+            $row = receiptCommissionRows($this->db, 'SELECT * FROM sanadsarf WHERE sanadid=? FOR UPDATE', [(int)$transferId])[0] ?? null;
+            if (!$row) throw new RuntimeException('السند غير موجود.');
+            if (!amlakSyncIsInPeriod($this->db, $row['sanadate'])) throw new RuntimeException('تاريخ الحركة يسبق تاريخ بدء المزامنة.');
+            $result = $this->buildTransferEntry($row);
+            if (empty($result['success'])) throw new RuntimeException($result['message'] ?? $result['error'] ?? 'تعذر ترحيل الحركة.');
+            receiptCommissionQuery($this->db, 'UPDATE sanadsarf SET accounting_entry_id=? WHERE sanadid=?', [(int)$result['entry_id'], (int)$transferId])->close();
+            $this->db->commit();
+            return $result;
+        } catch (Throwable $error) {
+            $this->db->rollback();
+            error_log('Transfer sync: ' . $error->getMessage());
+            return ['success' => false, 'message' => $error instanceof RuntimeException ? $error->getMessage() : 'تعذر ترحيل الحركة.'];
+        }
+    }
+
+    private function transferRequired(int $account, string $label): int {
+        if ($account <= 0) throw new RuntimeException('حساب "' . $label . '" غير مهيأ.');
+        return $account;
+    }
+
+    /** Fee and expenses closed by a full settlement; carried by the last voucher of the group. */
+    private function transferClosing(array $row): array {
+        $marker = trim((string)$row['tasfia']);
+        $empty = ['fee' => 0.0, 'expenses' => 0.0];
+        if ($marker === '') return $empty;
+        $last = receiptCommissionRows($this->db, 'SELECT MAX(sanadid) m FROM sanadsarf WHERE tasfia=? AND aqarid=? AND iderad=0', [$marker, (int)$row['aqarid']])[0]['m'];
+        if ((int)$last !== (int)$row['sanadid']) return $empty;
+        $property = receiptCommissionRows($this->db, 'SELECT * FROM amlak WHERE idaqar=?', [(int)$row['aqarid']])[0] ?? [];
+        $income = receiptCommissionRows($this->db, 'SELECT e.* FROM eradat e WHERE e.tasfia=? AND e.idaqar=? AND NOT EXISTS (SELECT 1 FROM sanadsarf d WHERE d.iderad=e.iderad AND d.iderad>0)', [$marker, (int)$row['aqarid']]);
+        foreach ($income as $item) {
+            $receipt = receiptCommissionRows($this->db, 'SELECT idsanad,sanaddate FROM sanad WHERE idsanad=?', [(int)$item['sanadrakam']])[0] ?? null;
+            if ($receipt && amlakSyncIsInPeriod($this->db, $receipt['sanaddate']) && !$this->sourceEntry('sanad_id', (int)$receipt['idsanad'], 'sanad')) {
+                throw new RuntimeException('اعتمد فاتورة سند القبض #' . (int)$receipt['idsanad'] . ' أولاً.');
+            }
+        }
+        $fee = array_sum(array_column(receiptDeliveryBreakdowns($this->db, $income, $property), 'fee'));
+        $expenses = receiptCommissionRows($this->db, 'SELECT COALESCE(SUM(amount),0) t FROM masrofat WHERE tasfia=? AND idaqar=? AND fund_source=0', [$marker, (int)$row['aqarid']])[0]['t'];
+        return ['fee' => round((float)$fee, 2), 'expenses' => round((float)$expenses, 2)];
+    }
+
+    private function buildTransferEntry(array $row): array {
+        $id = (int)$row['sanadid'];
+        $type = (int)$row['qayedtype'];
+        if ((int)$row['iderad'] !== 0 || $type < 1 || $type > 10) throw new RuntimeException('السند ليس حركة تحويل.');
+        $existing = $this->sourceEntry('sanadsarf_id', $id, 'sanadsarf');
+        if ($existing) return ['success' => true, 'existing' => true, 'entry_id' => (int)$existing['entry_id']];
+        $amount = round((float)$row['amount'], 2);
+        if ($amount <= 0) throw new RuntimeException('مبلغ السند غير صحيح.');
+        $cash = $this->accountId('default_payment_cash_account_id', '1111');
+        $bank = $this->bankLedgerAccount($row['bankid'] ?? 0, $this->accountId('default_payment_bank_account_id', '1112'));
+        $cash = $this->transferRequired($cash, 'الصندوق');
+        if ($type === 1 || $type % 2 === 0) $bank = $this->transferRequired($bank, 'البنك');
+        $source = $type === 1 ? $cash : ($type % 2 === 0 ? $bank : $cash);
+        $isOwner = $type === 3 || $type === 4;
+        $aqar = $isOwner ? (int)$row['aqarid'] : 0;
+        $context = $this->buildPropertyContext($aqar, null);
+        $extra = [];
+        $debitAmount = $amount;
+        if ($type === 1) $debit = $bank;
+        elseif ($type === 2) $debit = $cash;
+        elseif ($isOwner) {
+            $property = $aqar > 0 ? (receiptCommissionRows($this->db, 'SELECT * FROM amlak WHERE idaqar=?', [$aqar])[0] ?? null) : null;
+            if (!$property) throw new RuntimeException('حدد عقار المالك في السند.');
+            if (($property['rent_income_to'] ?? 'owner') === 'office') throw new RuntimeException('العقار مملوك للمكتب؛ لا يوجد تسليم لمالك.');
+            $debit = $this->receiptInvoiceSettingId('default_owner_payable_account_id', 'ذمم الملاك');
+            $closing = $this->transferClosing($row);
+            if ($closing['fee'] > 0) $extra[] = [$this->receiptInvoiceSettingId('default_management_fee_account_id', 'إيراد أتعاب الإدارة'), 'أتعاب إدارة', $closing['fee']];
+            if ($closing['expenses'] > 0) $extra[] = [$this->receiptInvoiceSettingId('default_owner_recoverable_account_id', 'مصروفات مستردة من الملاك'), 'مصروفات مخصومة', $closing['expenses']];
+            $debitAmount = round($amount + $closing['fee'] + $closing['expenses'], 2);
+        } elseif ($type === 7 || $type === 8) $debit = $this->transferRequired($this->accountId('default_salary_expense_account_id', '5110'), 'الرواتب والأجور');
+        else $debit = $this->transferRequired($this->accountId('default_expense_account_id', '5190'), 'المصروفات العامة');
+        if ($debit === $source) throw new RuntimeException('حساب الصندوق والبنك متطابقان في الإعدادات.');
+        $labels = [1 => 'تحويل من الصندوق إلى البنك', 2 => 'تحويل من البنك إلى الصندوق', 3 => 'دفعة لمالك', 4 => 'دفعة لمالك', 5 => 'مصروف مكتب', 6 => 'مصروف مكتب',
+            7 => 'أجور عاملين', 8 => 'أجور عاملين', 9 => 'مصروف آخر', 10 => 'مصروف آخر'];
+        $description = $labels[$type] . ' #' . $id . (trim((string)$row['bayan']) !== '' ? ' - ' . trim((string)$row['bayan']) : '');
+        $cost = $context['cost_center_id'];
+        $lines = [['account_id' => $debit, 'description' => mb_substr($description, 0, 250, 'UTF-8'), 'debit_amount' => $debitAmount, 'credit_amount' => 0, 'cost_center_id' => $cost]];
+        foreach ($extra as [$account, $label, $value]) $lines[] = ['account_id' => $account, 'description' => $label . ' - #' . $id, 'debit_amount' => 0, 'credit_amount' => $value, 'cost_center_id' => $cost];
+        $lines[] = ['account_id' => $source, 'description' => mb_substr($description, 0, 250, 'UTF-8'), 'debit_amount' => 0, 'credit_amount' => $amount, 'cost_center_id' => $cost];
+        return $this->accountingManager->createJournalEntry([
+            'entry_date' => $this->timestampDate($row['sanadate']), 'entry_type' => $isOwner ? 'owner_settlement' : ($type <= 2 ? 'auto' : 'expense'),
+            'journal_id' => $this->accountingManager->getDefaultJournalIdByCode($type <= 2 ? 'GEN' : 'PAY'),
+            'owner_id' => $context['owner_id'], 'aqar_id' => $context['aqar_id'], 'sanadsarf_id' => $id,
+            'reference_type' => 'sanadsarf', 'reference_id' => $id, 'description' => $description, 'status' => 'posted',
+        ], $lines);
+    }
+}

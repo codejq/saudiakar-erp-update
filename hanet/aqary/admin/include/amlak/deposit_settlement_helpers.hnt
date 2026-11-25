@@ -1,0 +1,170 @@
+<?php
+/**
+ * Insurance settlement when a tenant leaves (ACCOUNTING_RENTAL_SYNC.md, B17, B18, B20).
+ * Damages never exceed the insurance; the user chooses who receives them each time.
+ */
+require_once __DIR__ . '/receipt_components_store.hnt';
+require_once __DIR__ . '/accounting_lock.hnt';
+
+function depositSettlementReady($link): bool {
+    static $ready = [];
+    $key = spl_object_id($link);
+    if (!isset($ready[$key])) {
+        $ready[$key] = receiptComponentsReady($link) && !empty(receiptCommissionRows($link,
+            "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='deposit_settlements'"));
+    }
+    return $ready[$key];
+}
+
+/** Contract, unit, property and tenant; vacating clears some of them, so use the fallbacks. */
+function depositContract($link, $contractId): ?array {
+    $contract = receiptCommissionRows($link, 'SELECT * FROM egar WHERE rakam3akdid=?', [(int)$contractId])[0] ?? null;
+    if (!$contract) return null;
+    $unit = receiptCommissionRows($link, 'SELECT ABS(idsubaqar) unit FROM aksat WHERE egar_id=? AND idsubaqar<>0 LIMIT 1', [(int)$contractId])[0]['unit'] ?? 0;
+    if (!$unit) $unit = receiptCommissionRows($link, 'SELECT idsubaqar unit FROM amlakdetails WHERE rakam3akdid=? LIMIT 1', [(int)$contractId])[0]['unit'] ?? 0;
+    $details = $unit ? (receiptCommissionRows($link, 'SELECT * FROM amlakdetails WHERE idsubaqar=?', [(int)$unit])[0] ?? null) : null;
+    $property = $details ? (receiptCommissionRows($link, 'SELECT * FROM amlak WHERE idaqar=?', [(int)$details['idaqar']])[0] ?? null) : null;
+    $tenantId = (int)$contract['mostagerid'] ?: (int)$contract['elect'];
+    $tenant = $tenantId ? (receiptCommissionRows($link, 'SELECT mostagerid,mostagername FROM mostagereen WHERE mostagerid=?', [$tenantId])[0] ?? null) : null;
+    return ['contract' => $contract, 'unit' => $details, 'property' => $property, 'tenant_id' => $tenantId, 'tenant_name' => $tenant['mostagername'] ?? ''];
+}
+
+/** Insurance received for a contract, in cents, and where the figure comes from. */
+function depositInsuranceReceived($link, $contractId, array $contract): array {
+    $row = receiptCommissionRows($link, 'SELECT COALESCE(SUM(c.insurance),0) t,SUM(c.status=\'review\') r FROM aksat k JOIN sanad_components c ON c.kastid=k.kastid
+        JOIN sanad s ON s.idsanad=c.idsanad WHERE k.egar_id=?', [(int)$contractId])[0];
+    if ((float)$row['t'] > 0) return ['cents' => receiptComponentsCents($row['t']), 'source' => 'receipts', 'review' => (int)$row['r'] > 0];
+    $old = receiptCommissionRows($link, 'SELECT COALESCE(SUM(e.tamen),0) t FROM eradat e JOIN sanad s ON s.idsanad=e.sanadrakam
+        JOIN aksat k ON k.kastid=s.kastid WHERE k.egar_id=?', [(int)$contractId])[0];
+    if ((float)$old['t'] > 0) return ['cents' => receiptComponentsCents($old['t']), 'source' => 'income', 'review' => false];
+    // Nothing recorded on receipts: the contract figure, which the user must confirm.
+    return ['cents' => receiptComponentsCents($contract['tamen']), 'source' => 'contract', 'review' => false];
+}
+
+function depositHolder(array $property): string {
+    return ($property['rent_income_to'] ?? 'owner') !== 'office' && ($property['addtameento'] ?? '') === 'malek' ? 'owner' : 'office';
+}
+
+/** Split of a settlement, in cents. Pure function. */
+function depositSettlementParts(int $insurance, int $damages, string $holder, string $damagesTo): array {
+    if ($insurance <= 0) throw new RuntimeException('لا يوجد تأمين محصل لهذا العقد.');
+    if ($damages < 0 || $damages > $insurance) throw new RuntimeException('التلفيات لا تتجاوز مبلغ التأمين؛ سجل الزيادة بسند قبض على المستأجر.');
+    $refund = $insurance - $damages;
+    return [
+        'refund' => $refund,
+        // Owner holds the money: the office recovers what it paid, plus its own damages.
+        'owner_expense' => $holder === 'owner' ? $refund + ($damagesTo === 'office' ? $damages : 0) : 0,
+        // Office holds the money: damages for the owner join the next delivery without a fee.
+        'owner_credit' => $holder === 'office' && $damagesTo === 'owner' ? $damages : 0,
+        'office_income' => $damagesTo === 'office' ? $damages : 0,
+    ];
+}
+
+function depositSettlementCreate($link, array $data): int {
+    if (!depositSettlementReady($link)) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث تسوية التأمين.');
+    $uid = (string)($data['formuid'] ?? '');
+    if (!preg_match('/^[a-f0-9]{32}$/D', $uid)) throw new RuntimeException('تعذر التحقق من النموذج. أعد تحميل الصفحة.');
+    $date = DateTimeImmutable::createFromFormat('!Y-m-d', (string)($data['settlement_date'] ?? ''));
+    if (!$date || $date->format('Y-m-d') !== $data['settlement_date'] || $date->getTimestamp() > time() + 86400) throw new RuntimeException('تاريخ التسوية غير صحيح.');
+    $method = (int)($data['payment_type'] ?? 0);
+    if (!in_array($method, [1, 2, 3, 4, 5], true)) throw new RuntimeException('طريقة الدفع غير صحيحة.');
+    $damagesTo = (string)($data['damages_to'] ?? '');
+    $link->begin_transaction();
+    try {
+        $existing = receiptCommissionRows($link, 'SELECT settlement_id FROM deposit_settlements WHERE formuid=? LIMIT 1', [$uid]);
+        if ($existing) { $link->commit(); return (int)$existing[0]['settlement_id']; }
+        $contractId = (int)($data['egar_id'] ?? 0);
+        receiptCommissionRows($link, 'SELECT rakam3akdid FROM egar WHERE rakam3akdid=? FOR UPDATE', [$contractId]);
+        $info = depositContract($link, $contractId);
+        if (!$info || !$info['property'] || !$info['unit']) throw new RuntimeException('العقد غير مرتبط بعقار ووحدة.');
+        $propertyId = (int)$info['property']['idaqar'];
+        $scope = receiptCommissionScope($link, 's');
+        if (!receiptCommissionRows($link, "SELECT s.idaqar FROM amlak s WHERE s.idaqar=? AND {$scope}", [$propertyId])) throw new RuntimeException('العقار خارج صلاحيات المستخدم.');
+        if (receiptCommissionRows($link, 'SELECT settlement_id FROM deposit_settlements WHERE egar_id=? LIMIT 1 FOR UPDATE', [$contractId])) throw new RuntimeException('تمت تسوية تأمين هذا العقد مسبقاً.');
+        $received = depositInsuranceReceived($link, $contractId, $info['contract']);
+        if ($received['review']) throw new RuntimeException('أحد سندات العقد محجوز للمراجعة؛ راجعه أولاً.');
+        if ($received['source'] === 'contract' && empty($data['confirm_received'])) throw new RuntimeException('أكد أن التأمين محصل فعلاً لأن مبلغه مأخوذ من العقد.');
+        $damages = receiptCommissionCents(trim((string)($data['damages'] ?? '')) === '' ? '0' : trim((string)$data['damages']));
+        $holder = depositHolder($info['property']);
+        if ($damages === 0) $damagesTo = '';
+        elseif (!in_array($damagesTo, ['owner', 'office'], true)) throw new RuntimeException('اختر لمن تذهب التلفيات.');
+        if ($damagesTo === 'owner' && ($info['property']['rent_income_to'] ?? 'owner') === 'office') throw new RuntimeException('العقار مملوك للمكتب؛ التلفيات للمكتب.');
+        $parts = depositSettlementParts($received['cents'], $damages, $holder, $damagesTo);
+        $bankId = (int)($data['bankid'] ?? 0);
+        if ($bankId && !receiptCommissionRows($link, 'SELECT id FROM bankacounts WHERE id=? AND ownerid2=0', [$bankId])) throw new RuntimeException('الحساب البنكي غير صحيح.');
+        if ($method === 1) $bankId = 0;
+        $notes = mb_substr(trim((string)($data['notes'] ?? '')), 0, 500, 'UTF-8');
+        $expenseId = 0;
+        if ($parts['owner_expense'] > 0) {
+            $category = receiptCommissionRows($link, "SELECT idmasrofcod FROM masrofattakweed WHERE masrofkind='رد تأمين مستأجر' ORDER BY idmasrofcod LIMIT 1")[0]['idmasrofcod'] ?? 0;
+            receiptCommissionQuery($link, "INSERT INTO masrofat (idaqar,idsubaqar,idmasrofcod,amount,payedby,created_by_userid,created_at,payeddue,payeddate,tasfia,formuid,fund_source)
+                VALUES (?,?,?,?,?,?,?,?,?,'',?,0)", [$propertyId, (int)$info['unit']['idsubaqar'], (int)$category, number_format($parts['owner_expense'] / 100, 2, '.', ''),
+                (string)($_SESSION['namev'] ?? ''), (int)($_SESSION['useridv'] ?? 0), time(),
+                mb_substr('رد تأمين المستأجر ' . $info['tenant_name'] . ' عقد ' . $contractId . ($parts['office_income'] ? ' (يشمل تلفيات للمكتب)' : ''), 0, 245, 'UTF-8'),
+                $date->getTimestamp(), 'deposit-' . $uid])->close();
+            $expenseId = (int)$link->insert_id;
+        }
+        receiptCommissionQuery($link, 'INSERT INTO deposit_settlements (egar_id,idaqar,idsubaqar,mostagerid,tenant_name,holder,insurance,damages,damages_to,refund,owner_expense,owner_credit,
+            office_income,payment_type,bankid,settlement_date,notes,expense_id,created_by_userid,created_at,formuid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            [$contractId, $propertyId, (int)$info['unit']['idsubaqar'], $info['tenant_id'], mb_substr($info['tenant_name'], 0, 240, 'UTF-8'), $holder, $received['cents'] / 100, $damages / 100, $damagesTo,
+            $parts['refund'] / 100, $parts['owner_expense'] / 100, $parts['owner_credit'] / 100, $parts['office_income'] / 100, $method, $bankId, $date->getTimestamp(), $notes, $expenseId,
+            (int)($_SESSION['useridv'] ?? 0), time(), $uid])->close();
+        $id = (int)$link->insert_id;
+        $link->commit();
+        if (function_exists('loginfo')) loginfo('critical', 'insert', 'تسوية تأمين العقد ' . $contractId, '', 'deposit_settlements', $id, $link);
+        return $id;
+    } catch (Throwable $error) {
+        $link->rollback();
+        throw $error;
+    }
+}
+
+/** Only while nothing posted it and no delivery used it. */
+function depositSettlementDelete($link, $settlementId): void {
+    $link->begin_transaction();
+    try {
+        $row = receiptCommissionRows($link, 'SELECT * FROM deposit_settlements WHERE settlement_id=? FOR UPDATE', [(int)$settlementId])[0] ?? null;
+        if (!$row) throw new RuntimeException('التسوية غير موجودة.');
+        $scope = receiptCommissionScope($link, 's');
+        if (!receiptCommissionRows($link, "SELECT s.idaqar FROM amlak s WHERE s.idaqar=? AND {$scope}", [(int)$row['idaqar']])) throw new RuntimeException('العقار خارج صلاحيات المستخدم.');
+        if ((int)$row['accounting_entry_id'] > 0) throw new RuntimeException('التسوية مرحّلة محاسبياً. اعكس قيدها أولاً.');
+        if ((int)$row['owner_sanadsarf_id'] > 0) throw new RuntimeException('سُلّمت التلفيات للمالك؛ احذف سند التسليم أولاً.');
+        if ((int)$row['expense_id'] > 0) {
+            $expense = receiptCommissionRows($link, 'SELECT tasfia FROM masrofat WHERE idmasrof=? FOR UPDATE', [(int)$row['expense_id']])[0] ?? null;
+            if ($expense && trim((string)$expense['tasfia']) !== '') throw new RuntimeException('خُصم رد التأمين من المالك؛ احذف سند التسليم أولاً.');
+            receiptCommissionQuery($link, 'DELETE FROM masrofat WHERE idmasrof=?', [(int)$row['expense_id']])->close();
+        }
+        receiptCommissionQuery($link, 'DELETE FROM deposit_settlements WHERE settlement_id=?', [(int)$settlementId])->close();
+        $link->commit();
+        if (function_exists('loginfo')) loginfo('critical', 'delete', 'حذف تسوية تأمين العقد ' . (int)$row['egar_id'], '', 'deposit_settlements', (int)$settlementId, $link);
+    } catch (Throwable $error) {
+        $link->rollback();
+        throw $error;
+    }
+}
+
+/** Damages waiting to join the owner's next delivery. */
+function depositPendingOwnerCredits($link, $propertyId, bool $lock = false): array {
+    if (!depositSettlementReady($link)) return [];
+    return receiptCommissionRows($link, 'SELECT settlement_id,owner_credit,tenant_name,egar_id FROM deposit_settlements
+        WHERE idaqar=? AND owner_credit>0 AND owner_sanadsarf_id=0 ORDER BY settlement_id' . ($lock ? ' FOR UPDATE' : ''), [(int)$propertyId]);
+}
+
+function depositCreditsTotal(array $credits): float {
+    return round(array_sum(array_column($credits, 'owner_credit')), 2);
+}
+
+function depositMarkOwnerCredits($link, array $credits, $deliveryId): void {
+    foreach ($credits as $credit) {
+        receiptCommissionQuery($link, 'UPDATE deposit_settlements SET owner_sanadsarf_id=? WHERE settlement_id=? AND owner_sanadsarf_id=0', [(int)$deliveryId, (int)$credit['settlement_id']])->close();
+    }
+}
+
+/** Credit lines for owner statements. */
+function depositStatementCredits($link, array $propertyIds, $from, $to, bool $pendingOnly): array {
+    $propertyIds = array_values(array_filter(array_map('intval', $propertyIds)));
+    if (!$propertyIds || !depositSettlementReady($link)) return [];
+    return receiptCommissionRows($link, 'SELECT d.*,a.aqarname FROM deposit_settlements d LEFT JOIN amlak a ON a.idaqar=d.idaqar
+        WHERE d.owner_credit>0 AND d.idaqar IN (' . implode(',', $propertyIds) . ') AND d.settlement_date>? AND d.settlement_date<?'
+        . ($pendingOnly ? ' AND d.owner_sanadsarf_id=0' : '') . ' ORDER BY d.settlement_date', [(int)$from, (int)$to]);
+}

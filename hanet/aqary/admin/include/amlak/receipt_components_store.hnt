@@ -1,0 +1,199 @@
+<?php
+/**
+ * Loads, stores and applies receipt components (see receipt_components.hnt).
+ * Every function returns null/legacy results until the Amlak migration has run.
+ */
+require_once __DIR__ . '/receipt_commission_helpers.hnt';
+require_once __DIR__ . '/receipt_components.hnt';
+
+function receiptComponentsReady($link): bool {
+    static $ready = [];
+    $key = spl_object_id($link);
+    if (!isset($ready[$key])) {
+        $row = receiptCommissionRows($link, "SELECT
+            (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='sanad_components') t,
+            (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='amlak'
+                AND COLUMN_NAME IN ('rent_income_to','rent_vat_filed_by')) c,
+            (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='sanad_components'
+                AND COLUMN_NAME IN ('other','other_vat')) o")[0];
+        $ready[$key] = (int)$row['t'] === 1 && (int)$row['o'] === 2 && (int)$row['c'] === 2;
+    }
+    return $ready[$key];
+}
+
+function receiptComponentsFromRow(array $row): array {
+    $components = [];
+    foreach (RECEIPT_COMPONENT_KEYS as $key) $components[$key] = receiptComponentsCents($row[$key] ?? 0);
+    return $components;
+}
+
+/** Fees recorded by the older screens on the income row, in cents. */
+function receiptRecordedFees(array $income): array {
+    return array_filter([
+        'commission' => receiptComponentsCents($income['mysa3ee'] ?? 0),
+        'water' => receiptComponentsCents($income['mywater'] ?? 0),
+        'services' => receiptComponentsCents($income['services'] ?? 0),
+        'insurance' => receiptComponentsCents($income['tamen'] ?? 0),
+    ], function ($value) { return $value > 0; });
+}
+
+/** Previous receipts of an installment, oldest first, as the calculator expects them. */
+function receiptEarlierPayments($link, $installmentId, $beforeReceiptId = 0): array {
+    $sql = 'SELECT idsanad,depositeamount FROM sanad WHERE kastid=?';
+    $params = [(string)(int)$installmentId];
+    if ($beforeReceiptId > 0) { $sql .= ' AND idsanad<?'; $params[] = (int)$beforeReceiptId; }
+    $receipts = receiptCommissionRows($link, $sql . ' ORDER BY idsanad', $params);
+    if (!$receipts) return [];
+    $ids = array_map('intval', array_column($receipts, 'idsanad'));
+    $marks = implode(',', array_fill(0, count($ids), '?'));
+    $stored = [];
+    if (receiptComponentsReady($link)) {
+        foreach (receiptCommissionRows($link, "SELECT * FROM sanad_components WHERE idsanad IN ({$marks})", $ids) as $row) $stored[(int)$row['idsanad']] = $row;
+    }
+    $income = [];
+    foreach (receiptCommissionRows($link, "SELECT sanadrakam,mysa3ee,mywater,services,tamen FROM eradat WHERE sanadrakam IN ({$marks}) ORDER BY iderad",
+        array_map('strval', $ids)) as $row) {
+        $income += [(int)$row['sanadrakam'] => $row];
+    }
+    $items = [];
+    foreach ($receipts as $receipt) {
+        $id = (int)$receipt['idsanad'];
+        if (isset($stored[$id])) $items[] = ['amount' => $receipt['depositeamount'], 'components' => receiptComponentsFromRow($stored[$id])];
+        else $items[] = ['amount' => $receipt['depositeamount'], 'fees' => isset($income[$id]) ? receiptRecordedFees($income[$id]) : []];
+    }
+    return $items;
+}
+
+/**
+ * Breakdown of a receipt that is about to be saved. $contract is the contract the screen
+ * charged by; null loads the installment's own contract. $paidBefore is aksat.dof3at
+ * before this receipt. Returns null when the migration has not run.
+ */
+function receiptComponentsPrepare($link, $installmentId, $amount, $contract, $paidBefore) {
+    if (!receiptComponentsReady($link)) return null;
+    $installment = receiptCommissionRows($link, 'SELECT * FROM aksat WHERE kastid=? FOR UPDATE', [(int)$installmentId]);
+    if (!$installment) return null;
+    $installment = $installment[0];
+    $warnings = [];
+    if ((int)$installment['egar_id'] <= 0) $warnings[] = 'القسط غير مرتبط بعقد';
+    if (!is_array($contract)) {
+        $rows = receiptCommissionRows($link, 'SELECT * FROM egar WHERE rakam3akdid=?', [(int)$installment['egar_id']]);
+        $contract = $rows[0] ?? [];
+        if (!$rows) $warnings[] = 'عقد القسط غير موجود';
+    } elseif ((int)$installment['egar_id'] > 0 && (int)($contract['rakam3akdid'] ?? 0) !== (int)$installment['egar_id']) {
+        $warnings[] = 'عقد الوحدة الحالي يختلف عن عقد القسط';
+    }
+    $earlier = receiptEarlierPayments($link, $installmentId);
+    $difference = receiptComponentsCents($paidBefore) - array_sum(array_map(function ($item) { return receiptComponentsCents($item['amount']); }, $earlier));
+    if ($difference > 0) {
+        array_unshift($earlier, $difference / 100);
+        $warnings[] = 'توجد دفعات على القسط بلا سندات';
+    } elseif ($difference < 0) {
+        $warnings[] = 'سندات القسط أكبر من المدفوع المسجل عليه';
+    }
+    $result = receiptComponents($installment, $contract, $amount, $earlier);
+    $result['warnings'] = array_values(array_unique(array_merge($warnings, $result['warnings'])));
+    $result['installment_id'] = (int)$installmentId;
+    return $result;
+}
+
+function receiptComponentsStore($link, $receiptId, array $result): void {
+    $columns = RECEIPT_COMPONENT_KEYS;
+    $money = receiptComponentsMoney($result['components']);
+    $params = [(int)$receiptId, (int)$result['installment_id']];
+    foreach ($columns as $column) $params[] = number_format($money[$column], 2, '.', '');
+    $params[] = $result['warnings'] ? 'review' : 'ok';
+    $params[] = json_encode($result['warnings'], JSON_UNESCAPED_UNICODE);
+    $params[] = time();
+    receiptCommissionQuery($link, 'INSERT INTO sanad_components (idsanad,kastid,' . implode(',', $columns) . ',status,warnings,created_at)
+        VALUES (' . implode(',', array_fill(0, count($params), '?')) . ')', $params)->close();
+}
+
+/** Today's formula, unchanged, for receipts without a usable breakdown. */
+function receiptLegacyDelivery(array $income, array $property): array {
+    $rate = receiptOfficeRate($property['persentage'] ?? 0);
+    $base = (float)$income['amount'] - (float)$income['services'] - (float)$income['mysa3ee'] - (float)$income['mywater'] - (float)$income['tamen'];
+    $water = ($property['addwaterto'] ?? '') === 'malek' ? (float)$income['mywater'] : 0;
+    $insurance = ($property['addtameento'] ?? '') === 'malek' ? (float)$income['tamen'] : 0;
+    $fee = round($rate / 100 * $base, 2);
+    return ['mode' => 'legacy', 'rate' => $rate, 'base' => round($base, 2), 'fee' => $fee, 'office_vat' => 0.0, 'commission_vat' => 0.0,
+        'owner_net' => round($water + $insurance + $base - $fee, 2), 'warnings' => [], 'components' => null];
+}
+
+/**
+ * Owner's share of each income row, keyed by iderad, in money.
+ * Stored components win. An undelivered older receipt that recorded VAT is calculated from
+ * its recorded fees; any doubt leaves today's formula in place with a warning.
+ */
+function receiptDeliveryBreakdowns($link, array $incomeRows, array $property): array {
+    $result = [];
+    if (!$incomeRows) return $result;
+    $ready = receiptComponentsReady($link) && array_key_exists('rent_vat_filed_by', $property);
+    $stored = $receipts = [];
+    $ids = array_values(array_unique(array_filter(array_map(function ($row) { return (int)$row['sanadrakam']; }, $incomeRows))));
+    if ($ready) {
+        foreach (array_chunk($ids, 500) as $chunk) {
+            $marks = implode(',', array_fill(0, count($chunk), '?'));
+            foreach (receiptCommissionRows($link, "SELECT * FROM sanad_components WHERE idsanad IN ({$marks})", $chunk) as $row) $stored[(int)$row['idsanad']] = $row;
+            foreach (receiptCommissionRows($link, "SELECT idsanad,kastid,depositeamount FROM sanad WHERE idsanad IN ({$marks})
+                AND kastid NOT IN ('','0') AND depositeamount_vat>0", $chunk) as $row) $receipts[(int)$row['idsanad']] = $row;
+        }
+    }
+    foreach ($incomeRows as $income) {
+        $legacy = receiptLegacyDelivery($income, $property);
+        $receiptId = (int)$income['sanadrakam'];
+        if (!$ready || $receiptId <= 0) { $result[(int)$income['iderad']] = $legacy; continue; }
+        $components = null;
+        $warnings = [];
+        if (isset($stored[$receiptId])) {
+            $components = receiptComponentsFromRow($stored[$receiptId]);
+            $warnings = json_decode((string)$stored[$receiptId]['warnings'], true) ?: [];
+        } elseif (isset($receipts[$receiptId]) && trim((string)$income['tasfia']) === '') {
+            $calculated = receiptOlderComponents($link, $receipts[$receiptId], $income);
+            if ($calculated['warnings']) $warnings = $calculated['warnings'];
+            else $components = $calculated['components'];
+        }
+        if ($components !== null && abs(array_sum($components) - receiptComponentsCents($income['amount'])) > 1) {
+            $components = null;
+            $warnings[] = 'مبلغ الإيراد لا يطابق تفاصيل السند';
+        }
+        if ($components === null) {
+            $legacy['warnings'] = $warnings;
+            $result[(int)$income['iderad']] = $legacy;
+            continue;
+        }
+        // Unclassified money stays with the rent, as today; the warning is shown.
+        $forOwner = $components;
+        $forOwner['rent'] += $components['unclassified'];
+        $share = receiptOwnerShare($forOwner, $property);
+        $result[(int)$income['iderad']] = ['mode' => isset($stored[$receiptId]) ? 'stored' : 'calculated',
+            'rate' => receiptOfficeRate($property['persentage'] ?? 0),
+            'base' => ($forOwner['rent'] + $components['rent_vat']) / 100, 'fee' => $share['fee'] / 100,
+            'office_vat' => $share['office_vat'] / 100, 'commission_vat' => $components['commission_vat'] / 100,
+            'owner_net' => $share['owner_net'] / 100, 'warnings' => $warnings, 'components' => $components];
+    }
+    return $result;
+}
+
+function receiptOlderComponents($link, array $receipt, array $income): array {
+    $installment = receiptCommissionRows($link, 'SELECT * FROM aksat WHERE kastid=?', [(int)$receipt['kastid']]);
+    $contract = $installment ? receiptCommissionRows($link, 'SELECT * FROM egar WHERE rakam3akdid=?', [(int)$installment[0]['egar_id']]) : [];
+    if (!$contract) return ['components' => [], 'warnings' => ['سند قديم غير مرتبط بعقد: لم تفصل ضريبته']];
+    $result = receiptComponents($installment[0], $contract[0], $income['amount'],
+        receiptEarlierPayments($link, $receipt['kastid'], $receipt['idsanad']), receiptRecordedFees($income));
+    $result['installment_id'] = (int)$receipt['kastid'];
+    return $result;
+}
+
+/** Keep the split an older receipt was delivered with, so statements stay equal to what was paid. */
+function receiptKeepDeliveredComponents($link, array $income, array $breakdown): void {
+    if ($breakdown['mode'] !== 'calculated') return;
+    $receipt = receiptCommissionRows($link, 'SELECT kastid FROM sanad WHERE idsanad=?', [(int)$income['sanadrakam']]);
+    receiptComponentsStore($link, (int)$income['sanadrakam'], ['components' => $breakdown['components'], 'warnings' => [],
+        'installment_id' => (int)($receipt[0]['kastid'] ?? 0)]);
+}
+
+/** Amount an owner statement must not credit: VAT the office files and commission VAT. */
+function receiptWithheldFromOwner(array $breakdown): float {
+    return $breakdown['mode'] === 'legacy' ? 0.0 : round($breakdown['office_vat'] + $breakdown['commission_vat'], 2);
+}

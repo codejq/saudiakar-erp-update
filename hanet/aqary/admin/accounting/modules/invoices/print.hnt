@@ -1,17 +1,18 @@
 <?php
 /**
  * Invoice Print View
- * ط·ط¨ط§ط¹ط© ط§ظ„ظپط§طھظˆط±ط©
+ * طباعة الفاتورة
  * 
  * @charset UTF-8
  * @version 1.0
  */
 
+include_once "../../../../reqlogin.hnt";
 include_once "../../../../connectdb.hnt";
 require __DIR__ . '/../../includes/active_database.hnt';
 include_once "../../includes/zatca_helper.hnt";
 
-$invoiceId = $_GET['id'] ?? 0;
+$invoiceId = intval($_GET['id'] ?? 0);
 
 // Get invoice
 $invoiceQuery = "SELECT * FROM acc_invoices WHERE invoice_id = ?";
@@ -28,22 +29,36 @@ if (!$invoice) {
 $items = [];
 // In production, you'd have a separate invoice_items table
 
+// Seller: the values stored on the invoice, otherwise the company settings
+$companySettings = [];
+$settingsResult = $db->query("SELECT setting_key, setting_value FROM acc_system_settings
+    WHERE setting_key IN ('company_name_ar','company_vat_number','company_address','company_phone')");
+while ($settingsResult && ($settingRow = $settingsResult->fetch_assoc())) {
+    $companySettings[$settingRow['setting_key']] = trim((string)$settingRow['setting_value']);
+}
+$companyName = trim((string)($invoice['seller_name'] ?? '')) ?: ($companySettings['company_name_ar'] ?? '');
+$companyVAT = trim((string)($invoice['seller_vat_number'] ?? '')) ?: ($companySettings['company_vat_number'] ?? '');
+$companyAddress = trim((string)($invoice['seller_address'] ?? '')) ?: ($companySettings['company_address'] ?? '');
+// The stored phone belongs to the company, so it is shown only when the company is the seller
+$companyPhone = trim((string)($invoice['seller_name'] ?? '')) === '' || $companyName === ($companySettings['company_name_ar'] ?? '')
+    ? ($companySettings['company_phone'] ?? '') : '';
+
 // Generate QR Code
+$invoice['seller_name'] = $companyName;
+$invoice['seller_vat_number'] = $companyVAT;
 $qrData = ZATCAHelper::generateQRCode($invoice);
 $qrImage = ZATCAHelper::generateQRCodeImage($qrData, 150);
 
-// Company info (should come from settings)
-$companyName = 'ط´ط±ظƒط© ط§ظ„ط¹ظ‚ط§ط±ط§طھ ط§ظ„ظ…طھط­ط¯ط©';
-$companyVAT = '300000000000003';
-$companyAddress = 'ط§ظ„ط±ظٹط§ط¶طŒ ط§ظ„ظ…ظ…ظ„ظƒط© ط§ظ„ط¹ط±ط¨ظٹط© ط§ظ„ط³ط¹ظˆط¯ظٹط©';
-$companyPhone = '+966 11 234 5678';
+$h = function ($value) {
+    return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+};
 ?>
 <!DOCTYPE html>
 <html dir="rtl" lang="ar">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ظپط§طھظˆط±ط© <?php echo $invoice['invoice_number']; ?></title>
+    <title>فاتورة <?php echo $h($invoice['invoice_number']); ?></title>
     <style>
         * {
             margin: 0;
@@ -222,16 +237,16 @@ $companyPhone = '+966 11 234 5678';
 </head>
 <body>
     <button class="print-button no-print" onclick="window.print()">
-        ًں–¨ï¸ڈ ط·ط¨ط§ط¹ط© ط§ظ„ظپط§طھظˆط±ط©
+        🖨️ طباعة الفاتورة
     </button>
     
     <div class="invoice-container">
         <!-- Header -->
         <div class="invoice-header">
-            <h1>ظپط§طھظˆط±ط© ط¶ط±ظٹط¨ظٹط©</h1>
+            <h1>فاتورة ضريبية</h1>
             <div class="invoice-number">TAX INVOICE</div>
             <div class="invoice-number" style="margin-top: 15px;">
-                <?php echo $invoice['invoice_number']; ?>
+                <?php echo $h($invoice['invoice_number']); ?>
             </div>
         </div>
         
@@ -240,21 +255,21 @@ $companyPhone = '+966 11 234 5678';
             <!-- Company & Customer Info -->
             <div class="info-row">
                 <div class="info-box">
-                    <h3>ط¨ظٹط§ظ†ط§طھ ط§ظ„ط´ط±ظƒط©</h3>
-                    <p><strong><?php echo $companyName; ?></strong></p>
-                    <p>ط§ظ„ط±ظ‚ظ… ط§ظ„ط¶ط±ظٹط¨ظٹ: <?php echo $companyVAT; ?></p>
-                    <p><?php echo $companyAddress; ?></p>
-                    <p>ظ‡ط§طھظپ: <?php echo $companyPhone; ?></p>
+                    <h3>بيانات الشركة</h3>
+                    <p><strong><?php echo $h($companyName); ?></strong></p>
+                    <p>الرقم الضريبي: <?php echo $h($companyVAT); ?></p>
+                    <p><?php echo $h($companyAddress); ?></p>
+                    <?php if ($companyPhone !== ''): ?><p>هاتف: <?php echo $h($companyPhone); ?></p><?php endif; ?>
                 </div>
                 
                 <div class="info-box">
-                    <h3>ط¨ظٹط§ظ†ط§طھ ط§ظ„ط¹ظ…ظٹظ„</h3>
-                    <p><strong><?php echo $invoice['customer_name']; ?></strong></p>
+                    <h3>بيانات العميل</h3>
+                    <p><strong><?php echo $h($invoice['customer_name']); ?></strong></p>
                     <?php if ($invoice['customer_vat_number']): ?>
-                    <p>ط§ظ„ط±ظ‚ظ… ط§ظ„ط¶ط±ظٹط¨ظٹ: <?php echo $invoice['customer_vat_number']; ?></p>
+                    <p>الرقم الضريبي: <?php echo $h($invoice['customer_vat_number']); ?></p>
                     <?php endif; ?>
                     <?php if ($invoice['customer_address']): ?>
-                    <p><?php echo $invoice['customer_address']; ?></p>
+                    <p><?php echo $h($invoice['customer_address']); ?></p>
                     <?php endif; ?>
                 </div>
             </div>
@@ -262,30 +277,30 @@ $companyPhone = '+966 11 234 5678';
             <!-- Invoice Details -->
             <div class="info-row">
                 <div class="info-box">
-                    <p><strong>طھط§ط±ظٹط® ط§ظ„ظپط§طھظˆط±ط©:</strong> <?php echo $invoice['invoice_date']; ?></p>
+                    <p><strong>تاريخ الفاتورة:</strong> <?php echo $h($invoice['invoice_date']); ?></p>
                     <?php if ($invoice['due_date']): ?>
-                    <p><strong>طھط§ط±ظٹط® ط§ظ„ط§ط³طھط­ظ‚ط§ظ‚:</strong> <?php echo $invoice['due_date']; ?></p>
+                    <p><strong>تاريخ الاستحقاق:</strong> <?php echo $h($invoice['due_date']); ?></p>
                     <?php endif; ?>
                 </div>
                 
                 <div class="info-box">
-                    <p><strong>ط·ط±ظٹظ‚ط© ط§ظ„ط¯ظپط¹:</strong> 
+                    <p><strong>طريقة الدفع:</strong> 
                         <?php 
                         $methods = [
-                            'cash' => 'ظ†ظ‚ط¯ط§ظ‹',
-                            'bank_transfer' => 'طھط­ظˆظٹظ„ ط¨ظ†ظƒظٹ',
-                            'credit_card' => 'ط¨ط·ط§ظ‚ط© ط§ط¦طھظ…ط§ظ†',
-                            'cheque' => 'ط´ظٹظƒ'
+                            'cash' => 'نقداً',
+                            'bank_transfer' => 'تحويل بنكي',
+                            'credit_card' => 'بطاقة ائتمان',
+                            'cheque' => 'شيك'
                         ];
                         echo $methods[$invoice['payment_method']] ?? $invoice['payment_method'];
                         ?>
                     </p>
-                    <p><strong>ط­ط§ظ„ط© ط§ظ„ط¯ظپط¹:</strong> 
+                    <p><strong>حالة الدفع:</strong> 
                         <?php 
                         $statuses = [
-                            'unpaid' => 'ط؛ظٹط± ظ…ط¯ظپظˆط¹ط©',
-                            'partial' => 'ظ…ط¯ظپظˆط¹ط© ط¬ط²ط¦ظٹط§ظ‹',
-                            'paid' => 'ظ…ط¯ظپظˆط¹ط©'
+                            'unpaid' => 'غير مدفوعة',
+                            'partial' => 'مدفوعة جزئياً',
+                            'paid' => 'مدفوعة'
                         ];
                         echo $statuses[$invoice['payment_status']] ?? $invoice['payment_status'];
                         ?>
@@ -298,19 +313,19 @@ $companyPhone = '+966 11 234 5678';
                 <thead>
                     <tr>
                         <th style="width: 50px;">#</th>
-                        <th>ط§ظ„ظˆطµظپ</th>
-                        <th style="width: 100px;">ط§ظ„ظƒظ…ظٹط©</th>
-                        <th style="width: 120px;">ط§ظ„ط³ط¹ط±</th>
-                        <th style="width: 120px;">ط§ظ„ط¥ط¬ظ…ط§ظ„ظٹ</th>
+                        <th>الوصف</th>
+                        <th style="width: 100px;">الكمية</th>
+                        <th style="width: 120px;">السعر</th>
+                        <th style="width: 120px;">الإجمالي</th>
                     </tr>
                 </thead>
                 <tbody>
                     <tr>
                         <td>1</td>
-                        <td><?php echo $invoice['notes'] ?? 'ط®ط¯ظ…ط§طھ ط¹ظ‚ط§ط±ظٹط©'; ?></td>
+                        <td><?php echo $h($invoice['notes'] ?: 'خدمات عقارية'); ?></td>
                         <td>1</td>
-                        <td><?php echo number_format($invoice['subtotal'], 2); ?> ط±.ط³</td>
-                        <td><?php echo number_format($invoice['subtotal'], 2); ?> ط±.ط³</td>
+                        <td><?php echo number_format($invoice['subtotal'], 2); ?> ر.س</td>
+                        <td><?php echo number_format($invoice['subtotal'], 2); ?> ر.س</td>
                     </tr>
                 </tbody>
             </table>
@@ -318,33 +333,33 @@ $companyPhone = '+966 11 234 5678';
             <!-- Totals -->
             <div class="totals-section">
                 <div class="total-row">
-                    <span>ط§ظ„ظ…ط¬ظ…ظˆط¹ ظ‚ط¨ظ„ ط§ظ„ط¶ط±ظٹط¨ط©:</span>
-                    <span><?php echo number_format($invoice['subtotal'], 2); ?> ط±.ط³</span>
+                    <span>المجموع قبل الضريبة:</span>
+                    <span><?php echo number_format($invoice['subtotal'], 2); ?> ر.س</span>
                 </div>
                 <div class="total-row">
-                    <span>ط¶ط±ظٹط¨ط© ط§ظ„ظ‚ظٹظ…ط© ط§ظ„ظ…ط¶ط§ظپط© (15%):</span>
-                    <span><?php echo number_format($invoice['vat_amount'], 2); ?> ط±.ط³</span>
+                    <span>ضريبة القيمة المضافة (<?php echo rtrim(rtrim(number_format((float)$invoice['vat_rate'], 2), '0'), '.'); ?>%):</span>
+                    <span><?php echo number_format($invoice['vat_amount'], 2); ?> ر.س</span>
                 </div>
                 <div class="total-row grand-total">
-                    <span>ط§ظ„ط¥ط¬ظ…ط§ظ„ظٹ ط§ظ„ظ†ظ‡ط§ط¦ظٹ:</span>
-                    <span><?php echo number_format($invoice['total_amount'], 2); ?> ط±.ط³</span>
+                    <span>الإجمالي النهائي:</span>
+                    <span><?php echo number_format($invoice['total_amount'], 2); ?> ر.س</span>
                 </div>
             </div>
             
             <!-- QR Code -->
             <div class="qr-section">
-                <h3 style="color: #667eea; margin-bottom: 15px;">ط±ظ…ط² ط§ظ„ط§ط³طھط¬ط§ط¨ط© ط§ظ„ط³ط±ظٹط¹ط© - ZATCA</h3>
+                <h3 style="color: #667eea; margin-bottom: 15px;">رمز الاستجابة السريعة - ZATCA</h3>
                 <img src="<?php echo $qrImage; ?>" alt="QR Code" width="150" height="150">
                 <p style="margin-top: 15px; color: #6c757d; font-size: 0.9rem;">
-                    ط§ظ…ط³ط­ ط§ظ„ط±ظ…ط² ظ„ظ„طھط­ظ‚ظ‚ ظ…ظ† طµط­ط© ط§ظ„ظپط§طھظˆط±ط©
+                    امسح الرمز للتحقق من صحة الفاتورة
                 </p>
             </div>
             
             <!-- Footer -->
             <div class="footer">
-                <p style="margin-bottom: 10px;">ط´ظƒط±ط§ظ‹ ظ„طھط¹ط§ظ…ظ„ظƒظ… ظ…ط¹ظ†ط§</p>
+                <p style="margin-bottom: 10px;">شكراً لتعاملكم معنا</p>
                 <p style="font-size: 0.9rem; opacity: 0.9;">
-                    ظ‡ط°ظ‡ ظپط§طھظˆط±ط© ط¥ظ„ظƒطھط±ظˆظ†ظٹط© طµط§ط¯ط±ط© ظˆظپظ‚ط§ظ‹ ظ„ظ…طھط·ظ„ط¨ط§طھ ظ‡ظٹط¦ط© ط§ظ„ط²ظƒط§ط© ظˆط§ظ„ط¶ط±ظٹط¨ط© ظˆط§ظ„ط¬ظ…ط§ط±ظƒ
+                    هذه فاتورة إلكترونية صادرة وفقاً لمتطلبات هيئة الزكاة والضريبة والجمارك
                 </p>
             </div>
         </div>

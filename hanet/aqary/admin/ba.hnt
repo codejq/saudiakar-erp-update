@@ -1,0 +1,96 @@
+<?php
+include_once __DIR__ . '/../reqlogin.hnt';
+
+$sc_title = 'نسخ احتياطي داخلي';
+$sc_id = '17';
+$canscroll = 1;
+
+$backupDir = __DIR__ . '/upsql';
+$backupAllowed = ($_SESSION['userforv'] ?? '') == '4';
+if (empty($_SESSION['backup_csrf'])) $_SESSION['backup_csrf'] = bin2hex(random_bytes(32));
+
+/** Full path of an existing .gz backup in the backup folder, or '' for anything else. */
+function backupFilePath($dir, $name)
+{
+    $name = (string)$name;
+    if (!preg_match('/^[A-Za-z0-9_.-]+\.gz$/iD', $name)) return '';
+    $path = $dir . '/' . $name;
+    return is_file($path) ? $path : '';
+}
+
+if ($backupAllowed && isset($_GET['download'])) {
+    $backupPath = backupFilePath($backupDir, $_GET['download']);
+    while (ob_get_level() > 0) ob_end_clean();
+    if ($backupPath === '') {
+        http_response_code(404);
+        exit;
+    }
+    header('Content-Type: application/gzip');
+    header('Content-Disposition: attachment; filename="' . basename($backupPath) . '"');
+    header('Content-Length: ' . filesize($backupPath));
+    header('Cache-Control: no-store');
+    readfile($backupPath);
+    exit;
+}
+
+include_once '../nocash.hnt';
+include_once '../header.hnt';
+
+if (!$backupAllowed) {
+    echo '<div class="alert alert-danger m-4 text-center" dir="rtl">ليس لديك الصلاحية لدخول هذا القسم</div>';
+    exit;
+}
+
+$backupMessage = '';
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['deletefile'])) {
+    $backupPath = hash_equals($_SESSION['backup_csrf'], (string)($_POST['csrf'] ?? ''))
+        ? backupFilePath($backupDir, $_POST['deletefile']) : '';
+    $backupMessage = $backupPath !== '' && @unlink($backupPath) ? 'تم حذف النسخة' : 'تعذر حذف النسخة';
+}
+
+if (!is_dir($backupDir)) @mkdir($backupDir);
+$backupFiles = array();
+foreach (is_dir($backupDir) ? scandir($backupDir) : array() as $backupName) {
+    $backupPath = backupFilePath($backupDir, $backupName);
+    if ($backupPath !== '') $backupFiles[$backupName] = $backupPath;
+}
+?>
+<div class="container-fluid py-3" dir="rtl">
+    <?php if ($backupMessage !== '') { ?><div class="alert alert-info"><?= $backupMessage ?></div><?php } ?>
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+        <h5 class="mb-0 flex-grow-1">النسخ الاحتياطي الداخلي</h5>
+        <a class="btn btn-success" href="/aqary/admin/copydatabase.hnt"><i class="bi bi-database-add me-1"></i> إنشاء نسخة احتياطية</a>
+    </div>
+    <?php if (!$backupFiles) { ?>
+    <p class="text-muted">لا توجد نسخ محفوظة.</p>
+    <?php } else { ?>
+    <table class="table table-hover align-middle">
+        <thead><tr><th>الملف</th><th>الحجم (كيلوبايت)</th><th></th></tr></thead>
+        <tbody>
+        <?php foreach ($backupFiles as $backupName => $backupPath) { $backupSafe = htmlspecialchars($backupName, ENT_QUOTES, 'UTF-8'); ?>
+            <tr>
+                <td dir="ltr" class="text-end"><a href="/aqary/admin/ba.hnt?download=<?= rawurlencode($backupName) ?>"><?= $backupSafe ?></a></td>
+                <td><?= number_format(filesize($backupPath) / 1024) ?></td>
+                <td class="policy_<?= $sc_id ?>_deleetes">
+                    <form method="post" action="/aqary/admin/ba.hnt" class="m-0 backup-delete">
+                        <input type="hidden" name="csrf" value="<?= $_SESSION['backup_csrf'] ?>">
+                        <input type="hidden" name="deletefile" value="<?= $backupSafe ?>">
+                        <button type="submit" class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i> حذف</button>
+                    </form>
+                </td>
+            </tr>
+        <?php } ?>
+        </tbody>
+    </table>
+    <script>
+    document.querySelectorAll('.backup-delete').forEach(function (form) {
+        form.addEventListener('submit', function (event) {
+            event.preventDefault();
+            confirm('هل أنت متأكد من حذف هذه النسخة؟', 'حذف النسخة', function () { form.submit(); });
+        });
+    });
+    </script>
+    <?php } ?>
+</div>
+<?php
+require 'dump.hnt';

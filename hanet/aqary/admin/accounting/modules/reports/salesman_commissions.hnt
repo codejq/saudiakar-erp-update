@@ -1,0 +1,33 @@
+<?php
+/** Salesman commissions: earned on receipts, paid by expenses, remaining. */
+$sc_title = 'عمولات المندوبين';
+$syncReport = [
+    'key' => 'salesman_commissions', 'icon' => 'bi-person-check', 'desc' => 'العمولة المستحقة لكل مندوب والمصروف منها والمتبقي',
+    'filters' => ['date', 'owner_id', 'aqar_id'],
+    'selects' => ['user' => ['المندوب', function ($db) {
+        return array_column(receiptCommissionRows($db, "SELECT DISTINCT u.userid,COALESCE(NULLIF(u.name,''),u.username) t FROM sanad_commission_splits c JOIN user u ON u.userid=c.representative_userid WHERE c.commission_amount>0 ORDER BY t"), 't', 'userid');
+    }], 'state' => ['الحالة', ['open' => 'لم تصرف', 'paid' => 'مصروفة']]],
+    'build' => function ($db, $f) {
+        syncReportNeed(receiptCommissionReady($db));
+        [$where, $params] = syncReportWhere(['user' => (int)$f['user']] + $f, ['owner_id' => 'p.ownerid', 'aqar_id' => 's.idaqar', 'user' => 'c.representative_userid']);
+        $rows = receiptCommissionRows($db, "SELECT c.commission_amount amount,s.idsanad,s.kastid,s.sanaddate,s.mostagername,s.depositeamount,p.aqarname,COALESCE(NULLIF(u.name,''),u.username) rep,
+                COALESCE((SELECT SUM(m.amount) FROM masrofat m WHERE m.commission_split_id=c.split_id),0) paid,je.entry_id,je.entry_number
+            FROM sanad_commission_splits c JOIN sanad s ON s.idsanad=c.idsanad LEFT JOIN user u ON u.userid=c.representative_userid LEFT JOIN amlak p ON p.idaqar=s.idaqar
+            LEFT JOIN acc_journal_entries je ON je.entry_id=s.accounting_entry_id AND je.status='posted'
+            WHERE c.commission_amount>0 AND " . syncReportPeriod('s.sanaddate', $f) . "{$where} ORDER BY rep,s.sanaddate,s.idsanad", $params);
+        $list = [];
+        foreach ($rows as $row) {
+            $open = round((float)$row['amount'] - (float)$row['paid'], 2);
+            if ($f['state'] !== '' && $f['state'] !== ($open > 0 ? 'open' : 'paid')) continue;
+            $list[] = ['rep' => $row['rep'], 'date' => syncReportDay($row['sanaddate']), 'receipt' => syncReportReceiptCell($row['idsanad'], $row['kastid']), 'mostagername' => $row['mostagername'], 'aqarname' => $row['aqarname'],
+                'depositeamount' => $row['depositeamount'], 'amount' => $row['amount'], 'paid' => $row['paid'], 'open' => $open, 'entry' => $row['entry_id'] ? syncReportEntryCell($row) : ''];
+        }
+        $account = syncReportAccount($db, 'default_sales_commission_payable_account_id', 'عمولات مستحقة', '2112');
+        $ledger = (float)receiptCommissionRows($db, "SELECT COALESCE(SUM(l.credit_amount-l.debit_amount),0) t FROM acc_journal_entry_lines l JOIN acc_journal_entries je ON je.entry_id=l.entry_id
+            WHERE je.status='posted' AND je.entry_date<=? AND l.account_id=?", [$f['date_to'], $account])[0]['t'];
+        return ['columns' => ['rep' => ['المندوب', 'text'], 'date' => ['التاريخ', 'date'], 'receipt' => ['السند', 'text'], 'mostagername' => ['المستأجر', 'text'], 'aqarname' => ['العقار', 'text'], 'depositeamount' => ['مبلغ السند', 'money'],
+            'amount' => ['العمولة', 'money', true], 'paid' => ['المصروف', 'money', true], 'open' => ['المتبقي', 'money', true], 'entry' => ['القيد', 'text']], 'rows' => $list,
+            'cards' => ['العمولات' => (float)array_sum(array_column($list, 'amount')), 'المصروف' => (float)array_sum(array_column($list, 'paid')), 'المتبقي' => (float)array_sum(array_column($list, 'open')), 'رصيد حساب العمولات (كل المندوبين)' => $ledger]];
+    },
+];
+require __DIR__ . '/../../includes/sync_report_page.hnt';

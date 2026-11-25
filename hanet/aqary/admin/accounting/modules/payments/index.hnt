@@ -33,6 +33,8 @@ if (isset($_GET['export']) && in_array($_GET['export'], ['csv', 'xls', 'template
 
     $exp_headers = ['رقم القيد', 'تاريخ الدفعة', 'رقم الفاتورة', 'اسم العميل', 'المبلغ', 'طريقة الدفع', 'حالة الفاتورة', 'البيان'];
     $exp_rows    = [];
+    include_once "../../includes/accounting_class.hnt";
+    $receivableListSql = '4,' . (int)(new AccountingManager($db, 0))->getInvoicePaymentAccounts()['receivable'];
     $_er = $db->query("
         SELECT je.entry_number, je.entry_date, inv.invoice_number, inv.customer_name,
                SUM(ar_line.credit_amount) AS amount,
@@ -42,8 +44,8 @@ if (isset($_GET['export']) && in_array($_GET['export'], ['csv', 'xls', 'template
                inv.payment_status, je.description
         FROM acc_journal_entries je
         INNER JOIN acc_invoices inv ON je.reference_id = inv.invoice_id AND je.reference_type = 'invoice'
-        INNER JOIN acc_journal_entry_lines ar_line ON je.entry_id = ar_line.entry_id AND ar_line.account_id = 4 AND ar_line.credit_amount > 0
-        LEFT  JOIN acc_journal_entry_lines dl ON je.entry_id = dl.entry_id AND dl.debit_amount > 0 AND dl.account_id <> 4
+        INNER JOIN acc_journal_entry_lines ar_line ON je.entry_id = ar_line.entry_id AND ar_line.account_id IN ($receivableListSql) AND ar_line.credit_amount > 0
+        LEFT  JOIN acc_journal_entry_lines dl ON je.entry_id = dl.entry_id AND dl.debit_amount > 0
         WHERE je.status = 'posted' AND je.reference_type = 'invoice' AND je.reference_id IS NOT NULL
         GROUP BY je.entry_id, je.entry_number, je.entry_date, je.description, je.notes,
                  inv.invoice_id, inv.invoice_number, inv.customer_name, inv.payment_status
@@ -137,6 +139,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                 exit;
             }
 
+            if ((int)($invoice['sanad_id'] ?? 0) > 0) {
+                $response['message'] = 'لا تسجل دفعة هنا: الفاتورة مرتبطة بسند قبض ويُرحل تحصيلها عند اعتمادها';
+                echo json_encode($response, JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+
             $invoiceEntryContext = $accountingManager->getInvoiceDimensionContext((int)$invoiceId);
 
             $journalId = !empty($_POST['journal_id']) ? (int)$_POST['journal_id'] : $defaultReceiptJournalId;
@@ -160,9 +168,13 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
             ];
 
             // Determine cash/bank account based on payment method
-            $cashAccountId = 2; // Default to cash account (1111)
-            if ($paymentMethod == 'bank_transfer') {
-                $cashAccountId = 3; // Bank account (1112)
+            $paymentAccounts = $accountingManager->getInvoicePaymentAccounts();
+            $cashAccountId = $paymentMethod === 'cash' ? $paymentAccounts['cash'] : $paymentAccounts['bank'];
+            $amount = round((float)$amount, 2);
+            if ($cashAccountId <= 0 || $paymentAccounts['receivable'] <= 0 || $amount <= 0) {
+                $response['message'] = $amount <= 0 ? 'المبلغ غير صحيح' : 'حسابات الصندوق أو البنك أو ذمم العملاء غير محددة في إعدادات المحاسبة';
+                echo json_encode($response, JSON_UNESCAPED_UNICODE);
+                exit;
             }
 
             $lines = [
@@ -174,7 +186,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                     'cost_center_id' => $costCenterId
                 ],
                 [
-                    'account_id' => 4, // Accounts Receivable (1121)
+                    'account_id' => $paymentAccounts['receivable'],
                     'description' => "تسديد فاتورة {$invoice['invoice_number']}",
                     'debit_amount' => 0,
                     'credit_amount' => $amount,
@@ -263,10 +275,20 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                 $_inv_stmt->execute();
                 $_invoice = $_inv_stmt->get_result()->fetch_assoc();
                 if (!$_invoice) { $errors[] = "سطر $lineNum: الفاتورة '$_invoice_num' غير موجودة أو مدفوعة بالكامل"; continue; }
+                if ((int)($_invoice['sanad_id'] ?? 0) > 0) { $errors[] = "سطر $lineNum: لا تسجل دفعة هنا: الفاتورة مرتبطة بسند قبض ويُرحل تحصيلها عند اعتمادها"; continue; }
 
-                $_cash_acc = ($_pay_method === 'bank_transfer') ? 3 : 2;
+                $_pay_accounts = $accountingManager->getInvoicePaymentAccounts();
+                $_cash_acc = $_pay_method === 'cash' ? $_pay_accounts['cash'] : $_pay_accounts['bank'];
+                if ($_cash_acc <= 0 || $_pay_accounts['receivable'] <= 0) { $errors[] = "سطر $lineNum: حسابات الصندوق أو البنك أو ذمم العملاء غير محددة في إعدادات المحاسبة"; continue; }
 
+                $_ctx = $accountingManager->getInvoiceDimensionContext((int)$_invoice['invoice_id']);
                 $_entry_data = [
+                    'tenant_id'      => $_ctx['tenant_id'] ?? null,
+                    'owner_id'       => $_ctx['owner_id'] ?? null,
+                    'aqar_id'        => $_ctx['aqar_id'] ?? null,
+                    'subaqar_id'     => $_ctx['subaqar_id'] ?? null,
+                    'egar_id'        => $_ctx['egar_id'] ?? null,
+                    'invoice_id'     => $_invoice['invoice_id'],
                     'entry_date'     => $_pay_date,
                     'entry_type'     => 'payment',
                     'journal_id'     => $defaultReceiptJournalId,
@@ -278,11 +300,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
                 ];
                 $_lines = [
                     ['account_id' => $_cash_acc, 'description' => "استلام دفعة - {$_invoice['customer_name']}", 'debit_amount' => $_amount, 'credit_amount' => 0],
-                    ['account_id' => 4,           'description' => "تسديد فاتورة {$_invoice['invoice_number']}",  'debit_amount' => 0, 'credit_amount' => $_amount]
+                    ['account_id' => $_pay_accounts['receivable'],           'description' => "تسديد فاتورة {$_invoice['invoice_number']}",  'debit_amount' => 0, 'credit_amount' => $_amount]
                 ];
                 $_result = $accountingManager->createJournalEntry($_entry_data, $_lines);
 
                 if ($_result['success']) {
+                    if ($_notes === '') $_notes = $_pay_method;
                     if (!empty($_result['entry_id']) && !empty($_notes)) {
                         $_nstmt = $db->prepare("UPDATE acc_journal_entries SET notes = ? WHERE entry_id = ?");
                         if ($_nstmt) { $_nstmt->bind_param('si', $_notes, $_result['entry_id']); $_nstmt->execute(); }
@@ -308,6 +331,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['ajax_action'])) {
     echo json_encode($response, JSON_UNESCAPED_UNICODE);
     exit;
 }
+
+// New payments credit the configured receivable account; older ones credited account 4.
+$receivableListSql = '4,' . (int)$accountingManager->getInvoicePaymentAccounts()['receivable'];
 
 // Get recent payments (from journal entries)
 $paymentsQuery = "
@@ -337,12 +363,11 @@ $paymentsQuery = "
         AND je.reference_type = 'invoice'
     INNER JOIN acc_journal_entry_lines ar_line
         ON je.entry_id = ar_line.entry_id
-        AND ar_line.account_id = 4
+        AND ar_line.account_id IN ($receivableListSql)
         AND ar_line.credit_amount > 0
     LEFT JOIN acc_journal_entry_lines debit_line
         ON je.entry_id = debit_line.entry_id
         AND debit_line.debit_amount > 0
-        AND debit_line.account_id <> 4
     WHERE je.status = 'posted'
         AND je.reference_type = 'invoice'
         AND je.reference_id IS NOT NULL
@@ -565,12 +590,17 @@ if ($preselectedInvoiceId > 0) {
                 لا توجد مدفوعات مسجلة بعد.
             </div>
             <?php else: ?>
+            <?php
+            require_once __DIR__ . '/../../includes/entry_links.hnt';
+            $paymentLinks = accountingEntryLinks($db, array_column($payments, 'entry_id'));
+            ?>
             <?php foreach ($payments as $payment): ?>
             <div class="payment-card">
                 <div class="d-flex justify-content-between align-items-start">
                     <div>
-                        <strong><?php echo $payment['entry_number']; ?></strong><br>
-                        <small class="text-muted"><?php echo $payment['description']; ?></small>
+                        <strong><?php echo accountingEntryPageLink($payment['entry_id'], $payment['entry_number']); ?></strong><br>
+                        <small class="text-muted"><?php echo htmlspecialchars($payment['description'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); ?></small>
+                        <div class="mt-1"><?php echo accountingRenderEntryLinks($paymentLinks[(int)$payment['entry_id']] ?? []); ?></div>
                     </div>
                     <div class="text-end">
                         <div class="h5 mb-0 text-success">

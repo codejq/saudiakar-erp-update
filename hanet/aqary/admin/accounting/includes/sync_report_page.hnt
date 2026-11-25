@@ -1,0 +1,179 @@
+<?php
+/**
+ * Page shared by the rental sync reports. Read only.
+ * The report file sets $sc_title and $syncReport before including this file:
+ *   key, icon, desc, filters (date, as_of, owner_id, aqar_id, subaqar_id, tenant_id, egar_id),
+ *   selects [name => [label, options array or callable($db)]], and build($db, $f), which returns
+ *   columns [key => [label, type, summed?]] (types: text, date, money, int, badge, links),
+ *   rows, and optionally cards [label => value], notes, opening message 'empty'.
+ *   A cell is a scalar or [text, url]; a badge is [text, bootstrap colour]; links is the entry links list.
+ */
+$sc_id = '207';
+$use_accounting_theme = true;
+$syncReportExport = in_array($_GET['export'] ?? '', ['csv', 'xls'], true) ? $_GET['export'] : '';
+if ($syncReportExport !== '') {
+    include_once '../../../../reqloginajax.hnt';
+} else {
+    include_once '../../../../nocash.hnt';
+    include_once '../../../../connectdb.hnt';
+    include_once '../../../../header.hnt';
+}
+include_once __DIR__ . '/accounting_class.hnt';
+include_once __DIR__ . '/amlak_integration.hnt';
+include_once __DIR__ . '/entry_links.hnt';
+include_once __DIR__ . '/sync_report_helpers.hnt';
+
+$f = syncReportFilters($syncReport);
+$syncReportError = '';
+$data = ['columns' => [], 'rows' => []];
+try {
+    $data = ($syncReport['build'])($db, $f) + ['cards' => [], 'notes' => [], 'empty' => 'لا توجد بيانات ضمن الفلاتر المحددة.'];
+} catch (Throwable $error) {
+    error_log('Sync report ' . $syncReport['key'] . ': ' . $error->getMessage());
+    $syncReportError = $error instanceof RuntimeException ? $error->getMessage() : 'تعذر تحميل التقرير. راجع سجل الخادم.';
+}
+$data += ['cards' => [], 'notes' => [], 'empty' => ''];
+$syncReportTotals = [];
+foreach ($data['columns'] as $name => $column) {
+    if (empty($column[2])) continue;
+    $syncReportTotals[$name] = array_sum(array_map(function ($row) use ($name) { return (float)syncReportText($row[$name] ?? 0, 'money'); }, $data['rows']));
+}
+
+if ($syncReportExport !== '') {
+    if ($syncReportError !== '') {
+        http_response_code(409);
+        header('Content-Type: text/plain; charset=UTF-8');
+        exit($syncReportError);
+    }
+    $lines = [array_column($data['columns'], 0)];
+    foreach ($data['rows'] as $row) {
+        $line = [];
+        foreach ($data['columns'] as $name => $column) $line[] = syncReportText($row[$name] ?? '', $column[1]);
+        $lines[] = $line;
+    }
+    if ($syncReportTotals && $data['rows']) {
+        $line = [];
+        foreach ($data['columns'] as $name => $column) $line[] = isset($syncReportTotals[$name]) ? syncReportText($syncReportTotals[$name], $column[1]) : '';
+        if ($line[0] === '') $line[0] = 'الإجمالي';
+        $lines[] = $line;
+    }
+    $fileName = $syncReport['key'] . '_' . date('Ymd_His');
+    if ($syncReportExport === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="' . $fileName . '.csv"');
+        $out = fopen('php://output', 'w');
+        fwrite($out, "\xEF\xBB\xBF");
+        // Stored names must not run as spreadsheet formulas.
+        foreach ($lines as $line) fputcsv($out, array_map('syncReportCsvCell', $line), ',', '"', '\\');
+        fclose($out);
+        exit;
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="' . $fileName . '.xls"');
+    echo '<html lang="ar" dir="rtl"><head><meta charset="UTF-8"></head><body><table border="1">';
+    foreach ($lines as $index => $line) {
+        echo '<tr>';
+        foreach ($line as $cell) echo ($index ? '<td>' : '<th>') . accountingLinkEsc(syncReportCsvCell($cell)) . ($index ? '</td>' : '</th>');
+        echo '</tr>';
+    }
+    echo '</table></body></html>';
+    exit;
+}
+
+const SYNC_REPORT_SCREEN_ROWS = 2000;
+$options = syncReportOptions($db, $syncReport['filters']);
+$exportQuery = http_build_query(array_filter($f, function ($value) { return $value !== '' && $value !== 0; }));
+$uses = function ($name) use ($syncReport) { return in_array($name, $syncReport['filters'], true); };
+?>
+<style>
+:root {
+    --accounting-primary-color: #1f4e5f;
+    --secondary-color: #163a47;
+    --primary-color: #1f4e5f;
+}
+.report-card { background: #fff; border-radius: 12px; padding: 1.5rem; box-shadow: 0 4px 15px rgba(0,0,0,.08); }
+.report-table { width: 100%; }
+.report-table th, .report-table td { padding: .6rem .5rem; border-bottom: 1px solid #e9ecef; vertical-align: middle; }
+.report-table .num { text-align: left; direction: ltr; white-space: nowrap; }
+.report-table tbody tr:hover { background: #f8f9fa; }
+.report-total td { background: #e8eff2; font-weight: 700; border-top: 2px solid #1f4e5f; }
+.sync-summary { background: #fff; border-right: 4px solid #1f4e5f; border-radius: 10px; padding: 1rem 1.25rem; box-shadow: 0 2px 10px rgba(0,0,0,.06); height: 100%; }
+.sync-summary .value { font-size: 1.35rem; font-weight: 700; color: #1f4e5f; }
+@media print {
+    .no-print { display: none !important; }
+    .report-card { box-shadow: none; padding: 0; }
+    .report-table th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
+</style>
+<div class="container-fluid p-4">
+    <div class="page-header no-print">
+        <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2"><i class="bi <?= accountingLinkEsc($syncReport['icon']) ?> me-2"></i><?= accountingLinkEsc($sc_title) ?></h1>
+                <p class="mb-0 opacity-75"><?= accountingLinkEsc($syncReport['desc']) ?></p>
+            </div>
+            <div class="d-flex flex-wrap gap-2">
+                <a class="btn btn-light btn-lg" href="?<?= accountingLinkEsc($exportQuery . '&export=xls') ?>"><i class="bi bi-file-earmark-excel me-2"></i>Excel</a>
+                <a class="btn btn-light btn-lg" href="?<?= accountingLinkEsc($exportQuery . '&export=csv') ?>"><i class="bi bi-filetype-csv me-2"></i>CSV</a>
+                <button type="button" class="btn btn-light btn-lg" onclick="window.print()"><i class="bi bi-printer me-2"></i>طباعة</button>
+                <button type="button" class="btn btn-light btn-lg" onclick="window.location='index.hnt'"><i class="bi bi-arrow-right me-2"></i>العودة</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="report-card mb-4 no-print">
+        <form method="get" class="row g-3">
+            <?php if ($uses('date')) foreach (['date_from' => 'من تاريخ', 'date_to' => 'إلى تاريخ'] as $name => $label): ?>
+            <div class="col-md-3"><label class="form-label"><?= $label ?></label><div class="input-group">
+                <input type="text" class="form-control datepicker-input" name="<?= $name ?>" autocomplete="off" value="<?= date('d/m/Y', strtotime($f[$name])) ?>"><span class="input-group-text"><i class="bi bi-calendar3"></i></span>
+            </div></div>
+            <?php endforeach; ?>
+            <?php if ($uses('as_of')): ?>
+            <div class="col-md-3"><label class="form-label">حتى تاريخ</label><div class="input-group">
+                <input type="text" class="form-control datepicker-input" name="date_to" autocomplete="off" value="<?= date('d/m/Y', strtotime($f['date_to'])) ?>"><span class="input-group-text"><i class="bi bi-calendar3"></i></span>
+            </div></div>
+            <?php endif; ?>
+            <?php foreach ($options as $name => [$label, $list]): ?>
+            <div class="col-md-3"><label class="form-label"><?= $label ?></label><select class="form-select" name="<?= $name ?>"><option value="">الكل</option>
+                <?php foreach ($list as $id => $text): ?><option value="<?= (int)$id ?>" <?= $f[$name] === (int)$id ? 'selected' : '' ?>><?= accountingLinkEsc($text) ?></option><?php endforeach; ?>
+            </select></div>
+            <?php endforeach; ?>
+            <?php foreach ($syncReport['selects'] ?? [] as $name => [$label, $list]): ?>
+            <div class="col-md-3"><label class="form-label"><?= accountingLinkEsc($label) ?></label><select class="form-select" name="<?= $name ?>"><option value="">الكل</option>
+                <?php foreach (syncReportSelect($db, $list) as $id => $text): ?><option value="<?= accountingLinkEsc($id) ?>" <?= $f[$name] === (string)$id ? 'selected' : '' ?>><?= accountingLinkEsc($text) ?></option><?php endforeach; ?>
+            </select></div>
+            <?php endforeach; ?>
+            <div class="col-md-3 d-flex align-items-end"><button class="btn btn-primary w-100" type="submit" style="background:#1f4e5f;border-color:#1f4e5f"><i class="bi bi-search me-2"></i>عرض</button></div>
+        </form>
+    </div>
+
+    <?php if ($syncReportError !== ''): ?><div class="alert alert-warning"><?= accountingLinkEsc($syncReportError) ?></div><?php endif; ?>
+    <?php foreach ($data['notes'] as $note): ?><div class="alert alert-light border"><i class="bi bi-info-circle me-2"></i><?= accountingLinkEsc($note) ?></div><?php endforeach; ?>
+    <?php if ($data['cards']): ?><div class="row g-3 mb-4"><?php foreach ($data['cards'] as $label => $value): ?>
+        <div class="col-6 col-lg-3"><div class="sync-summary"><div class="text-muted"><?= accountingLinkEsc($label) ?></div><div class="value"><?= accountingLinkEsc(is_float($value) ? number_format($value, 2) : $value) ?></div></div></div>
+    <?php endforeach; ?></div><?php endif; ?>
+
+    <?php if ($syncReportError === ''): ?>
+    <div class="report-card">
+        <h5 class="mb-3"><?= accountingLinkEsc($sc_title) ?><?php if ($uses('date')): ?> <small class="text-muted">من <?= $f['date_from'] ?> إلى <?= $f['date_to'] ?></small><?php elseif ($uses('as_of')): ?> <small class="text-muted">حتى <?= $f['date_to'] ?></small><?php endif; ?></h5>
+        <?php if (!$data['rows']): ?><p class="text-muted text-center py-4 mb-0"><?= accountingLinkEsc($data['empty']) ?></p><?php else: ?>
+        <?php if (count($data['rows']) > SYNC_REPORT_SCREEN_ROWS): ?><div class="alert alert-info no-print">عدد السجلات <?= count($data['rows']) ?>، ويظهر هنا أول <?= SYNC_REPORT_SCREEN_ROWS ?>. الإجماليات والتصدير تشمل الكل.</div><?php endif; ?>
+        <div class="table-responsive"><table class="report-table">
+            <thead><tr><?php foreach ($data['columns'] as $column): ?><th class="<?= in_array($column[1], ['money', 'int'], true) ? 'num' : '' ?>"><?= accountingLinkEsc($column[0]) ?></th><?php endforeach; ?></tr></thead>
+            <tbody><?php foreach (array_slice($data['rows'], 0, SYNC_REPORT_SCREEN_ROWS) as $row): ?><tr><?php foreach ($data['columns'] as $name => $column): ?>
+                <td class="<?= in_array($column[1], ['money', 'int'], true) ? 'num' : '' ?>"><?= syncReportCell($row[$name] ?? '', $column[1]) ?></td><?php endforeach; ?></tr>
+            <?php endforeach; ?></tbody>
+            <?php if ($syncReportTotals): $first = true; ?><tfoot><tr class="report-total"><?php foreach ($data['columns'] as $name => $column): ?>
+                <td class="<?= isset($syncReportTotals[$name]) ? 'num' : '' ?>"><?= isset($syncReportTotals[$name]) ? syncReportCell($syncReportTotals[$name], $column[1], true) : ($first ? 'الإجمالي' : '') ?></td><?php $first = false; endforeach; ?></tr></tfoot><?php endif; ?>
+        </table></div>
+        <?php endif; ?>
+    </div>
+    <?php endif; ?>
+</div>
+<script>
+$(function () {
+    $('.datepicker-input').datepicker({format: 'dd/mm/yyyy', language: 'ar', rtl: true, autoclose: true, todayHighlight: true, calendarType: 'gregorian', orientation: 'bottom right', weekStart: 0});
+    $('.input-group-text').on('click', function () { $(this).prev('.datepicker-input').datepicker('show'); });
+});
+</script>
+<?php require '../../../../foter.hnt'; ?>

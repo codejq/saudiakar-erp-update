@@ -94,13 +94,23 @@ if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], tr
     $exp_rows = [];
 
     // Income (eradat)
-    $exp_res = mysql_query("SELECT eradat.pymentdesription, eradat.paymentdate, eradat.amount, eradat.mysa3ee, eradat.tamen, eradat.mywater, eradat.services
+    $exp_res = mysql_query("SELECT eradat.*
                             FROM eradat WHERE idaqar='" . intval($idaqar) . "'
                             AND paymentdate > '$_exp_start' AND paymentdate < '$_exp_end'
                             $_tasfia_f $_bk_eradat_f $_pt_eradat_f", $link);
-    while ($r = mysql_fetch_array($exp_res)) {
-        $net = floatval($r['amount']) - floatval($r['mysa3ee']) - floatval($r['services']);
+    require_once __DIR__ . '/receipt_components_store.hnt';
+    $_exp_income = array();
+    while ($r = mysql_fetch_assoc($exp_res)) $_exp_income[] = $r;
+    $_exp_property = receiptCommissionRows($link, 'SELECT * FROM amlak WHERE idaqar=?', array(intval($idaqar)))[0] ?? array();
+    $_exp_parts = receiptDeliveryBreakdowns($link, $_exp_income, $_exp_property);
+    foreach ($_exp_income as $r) {
+        $net = floatval($r['amount']) - floatval($r['mysa3ee']) - floatval($r['services']) - receiptWithheldFromOwner($_exp_parts[intval($r['iderad'])]);
         $exp_rows[] = ['إيراد', str_replace('+', ' بدون ', $r['pymentdesription']), date('d/m/Y', $r['paymentdate']), number_format($net, 2, '.', ''), ''];
+    }
+
+    require_once __DIR__ . '/deposit_settlement_helpers.hnt';
+    foreach ($_bankid > 0 || $_payment_type > 0 ? array() : depositStatementCredits($link, array($idaqar), $_exp_start, $_exp_end, (bool)$_showtasfia) as $r) {
+        $exp_rows[] = ['إيراد', 'تلفيات من تأمين المستأجر ' . $r['tenant_name'], date('d/m/Y', $r['settlement_date']), number_format((float)$r['owner_credit'], 2, '.', ''), ''];
     }
 
     // Expenses (masrofat)
@@ -464,21 +474,26 @@ if ($idaqar) {
                             <tbody>
 <?php
     $counx = 0;
+    require_once __DIR__ . '/eradat_report_helpers.hnt';
     $allsandrakam = array();
 
-    while ($row = mysql_fetch_array($result)) {
-        // Remove duplicated entries
-        if (in_array($row['sanadrakam'], $allsandrakam)) {
-            $rid = mysql_fetch_array(mysql_query("SELECT sanadrakam FROM eradat WHERE sanadrakam='" . addslashes($row['sanadrakam']) . "'"));
-            if ($rid['sanadrakam']) {
-                loginfo("critical", "delete", "تم حذف الايرد رقم سند: {$row['sanadrakam']} البيان", "", "eradat", $row['sanadrakam'], $link);
-                mysql_query("DELETE FROM eradat WHERE sanadrakam='" . addslashes($row['sanadrakam']) . "'", $link);
-            }
-            continue;
-        }
-        $allsandrakam[] = $row['sanadrakam'];
+    require_once __DIR__ . '/receipt_components_store.hnt';
+    $incomeRows = array();
+    while ($row = mysql_fetch_assoc($result)) $incomeRows[] = $row;
+    $incomeParts = receiptDeliveryBreakdowns($link, $incomeRows, is_array($aqinfo) ? $aqinfo : array());
+    $withheldRentVat = 0;
+    foreach ($incomeRows as $row) {
+        // Display only: never delete income rows from a report.
+        if (eradatReportIsRepeated($row, $allsandrakam)) continue;
 
         $counx++;
+        // VAT the office files and commission VAT are not the owner's money.
+        $rowWithheld = receiptWithheldFromOwner($incomeParts[intval($row['iderad'])]);
+        $row['amount2'] -= $rowWithheld;
+        if ($rowWithheld > 0) {
+            $withheldRentVat += $incomeParts[intval($row['iderad'])]['office_vat'];
+            $row['pymentdesription'] .= ' (ضريبة محجوزة لدى المكتب ' . number_format($rowWithheld, 2) . ')';
+        }
 
         // Format date
         if (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) {
@@ -502,6 +517,17 @@ if ($idaqar) {
                                 </tr>
 <?php
         $totalincome += $row['amount2'];
+    }
+
+    // Insurance damages owed to the owner; no fee on them.
+    require_once __DIR__ . '/deposit_settlement_helpers.hnt';
+    $depositCredits = $bankid > 0 || $payment_type > 0 ? array() : depositStatementCredits($link, array($idaqar), $startfrom, $enddate, (bool)$showtasfia);
+    foreach ($depositCredits as $credit) {
+        $credit_date = isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))
+            ? date("d/m/Y", $credit['settlement_date']) : $arabicTools->arabicDate('hj:d/m/Y', $credit['settlement_date']);
+        echo "<tr class='text-center'><td>x</td><td>تلفيات من تأمين المستأجر " . htmlspecialchars($credit['tenant_name']) . "</td><td>" . $credit_date . "</td><td>" . number_format($credit['owner_credit'], 2)
+            . "</td><td></td><td></td><td class='hidecommision'></td><td></td><td><strong class='text-success'>" . number_format($credit['owner_credit'], 2) . "</strong></td><td>0</td><td class='screenonlyonly'></td></tr>";
+        $totalincome += $credit['owner_credit'];
     }
 
     // Get expenses
@@ -629,7 +655,9 @@ if ($idaqar) {
         }
     }
 
-    $commission = ($per * $totalincome) / 100;
+    // The fee also covers the rent VAT the office collected.
+    $feeBase = $totalincome + ($withheldRentVat ?? 0) - depositCreditsTotal($depositCredits ?? array());
+    $commission = ($per * $feeBase) / 100;
     $net_for_owner = $totalincome - $totaloutcome - $commission;
 ?>
                     <div class="row g-3">
@@ -638,7 +666,7 @@ if ($idaqar) {
                                 <div class="card-body">
                                     <h6 class="card-title">النسبة المستحقة</h6>
                                     <p class="mb-0">
-                                        (<?= $per ?>% × <?= number_format($totalincome, 2) ?>) / 100 =
+                                        (<?= $per ?>% × <?= number_format($feeBase, 2) ?>) / 100 =
                                         <strong class="text-primary"><?= number_format($commission, 2) ?> <?= isset($myomla) ? $myomla : 'ريال' ?></strong>
                                     </p>
                                 </div>

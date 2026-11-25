@@ -132,13 +132,23 @@ $officeWaterExpr = "CASE WHEN COALESCE(a.addwaterto, '') NOT IN ('', 'malek') TH
 $officeInsuranceExpr = "CASE WHEN COALESCE(a.addtameento, '') NOT IN ('', 'malek') THEN COALESCE(e.tamen, 0) ELSE 0 END";
 $rawRateExpr = "CAST(COALESCE(NULLIF(a.persentage, ''), '0') AS DECIMAL(12,4))";
 $rateExpr = "CASE WHEN {$rawRateExpr} < 100 THEN {$rawRateExpr} ELSE {$rawRateExpr} / 100 END";
-$commissionBaseExpr = "({$grossExpr} - {$renewalExpr} - {$servicesExpr} - {$officeWaterExpr} - {$officeInsuranceExpr})";
-$percentageCommissionExpr = "({$commissionBaseExpr} * {$rateExpr} / 100)";
-$directOfficeExpr = "({$renewalExpr} + {$servicesExpr} + {$officeWaterExpr} + {$officeInsuranceExpr})";
+// Receipts with a stored split: VAT the office files is neither its income nor the owner's.
+require_once __DIR__ . '/receipt_components_store.hnt';
+$componentsReady = receiptComponentsReady($link);
+$officeOwnedExpr = $componentsReady ? "(a.rent_income_to='office')" : '(1=0)';
+$commissionVatExpr = $componentsReady ? 'COALESCE(rc.commission_vat, 0)' : '0';
+$vatWithheldExpr = $componentsReady
+    ? "(COALESCE(rc.commission_vat, 0) + CASE WHEN {$officeOwnedExpr} OR a.rent_vat_filed_by<>'owner' THEN COALESCE(rc.rent_vat, 0) ELSE 0 END)" : '0';
+$componentsJoin = $componentsReady ? ' LEFT JOIN sanad_components rc ON rc.idsanad = CAST(e.sanadrakam AS UNSIGNED)' : '';
+$commissionBaseExpr = "({$grossExpr} - {$renewalExpr} - {$servicesExpr} - {$officeWaterExpr} - {$officeInsuranceExpr} - {$commissionVatExpr})";
+$percentageCommissionExpr = "(CASE WHEN {$officeOwnedExpr} THEN 0 ELSE {$commissionBaseExpr} * {$rateExpr} / 100 END)";
+// The office keeps all the income of a property it owns.
+$directOfficeExpr = "({$renewalExpr} + {$servicesExpr} + {$officeWaterExpr} + {$officeInsuranceExpr}
+    + CASE WHEN {$officeOwnedExpr} THEN {$commissionBaseExpr} + {$commissionVatExpr} - {$vatWithheldExpr} ELSE 0 END)";
 $officeTotalExpr = "({$directOfficeExpr} + {$percentageCommissionExpr})";
 $representativeCommissionExpr = $hasRepresentativeCommission ? 'COALESCE(s.sales_commission_amount, 0)' : '0';
 $officeNetExpr = "({$officeTotalExpr} - {$representativeCommissionExpr})";
-$ownerNetExpr = "({$grossExpr} - {$officeTotalExpr})";
+$ownerNetExpr = "({$grossExpr} - {$officeTotalExpr} - {$vatWithheldExpr})";
 
 $aggregateColumns = "
     COUNT(*) AS transaction_count,
@@ -153,6 +163,7 @@ $aggregateColumns = "
     COALESCE(SUM({$officeTotalExpr}), 0) AS office_total_income,
     COALESCE(SUM({$representativeCommissionExpr}), 0) AS representative_commission,
     COALESCE(SUM({$officeNetExpr}), 0) AS office_net_income,
+    COALESCE(SUM({$vatWithheldExpr}), 0) AS vat_withheld,
     COALESCE(SUM({$ownerNetExpr}), 0) AS owner_net_amount";
 
 $sanadJoin = 'LEFT JOIN sanad s ON s.idsanad = CAST(e.sanadrakam AS UNSIGNED)';
@@ -160,7 +171,7 @@ $whereSql = "e.paymentdate >= '" . intval($startTimestamp) . "' AND e.paymentdat
 if ($selectedProperty > 0) {
     $whereSql .= " AND e.idaqar='" . intval($selectedProperty) . "'";
 }
-$baseFromSql = "FROM eradat e LEFT JOIN amlak a ON a.idaqar=e.idaqar {$sanadJoin} WHERE {$whereSql}";
+$baseFromSql = "FROM eradat e LEFT JOIN amlak a ON a.idaqar=e.idaqar {$sanadJoin}{$componentsJoin} WHERE {$whereSql}";
 
 $reportError = '';
 $totals = incomePeriodTotalsDefaults();
@@ -357,6 +368,7 @@ $printQuery['report'] = 1;
         <div class="col-6 col-md-4 col-xl-2"><div class="card income-kpi" style="--income-color:#0f766e"><div class="card-body"><div class="income-label">صافي دخل المكتب</div><div class="income-value"><?= incomePeriodMoney($totals['office_net_income']) ?></div><small><?= incomePeriodEsc($currency) ?></small></div></div></div>
     </div>
 
+    <?php if (floatval($totals['vat_withheld'] ?? 0) > 0) { ?><div class="alert alert-info">ضريبة محصلة يوردها المكتب (ليست من دخل المكتب ولا المالك): <strong><?= incomePeriodMoney($totals['vat_withheld']) ?></strong></div><?php } ?>
     <div class="alert income-formula mb-4">
         <strong>طريقة الحساب:</strong>
         عمولة المكتب بالنسبة تعتمد على النسبة الحالية المضبوطة داخل بيانات كل عقار.

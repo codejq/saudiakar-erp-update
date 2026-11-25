@@ -25,12 +25,19 @@ AmlakMigrations::run($link);
 $pendingAmlakSync = [
     'receipts' => 0,
     'expenses' => 0,
+    'deposits' => 0,
+    'transfers' => 0,
     'owner_settlements' => 0
 ];
+require_once __DIR__ . '/includes/receipt_sync.hnt';
+require_once __DIR__ . '/includes/deposit_sync.hnt';
+require_once __DIR__ . '/includes/transfer_sync.hnt';
 $pendingSyncQueries = [
-    'receipts' => "SELECT COUNT(*) AS total FROM sanad WHERE accounting_entry_id IS NULL OR accounting_entry_id=0 OR NOT EXISTS (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id=sanad.accounting_entry_id AND j.status='posted')",
-    'expenses' => "SELECT COUNT(*) AS total FROM masrofat WHERE fund_source=0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0 OR NOT EXISTS (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id=masrofat.accounting_entry_id AND j.status='posted'))",
-    'owner_settlements' => "SELECT COUNT(*) AS total FROM sanadsarf WHERE aqarid>0 AND iderad>0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0 OR NOT EXISTS (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id=sanadsarf.accounting_entry_id AND j.status='posted'))"
+    'receipts' => "SELECT COUNT(*) AS total FROM sanad WHERE " . receiptSyncPendingSql($db),
+    'expenses' => "SELECT COUNT(*) AS total FROM masrofat WHERE " . amlakSyncDateSql($db,'payeddate') . " AND fund_source=0" . depositExpenseExclusionSql($db) . " AND (accounting_entry_id IS NULL OR accounting_entry_id=0 OR NOT EXISTS (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id=masrofat.accounting_entry_id AND j.status='posted'))",
+    'deposits' => depositSyncCountSql($db),
+    'transfers' => "SELECT COUNT(*) AS total FROM sanadsarf WHERE " . transferSyncWhere($db),
+    'owner_settlements' => "SELECT COUNT(*) AS total FROM sanadsarf WHERE " . amlakSyncDateSql($db,'sanadate') . " AND aqarid>0 AND iderad>0 AND (accounting_entry_id IS NULL OR accounting_entry_id=0 OR NOT EXISTS (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id=sanadsarf.accounting_entry_id AND j.status='posted'))"
 ];
 foreach ($pendingSyncQueries as $pendingType => $pendingQuery) {
     $pendingResult = $db->query($pendingQuery);
@@ -40,6 +47,8 @@ foreach ($pendingSyncQueries as $pendingType => $pendingQuery) {
     }
 }
 $pendingAmlakSyncTotal = array_sum($pendingAmlakSync);
+$receiptDrafts = receiptSyncDraftCount($db);
+$receiptsHeld = receiptSyncHeldCount($db);
 require_once __DIR__ . '/../include/amlak/receipt_commission_helpers.hnt';
 $accountingCommissionBalance = null;
 if (receiptCommissionCan($link,'voucher_reports')) {
@@ -173,8 +182,8 @@ body {
     margin-bottom: 1rem;
 }
 
-.stat-icon.success { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
-.stat-icon.danger { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; }
+.stat-icon.success { background: linear-gradient(135deg, #1f4e5f 0%, #163a47 100%); color: white; }
+.stat-icon.danger { background: linear-gradient(135deg, #c0392b 0%, #922b21 100%); color: white; }
 .stat-icon.info { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: white; }
 .stat-icon.warning { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); color: white; }
 
@@ -222,12 +231,12 @@ body {
     font-size: 2.5rem;
 }
 
-.module-icon.purple { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+.module-icon.petrol { background: linear-gradient(135deg, #1f4e5f 0%, #163a47 100%); color: white; }
 .module-icon.blue { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: white; }
 .module-icon.green { background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); color: white; }
 .module-icon.orange { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); color: white; }
-.module-icon.red { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; }
-.module-icon.teal { background: linear-gradient(135deg, #30cfd0 0%, #330867 100%); color: white; }
+.module-icon.red { background: linear-gradient(135deg, #c0392b 0%, #922b21 100%); color: white; }
+.module-icon.teal { background: linear-gradient(135deg, #30cfd0 0%, #1f6f78 100%); color: white; }
 .module-icon.slate { background: #4e627f; color: white; }
 
 .module-title {
@@ -273,17 +282,39 @@ body {
 
 <div class="container-fluid p-4">
     <?php if ($accountingCommissionBalance!==null) { ?>
-    <div class="alert alert-success d-flex flex-wrap justify-content-between align-items-center gap-3">
+    <div class="alert alert-success" id="commissionNotice" data-notice="<?= htmlspecialchars((int)($_SESSION['useridv'] ?? 0) . '|' . ($db->query('SELECT DATABASE()')->fetch_row()[0] ?? '') . '|' . number_format($accountingCommissionBalance, 2, '.', ''), ENT_QUOTES, 'UTF-8') ?>">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
         <div><i class="bi bi-people me-1"></i>عمولات المندوبين المتبقية في الشركة الحالية: <strong><?= number_format($accountingCommissionBalance,2) ?></strong><br><small>تثبت العمولة مرة واحدة عند ترحيل سند القبض، وصرفها من المكتب يسوي الذمة دون تكرار المصروف.</small></div>
-        <div><a class="btn btn-outline-success" href="../hnt-office/representative_statement.hnt">كشف حساب مندوب</a> <a class="btn btn-success" href="../include/amlak/office_expense.hnt">صرف عمولة</a></div>
+        <div><a class="btn btn-outline-success" href="../hnt-office/representative_statement.hnt">كشف حساب مندوب</a> <a class="btn btn-success" href="../include/amlak/office_expense.hnt">صرف عمولة</a> <button type="button" class="btn-close ms-2" id="commissionNoticeClose" aria-label="إخفاء" title="إخفاء"></button></div>
+        </div>
     </div>
+    <script>
+    // Hidden until the remaining amount changes, per user and company.
+    (function () {
+        var notice = document.getElementById('commissionNotice'), value = notice.getAttribute('data-notice'), parts = value.split('|');
+        var key = 'commissionNoticeHidden_' + parts[0] + '_' + parts[1];
+        try { if (localStorage.getItem(key) === value) notice.style.display = 'none'; } catch (e) {}
+        document.getElementById('commissionNoticeClose').addEventListener('click', function () {
+            notice.style.display = 'none';
+            try { localStorage.setItem(key, value); } catch (e) {}
+        });
+    })();
+    </script>
     <?php } ?>
+    <?php if ($receiptDrafts + $receiptsHeld > 0): ?>
+    <div class="alert alert-warning d-flex flex-wrap align-items-center justify-content-between gap-3">
+        <div><i class="bi bi-clipboard-check me-2"></i>فواتير سندات بانتظار الاعتماد: <strong><?= number_format($receiptDrafts) ?></strong> — سندات محجوزة للمراجعة: <strong><?= number_format($receiptsHeld) ?></strong></div>
+        <a class="btn btn-warning" href="receipt_review.hnt">فتح المراجعة</a>
+    </div>
+    <?php endif; ?>
     <?php if ($pendingAmlakSyncTotal > 0): ?>
     <div class="alert alert-info d-flex flex-wrap align-items-center justify-content-between gap-3" role="status">
         <div>
             <strong><i class="bi bi-arrow-repeat me-2"></i>توجد حركات أملاك لم تزامن محاسبياً.</strong>
             <span class="ms-2">سندات القبض: <?php echo number_format($pendingAmlakSync['receipts']); ?>
                 — المصروفات: <?php echo number_format($pendingAmlakSync['expenses']); ?>
+                — حركات الصندوق والبنك: <?php echo number_format($pendingAmlakSync['transfers']); ?>
+                — تسويات التأمين: <?php echo number_format($pendingAmlakSync['deposits']); ?>
                 — تسليمات الملاك: <?php echo number_format($pendingAmlakSync['owner_settlements']); ?></span>
         </div>
         <a class="btn btn-primary" href="sync_amlak.hnt"><i class="bi bi-arrow-repeat me-1"></i>فتح المزامنة</a>
@@ -389,7 +420,7 @@ body {
         <!-- Chart of Accounts -->
         <div class="col-md-6 col-lg-4 col-xl-3">
             <a href="modules/chart_of_accounts/" class="module-card">
-                <div class="module-icon purple">
+                <div class="module-icon petrol">
                     <i class="bi bi-diagram-3"></i>
                 </div>
                 <div class="module-title">دليل الحسابات</div>
@@ -468,7 +499,7 @@ body {
         <!-- Reports -->
         <div class="col-md-6 col-lg-4 col-xl-3">
             <a href="modules/reports/" class="module-card">
-                <div class="module-icon purple">
+                <div class="module-icon petrol">
                     <i class="bi bi-bar-chart"></i>
                 </div>
                 <div class="module-title">التقارير المالية</div>
@@ -479,7 +510,7 @@ body {
         <!-- Journals -->
         <div class="col-md-6 col-lg-4 col-xl-3">
             <a href="modules/settings/journals.hnt" class="module-card">
-                <div class="module-icon purple">
+                <div class="module-icon petrol">
                     <i class="bi bi-journal-bookmark"></i>
                 </div>
                 <div class="module-title">دفاتر اليومية</div>
@@ -555,7 +586,7 @@ body {
                             </button>
                         </div>
                         <div class="col-md-6 col-lg-3">
-                            <button class="btn btn-secondary quick-action-btn w-100" onclick="window.location='sync_amlak.hnt'" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border: none;">
+                            <button class="btn btn-secondary quick-action-btn w-100" onclick="window.location='sync_amlak.hnt'" style="background: linear-gradient(135deg, #1f4e5f 0%, #163a47 100%); border: none;">
                                 <i class="bi bi-arrow-repeat me-2"></i>مزامنة العقارات
                             </button>
                         </div>

@@ -1,0 +1,53 @@
+<?php
+include_once __DIR__ . '/reqlogin.hnt';
+require_once __DIR__ . '/connectdb.hnt';
+require_once __DIR__ . '/lib/screen_permissions.hnt';
+
+if (!aqaryScreenCan($link, '91', 'adds')) {
+    aqaryScreenDenyPage('ليس لديك صلاحية إضافة شاشة');
+}
+if (empty($_SESSION['addscreen_csrf'])) $_SESSION['addscreen_csrf'] = bin2hex(random_bytes(32));
+
+$message = '';
+$messageColor = 'red';
+$html = '';
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    // The pasted text is only read for the title; it is never executed.
+    $source = (string)($_POST['screendata'] ?? '');
+    $screenName = preg_match('/\$sc_title\s*=\s*(["\'])(.*?)\1\s*;/su', $source, $match) ? trim($match[2]) : '';
+    if (!hash_equals($_SESSION['addscreen_csrf'], (string)($_POST['csrf'] ?? ''))) {
+        $message = 'انتهت صلاحية الصفحة، يرجى المحاولة من جديد';
+    } elseif ($screenName === '') {
+        $message = 'لم يتم العثور على عنوان الشاشة ($sc_title)';
+    } else {
+        $stmt = mysqli_prepare($link, 'SELECT screenid FROM screens WHERE screen_name=? LIMIT 1');
+        $existing = $stmt && $stmt->execute([$screenName]) ? $stmt->get_result()->fetch_assoc() : false;
+        if ($existing) {
+            $message = 'الشاشة موجودة مسبقا';
+        } elseif ($existing === null) {
+            $stmt = mysqli_prepare($link, "INSERT INTO screens (screen_name, screen_isactive, parentid, formuid) VALUES (?, '1', 0, '')");
+            if ($stmt && $stmt->execute([$screenName])) {
+                $message = 'تمت الاضافة';
+                $messageColor = 'green';
+                $html = '$sc_id="' . mysqli_insert_id($link) . "\";\n\$sc_title=\"" . $screenName . "\";\n";
+            } else {
+                $message = 'تعذرت الاضافة';
+            }
+        } else {
+            $message = 'تعذرت الاضافة';
+        }
+    }
+}
+?>
+<!doctype html>
+<html dir="rtl" lang="ar">
+<head><meta charset="utf-8"><title>اضافة شاشة</title></head>
+<body>
+<?php if ($message !== '') { ?><p style="color:<?= $messageColor ?>"><?= htmlspecialchars($message, ENT_QUOTES, 'UTF-8') ?></p><?php } ?>
+<form action="addscreen.hnt" method="post">
+<input type="hidden" name="csrf" value="<?= $_SESSION['addscreen_csrf'] ?>">
+<textarea name="screendata" dir="ltr" rows="5" cols="60" placeholder='$sc_title="اسم الشاشة";'><?= htmlspecialchars($html, ENT_QUOTES, 'UTF-8') ?></textarea><br>
+<input type="submit" value="اضافة شاشة">
+</form>
+</body>
+</html>

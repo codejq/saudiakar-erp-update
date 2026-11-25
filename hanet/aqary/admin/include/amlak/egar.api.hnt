@@ -501,6 +501,10 @@ function createPaymentReceipt($kastid, $data, $mostagerid, $payedamount, $user_d
         intval($data['sales_representative_userid'] ?? 0),
         $link
     );
+    // The contract form already stored this payment on the installment, so nothing was paid before it.
+    require_once __DIR__ . '/receipt_components_store.hnt';
+    $receiptBreakdown = receiptComponentsPrepare($link, $kastid, $payedamount, null, 0);
+    $receiptParts = $receiptBreakdown !== null ? receiptComponentsMoney($receiptBreakdown['components']) : null;
     $sql = "INSERT INTO sanad SET
         mostagerid='" . $mostagerid . "',
         mostagername='" . mysql_real_escape_string($data['mostagername']) . "',
@@ -511,8 +515,8 @@ function createPaymentReceipt($kastid, $data, $mostagerid, $payedamount, $user_d
         idaqar='" . intval($data['idaqar']) . "',
         idsubaqar='" . intval($data['idsubaqar']) . "',
         sanaddate='" . time() . "',
-        commesion_vat='" . str_replace(",", "", $data['commesion_vat']) . "',
-        depositeamount_vat='" . str_replace(",", "", $data['depositeamount_vat']) . "',
+        commesion_vat='" . ($receiptParts !== null ? $receiptParts['commission_vat'] : str_replace(",", "", $data['commesion_vat'])) . "',
+        depositeamount_vat='" . ($receiptParts !== null ? $receiptParts['rent_vat'] : str_replace(",", "", $data['depositeamount_vat'])) . "',
         sales_representative_userid='" . $salesCommission['representative_userid'] . "',
         sales_commission_type='" . $salesCommission['type'] . "',
         sales_commission_value='" . $salesCommission['value'] . "',
@@ -533,9 +537,16 @@ function createPaymentReceipt($kastid, $data, $mostagerid, $payedamount, $user_d
         paymentdate='" . time() . "',
         pymentdesription='قيمة القسط الأول',
         sanadrakam='" . $sanadId . "',
+        mysa3ee='" . ($receiptParts['commission'] ?? 0) . "',
+        mywater='" . ($receiptParts['water'] ?? 0) . "',
+        services='" . ($receiptParts['services'] ?? 0) . "',
+        tamen='" . ($receiptParts['insurance'] ?? 0) . "',
+        kastid='" . intval($kastid) . "',
         formuid='" . mysql_real_escape_string($data['formuid']) . "'";
 
     mysql_query($sql, $link);
+
+    if ($receiptBreakdown !== null && $sanadId > 0) receiptComponentsStore($link, $sanadId, $receiptBreakdown);
 
     // Generate QR code for receipt
     generateReceiptQR($sanadId, $data, $payedamount);

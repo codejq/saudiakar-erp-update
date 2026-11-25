@@ -72,10 +72,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 $_inv_stmt->execute();
                 $_invoice = $_inv_stmt->get_result()->fetch_assoc();
                 if (!$_invoice) { $errors[] = "سطر $lineNum: الفاتورة '$_invoice_num' غير موجودة أو مدفوعة بالكامل"; continue; }
+                if ((int)($_invoice['sanad_id'] ?? 0) > 0) { $errors[] = "سطر $lineNum: لا تسجل دفعة هنا: الفاتورة مرتبطة بسند قبض ويُرحل تحصيلها عند اعتمادها"; continue; }
 
-                $_cash_acc = ($_pay_method === 'bank_transfer') ? 3 : 2;
+                $_pay_accounts = $_am->getInvoicePaymentAccounts();
+                $_cash_acc = $_pay_method === 'cash' ? $_pay_accounts['cash'] : $_pay_accounts['bank'];
+                if ($_cash_acc <= 0 || $_pay_accounts['receivable'] <= 0) { $errors[] = "سطر $lineNum: حسابات الصندوق أو البنك أو ذمم العملاء غير محددة في إعدادات المحاسبة"; continue; }
 
+                $_ctx = $_am->getInvoiceDimensionContext((int)$_invoice['invoice_id']);
                 $_entry_data = [
+                    'tenant_id'      => $_ctx['tenant_id'] ?? null,
+                    'owner_id'       => $_ctx['owner_id'] ?? null,
+                    'aqar_id'        => $_ctx['aqar_id'] ?? null,
+                    'subaqar_id'     => $_ctx['subaqar_id'] ?? null,
+                    'egar_id'        => $_ctx['egar_id'] ?? null,
+                    'invoice_id'     => $_invoice['invoice_id'],
                     'entry_date'     => $_pay_date,
                     'entry_type'     => 'payment',
                     'journal_id'     => $_rjid,
@@ -87,11 +97,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 ];
                 $_lines = [
                     ['account_id' => $_cash_acc, 'description' => "استلام دفعة - {$_invoice['customer_name']}", 'debit_amount' => $_amount, 'credit_amount' => 0],
-                    ['account_id' => 4,           'description' => "تسديد فاتورة {$_invoice['invoice_number']}",  'debit_amount' => 0, 'credit_amount' => $_amount]
+                    ['account_id' => $_pay_accounts['receivable'],           'description' => "تسديد فاتورة {$_invoice['invoice_number']}",  'debit_amount' => 0, 'credit_amount' => $_amount]
                 ];
                 $_result = $_am->createJournalEntry($_entry_data, $_lines);
 
                 if ($_result['success']) {
+                    if ($_notes === '') $_notes = $_pay_method;
                     if (!empty($_result['entry_id']) && !empty($_notes)) {
                         $_nstmt = $db->prepare("UPDATE acc_journal_entries SET notes = ? WHERE entry_id = ?");
                         if ($_nstmt) { $_nstmt->bind_param('si', $_notes, $_result['entry_id']); $_nstmt->execute(); }
@@ -201,6 +212,9 @@ if ($customersResult) {
     }
 }
 
+// New payments credit the configured receivable account; older ones credited account 4.
+$receivableListSql = '4,' . (int)(new AccountingManager($db, 0))->getInvoicePaymentAccounts()['receivable'];
+
 $paymentsQuery = "
     SELECT
         je.entry_id,
@@ -229,12 +243,11 @@ $paymentsQuery = "
         AND je.reference_id = inv.invoice_id
     INNER JOIN acc_journal_entry_lines ar_line
         ON je.entry_id = ar_line.entry_id
-        AND ar_line.account_id = 4
+        AND ar_line.account_id IN ($receivableListSql)
         AND ar_line.credit_amount > 0
     LEFT JOIN acc_journal_entry_lines debit_line
         ON je.entry_id = debit_line.entry_id
         AND debit_line.debit_amount > 0
-        AND debit_line.account_id <> 4
     WHERE je.status = 'posted'
         AND je.reference_type = 'invoice'
         AND je.reference_id IS NOT NULL
@@ -732,11 +745,12 @@ body {
                     </tr>
                 </thead>
                 <tbody>
+                    <?php require_once __DIR__ . '/../../includes/entry_links.hnt'; ?>
                     <?php foreach ($payments as $payment): ?>
                     <tr>
                         <td><?php echo htmlspecialchars($payment['entry_date']); ?></td>
-                        <td><strong><?php echo htmlspecialchars($payment['entry_number']); ?></strong></td>
-                        <td><?php echo htmlspecialchars($payment['invoice_number']); ?></td>
+                        <td><strong><?php echo accountingEntryPageLink($payment['entry_id'], $payment['entry_number']); ?></strong></td>
+                        <td><a target="_blank" rel="noopener" href="../invoices/view.hnt?id=<?php echo (int)$payment['invoice_id']; ?>"><?php echo htmlspecialchars($payment['invoice_number']); ?></a></td>
                         <td><?php echo htmlspecialchars($payment['customer_name']); ?></td>
                         <td>
                             <span class="badge text-bg-light">

@@ -22,10 +22,20 @@ if (isset($_GET['export']) && in_array($_GET['export'], ['csv', 'xls'], true)) {
     }
     $exp_headers = ['النوع', 'المرجع', 'التاريخ', 'الجهة', 'المبلغ', 'الضريبة', 'الإجمالي'];
     $exp_rows = [];
-    $_ss = $db->prepare("SELECT invoice_number, customer_name, invoice_date, subtotal, vat_amount, total_amount FROM acc_invoices WHERE invoice_date BETWEEN ? AND ? AND invoice_type IN ('standard','simplified') ORDER BY invoice_date");
+    $_receiptColumn = $db->query("SHOW COLUMNS FROM acc_invoices LIKE 'sanad_id'");
+    $_receiptReversal = ($_rv = $db->query("SHOW COLUMNS FROM acc_invoices LIKE 'reversed_date'")) && $_rv->num_rows > 0;
+    $_receiptDraftSql = $_receiptColumn && $_receiptColumn->num_rows ? " AND NOT (COALESCE(sanad_id,0)>0 AND (status='draft' OR (status='cancelled'" . ($_receiptReversal ? ' AND reversed_date IS NULL' : '') . ')))' : '';
+    $_ss = $db->prepare("SELECT invoice_number, customer_name, invoice_date, subtotal, vat_amount, total_amount FROM acc_invoices WHERE invoice_date BETWEEN ? AND ? AND invoice_type IN ('standard','simplified')" . $_receiptDraftSql . " ORDER BY invoice_date");
     if ($_ss) { $_ss->bind_param('ss', $_dateFrom, $_dateTo); $_ss->execute();
         foreach ($_ss->get_result()->fetch_all(MYSQLI_ASSOC) as $_r) {
             $exp_rows[] = ['مبيعات (مخرجات)', $_r['invoice_number'], $_r['invoice_date'], $_r['customer_name'], number_format((float)$_r['subtotal'], 2, '.', ''), number_format((float)$_r['vat_amount'], 2, '.', ''), number_format((float)$_r['total_amount'], 2, '.', '')];
+        }
+    }
+    if ($_receiptReversal) {
+        $_rs = $db->prepare("SELECT invoice_number, customer_name, reversed_date, subtotal, vat_amount, total_amount FROM acc_invoices WHERE sanad_id > 0 AND reversed_date BETWEEN ? AND ? ORDER BY reversed_date");
+        $_rs->bind_param('ss', $_dateFrom, $_dateTo); $_rs->execute();
+        foreach ($_rs->get_result()->fetch_all(MYSQLI_ASSOC) as $_r) {
+            $exp_rows[] = ['مبيعات (مخرجات)', 'عكس ' . $_r['invoice_number'], $_r['reversed_date'], $_r['customer_name'], number_format(-(float)$_r['subtotal'], 2, '.', ''), number_format(-(float)$_r['vat_amount'], 2, '.', ''), number_format(-(float)$_r['total_amount'], 2, '.', '')];
         }
     }
     $_ps = $db->prepare("SELECT je.entry_number, je.entry_date, je.description, SUM(jel.debit_amount) as amount, SUM(jel.debit_amount)*0.15 as vat_amount FROM acc_journal_entries je JOIN acc_journal_entry_lines jel ON je.entry_id=jel.entry_id JOIN acc_chart_of_accounts acc ON jel.account_id=acc.account_id WHERE je.entry_date BETWEEN ? AND ? AND je.status='posted' AND acc.vat_applicable=1 AND acc.account_type='expense' GROUP BY je.entry_id ORDER BY je.entry_date");
@@ -68,7 +78,10 @@ foreach (['dateFrom', 'dateTo'] as $_df) {
     }
 }
 
-// Get sales (output VAT)
+// Get sales (output VAT); receipt drafts count only after approval
+$receiptColumn = $db->query("SHOW COLUMNS FROM acc_invoices LIKE 'sanad_id'");
+$receiptReversal = ($reversalColumn = $db->query("SHOW COLUMNS FROM acc_invoices LIKE 'reversed_date'")) && $reversalColumn->num_rows > 0;
+$receiptDraftSql = $receiptColumn && $receiptColumn->num_rows ? "AND NOT (COALESCE(sanad_id,0)>0 AND (status='draft' OR (status='cancelled'" . ($receiptReversal ? ' AND reversed_date IS NULL' : '') . ')))' : '';
 $salesQuery = "
     SELECT
         invoice_number,
@@ -80,12 +93,22 @@ $salesQuery = "
     FROM acc_invoices
     WHERE invoice_date BETWEEN ? AND ?
     AND invoice_type IN ('standard', 'simplified')
+    $receiptDraftSql
     ORDER BY invoice_date
 ";
 $stmt = $db->prepare($salesQuery);
 $stmt->bind_param('ss', $dateFrom, $dateTo);
 $stmt->execute();
 $sales = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+if ($receiptReversal) {
+    // Reversed invoices count negatively on the reversal date.
+    $stmt = $db->prepare("SELECT CONCAT('عكس ', invoice_number) AS invoice_number, customer_name, reversed_date AS invoice_date,
+        -subtotal AS subtotal, -vat_amount AS vat_amount, -total_amount AS total_amount
+        FROM acc_invoices WHERE sanad_id > 0 AND reversed_date BETWEEN ? AND ? ORDER BY reversed_date");
+    $stmt->bind_param('ss', $dateFrom, $dateTo);
+    $stmt->execute();
+    $sales = array_merge($sales, $stmt->get_result()->fetch_all(MYSQLI_ASSOC));
+}
 
 // Get purchases (input VAT) - from journal entries with VAT
 $purchasesQuery = "
@@ -123,7 +146,9 @@ $netVAT = $totalSalesVAT - $totalPurchasesVAT;
 
 <style>
 :root {
-    --primary-color: var(--accounting-primary-color, #4e627f);
+    --accounting-primary-color: #1f4e5f;
+    --secondary-color: #163a47;
+    --primary-color: var(--accounting-primary-color, #1f4e5f);
 }
 
 .report-card {
@@ -173,7 +198,7 @@ $netVAT = $totalSalesVAT - $totalPurchasesVAT;
 
 .summary-card.sales { border-right-color: #28a745; }
 .summary-card.purchases { border-right-color: #dc3545; }
-.summary-card.net { border-right-color: #667eea; }
+.summary-card.net { border-right-color: #1f4e5f; }
 
 .summary-value {
     font-size: 1.5rem;
@@ -216,7 +241,7 @@ $netVAT = $totalSalesVAT - $totalPurchasesVAT;
                 <a href="vat_report.hnt?export=xls<?= $_eq ?>" class="btn btn-outline-light btn-lg">
                     <i class="bi bi-file-earmark-excel me-2"></i>تصدير Excel
                 </a>
-                <button class="btn btn-light btn-lg" onclick="window.location='../../index.hnt'">
+                <button class="btn btn-light btn-lg" onclick="window.location='index.hnt'">
                     <i class="bi bi-arrow-right me-2"></i>العودة
                 </button>
                 <button class="btn btn-light btn-lg" onclick="window.print()">

@@ -1,295 +1,513 @@
-<?
-include_once"../nocash.hnt";
-include_once"../header.hnt";
-$sql="select *, FROM_UNIXTIME(dep_lastmodified,'%d-%m-%Y  %h:%i:%s')  as dep_lastmodified  from departments_name where dep_id='".$_REQUEST[dep_id]."'";
-$result=mysql_query($sql,$link);
-$dep_data=mysql_fetch_array($result);
+<?php
+/**
+ * Department fields: add, edit, and remove the custom fields of one generic department.
+ * GET renders the page; POST with ajax_submit=1 answers JSON.
+ */
 
-if($_REQUEST['formuid']){
-	$sql="select count(fld_id) as dd from   department_field  where formuid = '".$_REQUEST['formuid']."' ";
-	$row=mysql_fetch_array(mysql_query($sql,$link));
-	if($row['dd']){
-		echo "<div class='col_12 center'><h5 class='uifont18 center' style='color:red'> ��� ��� ����� ����� ����� ����� </h5></div>";
-		exit();
-	}
-}
+$sc_title = 'حقول القسم';
+$sc_id = '84';
+$is_ajax_request = ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && ($_POST['ajax_submit'] ?? '') === '1';
 
-
-/*
-    [0] => 1
-    [dep_id] => 1
-    [1] => ����� ���������
-    [dep_name] => ����� ���������
-    [2] => mhtatalbnzynat
-    [dep_en_name] => mhtatalbnzynat
-    [3] => images/48x48/email.png
-    [dep_image] => images/48x48/email.png
-    [4] => images/24x24/email.png
-    [dep_image_small] => images/24x24/email.png
-    [5] => 1
-    [dep_isactive] => 1
-    [6] => dgn_mhtatalbnzynat
-    [dep_table_name] => dgn_mhtatalbnzynat
-    [7] => 1237240165
-    [dep_lastmodified] => 1237240165
-    [8] =>
-    [dep_isdeleted] =>
-*/
-
-
-echo <<<end
-
-<img src='\aqary\admin\images\goback.png'
-style="cursor:hand;position: absolute;  z-index: 1;left:10px; top: 50px"
-onclick="window.location.href='/aqary/admin/departments.hnt';"
- border=0 alt="������ ��� ����� �������">
-
-
-<div dir='rtl' class='uifont16 greentext'>
-<img src="/aqary/admin/$dep_data[dep_image]" border=0>
-��� : $dep_data[dep_name]  -
-��� ����� :$dep_data[dep_lastmodified]
-
-</div>
-end;
-
-
-if($_REQUEST[fld_name])
+/** Field types as rendered by include/geniric_departments/dep_add_edit.hnt. */
+function depFieldTypes()
 {
-
-	$_REQUEST[fld_values]=str_replace(";","\r\n",$_REQUEST[fld_values]);
-	$_REQUEST[fld_values]=str_replace(",","\r\n",$_REQUEST[fld_values]);
-	$_REQUEST[fld_values]=str_replace("-","\r\n",$_REQUEST[fld_values]);
-
-	$_REQUEST[fld_en_name] = $_REQUEST[fld_en_name]."_".time();
-
-
-	$sql="insert into department_field set
-		fld_name='".$_REQUEST[fld_name]."',
-		fld_en_name='".$_REQUEST[fld_en_name]."',
-		fld_table_name='".$_REQUEST[fld_table_name]."',
-		fld_isactive='".$_REQUEST[fld_isactive]."',
-		fld_required='".$_REQUEST[fld_required]."',
-		fld_values='".$_REQUEST[fld_values]."',
-		dep_id='".$_REQUEST[dep_id]."',
-		fld_type='".$_REQUEST[fld_type]."' ,
-		formuid = '".$_REQUEST['formuid']."'
-	";
-		if($_REQUEST[update_fld_id]){
-			$sql="update department_field set
-				fld_name='".$_REQUEST[fld_name]."',
-				fld_isactive='".$_REQUEST[fld_isactive]."',
-				fld_required='".$_REQUEST[fld_required]."',
-				fld_values='".$_REQUEST[fld_values]."',
-				fld_type='".$_REQUEST[fld_type]."' ,
-				formuid = '".$_REQUEST['formuid']."'
-				where fld_id='".$_REQUEST[update_fld_id]."'
-			";
-		}
-
-
-	mysql_query($sql);
-
-	$sql="alter table $_REQUEST[fld_table_name] ADD " . $_REQUEST[fld_en_name]." VARCHAR( 600 ) NOT NULL ";
-	if($_REQUEST[fld_type]==2){$sql="alter table $_REQUEST[fld_table_name] ADD  " . $_REQUEST[fld_en_name]."  TEXT NOT NULL  ";}
-	mysql_query($sql);
-
-
+    return array(
+        1 => array('label' => 'مربع نص', 'icon' => 'bi-input-cursor-text', 'hint' => 'نص قصير في سطر واحد'),
+        2 => array('label' => 'مساحة نص', 'icon' => 'bi-textarea-t', 'hint' => 'نص طويل متعدد الأسطر'),
+        3 => array('label' => 'قائمة منسدلة', 'icon' => 'bi-menu-button-wide', 'hint' => 'اختيار قيمة واحدة من قائمة'),
+        4 => array('label' => 'أزرار اختيار', 'icon' => 'bi-ui-radios', 'hint' => 'اختيار قيمة واحدة ظاهرة'),
+        5 => array('label' => 'مربع تأشير', 'icon' => 'bi-check2-square', 'hint' => 'نعم أو لا'),
+        6 => array('label' => 'ملف مرفق', 'icon' => 'bi-paperclip', 'hint' => 'رفع ملف أو صورة'),
+        7 => array('label' => 'موقع على الخريطة', 'icon' => 'bi-geo-alt', 'hint' => 'تحديد الموقع على الخريطة'),
+    );
 }
 
-if($_REQUEST[edit_field_id]){
-$sql="select * from department_field  where fld_id='".$_REQUEST[edit_field_id]."'";
-$edit_field=mysql_fetch_array(mysql_query($sql,$link));
+/** Prepared statement on the active company connection; throws on failure. */
+function depFieldQuery($link, $sql, array $params = array())
+{
+    $stmt = mysqli_prepare($link, $sql);
+    if (!$stmt || !$stmt->execute($params)) {
+        throw new RuntimeException($stmt ? $stmt->error : mysqli_error($link));
+    }
+    return $stmt;
 }
+
+function depFieldRows($link, $sql, array $params = array())
+{
+    $result = depFieldQuery($link, $sql, $params)->get_result();
+    return $result ? $result->fetch_all(MYSQLI_ASSOC) : array();
+}
+
+function depFieldDepartment($link, $depId)
+{
+    $rows = depFieldRows($link, 'SELECT * FROM departments_name WHERE dep_id=? LIMIT 1', array($depId));
+    return $rows ? $rows[0] : null;
+}
+
+/** Table and column names cannot be bound, so only plain identifiers are accepted. */
+function depFieldIdentifier($name)
+{
+    return (bool)preg_match('/^[A-Za-z0-9_]{1,64}$/', (string)$name);
+}
+
+function depFieldColumnExists($link, $table, $column)
+{
+    return (bool)depFieldRows($link, 'SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1', array($table, $column));
+}
+
+/** Latin column name from an Arabic label, unique by time as before. */
+function depFieldColumnName($label)
+{
+    $map = array('ا'=>'a','أ'=>'a','إ'=>'i','آ'=>'a','ب'=>'b','ت'=>'t','ث'=>'th','ج'=>'j','ح'=>'h','خ'=>'kh',
+        'د'=>'d','ذ'=>'th','ر'=>'r','ز'=>'z','س'=>'s','ش'=>'sh','ص'=>'s','ض'=>'d','ط'=>'t','ظ'=>'z','ع'=>'a',
+        'غ'=>'gh','ف'=>'f','ق'=>'q','ك'=>'k','ل'=>'l','م'=>'m','ن'=>'n','ه'=>'h','و'=>'w','ؤ'=>'w','ي'=>'y',
+        'ى'=>'a','ئ'=>'y','ة'=>'h');
+    $name = preg_replace('/[^a-z]/', '', strtolower(strtr($label, $map)));
+    return ($name === '' ? 'field' : substr($name, 0, 45)) . '_' . time();
+}
+
+function depFieldRespond($ok, $message, $status = 200)
+{
+    while (ob_get_level() > 0) ob_end_clean();
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(array('success' => $ok, 'message' => $message), JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+
+if ($is_ajax_request) {
+    ob_start();
+    include_once '../reqloginajax.hnt';
+    require_once __DIR__ . '/../lib/screen_permissions.hnt';
+
+    if (empty($_SESSION['useridv'])) depFieldRespond(false, 'انتهت الجلسة، يرجى تسجيل الدخول من جديد', 401);
+    $fieldToken = (string)($_SESSION['dep_fields_csrf'] ?? '');
+    if ($fieldToken === '' || !hash_equals($fieldToken, (string)($_POST['csrf'] ?? ''))) {
+        depFieldRespond(false, 'انتهت صلاحية الصفحة، يرجى تحديثها والمحاولة من جديد', 403);
+    }
+
+    $fieldAction = (string)($_POST['field_action'] ?? '');
+    $fieldId = intval($_POST['update_fld_id'] ?? 0);
+    $fieldOperation = $fieldAction === 'delete' ? 'deleetes' : ($fieldId > 0 ? 'edits' : 'adds');
+    if (!aqaryScreenCan($link, '84', $fieldOperation)) {
+        depFieldRespond(false, 'ليس لديك صلاحية لهذا الإجراء', 403);
+    }
+
+    try {
+        $depId = intval($_POST['dep_id'] ?? 0);
+        $department = depFieldDepartment($link, $depId);
+        if (!$department) depFieldRespond(false, 'القسم غير موجود', 404);
+
+        $currentField = null;
+        if ($fieldId > 0) {
+            $rows = depFieldRows($link, 'SELECT * FROM department_field WHERE fld_id=? AND dep_id=? LIMIT 1', array($fieldId, $depId));
+            $currentField = $rows ? $rows[0] : null;
+            if (!$currentField) depFieldRespond(false, 'الحقل غير موجود', 404);
+        }
+
+        if ($fieldAction === 'delete') {
+            if (!$currentField) depFieldRespond(false, 'الحقل غير موجود', 404);
+            // The data column is kept, as before, so saved values are not lost.
+            depFieldQuery($link, 'DELETE FROM department_field WHERE fld_id=? AND dep_id=?', array($fieldId, $depId));
+            depFieldRespond(true, 'تم حذف الحقل');
+        }
+        if ($fieldAction !== 'save') depFieldRespond(false, 'طلب غير معروف', 400);
+
+        $types = depFieldTypes();
+        $label = trim((string)($_POST['fld_name'] ?? ''));
+        $type = intval($_POST['fld_type'] ?? 0);
+        $values = trim((string)($_POST['fld_values'] ?? ''));
+        $formUid = substr(preg_replace('/[^0-9a-f]/', '', (string)($_POST['formuid'] ?? '')), 0, 64);
+        $active = ($_POST['fld_isactive'] ?? '') === '1' ? '1' : '2';
+        $required = ($_POST['fld_required'] ?? '') === '1' ? '1' : '2';
+
+        if ($label === '') depFieldRespond(false, 'اسم الحقل مطلوب', 422);
+        if (mb_strlen($label, 'UTF-8') > 100) depFieldRespond(false, 'اسم الحقل طويل جداً (الحد الأقصى 100 حرف)', 422);
+        if (!isset($types[$type])) depFieldRespond(false, 'اختر نوع الحقل', 422);
+        // Only choice fields hold a list; other types keep their text unchanged.
+        if ($type === 3 || $type === 4) {
+            $options = array_filter(array_map('trim', preg_split('/\r\n|\r|\n|;|,|،/u', $values) ?: array()), 'strlen');
+            if (!$options) depFieldRespond(false, 'أدخل قيمة واحدة على الأقل لهذا النوع', 422);
+            $values = implode("\r\n", array_unique($options));
+        } else {
+            $values = preg_replace('/\r\n|\r|\n/', "\r\n", $values);
+        }
+
+        if ($currentField) {
+            depFieldQuery($link, 'UPDATE department_field SET fld_name=?, fld_isactive=?, fld_required=?, fld_values=?, fld_type=?
+                WHERE fld_id=? AND dep_id=?', array($label, $active, $required, $values, (string)$type, $fieldId, $depId));
+            depFieldRespond(true, 'تم تعديل الحقل');
+        }
+
+        if ($formUid === '') depFieldRespond(false, 'طلب غير مكتمل', 400);
+        if (depFieldRows($link, 'SELECT fld_id FROM department_field WHERE formuid=? LIMIT 1', array($formUid))) {
+            depFieldRespond(false, 'تم حفظ هذا الحقل مسبقاً', 409);
+        }
+        $table = (string)$department['dep_table_name'];
+        $column = depFieldColumnName($label);
+        if (!depFieldIdentifier($table) || !depFieldIdentifier($column)) {
+            depFieldRespond(false, 'اسم جدول القسم غير صالح', 422);
+        }
+        // Create the column first, so a failure never leaves a field without storage.
+        if (!depFieldColumnExists($link, $table, $column)) {
+            depFieldQuery($link, "ALTER TABLE `$table` ADD `$column` " . ($type === 2 ? 'TEXT NOT NULL' : 'VARCHAR(600) NOT NULL'));
+        } else {
+            depFieldRespond(false, 'يوجد حقل بالاسم نفسه، حاول مرة أخرى بعد لحظات', 409);
+        }
+        depFieldQuery($link, 'INSERT INTO department_field
+            (fld_name, fld_en_name, fld_table_name, fld_isactive, fld_required, fld_values, dep_id, fld_type, formuid)
+            VALUES (?,?,?,?,?,?,?,?,?)',
+            array($label, $column, $table, $active, $required, $values, $depId, (string)$type, $formUid));
+        depFieldRespond(true, 'تمت إضافة الحقل');
+    } catch (Throwable $error) {
+        error_log('departments_sub: ' . $error->getMessage());
+        depFieldRespond(false, 'تعذر حفظ التغيير، يرجى المحاولة لاحقاً', 500);
+    }
+}
+
+include_once '../nocash.hnt';
+include_once '../header.hnt';
+require_once __DIR__ . '/../lib/screen_permissions.hnt';
+
+if (empty($_SESSION['dep_fields_csrf'])) $_SESSION['dep_fields_csrf'] = bin2hex(random_bytes(32));
+
+$depFieldH = function ($value) {
+    return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+};
+$depFieldId = intval($_GET['dep_id'] ?? 0);
+$depFieldList = array();
+$depFieldDep = null;
+try {
+    $depFieldDep = depFieldDepartment($link, $depFieldId);
+    if ($depFieldDep) {
+        $depFieldList = depFieldRows($link, 'SELECT fld_id, fld_name, fld_en_name, fld_isactive, fld_required, fld_values, fld_type
+            FROM department_field WHERE dep_id=? ORDER BY fld_id', array($depFieldId));
+    }
+} catch (Throwable $error) {
+    error_log('departments_sub: ' . $error->getMessage());
+}
+$depFieldTypeList = depFieldTypes();
+$depFieldCanAdd = aqaryScreenCan($link, '84', 'adds');
+$depFieldCanEdit = aqaryScreenCan($link, '84', 'edits');
+$depFieldCanDelete = aqaryScreenCan($link, '84', 'deleetes');
+$depFieldShowForm = $depFieldCanAdd || $depFieldCanEdit;
+$depFieldActive = count(array_filter($depFieldList, function ($row) { return $row['fld_isactive'] == 1; }));
+$depFieldRequired = count(array_filter($depFieldList, function ($row) { return $row['fld_required'] == 1; }));
+$depFieldEditId = intval($_GET['edit_field_id'] ?? 0);
 ?>
-
-<script>
-function displaysample(id)
-{
-for(i=1;i<8;i++)
-document.getElementById('sample'+i).style.display="none";
-
-if(id>0){document.getElementById('sample'+id).style.display="block";}
-
-}
-</script>
 
 <style>
-.labeltext{
-	clear: both !important;
-    display: inherit;
-    padding-top: 15px;
-    padding-bottom: 3px;
-
-}
+.dep-fields { --df-main: #0e7490; --df-line: #e2e8f0; background: #f8f9fa; min-height: calc(100vh - 100px); }
+.dep-fields .df-head { background: linear-gradient(135deg, #189c2a 0%, #066d96 100%); color: #fff; border-radius: 10px; padding: 1rem 1.25rem; }
+.dep-fields .df-head h1 { font-size: 1.3rem; margin: 0; font-weight: 700; }
+.dep-fields .df-head-icon { width: 56px; height: 56px; background: #fff; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex: none; }
+.dep-fields .df-head-icon img { max-width: 44px; max-height: 44px; }
+.dep-fields .df-stat { background: rgba(255,255,255,.18); border-radius: 8px; padding: .3rem .8rem; font-size: .9rem; }
+.dep-fields .df-panel { background: #fff; border: 1px solid var(--df-line); border-radius: 10px; }
+.dep-fields .df-panel-title { padding: .85rem 1.1rem; border-bottom: 1px solid var(--df-line); font-weight: 700; color: var(--df-main); }
+.dep-fields .df-types { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: .5rem; }
+.dep-fields .df-types label { display: flex; flex-direction: column; align-items: center; gap: .25rem; height: 100%; padding: .6rem .35rem; border: 1px solid #cbd5e1; border-radius: 8px; cursor: pointer; font-size: .85rem; text-align: center; }
+.dep-fields .df-types label i { font-size: 1.25rem; color: var(--df-main); }
+.dep-fields .df-types label:hover { border-color: var(--df-main); }
+.dep-fields .df-types input:checked + label { border-color: var(--df-main); background: #ecfeff; box-shadow: inset 0 0 0 1px var(--df-main); font-weight: 700; }
+.dep-fields .df-types input:focus-visible + label { outline: 3px solid rgba(14,116,144,.35); }
+.dep-fields .df-preview { background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 8px; padding: .85rem; min-height: 80px; }
+.dep-fields .df-row { display: flex; align-items: center; gap: .9rem; padding: .8rem 1.1rem; border-bottom: 1px solid var(--df-line); }
+.dep-fields .df-row:last-child { border-bottom: 0; }
+.dep-fields .df-row:hover { background: #f8fafc; }
+.dep-fields .df-row.is-editing { background: #ecfeff; }
+.dep-fields .df-row.is-off .df-row-icon, .dep-fields .df-row.is-off .df-row-name { opacity: .5; }
+.dep-fields .df-row-icon { width: 40px; height: 40px; border-radius: 8px; background: #ecfeff; color: var(--df-main); display: flex; align-items: center; justify-content: center; font-size: 1.15rem; flex: none; }
+.dep-fields .df-row-main { flex: 1; min-width: 0; }
+.dep-fields .df-row-name { font-weight: 700; overflow-wrap: anywhere; }
+.dep-fields .df-row-col { color: #64748b; font-size: .8rem; overflow-wrap: anywhere; }
+.dep-fields .df-values { color: #475569; font-size: .83rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (min-width: 992px) { .dep-fields .df-sticky { position: sticky; top: 80px; } }
 </style>
 
+<div class="container-fluid py-3 dep-fields" dir="rtl">
+<?php if (!$depFieldDep) { ?>
+    <div class="df-panel text-center p-5">
+        <i class="bi bi-folder-x fs-1 text-muted d-block mb-2"></i>
+        <p class="mb-3">القسم غير موجود.</p>
+        <a class="btn btn-success" href="/aqary/admin/departments.hnt">العودة إلى الأقسام</a>
+    </div>
+<?php } else { ?>
+    <div class="df-head d-flex flex-wrap align-items-center gap-3 mb-3">
+        <div class="df-head-icon"><img src="/aqary/admin/<?= $depFieldH($depFieldDep['dep_image']) ?>" alt=""></div>
+        <div class="flex-grow-1">
+            <h1>حقول قسم <?= $depFieldH($depFieldDep['dep_name']) ?></h1>
+            <div class="d-flex flex-wrap gap-2 mt-2">
+                <span class="df-stat">عدد الحقول: <?= count($depFieldList) ?></span>
+                <span class="df-stat">الفعالة: <?= $depFieldActive ?></span>
+                <span class="df-stat">المطلوبة: <?= $depFieldRequired ?></span>
+            </div>
+        </div>
+        <a class="btn btn-light" href="/aqary/admin/departments.hnt"><i class="bi bi-arrow-right me-1"></i> العودة إلى الأقسام</a>
+    </div>
 
+    <div class="row g-3">
+        <?php if ($depFieldShowForm) { ?>
+        <div class="col-lg-5">
+            <div class="df-panel df-sticky" id="dfFormPanel">
+                <div class="df-panel-title"><i class="bi bi-plus-circle me-1" id="dfFormIcon"></i> <span id="dfFormTitle">إضافة حقل جديد</span></div>
+                <form id="dfForm" class="p-3" autocomplete="off" novalidate>
+                    <input type="hidden" name="ajax_submit" value="1">
+                    <input type="hidden" name="field_action" value="save">
+                    <input type="hidden" name="dep_id" value="<?= $depFieldId ?>">
+                    <input type="hidden" name="csrf" value="<?= $depFieldH($_SESSION['dep_fields_csrf']) ?>">
+                    <input type="hidden" name="formuid" value="<?= bin2hex(random_bytes(16)) ?>">
+                    <input type="hidden" name="update_fld_id" id="dfId" value="">
 
+                    <div class="mb-3">
+                        <label class="form-label fw-bold" for="dfName">اسم الحقل <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" name="fld_name" id="dfName" maxlength="100" placeholder="مثال: عدد الغرف">
+                        <div class="invalid-feedback">اسم الحقل مطلوب</div>
+                    </div>
 
+                    <div class="mb-3">
+                        <div class="form-label fw-bold" id="dfTypeLabel">نوع الحقل</div>
+                        <div class="df-types" role="radiogroup" aria-labelledby="dfTypeLabel">
+                            <?php foreach ($depFieldTypeList as $depTypeId => $depType) { ?>
+                            <div>
+                                <input class="visually-hidden" type="radio" name="fld_type" id="dfType<?= $depTypeId ?>" value="<?= $depTypeId ?>" <?= $depTypeId === 1 ? 'checked' : '' ?>>
+                                <label for="dfType<?= $depTypeId ?>" title="<?= $depFieldH($depType['hint']) ?>"><i class="bi <?= $depType['icon'] ?>"></i><?= $depFieldH($depType['label']) ?></label>
+                            </div>
+                            <?php } ?>
+                        </div>
+                    </div>
 
-<div class="col_12 uifont16" >
-<form dir=rtl method=post action=departments_sub.hnt >
-<input type='hidden' name=formuid id="formuid"
-value="<?=str_replace('.','',microtime(true).rand(11111,99999).rand(11111,99999).rand(111,999).rand(111,999));?>"  >
-<!--
-fld_id
-   fld_name  varchar(245)     Yes
-   fld_en_name  varchar(245)     Yes
-   fld_table_name  varchar(245)     Yes
-   fld_isactive  varchar(245)     Yes
-   fld_required
-   fld_values  text     Yes
-   dep_id  int(11)     Yes
-   fld_type
+                    <div class="mb-3" id="dfValuesBox">
+                        <label class="form-label fw-bold" for="dfValues" id="dfValuesLabel">نص توضيحي</label>
+                        <textarea class="form-control" name="fld_values" id="dfValues" rows="4"></textarea>
+                        <div class="form-text" id="dfValuesHelp"></div>
+                        <div class="invalid-feedback">أدخل قيمة واحدة على الأقل</div>
+                    </div>
 
+                    <div class="d-flex flex-wrap gap-4 mb-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" role="switch" name="fld_isactive" id="dfActive" value="1" checked>
+                            <label class="form-check-label" for="dfActive">فعال</label>
+                        </div>
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" role="switch" name="fld_required" id="dfRequired" value="1">
+                            <label class="form-check-label" for="dfRequired">مطلوب</label>
+                        </div>
+                    </div>
 
--->
-<input type="hidden" name="dep_id" id="dep_id" value="<?=$dep_data[dep_id];?>" >
-<input type="hidden" name="update_fld_id"   value="<?=$edit_field[fld_id];?>" >
-<?
-$x=$edit_field[fld_type];
-$sel[$x]=" selected ";
-?>
-<div class="col_4 uifont16" >
+                    <div class="mb-3">
+                        <div class="form-label fw-bold">معاينة</div>
+                        <div class="df-preview" id="dfPreview" aria-live="polite"></div>
+                    </div>
 
-<span class="labeltext">��� �����:</span><select id="fld_type" name="fld_type"  onchange="displaysample(this.value)">
-<option <?=$sel[1];?> value=1>���� ��</option>
-<option <?=$sel[2];?> value=2>����� ���</option>
-<option <?=$sel[3];?> value=3>����� ��������</option>
-<option <?=$sel[7];?> value=4>����� ��������</option>
-<option <?=$sel[5];?> value=5>����� ������</option>
-<option <?=$sel[6];?> value=6>��� �����</option>
-<option <?=$sel[7];?> value=7>�� ���� �������</option>
-</select><br>
-<span class="labeltext">��� �����:</span><input style="width:180px;" type=text name="fld_name" id="fld_name" value="<?=$edit_field[fld_name]?>" onkeyup="ajaxpost('entrando.hnt?mystring='+this.value,'','fld_en_name');" ><br>
-<span class="labeltext">��� �������:</span><input style="width:180px;" type=text name="fld_en_name" id="fld_en_name"  value="<?=$edit_field[fld_en_name]?>"  readonly><br>
-<span class="labeltext">��� ������:</span><input style="width:180px;" type=text name="fld_table_name" readonly value="<?=$dep_data[dep_table_name];?>"><br>
-<span class="labeltext">���� �� ��:</span><select class="smallbutton"  name=fld_isactive>
-<?$x=$edit_field[fld_isactive];$sel[$x]=" selected ";?>
-<option <?=$sel[1];?> value=1>��� </option><option  <?=$sel[2];?> value=2>��</option></select>
-<span class="labeltext">������ �� ��:</span><select class="smallbutton"  name=fld_required>
-<?$x=$edit_field[fld_required];$sel[$x]=" selected ";?>
-<option <?=$sel[2];?> value=2>��</option><option  <?=$sel[1];?> value=1>��� </option></select>
+                    <div class="d-flex gap-2">
+                        <button type="submit" class="btn btn-success flex-grow-1" id="dfSave"><i class="bi bi-check-circle me-1"></i> <span>إضافة الحقل</span></button>
+                        <button type="button" class="btn btn-outline-secondary" id="dfCancel" hidden>إلغاء التعديل</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <?php } ?>
 
-<br><span class="labeltext">���� ������:</span><textarea name="fld_values" id="fld_values"
-title="���� ���� ������ ����� ����� ���� �� ����� - ��  ����� ; �� ����� ,"
-style="width:180px;height:200px"><?=$edit_field[fld_values]?></textarea>
-<?
-if($_REQUEST[edit_field_id]){$btn=" ����� ����� ";}else{$btn=" ����� ����� ";}
-?>
-<br><span class="labeltext">&nbsp;</span><input type="submit"  value="<?=$btn;?>">
-<button onclick="window.location.href='/aqary/admin/departments_sub.hnt?dep_id=<?=$_REQUEST[dep_id];?>';" >��� ���� </button>
+        <div class="<?= $depFieldShowForm ? 'col-lg-7' : 'col-12' ?>">
+            <div class="df-panel">
+                <div class="df-panel-title d-flex flex-wrap align-items-center gap-2">
+                    <span class="flex-grow-1"><i class="bi bi-list-ul me-1"></i> الحقول الحالية</span>
+                    <input type="search" class="form-control form-control-sm" id="dfSearch" style="max-width:240px" placeholder="بحث في الحقول" aria-label="بحث في الحقول">
+                </div>
+                <div id="dfList">
+                    <?php if (!$depFieldList) { ?>
+                    <div class="text-center text-muted p-5"><i class="bi bi-inbox fs-1 d-block mb-2"></i> لا توجد حقول في هذا القسم. أضف أول حقل من النموذج.</div>
+                    <?php } ?>
+                    <?php foreach ($depFieldList as $depRow) {
+                        $depRowType = $depFieldTypeList[intval($depRow['fld_type'])] ?? array('label' => 'نوع غير محدد', 'icon' => 'bi-question-circle');
+                        $depRowValues = trim((string)$depRow['fld_values']);
+                    ?>
+                    <div class="df-row <?= $depRow['fld_isactive'] == 1 ? '' : 'is-off' ?>" data-id="<?= intval($depRow['fld_id']) ?>">
+                        <div class="df-row-icon"><i class="bi <?= $depRowType['icon'] ?>"></i></div>
+                        <div class="df-row-main">
+                            <div class="df-row-name"><?= $depFieldH($depRow['fld_name']) ?></div>
+                            <div class="df-row-col"><?= $depFieldH($depRowType['label']) ?> · <bdi dir="ltr"><?= $depFieldH($depRow['fld_en_name']) ?></bdi></div>
+                            <?php if ($depRowValues !== '') { ?>
+                            <div class="df-values" title="<?= $depFieldH($depRowValues) ?>"><?= $depFieldH(preg_replace('/\s*[\r\n]+\s*/', '، ', $depRowValues)) ?></div>
+                            <?php } ?>
+                        </div>
+                        <div class="d-flex flex-wrap justify-content-end gap-1">
+                            <?php if ($depRow['fld_required'] == 1) { ?><span class="badge text-bg-warning">مطلوب</span><?php } ?>
+                            <?php if ($depRow['fld_isactive'] != 1) { ?><span class="badge text-bg-secondary">غير فعال</span><?php } ?>
+                        </div>
+                        <div class="d-flex gap-1">
+                            <?php if ($depFieldCanEdit) { ?><button type="button" class="btn btn-sm btn-outline-primary" data-df="edit" title="تعديل" aria-label="تعديل <?= $depFieldH($depRow['fld_name']) ?>"><i class="bi bi-pencil"></i></button><?php } ?>
+                            <?php if ($depFieldCanDelete) { ?><button type="button" class="btn btn-sm btn-outline-danger" data-df="delete" title="حذف" aria-label="حذف <?= $depFieldH($depRow['fld_name']) ?>"><i class="bi bi-trash"></i></button><?php } ?>
+                        </div>
+                    </div>
+                    <?php } ?>
+                    <div class="text-center text-muted p-4" id="dfNoMatch" hidden>لا توجد حقول مطابقة للبحث</div>
+                </div>
+            </div>
+        </div>
+    </div>
 
+<script>
+(function () {
+    const fields = <?= json_encode($depFieldList, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_INVALID_UTF8_SUBSTITUTE) ?>;
+    const depId = <?= $depFieldId ?>;
+    const csrf = '<?= $depFieldH($_SESSION['dep_fields_csrf']) ?>';
+    const canAdd = <?= $depFieldCanAdd ? 'true' : 'false' ?>;
+    const pageUrl = '/aqary/admin/departments_sub.hnt?dep_id=' + depId;
+    const byId = id => document.getElementById(id);
+    const form = byId('dfForm');
+
+    async function send(data) {
+        const response = await fetch('/aqary/admin/departments_sub.hnt', { method: 'POST', body: data, credentials: 'same-origin' });
+        try { return await response.json(); }
+        catch (error) { return { success: false, message: 'تعذر قراءة رد الخادم' }; }
+    }
+
+    function finish(result) {
+        showBootstrapNotification(result.message || 'حدث خطأ غير متوقع', result.success ? 'success' : 'error', result.success ? 1500 : 5000);
+        if (result.success) setTimeout(() => { window.location.href = pageUrl; }, 800);
+    }
+
+    if (form) {
+        const name = byId('dfName'), values = byId('dfValues'), preview = byId('dfPreview'), save = byId('dfSave');
+        const type = () => Number((form.querySelector('[name=fld_type]:checked') || {}).value || 0);
+        const isChoice = () => type() === 3 || type() === 4;
+        const options = () => values.value.split(/[\n;,،]/).map(v => v.trim()).filter(Boolean);
+
+        function element(tag, className, text) {
+            const node = document.createElement(tag);
+            if (className) node.className = className;
+            if (text) node.textContent = text;
+            return node;
+        }
+
+        function refresh() {
+            const current = type();
+            const texts = isChoice()
+                ? ['القيم', 'اكتب كل قيمة في سطر، أو افصل بينها بفاصلة.']
+                : current === 5 ? ['النص بجانب المربع', 'يظهر بعد اسم الحقل ويُحفظ عند التأشير.']
+                : ['نص توضيحي', 'اختياري، يظهر عند المرور على الحقل.'];
+            byId('dfValuesLabel').textContent = texts[0];
+            byId('dfValuesHelp').textContent = texts[1];
+            byId('dfValuesBox').hidden = current === 6 || current === 7;
+
+            preview.replaceChildren();
+            const title = element('div', 'form-label', name.value.trim() || 'اسم الحقل');
+            if (byId('dfRequired').checked) title.append(element('span', 'text-danger', ' *'));
+            if (current !== 5) preview.append(title);
+            if (current === 2) {
+                const area = element('textarea', 'form-control'); area.rows = 2; preview.append(area);
+            } else if (current === 3) {
+                const list = element('div', 'd-flex flex-wrap gap-1');
+                options().forEach(o => list.append(element('span', 'badge text-bg-light border', o)));
+                preview.append(list.children.length ? list : element('div', 'text-muted small', 'أدخل القيم لتظهر هنا'));
+            } else if (current === 4 || current === 5) {
+                const items = current === 5 ? [(name.value.trim() || 'اسم الحقل') + (values.value.trim() ? ': ' + values.value.trim() : '')] : options();
+                items.forEach((text, i) => {
+                    const row = element('div', 'form-check'), input = element('input', 'form-check-input'), label = element('label', 'form-check-label', text);
+                    input.type = current === 4 ? 'radio' : 'checkbox';
+                    input.name = 'dfPreviewInput'; input.id = 'dfPreviewInput' + i; label.htmlFor = input.id;
+                    input.setAttribute('form', 'dfPreviewNoForm');
+                    row.append(input, label); preview.append(row);
+                });
+                if (!items.length) preview.append(element('div', 'text-muted small', 'أدخل القيم لتظهر هنا'));
+            } else if (current === 7) {
+                preview.append(element('div', 'text-muted', 'يحدد المستخدم الموقع على الخريطة في نهاية النموذج.'));
+            } else {
+                const input = element('input', 'form-control');
+                input.type = current === 6 ? 'file' : 'text';
+                input.title = current === 6 ? '' : values.value;
+                preview.append(input);
+            }
+        }
+
+        function setMode(field) {
+            byId('dfId').value = field ? field.fld_id : '';
+            byId('dfFormTitle').textContent = field ? 'تعديل الحقل' : 'إضافة حقل جديد';
+            byId('dfFormIcon').className = 'bi me-1 ' + (field ? 'bi-pencil-square' : 'bi-plus-circle');
+            save.querySelector('span').textContent = field ? 'حفظ التعديل' : 'إضافة الحقل';
+            save.disabled = !field && !canAdd;
+            byId('dfCancel').hidden = !field;
+            name.value = field ? field.fld_name : '';
+            values.value = field ? field.fld_values : '';
+            byId('dfActive').checked = field ? String(field.fld_isactive) === '1' : true;
+            byId('dfRequired').checked = field ? String(field.fld_required) === '1' : false;
+            form.querySelectorAll('[name=fld_type]').forEach(r => { r.checked = String(r.value) === String(field ? field.fld_type : 1); });
+            name.classList.remove('is-invalid'); values.classList.remove('is-invalid');
+            document.querySelectorAll('.dep-fields .df-row').forEach(r => r.classList.toggle('is-editing', !!field && r.dataset.id === String(field.fld_id)));
+            refresh();
+        }
+
+        window.depFieldEdit = function (id) {
+            const field = fields.find(f => String(f.fld_id) === String(id));
+            if (!field) return;
+            setMode(field);
+            byId('dfFormPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            name.focus({ preventScroll: true });
+        };
+
+        form.addEventListener('input', event => { event.target.classList.remove('is-invalid'); refresh(); });
+        form.addEventListener('change', refresh);
+        byId('dfCancel').addEventListener('click', () => setMode(null));
+        form.addEventListener('submit', async event => {
+            event.preventDefault();
+            name.classList.toggle('is-invalid', !name.value.trim());
+            values.classList.toggle('is-invalid', isChoice() && !options().length);
+            const invalid = form.querySelector('.is-invalid');
+            if (invalid) { invalid.focus(); return; }
+            if (!type()) { showBootstrapNotification('اختر نوع الحقل', 'warning', 3000); return; }
+            save.disabled = true;
+            let result;
+            try { result = await send(new FormData(form)); }
+            catch (error) { result = { success: false, message: 'تعذر الاتصال بالخادم' }; }
+            if (!result.success) save.disabled = false;
+            finish(result);
+        });
+
+        setMode(null);
+        <?php if ($depFieldEditId && $depFieldCanEdit) { ?>window.depFieldEdit(<?= $depFieldEditId ?>);<?php } ?>
+    }
+
+    byId('dfList').addEventListener('click', event => {
+        const button = event.target.closest('[data-df]');
+        if (!button) return;
+        const row = button.closest('.df-row');
+        if (button.dataset.df === 'edit') { window.depFieldEdit(row.dataset.id); return; }
+        const label = row.querySelector('.df-row-name').textContent;
+        const safeLabel = label.replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';');
+        confirm('هل أنت متأكد من حذف الحقل "' + safeLabel + '"؟', 'حذف الحقل', async function () {
+            const data = new FormData();
+            data.append('ajax_submit', '1');
+            data.append('field_action', 'delete');
+            data.append('dep_id', depId);
+            data.append('update_fld_id', row.dataset.id);
+            data.append('csrf', csrf);
+            button.disabled = true;
+            let result;
+            try { result = await send(data); }
+            catch (error) { result = { success: false, message: 'تعذر الاتصال بالخادم' }; }
+            button.disabled = false;
+            finish(result);
+        });
+    });
+
+    byId('dfSearch').addEventListener('input', event => {
+        const term = event.target.value.trim().toLowerCase();
+        let shown = 0;
+        const rows = document.querySelectorAll('.dep-fields .df-row');
+        rows.forEach(row => {
+            const match = row.querySelector('.df-row-main').textContent.toLowerCase().includes(term);
+            row.hidden = !match;
+            row.style.display = match ? '' : 'none';
+            if (match) shown++;
+        });
+        byId('dfNoMatch').hidden = shown > 0 || !rows.length;
+    });
+})();
+</script>
+<?php } ?>
 </div>
 
-
-
-
-
-<div  class="col_8 uifont16"   >
-
-<div class="col_12 uifont16 bluetext" >
-���� : <br>
-<input type=text id="sample1" style="display:none">
-<textarea id="sample2" style="display:none;width:180px;height:30px"></textarea>
-<select id="sample3" style="display:none" ><option>���� 1</option><option>���� 2</option></select>
-<div id="sample4" style="display:none">
-<input type=radio name=rdio1> ������ 1
-<input type=radio name=rdio1> ������ 2
-<input type=radio name=rdio1> ������ 3
-<input type=radio name=rdio1> ������ 4
-....
-</div>
-
-<div id="sample5" style="display:none" ><input type=checkbox > ��� �� ��  ....</div>
-<input type=file id="sample6" style="display:none">
-<input type=button value="���� �������" id="sample7" style="display:none">
-
-
-</div>
-
-<span class=labeltext>������:</span>
-<?
-$sql="select * from department_field  where dep_id ='".$_REQUEST[dep_id]."'";
-$result=mysql_query($sql,$link);
-while($field_data=mysql_fetch_array($result))
-{
-$actiontodo="<img src='/aqary/admin/images/edit.png' border=0 style='cursor:hand'
-onclick=\"window.location.href='/aqary/admin/departments_sub.hnt?dep_id=$_REQUEST[dep_id]&edit_field_id=".$field_data[0]."';\"
-alt='����� ��� ����� ������� ������ ������ ����� '>";
-
-$actiondelete="<img src='/aqary/admin/images/maildelete.gif' border=0 style='cursor:hand'
-class='policy_{$sc_id}_deleetes'
-onclick=\"
-confirm('�� ���� �� ��� ��� ����� ',
-'�����',
-function(){ajaxmysql('delete from department_field  where fld_id=".$field_data[fld_id]." ');});return false;\"
-alt='��� �����  '>";
-
-$actionrepaire="<img src='/aqary/admin/images/refresh.gif' border=0 style='cursor:hand'
-onclick=\"window.location.href='/aqary/admin/departments_sub.hnt?edit_id=".$row['�']."';\"
-alt='����� ��� ����� ������� ������ ������ ����� '>";
-
-
-switch ($field_data[fld_type]) {
-    case 0:
-        echo "��� ����� ��� ����� ������ ������";
-        break;
-    case 1:
-        echo "<span class=labeltext>$field_data[fld_name]:</span><input type=text name='$field_data[fld_en_name]' title='$field_data[fld_values]'> ";
-        break;
-    case 2:
-        echo "<span class=labeltext>$field_data[fld_name]:</span><textarea style='width:75%;height:100px'  name='$field_data[fld_en_name]' title='$field_data[fld_values]'></textarea> ";
-        break;
-    case 3:
-	$field_allvalues= explode("\r\n",$field_data[fld_values]);
-	echo "<span class=labeltext>$field_data[fld_name]:</span><select name='$field_data[fld_en_name]'>";
-		foreach ($field_allvalues as $value) {
-    	echo "<option value='$value'>$value</option>";
-	}
-
-        echo "</select>";
-        break;
-    case 4:
-	$field_allvalues= explode("\r\n",$field_data[fld_values]);
-	echo"<span class=labeltext>$field_data[fld_name]:</span>";
-	foreach ($field_allvalues as $value) {
-    	echo "<input type=radio name='$field_data[fld_en_name]' value='$value'>$value &nbsp&nbsp";
-	}
-
-
-        break;
-    case 5:
-        echo "<span class=labeltext>$field_data[fld_name]:</span><input type=checkbox name='$field_data[fld_en_name]' > $field_data[fld_values]";
-        break;
-    case 6:
-        echo "<span class=labeltext>$field_data[fld_name]:</span><input type=file name='$field_data[fld_en_name]' > ";
-        break;
-    case 7:
-        echo "<span class=labeltext>$field_data[fld_name]:</span><input type=button name='$field_data[fld_en_name]' value='$field_data[fld_values]' > ";
-        break;
-
-	}
-echo $actiontodo .$actiondelete. $actionrepaire;
-
-
-}
-
-
-?>
-
-
-
-</div>
-
-
-
-
-</form>
-
-</div>
-
-
-
-
+<?php require '../foter.hnt'; ?>

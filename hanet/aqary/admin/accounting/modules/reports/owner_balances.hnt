@@ -1,0 +1,35 @@
+<?php
+/** Owner balances: money due to each owner and money recoverable from them. */
+$sc_title = 'أرصدة الملاك';
+$syncReport = [
+    'key' => 'owner_balances', 'icon' => 'bi-people', 'desc' => 'المستحق لكل مالك والمصروفات المستردة منه وصافي رصيده',
+    'filters' => ['date', 'owner_id', 'aqar_id'],
+    'build' => function ($db, $f) {
+        $payable = syncReportAccount($db, 'default_owner_payable_account_id', 'ذمم الملاك', '2111');
+        $recoverable = syncReportAccount($db, 'default_owner_recoverable_account_id', 'مصروفات مستردة من الملاك');
+        [$where, $params] = syncReportEntryWhere($f);
+        $rows = receiptCommissionRows($db, "SELECT COALESCE(je.owner_id,0) owner_id,COALESCE(MAX(o.ownername),'') ownername,
+                SUM(IF(l.account_id={$payable} AND je.entry_date<?,l.credit_amount-l.debit_amount,0)) opening,
+                SUM(IF(l.account_id={$payable} AND je.entry_date>=?,l.credit_amount,0)) credit,
+                SUM(IF(l.account_id={$payable} AND je.entry_date>=?,l.debit_amount,0)) debit,
+                SUM(IF(l.account_id={$payable},l.credit_amount-l.debit_amount,0)) closing,
+                SUM(IF(l.account_id={$recoverable},l.debit_amount-l.credit_amount,0)) recoverable
+            FROM acc_journal_entry_lines l JOIN acc_journal_entries je ON je.entry_id=l.entry_id
+            LEFT JOIN amlakowner o ON o.ownerid=je.owner_id
+            WHERE je.status='posted' AND je.entry_date<=? AND l.account_id IN ({$payable},{$recoverable}){$where}
+            GROUP BY COALESCE(je.owner_id,0) ORDER BY ownername", array_merge([$f['date_from'], $f['date_from'], $f['date_from'], $f['date_to']], $params));
+        $list = [];
+        foreach ($rows as $row) {
+            $name = (int)$row['owner_id'] ? ($row['ownername'] !== '' ? $row['ownername'] : '#' . (int)$row['owner_id']) : 'قيود بلا مالك';
+            $row['owner'] = [$name, (int)$row['owner_id'] ? 'owner_statement.hnt?' . http_build_query(['owner_id' => (int)$row['owner_id'], 'aqar_id' => $f['aqar_id'], 'date_from' => $f['date_from'], 'date_to' => $f['date_to']]) : ''];
+            $row['net'] = (float)$row['closing'] - (float)$row['recoverable'];
+            $list[] = $row;
+        }
+        return ['columns' => ['owner' => ['المالك', 'text'], 'opening' => ['رصيد أول المدة', 'money', true], 'credit' => ['مستحق خلال المدة', 'money', true], 'debit' => ['مسلّم ومخصوم', 'money', true],
+            'closing' => ['المستحق للمالك', 'money', true], 'recoverable' => ['مسترد من المالك', 'money', true], 'net' => ['الصافي', 'money', true]], 'rows' => $list,
+            'cards' => ['عدد الملاك' => count(array_filter(array_column($rows, 'owner_id'))), 'إجمالي المستحق' => (float)array_sum(array_column($rows, 'closing')),
+                'إجمالي المسترد' => (float)array_sum(array_column($rows, 'recoverable')), 'الصافي' => (float)array_sum(array_column($list, 'net'))],
+            'notes' => ['الصافي السالب يعني أن المالك مدين للمكتب. الأرقام من القيود المرحّلة فقط.']];
+    },
+];
+require __DIR__ . '/../../includes/sync_report_page.hnt';

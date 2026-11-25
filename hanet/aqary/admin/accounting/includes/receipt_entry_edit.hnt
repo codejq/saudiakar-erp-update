@@ -1,0 +1,79 @@
+<?php
+/**
+ * Reviewer's changes to the two entries of a receipt, before they are posted. Pure rules:
+ * - 'fixed' lines (receivable, VAT, salesman payable) keep account and amount;
+ * - 'amount' lines (salesman expense) may change account only;
+ * - 'free' lines may change account and amount, be split, or be removed;
+ * - every entry stays balanced and free lines stay on their own side.
+ */
+function receiptEntryLineMode(string $key): string {
+    if (in_array($key, ['receivable', 'rent_vat', 'commission_vat', 'other_vat'], true) || strpos($key, 'cpay') === 0) return 'fixed';
+    return strpos($key, 'cexp') === 0 ? 'amount' : 'free';
+}
+
+/** Returns [lines, changed]. $accounts: ids of active leaf accounts. Throws RuntimeException. */
+function receiptApplyEditedLines(array $defaults, array $edited, array $accounts, string $label): array {
+    $byKey = [];
+    $reserved = [];
+    $freeSide = '';
+    foreach ($defaults as $line) {
+        $byKey[$line['key']] = $line;
+        $mode = receiptEntryLineMode($line['key']);
+        if ($mode === 'fixed') $reserved[(int)$line['account_id']] = true;
+        if ($mode === 'free') {
+            $freeSide = $line['debit_amount'] > 0 ? 'debit' : 'credit';
+            // The owner payable may also hold VAT the owner files; it stays selectable.
+            unset($reserved[(int)$line['account_id']]);
+        }
+    }
+    foreach ($defaults as $line) if (receiptEntryLineMode($line['key']) === 'free') unset($reserved[(int)$line['account_id']]);
+    if (count($edited) > 40) throw new RuntimeException($label . ': عدد البنود كبير.');
+    $result = [];
+    $seen = [];
+    $changed = false;
+    $cost = $defaults[0]['cost_center_id'] ?? null;
+    foreach ($edited as $row) {
+        if (!is_array($row)) throw new RuntimeException($label . ': بند غير صحيح.');
+        $key = is_string($row['key'] ?? null) ? $row['key'] : '';
+        $account = (int)($row['account_id'] ?? 0);
+        $description = trim(is_string($row['description'] ?? null) ? $row['description'] : '');
+        if ($description === '' || mb_strlen($description, 'UTF-8') > 250) throw new RuntimeException($label . ': بيان البند مطلوب وبحد أقصى 250 حرفاً.');
+        $default = $key !== '' ? ($byKey[$key] ?? null) : null;
+        if ($key !== '' && (!$default || isset($seen[$key]))) throw new RuntimeException($label . ': بند غير معروف أو مكرر.');
+        $mode = $default ? receiptEntryLineMode($key) : 'free';
+        if ($default) $seen[$key] = true;
+        if (!isset($accounts[$account])) throw new RuntimeException($label . ': اختر حساباً طرفياً نشطاً.');
+        if ($mode === 'fixed' && $account !== (int)$default['account_id']) throw new RuntimeException($label . ': لا يمكن تغيير حساب ذمم العميل أو الضريبة أو ذمة المندوب.');
+        if ($mode === 'amount' && isset($reserved[$account])) throw new RuntimeException($label . ': هذا الحساب محجوز لذمم العميل أو الضريبة.');
+        if ($mode === 'free') {
+            $amount = receiptCommissionCents(trim((string)(is_scalar($row['amount'] ?? null) ? $row['amount'] : '')));
+            if ($amount <= 0) throw new RuntimeException($label . ': مبلغ كل بند يجب أن يكون أكبر من صفر.');
+            if (isset($reserved[$account])) throw new RuntimeException($label . ': هذا الحساب محجوز لذمم العميل أو الضريبة.');
+            $debit = $freeSide === 'debit' ? $amount / 100 : 0;
+            $credit = $freeSide === 'debit' ? 0 : $amount / 100;
+        } else {
+            $debit = $default['debit_amount'];
+            $credit = $default['credit_amount'];
+        }
+        if (!$default || $account !== (int)$default['account_id'] || $description !== trim($default['description'])
+            || abs($debit - $default['debit_amount']) > 0.001 || abs($credit - $default['credit_amount']) > 0.001) $changed = true;
+        $result[] = ['key' => $key, 'account_id' => $account, 'description' => $description, 'debit_amount' => $debit, 'credit_amount' => $credit, 'cost_center_id' => $cost];
+    }
+    foreach ($byKey as $key => $line) {
+        if (isset($seen[$key])) continue;
+        if (receiptEntryLineMode($key) !== 'free') throw new RuntimeException($label . ': لا يمكن حذف بند ثابت.');
+        $changed = true;
+    }
+    $sum = function ($column) use ($result) { return array_sum(array_map(function ($line) use ($column) { return (int)round($line[$column] * 100); }, $result)); };
+    if ($sum('debit_amount') !== $sum('credit_amount')) {
+        throw new RuntimeException($label . ': القيد غير متوازن. المدين ' . number_format($sum('debit_amount') / 100, 2) . ' والدائن ' . number_format($sum('credit_amount') / 100, 2));
+    }
+    return [$result, $changed];
+}
+
+/** Net credit of one account, in cents. */
+function receiptEntryAccountCredit(array $lines, int $account): int {
+    $total = 0;
+    foreach ($lines as $line) if ((int)$line['account_id'] === $account) $total += (int)round(($line['credit_amount'] - $line['debit_amount']) * 100);
+    return $total;
+}

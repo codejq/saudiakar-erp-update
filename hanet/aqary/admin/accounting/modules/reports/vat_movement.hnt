@@ -1,0 +1,31 @@
+<?php
+/** Every posted line on the output and input VAT accounts. */
+$sc_title = 'حركة ضريبة القيمة المضافة';
+$syncReport = [
+    'key' => 'vat_movement', 'icon' => 'bi-arrow-left-right', 'desc' => 'كل قيد على حسابي ضريبة المخرجات والمدخلات مع العقار والفاتورة والسند',
+    'filters' => ['date', 'owner_id', 'aqar_id', 'subaqar_id', 'tenant_id', 'egar_id'],
+    'selects' => ['side' => ['نوع الضريبة', ['output' => 'مخرجات', 'input' => 'مدخلات']]],
+    'build' => function ($db, $f) {
+        $output = syncReportAccount($db, 'default_invoice_vat_account_id', 'ضريبة المخرجات', '2121');
+        $input = syncReportAccount($db, 'default_input_vat_account_id', 'ضريبة المدخلات');
+        $accounts = $f['side'] === 'output' ? $output : ($f['side'] === 'input' ? $input : "{$output},{$input}");
+        [$where, $params] = syncReportEntryWhere($f);
+        $lines = receiptCommissionRows($db, "SELECT je.entry_id,je.entry_number,je.entry_date,je.reference_type,l.account_id,l.description,l.debit_amount,l.credit_amount FROM acc_journal_entry_lines l
+            JOIN acc_journal_entries je ON je.entry_id=l.entry_id WHERE je.status='posted' AND je.entry_date BETWEEN ? AND ? AND l.account_id IN ({$accounts}){$where}
+            ORDER BY je.entry_date,je.entry_id,l.line_number", array_merge([$f['date_from'], $f['date_to']], $params));
+        $links = accountingEntryLinks($db, array_column($lines, 'entry_id'));
+        $rows = [];
+        foreach ($lines as $line) {
+            $isOutput = (int)$line['account_id'] === $output;
+            $rows[] = ['date' => $line['entry_date'], 'entry' => syncReportEntryCell($line), 'kind' => $isOutput ? ['مخرجات', 'primary'] : ['مدخلات', 'success'], 'description' => $line['description'],
+                'output' => $isOutput ? $line['credit_amount'] - $line['debit_amount'] : 0, 'input' => $isOutput ? 0 : $line['debit_amount'] - $line['credit_amount'], 'links' => $links[(int)$line['entry_id']] ?? []];
+        }
+        $out = (float)array_sum(array_column($rows, 'output'));
+        $in = (float)array_sum(array_column($rows, 'input'));
+        return ['columns' => ['date' => ['التاريخ', 'date'], 'entry' => ['القيد', 'text'], 'kind' => ['النوع', 'badge'], 'description' => ['البيان', 'text'], 'output' => ['ضريبة المخرجات', 'money', true],
+            'input' => ['ضريبة المدخلات', 'money', true], 'links' => ['الروابط', 'links']], 'rows' => $rows,
+            'cards' => ['ضريبة المخرجات' => $out, 'ضريبة المدخلات' => $in, 'الصافي المستحق' => $out - $in],
+            'notes' => ['القيود المعكوسة تظهر بقيمتها السالبة. ضريبة الإيجار التي يقدمها المالك لا تدخل هنا لأنها تقيد في ذمته. استخدم تقرير الضريبة الرسمي للإقرار.']];
+    },
+];
+require __DIR__ . '/../../includes/sync_report_page.hnt';

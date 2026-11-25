@@ -237,6 +237,13 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] == 'update_limited_vou
         exit();
     }
 
+    require_once __DIR__ . '/accounting_lock.hnt';
+    $delivery_lock = accountingLockReason($link, 'sanadsarf', $edit_sanadid);
+    if ($delivery_lock !== '') {
+        echo json_encode(['success' => false, 'message' => $delivery_lock], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit();
+    }
+
     $update_sql = "UPDATE sanadsarf SET sanadate='" . $edit_sanadate . "', payment_type='" . $edit_payment_type . "', money_source='" . $edit_money_source . "' WHERE sanadid='" . $edit_sanadid . "' LIMIT 1";
     $updated = mysql_query($update_sql, $link);
 
@@ -254,8 +261,15 @@ if ($deltesanadid && $ajax_request == 1) {
     $rid = mysql_fetch_array(mysql_query("SELECT sanadid FROM sanadsarf WHERE sanadid='" . intval($deltesanadid) . "' LIMIT 1", $link));
 
     if ($rid['sanadid']) {
+        require_once __DIR__ . '/accounting_lock.hnt';
+        try {
+            accountingDeleteDelivery($link, $deltesanadid);
+        } catch (Throwable $deleteError) {
+            error_log('Delivery delete: ' . $deleteError->getMessage());
+            echo json_encode(array('success' => false, 'message' => $deleteError instanceof RuntimeException ? $deleteError->getMessage() : 'تعذر حذف السند'), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            exit();
+        }
         loginfo("critical", "delete", "تم حذف سند الصرف رقم {$deltesanadid}", "", "sanadsarf", $deltesanadid, $link);
-        mysql_query("DELETE FROM sanadsarf WHERE sanadid='" . intval($deltesanadid) . "' LIMIT 1", $link);
 
         $response = array(
             'success' => true,

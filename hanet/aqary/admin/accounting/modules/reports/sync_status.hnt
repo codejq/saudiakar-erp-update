@@ -1,0 +1,53 @@
+<?php
+/** Everything that has not reached the ledger yet. */
+$sc_title = 'حركات لم ترحّل';
+$syncReport = [
+    'key' => 'sync_status', 'icon' => 'bi-hourglass-split', 'desc' => 'سندات ومصروفات وتسليمات وتسويات وتحويلات لم تصل إلى القيود بعد',
+    'filters' => ['date', 'aqar_id'],
+    'selects' => ['kind' => ['النوع', ['receipt' => 'سند قبض بانتظار المزامنة', 'held' => 'سند محجوز للمراجعة', 'draft' => 'مسودة بانتظار الاعتماد', 'expense' => 'مصروف', 'delivery' => 'تسليم مالك', 'transfer' => 'تحويل أو صرف', 'deposit' => 'تسوية تأمين']]],
+    'build' => function ($db, $f) {
+        syncReportNeed(receiptSyncReady($db));
+        $unposted = function ($table) { return "(accounting_entry_id IS NULL OR accounting_entry_id=0 OR NOT EXISTS (SELECT 1 FROM acc_journal_entries j WHERE j.entry_id={$table}.accounting_entry_id AND j.status='posted'))"; };
+        // The same conditions the sync page uses.
+        $queries = [
+            'receipt' => "SELECT sanad.idsanad id,kastid extra,sanaddate at,mostagername party,depositeamount amount,idaqar property,mybyan note FROM sanad WHERE " . receiptSyncPendingSql($db) . ' AND ' . syncReportPeriod('sanaddate', $f),
+            'held' => "SELECT sanad.idsanad id,sanad.kastid extra,sanaddate at,mostagername party,depositeamount amount,idaqar property,c.warnings note FROM sanad_components c JOIN sanad ON sanad.idsanad=c.idsanad
+                WHERE c.status='review' AND " . amlakSyncDateSql($db, 'sanaddate') . ' AND ' . syncReportPeriod('sanaddate', $f),
+            'draft' => "SELECT invoice_id id,invoice_number extra,UNIX_TIMESTAMP(invoice_date) at,customer_name party,total_amount amount,aqar_id property,'' note FROM acc_invoices
+                WHERE sanad_id>0 AND status='draft' AND invoice_date BETWEEN '{$f['date_from']}' AND '{$f['date_to']}'",
+            'expense' => "SELECT idmasrof id,'' extra,payeddate at,beneficiary_name party,amount,idaqar property,payeddue note FROM masrofat WHERE " . amlakSyncDateSql($db, 'payeddate') . ' AND fund_source=0'
+                . depositExpenseExclusionSql($db) . ' AND ' . $unposted('masrofat') . ' AND ' . syncReportPeriod('payeddate', $f),
+            'delivery' => "SELECT sanadid id,'' extra,sanadate at,mostafeed party,amount,aqarid property,bayan note FROM sanadsarf WHERE " . amlakSyncDateSql($db, 'sanadate') . ' AND aqarid>0 AND iderad>0 AND '
+                . $unposted('sanadsarf') . ' AND ' . syncReportPeriod('sanadate', $f),
+            'transfer' => "SELECT sanadid id,'' extra,sanadate at,mostafeed party,amount,aqarid property,bayan note FROM sanadsarf WHERE " . transferSyncWhere($db) . ' AND ' . syncReportPeriod('sanadate', $f),
+        ];
+        if (depositSettlementReady($db)) $queries['deposit'] = "SELECT settlement_id id,'' extra,settlement_date at,tenant_name party,insurance amount,idaqar property,notes note FROM deposit_settlements
+            WHERE " . depositSyncWhere($db) . ' AND ' . syncReportPeriod('settlement_date', $f);
+        $names = array_column(receiptCommissionRows($db, 'SELECT idaqar,aqarname FROM amlak'), 'aqarname', 'idaqar');
+        $labels = ['receipt' => ['سند قبض بانتظار المزامنة', 'info'], 'held' => ['سند محجوز للمراجعة', 'danger'], 'draft' => ['مسودة بانتظار الاعتماد', 'warning'], 'expense' => ['مصروف', 'secondary'],
+            'delivery' => ['تسليم مالك', 'secondary'], 'transfer' => ['تحويل أو صرف', 'secondary'], 'deposit' => ['تسوية تأمين', 'secondary']];
+        $rows = [];
+        $cards = [];
+        foreach ($queries as $kind => $sql) {
+            if ($f['kind'] !== '' && $f['kind'] !== $kind) continue;
+            $count = 0;
+            foreach (receiptCommissionRows($db, $sql) as $row) {
+                if ($f['aqar_id'] && (int)$row['property'] !== $f['aqar_id']) continue;
+                $count++;
+                if ($kind === 'receipt' || $kind === 'held') $source = syncReportReceiptCell($row['id'], $row['extra']);
+                elseif ($kind === 'draft') $source = syncReportInvoiceCell($row['id'], $row['extra']);
+                elseif ($kind === 'delivery') $source = ['#' . (int)$row['id'], '/aqary/admin/include/amlak/selectprintform.hnt?formtype=paymentvaoucher&id=' . (int)$row['id']];
+                else $source = '#' . (int)$row['id'];
+                $note = $row['note'];
+                if ($kind === 'held') $note = implode('، ', array_filter((array)(json_decode((string)$note, true) ?: []), 'is_string'));
+                $rows[] = ['date' => syncReportDay($row['at']), 'kind' => $labels[$kind], 'source' => $source, 'party' => $row['party'], 'property' => $names[(int)$row['property']] ?? '', 'note' => $note, 'amount' => $row['amount']];
+            }
+            if ($count) $cards[$labels[$kind][0]] = $count;
+        }
+        usort($rows, function ($a, $b) { return strcmp($a['date'], $b['date']); });
+        return ['columns' => ['date' => ['التاريخ', 'date'], 'kind' => ['النوع', 'badge'], 'source' => ['المصدر', 'text'], 'party' => ['الطرف', 'text'], 'property' => ['العقار', 'text'], 'note' => ['البيان أو سبب الحجز', 'text'], 'amount' => ['المبلغ', 'money']],
+            'rows' => $rows, 'cards' => $cards, 'empty' => 'كل الحركات ضمن الفترة مرحّلة.',
+            'notes' => ['تبدأ المزامنة من ' . amlakSyncStartDate($db) . '، وما قبلها لا يظهر هنا. الترحيل من صفحة المزامنة ومن مراجعة فواتير السندات.']];
+    },
+];
+require __DIR__ . '/../../includes/sync_report_page.hnt';

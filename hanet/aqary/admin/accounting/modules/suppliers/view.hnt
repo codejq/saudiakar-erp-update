@@ -1,0 +1,551 @@
+<?php
+/**
+ * View Supplier Details
+ * عرض تفاصيل المورد
+ *
+ * @charset UTF-8
+ * @version 1.0
+ */
+
+$sc_title = "تفاصيل المورد";
+$sc_id = "207";
+include_once "../../../../header.hnt";
+include_once "../../includes/accounting_class.hnt";
+
+$accountingManager = new AccountingManager($db, $_SESSION['userid'] ?? 1);
+
+// Get supplier ID
+$supplierId = isset($_GET['id']) ? intval($_GET['id']) : 0;
+
+if ($supplierId == 0) {
+    echo "<div class='alert alert-danger'>رقم المورد غير صحيح</div>";
+    exit;
+}
+
+// Get supplier details
+$stmt = $db->prepare("SELECT * FROM acc_suppliers WHERE supplier_id = ?");
+$stmt->bind_param("i", $supplierId);
+$stmt->execute();
+$result = $stmt->get_result();
+$supplier = $result->fetch_assoc();
+
+if (!$supplier) {
+    echo "<div class='alert alert-danger'>المورد غير موجود</div>";
+    exit;
+}
+
+// Get supplier invoices (purchases)
+$invoicesQuery = "
+    SELECT
+        invoice_id,
+        invoice_number,
+        invoice_date,
+        total_amount,
+        paid_amount,
+        payment_status,
+        zatca_status
+    FROM acc_invoices
+    WHERE invoice_type = 'purchase'
+    AND customer_id = ?
+    ORDER BY invoice_date DESC
+    LIMIT 10
+";
+$stmt = $db->prepare($invoicesQuery);
+$stmt->bind_param("i", $supplierId);
+$stmt->execute();
+$invoicesResult = $stmt->get_result();
+$invoices = [];
+while ($row = $invoicesResult->fetch_assoc()) {
+    $invoices[] = $row;
+}
+
+// Calculate statistics
+$totalInvoices = count($invoices);
+$totalPurchases = 0;
+$totalPaid = 0;
+$totalOutstanding = 0;
+
+foreach ($invoices as $invoice) {
+    $totalPurchases += $invoice['total_amount'];
+    $totalPaid += $invoice['paid_amount'];
+    $totalOutstanding += ($invoice['total_amount'] - $invoice['paid_amount']);
+}
+?>
+
+<style>
+:root {
+    --primary-color: #1f4e5f;
+    --secondary-color: #163a47;
+}
+
+.page-header {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    color: white;
+    padding: 2rem;
+    border-radius: 15px;
+    margin-bottom: 2rem;
+}
+
+.info-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.info-row {
+    display: flex;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.info-row:last-child {
+    border-bottom: none;
+}
+
+.info-label {
+    font-weight: 600;
+    color: #6c757d;
+    min-width: 150px;
+}
+
+.info-value {
+    color: #212529;
+    flex: 1;
+}
+
+.stats-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    text-align: center;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    transition: all 0.3s ease;
+}
+
+.stats-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.12);
+}
+
+.stats-value {
+    font-size: 2rem;
+    font-weight: bold;
+    margin-bottom: 0.5rem;
+}
+
+.stats-label {
+    color: #6c757d;
+    font-size: 0.9rem;
+}
+
+.status-badge {
+    padding: 0.5rem 1rem;
+    border-radius: 20px;
+    font-weight: 600;
+}
+
+.status-active {
+    background: linear-gradient(135deg, #28a745, #20c997);
+    color: white;
+}
+
+.status-inactive {
+    background: #e9ecef;
+    color: #6c757d;
+}
+
+.section-title {
+    color: var(--primary-color);
+    font-weight: bold;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--primary-color);
+}
+
+.invoice-table {
+    background: white;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.btn-action {
+    padding: 0.5rem 1.5rem;
+    border-radius: 8px;
+    font-weight: 600;
+    transition: all 0.3s ease;
+}
+
+.btn-action:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+</style>
+
+<div class="container-fluid p-4">
+    <!-- Header -->
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-2">
+                    <i class="bi bi-truck me-2"></i><?php echo htmlspecialchars($supplier['supplier_name']); ?>
+                </h1>
+                <p class="mb-0 opacity-75">
+                    <?php echo $supplier['supplier_code'] ? 'كود: ' . htmlspecialchars($supplier['supplier_code']) : 'Supplier Details'; ?>
+                </p>
+            </div>
+            <div>
+                <span class="status-badge <?php echo $supplier['is_active'] ? 'status-active' : 'status-inactive'; ?>">
+                    <?php echo $supplier['is_active'] ? 'نشط' : 'غير نشط'; ?>
+                </span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="mb-4">
+        <button class="btn btn-secondary btn-action" onclick="window.location='index.hnt'">
+            <i class="bi bi-arrow-right me-2"></i>العودة للقائمة
+        </button>
+        <button class="btn btn-primary btn-action ms-2" onclick="window.location='edit.hnt?id=<?php echo $supplierId; ?>'">
+            <i class="bi bi-pencil me-2"></i>تعديل
+        </button>
+        <button class="btn btn-success btn-action ms-2" onclick="createPurchaseInvoice()">
+            <i class="bi bi-file-earmark-plus me-2"></i>فاتورة مشتريات جديدة
+        </button>
+    </div>
+
+    <!-- Statistics -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value text-primary"><?php echo $totalInvoices; ?></div>
+                <div class="stats-label">إجمالي الفواتير</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value text-danger"><?php echo number_format($totalPurchases, 2); ?> ر.س</div>
+                <div class="stats-label">إجمالي المشتريات</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value text-success"><?php echo number_format($totalPaid, 2); ?> ر.س</div>
+                <div class="stats-label">المدفوع</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-card">
+                <div class="stats-value text-warning"><?php echo number_format($totalOutstanding, 2); ?> ر.س</div>
+                <div class="stats-label">المتبقي</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <!-- Basic Information -->
+        <div class="col-md-6">
+            <div class="info-card">
+                <h5 class="section-title">
+                    <i class="bi bi-info-circle me-2"></i>المعلومات الأساسية
+                </h5>
+
+                <div class="info-row">
+                    <div class="info-label">اسم المورد:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($supplier['supplier_name']); ?></div>
+                </div>
+
+                <?php if ($supplier['supplier_code']): ?>
+                <div class="info-row">
+                    <div class="info-label">كود المورد:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($supplier['supplier_code']); ?></div>
+                </div>
+                <?php endif; ?>
+
+                <?php if ($supplier['vat_number']): ?>
+                <div class="info-row">
+                    <div class="info-label">الرقم الضريبي:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($supplier['vat_number']); ?></div>
+                </div>
+                <?php endif; ?>
+
+                <?php if ($supplier['category']): ?>
+                <div class="info-row">
+                    <div class="info-label">التصنيف:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($supplier['category']); ?></div>
+                </div>
+                <?php endif; ?>
+
+                <div class="info-row">
+                    <div class="info-label">الحالة:</div>
+                    <div class="info-value">
+                        <span class="badge <?php echo $supplier['is_active'] ? 'bg-success' : 'bg-secondary'; ?>">
+                            <?php echo $supplier['is_active'] ? 'نشط' : 'غير نشط'; ?>
+                        </span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Contact Information -->
+            <div class="info-card">
+                <h5 class="section-title">
+                    <i class="bi bi-telephone me-2"></i>معلومات الاتصال
+                </h5>
+
+                <?php if ($supplier['contact_person']): ?>
+                <div class="info-row">
+                    <div class="info-label">جهة الاتصال:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($supplier['contact_person']); ?></div>
+                </div>
+                <?php endif; ?>
+
+                <?php if ($supplier['phone']): ?>
+                <div class="info-row">
+                    <div class="info-label">الهاتف:</div>
+                    <div class="info-value">
+                        <i class="bi bi-telephone me-2"></i><?php echo htmlspecialchars($supplier['phone']); ?>
+                    </div>
+                </div>
+                <?php endif; ?>
+
+                <?php if ($supplier['mobile']): ?>
+                <div class="info-row">
+                    <div class="info-label">الجوال:</div>
+                    <div class="info-value">
+                        <i class="bi bi-phone me-2"></i><?php echo htmlspecialchars($supplier['mobile']); ?>
+                    </div>
+                </div>
+                <?php endif; ?>
+
+                <?php if ($supplier['email']): ?>
+                <div class="info-row">
+                    <div class="info-label">البريد الإلكتروني:</div>
+                    <div class="info-value">
+                        <i class="bi bi-envelope me-2"></i>
+                        <a href="mailto:<?php echo htmlspecialchars($supplier['email']); ?>">
+                            <?php echo htmlspecialchars($supplier['email']); ?>
+                        </a>
+                    </div>
+                </div>
+                <?php endif; ?>
+
+                <?php if ($supplier['website']): ?>
+                <div class="info-row">
+                    <div class="info-label">الموقع الإلكتروني:</div>
+                    <div class="info-value">
+                        <i class="bi bi-globe me-2"></i>
+                        <a href="<?php echo htmlspecialchars($supplier['website']); ?>" target="_blank">
+                            <?php echo htmlspecialchars($supplier['website']); ?>
+                        </a>
+                    </div>
+                </div>
+                <?php endif; ?>
+            </div>
+        </div>
+
+        <!-- Address & Financial Info -->
+        <div class="col-md-6">
+            <!-- Address Information -->
+            <div class="info-card">
+                <h5 class="section-title">
+                    <i class="bi bi-geo-alt me-2"></i>معلومات العنوان
+                </h5>
+
+                <?php if ($supplier['address']): ?>
+                <div class="info-row">
+                    <div class="info-label">العنوان:</div>
+                    <div class="info-value"><?php echo nl2br(htmlspecialchars($supplier['address'])); ?></div>
+                </div>
+                <?php endif; ?>
+
+                <?php if ($supplier['city']): ?>
+                <div class="info-row">
+                    <div class="info-label">المدينة:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($supplier['city']); ?></div>
+                </div>
+                <?php endif; ?>
+
+                <?php if ($supplier['country']): ?>
+                <div class="info-row">
+                    <div class="info-label">الدولة:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($supplier['country']); ?></div>
+                </div>
+                <?php endif; ?>
+            </div>
+
+            <!-- Financial Information -->
+            <div class="info-card">
+                <h5 class="section-title">
+                    <i class="bi bi-cash-stack me-2"></i>المعلومات المالية
+                </h5>
+
+                <div class="info-row">
+                    <div class="info-label">الرصيد الحالي:</div>
+                    <div class="info-value">
+                        <strong class="<?php echo $supplier['current_balance'] > 0 ? 'text-danger' : 'text-success'; ?>">
+                            <?php echo number_format($supplier['current_balance'], 2); ?> ر.س
+                        </strong>
+                    </div>
+                </div>
+
+                <div class="info-row">
+                    <div class="info-label">الحد الائتماني:</div>
+                    <div class="info-value"><?php echo number_format($supplier['credit_limit'], 2); ?> ر.س</div>
+                </div>
+
+                <?php if ($supplier['payment_terms']): ?>
+                <div class="info-row">
+                    <div class="info-label">شروط الدفع:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($supplier['payment_terms']); ?></div>
+                </div>
+                <?php endif; ?>
+            </div>
+
+            <!-- Bank Information -->
+            <?php if ($supplier['bank_name'] || $supplier['bank_account'] || $supplier['iban']): ?>
+            <div class="info-card">
+                <h5 class="section-title">
+                    <i class="bi bi-bank me-2"></i>المعلومات البنكية
+                </h5>
+
+                <?php if ($supplier['bank_name']): ?>
+                <div class="info-row">
+                    <div class="info-label">البنك:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($supplier['bank_name']); ?></div>
+                </div>
+                <?php endif; ?>
+
+                <?php if ($supplier['bank_account']): ?>
+                <div class="info-row">
+                    <div class="info-label">رقم الحساب:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($supplier['bank_account']); ?></div>
+                </div>
+                <?php endif; ?>
+
+                <?php if ($supplier['iban']): ?>
+                <div class="info-row">
+                    <div class="info-label">IBAN:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($supplier['iban']); ?></div>
+                </div>
+                <?php endif; ?>
+            </div>
+            <?php endif; ?>
+        </div>
+    </div>
+
+    <!-- Notes -->
+    <?php if ($supplier['notes']): ?>
+    <div class="row">
+        <div class="col-12">
+            <div class="info-card">
+                <h5 class="section-title">
+                    <i class="bi bi-sticky me-2"></i>ملاحظات
+                </h5>
+                <p class="mb-0"><?php echo nl2br(htmlspecialchars($supplier['notes'])); ?></p>
+            </div>
+        </div>
+    </div>
+    <?php endif; ?>
+
+    <!-- Recent Invoices -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="invoice-table">
+                <div class="p-3" style="background: linear-gradient(135deg, #1f4e5f, #163a47); color: white;">
+                    <h5 class="mb-0">
+                        <i class="bi bi-receipt me-2"></i>آخر فواتير المشتريات
+                    </h5>
+                </div>
+
+                <?php if (empty($invoices)): ?>
+                <div class="p-5 text-center text-muted">
+                    <i class="bi bi-inbox" style="font-size: 3rem;"></i>
+                    <p class="mt-3">لا توجد فواتير مشتريات لهذا المورد</p>
+                </div>
+                <?php else: ?>
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>رقم الفاتورة</th>
+                                <th>التاريخ</th>
+                                <th>المبلغ الإجمالي</th>
+                                <th>المدفوع</th>
+                                <th>المتبقي</th>
+                                <th>حالة الدفع</th>
+                                <th>الإجراءات</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($invoices as $invoice): ?>
+                            <tr>
+                                <td><strong><?php echo htmlspecialchars($invoice['invoice_number']); ?></strong></td>
+                                <td><?php echo date('Y-m-d', strtotime($invoice['invoice_date'])); ?></td>
+                                <td><?php echo number_format($invoice['total_amount'], 2); ?> ر.س</td>
+                                <td class="text-success"><?php echo number_format($invoice['paid_amount'], 2); ?> ر.س</td>
+                                <td class="text-danger">
+                                    <?php echo number_format($invoice['total_amount'] - $invoice['paid_amount'], 2); ?> ر.س
+                                </td>
+                                <td>
+                                    <?php
+                                    $statusClass = 'secondary';
+                                    $statusText = $invoice['payment_status'];
+                                    if ($invoice['payment_status'] == 'paid') {
+                                        $statusClass = 'success';
+                                        $statusText = 'مدفوعة';
+                                    } elseif ($invoice['payment_status'] == 'partial') {
+                                        $statusClass = 'warning';
+                                        $statusText = 'مدفوعة جزئياً';
+                                    } elseif ($invoice['payment_status'] == 'unpaid') {
+                                        $statusClass = 'danger';
+                                        $statusText = 'غير مدفوعة';
+                                    }
+                                    ?>
+                                    <span class="badge bg-<?php echo $statusClass; ?>"><?php echo $statusText; ?></span>
+                                </td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-primary"
+                                            onclick="window.location='../invoices/view.hnt?id=<?php echo $invoice['invoice_id']; ?>'">
+                                        <i class="bi bi-eye"></i>
+                                    </button>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+
+    <!-- Record Information -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="info-card">
+                <div class="row text-muted small">
+                    <div class="col-md-6">
+                        <i class="bi bi-calendar-plus me-2"></i>
+                        تاريخ الإنشاء: <?php echo date('Y-m-d H:i', strtotime($supplier['created_at'])); ?>
+                    </div>
+                    <div class="col-md-6 text-end">
+                        <i class="bi bi-calendar-check me-2"></i>
+                        آخر تحديث: <?php echo date('Y-m-d H:i', strtotime($supplier['updated_at'])); ?>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function createPurchaseInvoice() {
+    // Redirect to create invoice page with supplier pre-selected
+    window.location = '../invoices/create.hnt?type=purchase&supplier_id=<?php echo $supplierId; ?>';
+}
+</script>
+
+<?php require("../../../../foter.hnt"); ?>

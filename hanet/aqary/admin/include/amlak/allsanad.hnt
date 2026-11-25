@@ -4,23 +4,6 @@
  * Modern refactored version with Bootstrap 5
  */
 
-// Extract POST variables
-extract($_REQUEST);
-
-// Initialize variables
-$search = isset($search) ? trim($search) : '';
-$page = isset($page) ? intval($page) : 1;
-$idaqar = isset($idaqar) ? intval($idaqar) : 0;
-$idsanad = isset($idsanad) ? intval($idsanad) : 0;
-$startfrom_request = isset($startfrom) ? trim($startfrom) : '';
-$enddate_request = isset($enddate) ? trim($enddate) : '';
-$dd = isset($dd) ? intval($dd) : 0;
-$mm = isset($mm) ? intval($mm) : 0;
-$yy = isset($yy) ? intval($yy) : 0;
-$dd2 = isset($dd2) ? intval($dd2) : 0;
-$mm2 = isset($mm2) ? intval($mm2) : 0;
-$yy2 = isset($yy2) ? intval($yy2) : 0;
-
 $sc_title = "عرض جميع سندات القبض";
 $sc_id = "56";
 
@@ -28,61 +11,18 @@ include_once "../../../nocash.hnt";
 require '../arabicTools.class.hnt';
 require '../uCal.class.hnt';
 $dcal = new uCal;
+require_once __DIR__ . '/receipt_search.hnt';
 
 // Export handler — runs before any HTML output
 if (isset($_GET['export']) && in_array(trim($_GET['export']), ['csv', 'xls'], true)) {
-    include_once "../../../connectdb.hnt";
-    $_search  = isset($_GET['search'])  ? trim($_GET['search'])  : '';
-    $_idsanad = isset($_GET['idsanad']) ? intval($_GET['idsanad']) : 0;
-    $_idaqar  = isset($_GET['idaqar'])  ? intval($_GET['idaqar']) : 0;
-    $_startfrom = isset($_GET['startfrom']) ? trim($_GET['startfrom']) : '';
-    $_enddate = isset($_GET['enddate']) ? trim($_GET['enddate']) : '';
-    $_dd  = isset($_GET['dd'])  ? intval($_GET['dd'])  : 0;
-    $_mm  = isset($_GET['mm'])  ? intval($_GET['mm'])  : 0;
-    $_yy  = isset($_GET['yy'])  ? intval($_GET['yy'])  : 0;
-    $_dd2 = isset($_GET['dd2']) ? intval($_GET['dd2']) : 0;
-    $_mm2 = isset($_GET['mm2']) ? intval($_GET['mm2']) : 0;
-    $_yy2 = isset($_GET['yy2']) ? intval($_GET['yy2']) : 0;
-
-    $_sfx = 0; $_edx = 0;
-    if ($_startfrom !== '' && strpos($_startfrom, '-') !== false && $_enddate !== '' && strpos($_enddate, '-') !== false) {
-        $_d = explode("-", "0-0-0-" . $_startfrom);
-        $_d2 = explode("-", "0-0-0-" . $_enddate);
-        if (isset($_d[5], $_d2[5], $_d[4], $_d2[4], $_d[3], $_d2[3]) && $_d[5] < 1900 && $_d[5] > 1400) {
-            $_dateo = $dcal->u2g($_d[3], $_d[4], $_d[5]); $_d[3] = $_dateo['day']; $_d[4] = $_dateo['month']; $_d[5] = $_dateo['year'];
-            $_dateo = $dcal->u2g($_d2[3], $_d2[4], $_d2[5]); $_d2[3] = $_dateo['day']; $_d2[4] = $_dateo['month']; $_d2[5] = $_dateo['year'];
-        }
-        if (isset($_d[5], $_d[4], $_d[3], $_d2[5], $_d2[4], $_d2[3])) {
-            $_sfx = mktime(0, 0, 0, $_d[4], $_d[3], $_d[5]);
-            $_edx = mktime(0, 0, 0, $_d2[4], $_d2[3], $_d2[5]);
-        }
-    } elseif ($_dd) {
-        if ($_yy < 1900 && $_yy > 1400) {
-            $_dateo = $dcal->u2g($_dd, $_mm, $_yy);  $_dd = $_dateo['day'];  $_mm = $_dateo['month'];  $_yy = $_dateo['year'];
-            $_dateo = $dcal->u2g($_dd2, $_mm2, $_yy2); $_dd2 = $_dateo['day']; $_mm2 = $_dateo['month']; $_yy2 = $_dateo['year'];
-        }
-        $_sfx = mktime(0, 0, 0, $_mm, $_dd, $_yy);
-        $_edx = mktime(0, 0, 0, $_mm2, $_dd2, $_yy2);
-    }
-
-    $_where = '';
-    if ($_search) {
-        $_where = " WHERE idsanad='" . addslashes($_search) . "' OR mostagername LIKE '%" . addslashes($_search) . "%' OR depositeamount LIKE '%" . addslashes($_search) . "%' OR mybyan LIKE '%" . addslashes($_search) . "%'";
-    } elseif ($_idsanad) {
-        $_where = " WHERE idsanad='" . intval($_idsanad) . "'";
-    } elseif ($_idaqar && $_sfx && $_edx) {
-        $_where = " WHERE idaqar='" . intval($_idaqar) . "' AND sanaddate > $_sfx AND sanaddate < $_edx";
-    } elseif ($_dd && $_sfx && $_edx) {
-        $_where = " WHERE sanaddate > $_sfx AND sanaddate < $_edx";
-    }
-
-    $exp_sql = "SELECT s.idsanad, s.mostagername, s.depositeamount, s.mybyan, s.sanaddate, a.aqarname
-                FROM sanad s LEFT JOIN amlak a ON s.idaqar = a.idaqar
-                $_where ORDER BY s.idsanad DESC";
-    $exp_res = mysql_query($exp_sql, $link);
+    include_once "../../../reqloginajax.hnt";
+    $receiptFilters = receiptSearchFilters($_GET, $dcal);
+    [$receiptWhere, $receiptValues] = receiptSearchWhere($receiptFilters);
+    $exp_res = receiptCommissionRows($link, "SELECT s.idsanad, s.mostagername, s.depositeamount, s.mybyan, s.sanaddate, a.aqarname
+        FROM sanad s LEFT JOIN amlak a ON s.idaqar = a.idaqar {$receiptWhere} ORDER BY s.idsanad DESC", $receiptValues);
     $exp_headers = ['رقم السند', 'اسم المستأجر', 'المبلغ', 'البيان', 'العقار', 'التاريخ'];
     $exp_rows = [];
-    while ($r = mysql_fetch_array($exp_res)) {
+    foreach ($exp_res as $r) {
         $exp_rows[] = [intval($r['idsanad']), $r['mostagername'], number_format($r['depositeamount'], 2, '.', ''), $r['mybyan'], $r['aqarname'] ?: '', date('d/m/Y', $r['sanaddate'])];
     }
 
@@ -112,50 +52,10 @@ include_once "../../../header.hnt";
     <div class="row">
         <div class="col-12">
 <?php
-$startfromx = 0;
-$enddatex = 0;
-$default_startfrom = time();
-$default_enddate = time() + (30 * 86400);
-
-if ($startfrom_request !== '' && strpos($startfrom_request, '-') !== false && $enddate_request !== '' && strpos($enddate_request, '-') !== false) {
-    $start_parts = explode("-", "0-0-0-" . $startfrom_request);
-    $end_parts = explode("-", "0-0-0-" . $enddate_request);
-
-    if (isset($start_parts[5], $end_parts[5], $start_parts[4], $end_parts[4], $start_parts[3], $end_parts[3]) && ($start_parts[5] < 1900) && ($start_parts[5] > 1400)) {
-        $dateo = $dcal->u2g($start_parts[3], $start_parts[4], $start_parts[5]);
-        $start_parts[3] = $dateo['day'];
-        $start_parts[4] = $dateo['month'];
-        $start_parts[5] = $dateo['year'];
-        $dateo = $dcal->u2g($end_parts[3], $end_parts[4], $end_parts[5]);
-        $end_parts[3] = $dateo['day'];
-        $end_parts[4] = $dateo['month'];
-        $end_parts[5] = $dateo['year'];
-    }
-
-    if (isset($start_parts[5], $start_parts[4], $start_parts[3], $end_parts[5], $end_parts[4], $end_parts[3])) {
-        $startfromx = mktime(0, 0, 0, $start_parts[4], $start_parts[3], $start_parts[5]);
-        $enddatex = mktime(0, 0, 0, $end_parts[4], $end_parts[3], $end_parts[5]);
-    }
-} elseif ($dd) {
-    if (($yy < 1900) && ($yy > 1400)) {
-        $dateo = $dcal->u2g($dd, $mm, $yy);
-        $dd = $dateo['day'];
-        $mm = $dateo['month'];
-        $yy = $dateo['year'];
-        $dateo = $dcal->u2g($dd2, $mm2, $yy2);
-        $dd2 = $dateo['day'];
-        $mm2 = $dateo['month'];
-        $yy2 = $dateo['year'];
-    }
-
-    $startfromx = mktime(0, 0, 0, $mm, $dd, $yy);
-    $enddatex = mktime(0, 0, 0, $mm2, $dd2, $yy2);
-}
-
-if (!$startfromx || !$enddatex) {
-    $startfromx = $default_startfrom;
-    $enddatex = $default_enddate;
-}
+$receiptFilters = receiptSearchFilters($_GET, $dcal);
+[$receiptWhere, $receiptValues] = receiptSearchWhere($receiptFilters);
+$startfromx = $receiptFilters['from'] ?: time();
+$enddatex = $receiptFilters['to'] ?: time() + (30 * 86400);
 
 $startfrom_picker_value = date("d/m/Y", $startfromx);
 $enddate_picker_value = date("d/m/Y", $enddatex);
@@ -187,7 +87,7 @@ $enddate_picker_value = date("d/m/Y", $enddatex);
                                         <div class="mb-3">
                                             <label for="search" class="form-label">أكتب أي بيان من بيانات السند</label>
                                             <input type="text" class="form-control" name="search" id="search"
-                                                   value="<?= htmlspecialchars($search) ?>"
+                                                   value="<?= htmlspecialchars($receiptFilters['search'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
                                                    placeholder="رقم السند، اسم المستأجر، المبلغ...">
                                         </div>
 
@@ -235,7 +135,7 @@ $enddate_picker_value = date("d/m/Y", $enddatex);
                                                 $sql = "SELECT idaqar, aqarname FROM amlak";
                                                 $result = mysql_query($sql, $link);
                                                 while ($row = mysql_fetch_array($result)) {
-                                                    $selected = ($idaqar == $row['idaqar']) ? 'selected' : '';
+                                                    $selected = ($receiptFilters['idaqar'] === (int)$row['idaqar']) ? 'selected' : '';
                                                     echo "<option value='" . $row['idaqar'] . "' $selected>" . htmlspecialchars($row['aqarname']) . "</option>";
                                                 }
                                                 ?>
@@ -281,8 +181,7 @@ $enddate_picker_value = date("d/m/Y", $enddatex);
                                                 عودة
                                             </button>
                                             <?php
-                                            $_ep = $_GET; unset($_ep['export']);
-                                            $_eq = http_build_query($_ep);
+                                            $_eq = http_build_query(receiptSearchQuery($receiptFilters));
                                             $_eu = 'allsanad.hnt?' . $_eq . ($_eq ? '&' : '');
                                             ?>
                                             <a href="<?= htmlspecialchars($_eu . 'export=csv') ?>" class="btn btn-outline-success">
@@ -305,37 +204,11 @@ $enddate_picker_value = date("d/m/Y", $enddatex);
             <div class="card shadow-sm">
                 <div class="card-body">
 <?php
-// Build WHERE clause
-$where = "";
-if ($search) {
-    $where = " WHERE
-        idsanad='" . addslashes($search) . "' OR
-        mostagername LIKE '%" . addslashes($search) . "%' OR
-        depositeamount LIKE '%" . addslashes($search) . "%' OR
-        recivername LIKE '%" . addslashes($search) . "%' OR
-        mybyan LIKE '%" . addslashes($search) . "%' OR
-        cheqnumber LIKE '%" . addslashes($search) . "%' OR
-        cheqon LIKE '%" . addslashes($search) . "%'";
-}
-
-if ($idsanad) {
-    $where = " WHERE idsanad='" . intval($idsanad) . "'";
-}
-
-if ($idaqar && isset($startfromx) && isset($enddatex)) {
-    $where = " WHERE idaqar='" . intval($idaqar) . "' AND sanaddate > $startfromx AND sanaddate < $enddatex";
-}
-
-if ($dd && !$idaqar && isset($startfromx) && isset($enddatex)) {
-    $where = " WHERE sanaddate > $startfromx AND sanaddate < $enddatex";
-}
-
 // Pagination
-$sql = "SELECT COUNT(idsanad) as dd FROM sanad $where";
-$rownum = mysql_fetch_array(mysql_query($sql, $link));
-$rownum = $rownum['dd'];
-$rowperpage = isset($rowperpage) ? intval($rowperpage) : 40;
-$pagenum = ceil($rownum / $rowperpage);
+$rownum = (int)receiptCommissionRows($link, "SELECT COUNT(*) dd FROM sanad s LEFT JOIN amlak a ON a.idaqar = s.idaqar {$receiptWhere}", $receiptValues)[0]['dd'];
+$rowperpage = $receiptFilters['rowperpage'];
+$pagenum = (int)ceil($rownum / $rowperpage);
+$receiptPage = max(1, min($receiptFilters['page'], $pagenum));
 
 // Display count
 echo '<div class="alert alert-info mb-3">';
@@ -347,26 +220,20 @@ echo '</div>';
 if ($pagenum > 1) {
     echo '<nav aria-label="Page navigation"><ul class="pagination justify-content-center">';
     for ($xi = 1; $xi <= $pagenum; $xi++) {
-        $active = ($page == $xi) ? 'active' : '';
-        if (($xi > ($page - 4) && $xi < ($page + 4)) || $xi == 1 || $xi == $pagenum || $xi < 4 || $xi > ($pagenum - 4)) {
-            echo '<li class="page-item ' . $active . '"><a class="page-link" href="allsanad.hnt?page=' . $xi . '&where=' . urlencode($where) . '">' . $xi . '</a></li>';
-        } elseif ($xi == ($page - 4) || $xi == ($page + 4)) {
+        $active = ($receiptPage == $xi) ? 'active' : '';
+        if (($xi > ($receiptPage - 4) && $xi < ($receiptPage + 4)) || $xi == 1 || $xi == $pagenum || $xi < 4 || $xi > ($pagenum - 4)) {
+            echo '<li class="page-item ' . $active . '"><a class="page-link" href="allsanad.hnt?' . htmlspecialchars(http_build_query(receiptSearchQuery($receiptFilters) + ['page' => $xi]), ENT_QUOTES, 'UTF-8') . '">' . $xi . '</a></li>';
+        } elseif ($xi == ($receiptPage - 4) || $xi == ($receiptPage + 4)) {
             echo '<li class="page-item disabled"><span class="page-link">...</span></li>';
         }
     }
     echo '</ul></nav>';
 }
 
-// Calculate limit
-$limit = ($page - 1) * $rowperpage;
-$limit = $limit . "," . $rowperpage;
-if ($page == 1 || $page == '') {
-    $limit = $rowperpage;
-}
-
 // Get vouchers
-$sql = "SELECT * FROM sanad $where ORDER BY idsanad DESC LIMIT $limit";
-$result = mysql_query($sql, $link);
+$limit = ($receiptPage - 1) * $rowperpage;
+$receiptRows = receiptCommissionRows($link, "SELECT s.*, a.aqarname FROM sanad s LEFT JOIN amlak a ON a.idaqar = s.idaqar {$receiptWhere}
+    ORDER BY s.idsanad DESC LIMIT {$limit},{$rowperpage}", $receiptValues);
 ?>
 
                     <div class="table-responsive">
@@ -385,17 +252,13 @@ $result = mysql_query($sql, $link);
                             </thead>
                             <tbody>
 <?php
-while ($row = mysql_fetch_array($result)) {
+foreach ($receiptRows as $row) {
     // Prepare attachments link
     if ($row['attachedimages']) {
         $attachedimagelink = "<a href='/aqary/admin/include/uploadcenter.hnt?ids=" . $row['attachedimages'] . "&table=sanad&tableid=idsanad&tableidvalue=" . $row['idsanad'] . "' class='btn btn-sm btn-outline-primary' target='_blank' title='عرض المرفقات'><i class='bi bi-paperclip'></i></a>";
     } else {
         $attachedimagelink = "<a href='/aqary/admin/include/uploadcenter.hnt?ids=0,0&table=sanad&tableid=idsanad&tableidvalue=" . $row['idsanad'] . "' class='btn btn-sm btn-outline-secondary' target='_blank' title='إضافة مرفقات'><i class='bi bi-link-45deg'></i></a>";
     }
-
-    // Get property name
-    $sql2 = "SELECT aqarname FROM amlak WHERE idaqar='" . intval($row['idaqar']) . "'";
-    $rowaq = mysql_fetch_array(mysql_query($sql2, $link));
 
     // Format date
     if (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) {
@@ -405,7 +268,7 @@ while ($row = mysql_fetch_array($result)) {
     }
 
     $voucer_type = "";
-    if (!isset($rowaq['aqarname']) || !$rowaq['aqarname']) {
+    if (!isset($row['aqarname']) || !$row['aqarname']) {
         $dhd = $row['period'];
         $voucer_type = "free2";
     }
@@ -416,7 +279,7 @@ while ($row = mysql_fetch_array($result)) {
                                     <td><?= htmlspecialchars($row['depositeamount']) ?></td>
                                     <td><?= htmlspecialchars($row['recivername']) ?></td>
                                     <td><?= htmlspecialchars($row['mybyan']) ?></td>
-                                    <td><?= isset($rowaq['aqarname']) ? htmlspecialchars($rowaq['aqarname']) : '-' ?></td>
+                                    <td><?= isset($row['aqarname']) ? htmlspecialchars($row['aqarname']) : '-' ?></td>
                                     <td><?= $dhd ?></td>
                                     <td>
                                         <div class="btn-group btn-group-sm" role="group">

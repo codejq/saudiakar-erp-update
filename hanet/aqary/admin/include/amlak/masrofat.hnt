@@ -44,6 +44,38 @@ if (isset($_REQUEST['masrofkind']) && $_REQUEST['masrofkind']) {
     }
 }
 
+// Posted or settled expenses are locked.
+require_once __DIR__ . '/accounting_lock.hnt';
+if (empty($_SESSION['expense_delete_csrf'])) $_SESSION['expense_delete_csrf'] = bin2hex(random_bytes(24));
+if ($is_ajax_request && ($_POST['action'] ?? '') === 'delete_expense') {
+    header('Content-Type: application/json; charset=utf-8');
+    $deleteId = intval($_POST['idmasrof'] ?? 0);
+    $deleteToken = $_POST['csrf_token'] ?? '';
+    $deleteMessage = '';
+    if (!is_string($deleteToken) || !hash_equals($_SESSION['expense_delete_csrf'], $deleteToken)) $deleteMessage = 'انتهت صلاحية الصفحة. أعد تحميلها.';
+    else {
+        try {
+            mysqli_begin_transaction($link);
+            $deleteRow = receiptCommissionRows($link, 'SELECT * FROM masrofat WHERE idmasrof=? FOR UPDATE', array($deleteId))[0] ?? null;
+            if (!$deleteRow) $deleteMessage = 'المصروف غير موجود.';
+            elseif (trim((string)$deleteRow['tasfia']) !== '') $deleteMessage = 'المصروف مخصوم في تسليم للمالك ولا يمكن حذفه.';
+            elseif (!empty($deleteRow['payment_voucher_id'])) $deleteMessage = 'المصروف مرتبط بسند صرف ولا يمكن حذفه من هنا.';
+            else $deleteMessage = accountingLockReason($link, 'masrofat', $deleteId);
+            if ($deleteMessage === '') {
+                receiptCommissionQuery($link, 'DELETE FROM masrofat WHERE idmasrof=?', array($deleteId))->close();
+                mysqli_commit($link);
+                loginfo('critical', 'delete', 'تم حذف المصروف رقم ' . $deleteId, '', 'masrofat', $deleteId, $link);
+            } else mysqli_rollback($link);
+        } catch (Throwable $deleteError) {
+            mysqli_rollback($link);
+            error_log('Expense delete: ' . $deleteError->getMessage());
+            $deleteMessage = 'تعذر حذف المصروف.';
+        }
+    }
+    echo json_encode(array('success' => $deleteMessage === '', 'message' => $deleteMessage === '' ? 'تم حذف المصروف' : $deleteMessage), JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 // Handle form submission for expense entry/update
 if (isset($_POST['idaqar']) && isset($_POST['amount']) && $_POST['idaqar'] && $_POST['amount']) {
     $idaqar = mysql_real_escape_string($_POST['idaqar'], $link);
@@ -74,7 +106,17 @@ if (isset($_POST['idaqar']) && isset($_POST['amount']) && $_POST['idaqar'] && $_
 
     if (isset($_POST['idmasrof']) && $_POST['idmasrof']) {
         // Update existing expense
-        $idmasrof = mysql_real_escape_string($_POST['idmasrof'], $link);
+        $idmasrof = intval($_POST['idmasrof']);
+        $expenseLock = accountingLockReason($link, 'masrofat', $idmasrof);
+        if ($expenseLock !== '') {
+            if ($is_ajax_request) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode(['success' => false, 'message' => $expenseLock], JSON_UNESCAPED_UNICODE);
+            } else {
+                echo '<div class="alert alert-danger">' . htmlspecialchars($expenseLock) . '</div>';
+            }
+            exit;
+        }
         $sql = "UPDATE masrofat SET
             idmasrofcod='$idmasrofcod',
             amount='$amount',
@@ -556,12 +598,17 @@ $(document).ready(function() {
 
     function doDeleteRow(rowId) {
         confirm('هل ترغب في حذف هذا الحقل؟', 'تحذير', function() {
-            ajaxmysql("DELETE FROM masrofat WHERE idmasrof = '" + rowId + "'");
-            const rowElement = document.getElementById('mtr' + rowId);
-            if (rowElement && typeof deleteRow === 'function') {
-                deleteRow(rowElement);
-            }
-            fillmasrofat();
+            $.ajax({
+                url: 'masrofat.hnt', type: 'POST', dataType: 'json',
+                data: {ajax_submit: '1', action: 'delete_expense', idmasrof: rowId, csrf_token: <?= json_encode($_SESSION['expense_delete_csrf']) ?>}
+            }).done(function(response) {
+                if (!response.success) { alert(response.message); return; }
+                const rowElement = document.getElementById('mtr' + rowId);
+                if (rowElement && typeof deleteRow === 'function') {
+                    deleteRow(rowElement);
+                }
+                fillmasrofat();
+            }).fail(function() { alert('تعذر الاتصال بالخادم'); });
         });
         $('#contextlayer').hide();
     }

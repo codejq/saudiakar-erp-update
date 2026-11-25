@@ -41,6 +41,8 @@ if (!$is_ajax_request) {
 // Include required classes
 require '../arabicTools.class.hnt';
 include_once "amlakfunctions.hnt";
+require_once __DIR__ . '/receipt_components_store.hnt';
+require_once __DIR__ . '/deposit_settlement_helpers.hnt';
 require '../uCal.class.hnt';
 $dcal = new uCal;
 
@@ -128,6 +130,41 @@ if (isset($_POST['makepayemtsanad']) && $_POST['makepayemtsanad'] == '1') {
     $money_received_date = convertDisplayDateToTimestamp(isset($_POST['money_received_date']) ? $_POST['money_received_date'] : '', $posted_local_hnt_dll_type, $dcal);
     $money_actual_date = convertDisplayDateToTimestamp(isset($_POST['money_actual_date']) ? $_POST['money_actual_date'] : '', $posted_local_hnt_dll_type, $dcal);
 
+    // Recalculate on the server: the posted total must still be the amount due.
+    $deliveryError = '';
+    $deliveryIncome = receiptCommissionRows($link, 'SELECT * FROM eradat WHERE iderad=?', [intval($_POST['iderad'] ?? 0)]);
+    $deliveryProperty = $deliveryIncome ? receiptCommissionRows($link, 'SELECT * FROM amlak WHERE idaqar=?', [intval($deliveryIncome[0]['idaqar'])]) : [];
+    $deliveryBreakdown = null;
+    $deliveryCredits = $deliveryIncome ? depositPendingOwnerCredits($link, $deliveryIncome[0]['idaqar']) : [];
+    if (!$deliveryIncome || !$deliveryProperty) {
+        $deliveryError = 'الإيراد أو العقار غير موجود.';
+    } elseif (trim((string)$deliveryIncome[0]['tasfia']) !== '') {
+        $deliveryError = 'تم تسليم هذا الإيراد مسبقاً.';
+    } else {
+        $deliveryBreakdown = receiptDeliveryBreakdowns($link, $deliveryIncome, $deliveryProperty[0])[intval($deliveryIncome[0]['iderad'])];
+        $deliveryExpenseIds = array_values(array_unique(array_filter(array_map('intval', explode(',', (string)($_POST['idmasrofarray'] ?? ''))))));
+        $deliveryExpenses = 0;
+        if ($deliveryExpenseIds) {
+            $deliveryRows = receiptCommissionRows($link, "SELECT amount FROM masrofat WHERE fund_source=0 AND tasfia='' AND idaqar=? AND idmasrof IN ("
+                . implode(',', $deliveryExpenseIds) . ')', [intval($deliveryIncome[0]['idaqar'])]);
+            if (count($deliveryRows) !== count($deliveryExpenseIds)) $deliveryError = 'تغيرت المصروفات المحددة. أعد تحميل الصفحة.';
+            $deliveryExpenses = array_sum(array_column($deliveryRows, 'amount'));
+        }
+        if ($deliveryError === '' && abs($deliveryBreakdown['owner_net'] + depositCreditsTotal($deliveryCredits) - $deliveryExpenses - floatval($_POST['amount'] ?? 0)) > 0.011) {
+            $deliveryError = 'تغير المبلغ المستحق للمالك. أعد تحميل الصفحة ثم حاول مجدداً.';
+        }
+    }
+    if ($deliveryError !== '') {
+        if ($is_ajax_request) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['success' => false, 'error' => $deliveryError], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        echo "<div class='alert alert-danger text-center'><h5>" . $deliveryError . "</h5></div>";
+        require('../../../foter.hnt');
+        exit;
+    }
+
     // Insert disbursement voucher
     $sql = "INSERT INTO sanadsarf SET
         sanadate = '" . $sanadrealdate . "',
@@ -170,6 +207,9 @@ if (isset($_POST['makepayemtsanad']) && $_POST['makepayemtsanad'] == '1') {
         require('../../../foter.hnt');
         exit;
     }
+
+    receiptKeepDeliveredComponents($link, $deliveryIncome[0], $deliveryBreakdown);
+    depositMarkOwnerCredits($link, $deliveryCredits, $insert_id);
 
     // Update eradat (received payment) as settled
     mysql_query("UPDATE eradat SET tasfia = '" . $tasfia . "', formuid = '" . addslashes($_POST['formuid']) . "'
@@ -472,6 +512,11 @@ $netincome = ($mywater_netincome + $tamen_netincome) +
              ($row['amount'] - $row['mysa3ee'] - $row['services'] - $row['mywater'] - $row['tamen']) +
              (-($row2['persentage'] / 100) * ($row['amount'] - $row['services'] - $row['mysa3ee'] - $row['mywater'] - $row['tamen']));
 
+$delivery = receiptDeliveryBreakdowns($link, [$row], is_array($row2) ? $row2 : [])[intval($row['iderad'])];
+$netincome = $delivery['owner_net'];
+$deliveryFee = $delivery['fee'];
+$deliveryFeeBase = $delivery['base'];
+
 // Check if already paid via bulk settlement
 if (isset($row['tasfia']) && $row['tasfia']) {
     $sql = "SELECT sanadid, extradata FROM sanadsarf WHERE tasfia = '" . addslashes($row['tasfia']) . "'";
@@ -575,7 +620,9 @@ if (!empty($idmasrofcheck)) {
 }
 
 // Calculate final amount due to owner
-$final_amount = $netincome - $totalmsrofat;
+$ownerCredits = ($row2['rent_income_to'] ?? 'owner') === 'office' ? [] : depositPendingOwnerCredits($link, $idaqar);
+$ownerCreditsTotal = depositCreditsTotal($ownerCredits);
+$final_amount = round($netincome + $ownerCreditsTotal - $totalmsrofat, 2);
 
 // Get current date for form
 if ($local_hnt_dll_type) {
@@ -1050,12 +1097,31 @@ if (!$is_ajax_request) {
                             <tr>
                                 <td class="px-3 py-2 text-muted">
                                     <i class="bi bi-graph-down me-2 text-danger"></i>النسبة المستحقة
-                                    <small class="text-muted ms-1">(<?= $row2['persentage'] / 100 ?> &times; <?= number_format(floatval($row['amount'] - $row['mysa3ee'] - $row['mywater'] - $row['services'] - $row['tamen']), 2) ?>)</small>
+                                    <small class="text-muted ms-1">(<?= $delivery['rate'] ?>% &times; <?= number_format(floatval($deliveryFeeBase), 2) ?>)</small>
                                 </td>
                                 <td class="px-3 py-2 text-end">
-                                    <span class="egarcalc negative-amount" id="persentage"><?= number_format(floatval(-($row2['persentage'] / 100) * ($row['amount'] - $row['mysa3ee'] - $row['services'] - $row['mywater'] - $row['tamen'])), 2) ?></span>
+                                    <span class="egarcalc negative-amount" id="persentage"><?= number_format(-$deliveryFee, 2) ?></span>
                                 </td>
                             </tr>
+
+                            <?php if ($delivery['office_vat'] > 0) { ?>
+                            <tr>
+                                <td class="px-3 py-2 text-muted"><i class="bi bi-bank me-2 text-danger"></i>ضريبة الإيجار (يوردها المكتب)</td>
+                                <td class="px-3 py-2 text-end"><span class="egarcalc negative-amount" id="officevat"><?= number_format(-$delivery['office_vat'], 2) ?></span></td>
+                            </tr>
+                            <?php } ?>
+                            <?php if ($delivery['commission_vat'] > 0) { ?>
+                            <tr>
+                                <td class="px-3 py-2 text-muted"><i class="bi bi-bank me-2 text-danger"></i>ضريبة العمولة</td>
+                                <td class="px-3 py-2 text-end"><span class="egarcalc negative-amount" id="commissionvat"><?= number_format(-$delivery['commission_vat'], 2) ?></span></td>
+                            </tr>
+                            <?php } ?>
+                            <?php if (($row2['rent_income_to'] ?? 'owner') === 'office' && $delivery['mode'] !== 'legacy') { ?>
+                            <tr><td colspan="2" class="px-3 py-2 text-danger">العقار مملوك للمكتب؛ لا يوجد مبلغ يسلم لمالك.</td></tr>
+                            <?php } ?>
+                            <?php if ($delivery['warnings']) { ?>
+                            <tr><td colspan="2" class="px-3 py-2 text-warning-emphasis bg-warning-subtle">يحتاج مراجعة: <?= htmlspecialchars(implode('، ', $delivery['warnings'])) ?></td></tr>
+                            <?php } ?>
 
                             <!-- Subtotal before expenses -->
                             <tr class="table-primary">
@@ -1091,11 +1157,18 @@ if (!$is_ajax_request) {
                             </tr>
                             <?php } ?>
 
+                            <?php if ($ownerCreditsTotal > 0) { ?>
+                            <tr>
+                                <td class="px-3 py-2"><i class="bi bi-shield-check me-2 text-success"></i>تلفيات من تأمين المستأجر (بدون نسبة)</td>
+                                <td class="px-3 py-2 text-end"><span class="egarcalc positive-amount" id="ownercredits"><?= number_format($ownerCreditsTotal, 2) ?></span></td>
+                            </tr>
+                            <?php } ?>
+
                             <!-- Grand total -->
                             <tr class="total-row">
                                 <td class="px-3 py-3">
                                     <i class="bi bi-check-circle me-2"></i>إجمالي المستحق للمالك
-                                    <small class="opacity-75 ms-1">(<?= number_format(floatval($netincome), 2) ?> &minus; <?= number_format(floatval($totalmsrofat), 2) ?>)</small>
+                                    <small class="opacity-75 ms-1">(<?= number_format(floatval($netincome + $ownerCreditsTotal), 2) ?> &minus; <?= number_format(floatval($totalmsrofat), 2) ?>)</small>
                                 </td>
                                 <td class="px-3 py-3 text-end fw-bold fs-5">
                                     <span id="finalamount"><?= number_format(floatval($final_amount), 2) ?></span>

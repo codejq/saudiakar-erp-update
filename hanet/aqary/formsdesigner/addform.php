@@ -11,24 +11,24 @@ if($_REQUEST['addnewform'])
 	 mkdir("formsimages");
 	}
 
-	if($_FILES['fil'][name])
+	if($_FILES['fil']['name'])
 	{
-		$exten = strtolower(strrchr($_FILES['fil'][name],'.'));
-		$targetpic=$userinfo['user_id']."_"..rand().$exten; 
-		if($_FILES['fil'][type]!="image/pjpeg" and $_FILES['fil'][type]!="image/jpeg" and $_FILES['fil'][type]!="image/gif" and $_FILES['fil'][type]!="image/x-png")
+		$exten = strtolower(strrchr($_FILES['fil']['name'],'.'));
+		$targetpic=$userinfo['user_id']."_".rand().$exten; 
+		if($_FILES['fil']['type']!="image/pjpeg" and $_FILES['fil']['type']!="image/jpeg" and $_FILES['fil']['type']!="image/gif" and $_FILES['fil']['type']!="image/x-png")
 		{
-			$thanksmessage ="<font color=red>ط®ط·ط£: ظٹط¬ط¨ ط§ظ† ظٹظƒظˆظ† ظ†ظˆط¹ ط§ظ„طµظˆط±ط© jpg ط§ظˆ gif ط§ظˆ png   </font> ";
-			$redirectname = "طµظپط­ط© ط§ط¯ط®ط§ظ„ ط§ظ„ظ†ظ…ظˆط°ط¬  ";
+			$thanksmessage ="<font color=red>خطأ: يجب ان يكون نوع الصورة jpg او gif او png   </font> ";
+			$redirectname = "صفحة ادخال النموذج  ";
 			$redirecturl = "addform.php";
 			require("./templates/thankyou_templet.php");
 			exit();
 		}
 	 
 
-		if($_FILES['fil'][size]>5200000)
+		if($_FILES['fil']['size']>5200000)
 		{
-			$thanksmessage ="<font color=red>ط®ط·ط£: ط§ظ‚طµظ‰ ط­ط¬ظ… ظ…ط³ظ…ظˆط­ ط¨ظ‡ 5.2ظ…ظٹط¬ط§ ظٹط¬ط¨ طھظ‚ظ„ظٹظ„ ط­ط¬ظ… ط§ظ„طµظˆط±ط©  </font> ";
-			$redirectname = "طµظپط­ط© ط§ط¯ط®ط§ظ„ ط§ظ„ظ†ظ…ظˆط°ط¬  ";
+			$thanksmessage ="<font color=red>خطأ: اقصى حجم مسموح به 5.2ميجا يجب تقليل حجم الصورة  </font> ";
+			$redirectname = "صفحة ادخال النموذج  ";
 			$redirecturl = "addform.php";
 			require("./templates/thankyou_templet.php");
 			exit();
@@ -37,8 +37,8 @@ if($_REQUEST['addnewform'])
 
 		if(!move_uploaded_file($_FILES['fil']['tmp_name'],"./formsimages/".$targetpic)) 
 		{
-			$thanksmessage ="<font color=red>ظ„ظ… ط§ط³طھط·ط¹ طھط­ظ…ظٹظ„ ط§ظ„ظ…ظ„ظپ</font> ";
-			$redirectname = "طµظپط­ط© ط§ط¯ط®ط§ظ„ ط§ظ„ظ†ظ…ظˆط°ط¬  ";
+			$thanksmessage ="<font color=red>لم استطع تحميل الملف</font> ";
+			$redirectname = "صفحة ادخال النموذج  ";
 			$redirecturl = "addform.php";
 			require("./templates/thankyou_templet.php");
 			exit();
@@ -57,8 +57,8 @@ if($_REQUEST['addnewform'])
 				form_image = '". $targetpic ."'";
 			mysql_query($sql);
 			$form_id = mysql_insert_id();
-			$thanksmessage ="<font color=green>طھظ… ط¥ط¶ط§ظپط© ط§ظ„ظ†ظ…ظˆط°ط¬ ط¨ظ†ط¬ط§ط­  </font> ";
-			$redirectname = "ظ…طµظ…ظ… ط§ظ„ظ†ظ…ط§ط°ط¬  ";
+			$thanksmessage ="<font color=green>تم إضافة النموذج بنجاح  </font> ";
+			$redirectname = "مصمم النماذج  ";
 			$redirecturl = "addform.php?form_id=".$form_id;
 			require("./templates/thankyou_templet.php");
 			exit();
@@ -70,13 +70,13 @@ if($_REQUEST['addnewform'])
 }
 
 
-if(!$_REQUEST[form_id])
+if(!$_REQUEST['form_id'])
 {
 	require("./templates/newform.php");
 	exit();
 }
 
-$formdata=mysql_fetch_array(mysql_query("select * from forms where form_id='". intval($_REQUEST[form_id]) ."' and user_id='". $userinfo['user_id'] ."'"));
+$formdata=mysql_fetch_array(mysql_query("select * from forms where form_id='". intval($_REQUEST['form_id']) ."' and user_id='". $userinfo['user_id'] ."'"));
 
 ?>
 <script type="text/javascript">
@@ -320,40 +320,32 @@ $formdata=mysql_fetch_array(mysql_query("select * from forms where form_id='". i
 	<form id="mainForm" action="" method="post">
 	<textarea id="formdata" name="formdata"></textarea>
 	</form>
-	<div id="toolboxdraghanel" class="ui-widget-header" >ط´ط±ظٹط· ط§ظ„ط£ط¯ظˆط§طھ</div>
+	<div id="toolboxdraghanel" class="ui-widget-header" >شريط الأدوات</div>
 
 	<button onclick="addformelement();" style="font-size:10px">ab</button>
-	<button onclick="removeelement();" style="font-size:10px">ط­ط°ظپ</button>
+	<button onclick="removeelement();" style="font-size:10px">حذف</button>
 	<br>
-	ط§ظ„ط¹ظ†طµط±:<br><input class='property' type="text" name="nid" id="nid"><br>
+	العنصر:<br><input class='property' type="text" name="nid" id="nid"><br>
 	X:<br><input class='property' type="text" name="xcordinate" id="xcordinate"><br>
 	Y:<br><input class='property'  type="text" name="ycordinate" id="ycordinate"><br>
 	W:<br><input class='property'  type="text" name="wwidth" id="wwidth"><br>
 	H:<br><input class='property'  type="text" name="hheight" id="hheight"><br>
-	ط§ظ„ط£ط³ظ…:<br><input class='property'  type="text" name="nname" id="nname" ><br>
-	ط§ظ„ط®ط· :<br>
+	الأسم:<br><input class='property'  type="text" name="nname" id="nname" ><br>
+	الخط :<br>
 	<select  class='property' name="fontname" id="fontname">
 	<option>Arial</option>
 	<option>Tahoma</option>
 	</select>
 	<input  class='property' type="text" name="fontsize" id="fontsize" size="2"><br>
-	ط§ظ„ظ„ظˆظ† : <br>
+	اللون : <br>
 	<input  class='property' type="text" name="colorpicker" value="12" id="colorpicker">
 	<br>
-	<input type="text" value="ط­ظپط¸" onclick="formData();">
+	<input type="text" value="حفظ" onclick="formData();">
 	</div>
 	
 	
  
  
- <!--
-	<div class="formelementhandel" id='feh1' ><textarea type=text id='fe1' class="formelement" ></textarea></div>
-	<div class="formelementhandel" id='feh2' ><textarea type=text id='fe2' class="formelement" ></textarea></div>
-	<div class="formelementhandel" id='feh3' ><textarea type=text id='fe3' class="formelement" ></textarea></div>
-	<div class="formelementhandel" id='feh4' ><textarea type=text id='fe4' class="formelement" ></textarea></div>
--->
-	
-	
  
 
 

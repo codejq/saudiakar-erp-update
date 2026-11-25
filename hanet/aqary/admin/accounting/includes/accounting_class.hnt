@@ -364,6 +364,17 @@ class AccountingManager {
             return ['success' => false, 'error' => 'القيد غير متوازن: المدين لا يساوي الدائن'];
         }
         
+        // The entry belongs to the year of its own date; closed years accept nothing.
+        $yearStmt = $this->db->prepare("SELECT fiscal_year, status FROM acc_fiscal_years WHERE ? BETWEEN start_date AND end_date LIMIT 1");
+        $yearStmt->bind_param("s", $data['entry_date']);
+        $yearStmt->execute();
+        $yearRow = $yearStmt->get_result()->fetch_assoc();
+        $yearStmt->close();
+        if ($yearRow && $yearRow['status'] !== 'open') {
+            return ['success' => false, 'error' => 'السنة المالية لهذا التاريخ مقفلة', 'message' => 'السنة المالية لهذا التاريخ مقفلة'];
+        }
+        $entryFiscalYear = $yearRow ? (int)$yearRow['fiscal_year'] : (int)date('Y', strtotime($data['entry_date']));
+
         // Generate entry number
         $entryNumber = $this->generateEntryNumber();
 
@@ -433,7 +444,7 @@ class AccountingManager {
             $data['description'],
             $totalDebit,
             $totalCredit,
-            $this->fiscalYear,
+            $entryFiscalYear,
             $fiscalPeriod,
             $status,
             $this->userId
@@ -1547,6 +1558,74 @@ class AccountingManager {
     }
     
     /**
+     * Draft invoice of a receipt: no journal entry. Caller owns the transaction.
+     * Seller fields stay NULL so the company's own data is used everywhere.
+     */
+    public function createReceiptDraftInvoice(array $data, array $items) {
+        $lockName = 'acc-invoice-number:' . substr(hash('sha256', receiptCommissionRows($this->db, 'SELECT DATABASE() db')[0]['db']), 0, 40);
+        if (empty(receiptCommissionRows($this->db, 'SELECT GET_LOCK(?,5) a', [$lockName])[0]['a'])) {
+            throw new RuntimeException('ترقيم الفواتير مشغول، حاول مجدداً.');
+        }
+        try {
+            $number = $this->generateInvoiceNumber($data['invoice_type']);
+            $row = $data + [
+                'invoice_number' => $number, 'due_date' => $data['invoice_date'], 'paid_amount' => 0, 'remaining_amount' => $data['total_amount'],
+                'payment_status' => 'unpaid', 'status' => 'draft', 'seller_source' => 'company', 'created_by' => $this->userId,
+                'formuid' => 'receipt-' . $data['sanad_id'] . '-' . bin2hex(random_bytes(6)),
+            ];
+            // Older installations may lack optional columns such as seller_source.
+            $columns = array_column(receiptCommissionRows($this->db, 'SHOW COLUMNS FROM acc_invoices'), 'Field');
+            $row = array_intersect_key($row, array_flip($columns));
+            receiptCommissionQuery($this->db, 'INSERT INTO acc_invoices (' . implode(',', array_keys($row)) . ')
+                VALUES (' . implode(',', array_fill(0, count($row), '?')) . ')', array_values($row))->close();
+            $invoiceId = (int)$this->db->insert_id;
+            foreach ($items as $item) {
+                receiptCommissionQuery($this->db, 'INSERT INTO acc_invoice_items (invoice_id,item_description,quantity,unit_price,vat_rate,discount,line_total) VALUES (?,?,1,?,?,0,?)',
+                    [$invoiceId, $item['description'], $item['price'], $item['rate'], $item['total']])->close();
+            }
+        } finally {
+            receiptCommissionRows($this->db, 'SELECT RELEASE_LOCK(?) r', [$lockName]);
+        }
+        $this->logAudit('create', 'receipt_draft_invoice', $invoiceId, null, ['sanad_id' => $data['sanad_id']]);
+        return ['invoice_id' => $invoiceId, 'invoice_number' => $number];
+    }
+
+    /** Accounts of manual invoice payments, from settings; the invoice's own receivable account. */
+    public function getInvoicePaymentAccounts(): array {
+        $find = function ($keys, $code) {
+            foreach ($keys as $key) {
+                $id = (int)$this->getSetting($key, 0);
+                if ($id > 0 && receiptCommissionRows($this->db, 'SELECT account_id FROM acc_chart_of_accounts WHERE account_id=? AND is_active=1', [$id])) return $id;
+            }
+            return (int)(receiptCommissionRows($this->db, 'SELECT account_id FROM acc_chart_of_accounts WHERE account_code=? AND is_active=1', [$code])[0]['account_id'] ?? 0);
+        };
+        return [
+            'cash' => $find(['default_receipt_cash_account_id', 'default_invoice_cash_account_id'], '1111'),
+            'bank' => $find(['default_receipt_bank_account_id'], '1112'),
+            'receivable' => $find(['default_invoice_receivable_account_id', 'default_receivable_account_id'], '1121'),
+        ];
+    }
+
+    /** Receipt drafts and cancelled drafts are not receivables yet. */
+    private function unpostedReceiptInvoiceSql($alias = 'inv') {
+        static $hasColumn = [];
+        $key = spl_object_id($this->db);
+        if (!isset($hasColumn[$key])) {
+            $check = $this->db->query("SHOW COLUMNS FROM acc_invoices LIKE 'sanad_id'");
+            $hasColumn[$key] = $check && $check->num_rows > 0;
+        }
+        if (!$hasColumn[$key]) return '';
+        // A reversed invoice stays in its own period; the reversal entry offsets it on its date.
+        static $hasReversal = [];
+        if (!isset($hasReversal[$key])) {
+            $check = $this->db->query("SHOW COLUMNS FROM acc_invoices LIKE 'reversed_date'");
+            $hasReversal[$key] = $check && $check->num_rows > 0;
+        }
+        $cancelled = $hasReversal[$key] ? "($alias.status = 'cancelled' AND $alias.reversed_date IS NULL)" : "$alias.status = 'cancelled'";
+        return " AND NOT (COALESCE($alias.sanad_id, 0) > 0 AND ($alias.status = 'draft' OR $cancelled))";
+    }
+
+    /**
      * Generate invoice number
      * توليد رقم الفاتورة
      */
@@ -1586,7 +1665,8 @@ class AccountingManager {
             }
         }
 
-        $ownersResult = $this->db->query("SELECT malekid AS owner_id, malekbayan1 AS owner_name FROM malek WHERE malekbayan1 != '' ORDER BY malekbayan1 ASC");
+        // Entries store amlak.ownerid, which belongs to amlakowner (malek has its own IDs).
+        $ownersResult = $this->db->query("SELECT ownerid AS owner_id, ownername AS owner_name FROM amlakowner WHERE ownername != '' ORDER BY ownername ASC");
         if ($ownersResult) {
             while ($row = $ownersResult->fetch_assoc()) {
                 $owners[] = $row;
@@ -1600,7 +1680,24 @@ class AccountingManager {
             }
         }
 
+        $units = [];
+        $unitsResult = $this->db->query("SELECT d.idsubaqar AS unit_id,
+                CONCAT(COALESCE(a.aqarname, ''), ' - ', IF(d.rakam != '', d.rakam, CONCAT('#', d.idsubaqar))) AS unit_name
+            FROM amlakdetails d LEFT JOIN amlak a ON a.idaqar = d.idaqar
+            ORDER BY a.aqarname ASC, d.rakam ASC, d.idsubaqar ASC");
+        if ($unitsResult) {
+            $units = $unitsResult->fetch_all(MYSQLI_ASSOC);
+        }
+
+        $invoices = [];
+        $invoicesResult = $this->db->query("SELECT invoice_id, invoice_number, customer_name FROM acc_invoices ORDER BY invoice_id DESC LIMIT 2000");
+        if ($invoicesResult) {
+            $invoices = $invoicesResult->fetch_all(MYSQLI_ASSOC);
+        }
+
         return [
+            'units' => $units,
+            'invoices' => $invoices,
             'journals' => $this->getActiveJournals(),
             'cost_centers' => $this->getActiveCostCenters(),
             'properties' => $properties,
@@ -1653,6 +1750,18 @@ class AccountingManager {
             $types .= 'i';
         }
 
+        if (!empty($filters['subaqar_id'])) {
+            $conditions[] = "COALESCE($entryAlias.subaqar_id, $costCenterAlias.subaqar_id) = ?";
+            $params[] = (int)$filters['subaqar_id'];
+            $types .= 'i';
+        }
+
+        if (!empty($filters['invoice_id'])) {
+            $conditions[] = "COALESCE(NULLIF($entryAlias.invoice_id, 0), IF($entryAlias.reference_type = 'invoice', $entryAlias.reference_id, NULL)) = ?";
+            $params[] = (int)$filters['invoice_id'];
+            $types .= 'i';
+        }
+
         return [
             'sql' => !empty($conditions) ? (' AND ' . implode(' AND ', $conditions)) : '',
             'params' => $params,
@@ -1698,6 +1807,18 @@ class AccountingManager {
         if (!empty($filters['egar_id'])) {
             $conditions[] = "COALESCE($invoiceAlias.egar_id, $entryAlias.egar_id) = ?";
             $params[] = (int)$filters['egar_id'];
+            $types .= 'i';
+        }
+
+        if (!empty($filters['subaqar_id'])) {
+            $conditions[] = "COALESCE($invoiceAlias.subaqar_id, $entryAlias.subaqar_id) = ?";
+            $params[] = (int)$filters['subaqar_id'];
+            $types .= 'i';
+        }
+
+        if (!empty($filters['invoice_id'])) {
+            $conditions[] = "$invoiceAlias.invoice_id = ?";
+            $params[] = (int)$filters['invoice_id'];
             $types .= 'i';
         }
 
@@ -2023,7 +2144,7 @@ class AccountingManager {
             LEFT JOIN acc_journals inv_j ON inv.journal_id = inv_j.journal_id
             LEFT JOIN acc_journals j ON je.journal_id = j.journal_id
             WHERE inv.customer_id = ?
-              AND inv.invoice_date BETWEEN ? AND ?" . $invoiceDimensionClause['sql'] . "
+              AND inv.invoice_date BETWEEN ? AND ?" . $this->unpostedReceiptInvoiceSql() . $invoiceDimensionClause['sql'] . "
             GROUP BY inv.invoice_id
             ORDER BY inv.invoice_date, inv.invoice_id";
 
@@ -2044,7 +2165,7 @@ class AccountingManager {
                 LEFT JOIN acc_cost_centers inv_cc ON inv.cost_center_id = inv_cc.cost_center_id
                 LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
                 WHERE inv.customer_id = ?
-                  AND inv.invoice_date < ?" . $invoiceDimensionClause['sql'] . "
+                  AND inv.invoice_date < ?" . $this->unpostedReceiptInvoiceSql() . $invoiceDimensionClause['sql'] . "
                 GROUP BY inv.invoice_id
             ) inv";
         $openingInvoiceStmt = $this->db->prepare($openingInvoiceSql);
@@ -2078,7 +2199,7 @@ class AccountingManager {
             WHERE je.status = 'posted'
               AND " . $receiptScope['condition'] . "
               AND (acc.account_code = ? OR acc.account_id = ?)
-              AND (jel.credit_amount - jel.debit_amount) > 0
+              AND ((jel.credit_amount - jel.debit_amount) > 0 OR je.reference_type = 'reversal')
               AND je.entry_date BETWEEN ? AND ?" . $dimensionClause['sql'] . "
             GROUP BY je.entry_id
             ORDER BY je.entry_date, je.entry_id";
@@ -2101,7 +2222,7 @@ class AccountingManager {
                 WHERE je.status = 'posted'
                   AND " . $receiptScope['condition'] . "
                   AND (acc.account_code = ? OR acc.account_id = ?)
-                  AND (jel.credit_amount - jel.debit_amount) > 0
+                  AND ((jel.credit_amount - jel.debit_amount) > 0 OR je.reference_type = 'reversal')
                   AND je.entry_date < ?" . $dimensionClause['sql'] . "
                 GROUP BY je.entry_id
             ) payment_rows";
@@ -2195,7 +2316,7 @@ class AccountingManager {
             LEFT JOIN acc_cost_centers inv_cc ON inv.cost_center_id = inv_cc.cost_center_id
             LEFT JOIN acc_cost_centers cc ON jel.cost_center_id = cc.cost_center_id
             WHERE inv.invoice_date <= ?
-              AND COALESCE(inv.remaining_amount, inv.total_amount - inv.paid_amount) >= 0" . $dimensionClause['sql'] . "
+              AND COALESCE(inv.remaining_amount, inv.total_amount - inv.paid_amount) >= 0" . $this->unpostedReceiptInvoiceSql() . $dimensionClause['sql'] . "
             GROUP BY inv.invoice_id
             ORDER BY inv.customer_name, inv.invoice_date";
         $stmt = $this->db->prepare($sql);
@@ -2438,6 +2559,7 @@ class AccountingManager {
         $movementSql = "SELECT
                 acc.account_code,
                 acc.account_name_ar,
+                je.entry_id,
                 je.entry_number,
                 je.entry_date,
                 je.description AS entry_description,

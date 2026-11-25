@@ -1,0 +1,333 @@
+<?php
+/** Review of receipt draft invoices, held receipts and the sync accounts. */
+$sc_title = 'مراجعة فواتير سندات القبض';
+$sc_id = '211';
+$use_accounting_theme = true;
+require_once '../../header.hnt';
+require_once __DIR__ . '/includes/accounting_class.hnt';
+require_once __DIR__ . '/includes/amlak_integration.hnt';
+require_once __DIR__ . '/includes/entry_links.hnt';
+
+$screen = 'accounting_receipt_review';
+if (!receiptCommissionCan($db, $screen, 'sees')) {
+    echo '<div class="alert alert-danger m-4">ليس لديك صلاحية مراجعة فواتير السندات.</div>';
+    require '../../foter.hnt';
+    exit;
+}
+$canEdit = receiptCommissionCan($db, $screen, 'edits');
+if (empty($_SESSION['receipt_review_csrf'])) $_SESSION['receipt_review_csrf'] = bin2hex(random_bytes(24));
+
+$ready = receiptSyncReady($db);
+$manager = new AccountingManager($db, (int)($_SESSION['useridv'] ?? 0));
+$integration = new AmlakAccountingIntegration($db, $manager);
+$messages = [];
+
+$accountSettings = [
+    'default_owner_payable_account_id' => 'ذمم الملاك',
+    'default_owner_recoverable_account_id' => 'مصروفات مستردة من الملاك',
+    'default_deposits_account_id' => 'تأمينات المستأجرين',
+    'default_commission_revenue_account_id' => 'إيراد العمولات (السعي)',
+    'default_management_fee_account_id' => 'إيراد أتعاب الإدارة',
+    'default_services_revenue_account_id' => 'إيراد الخدمات',
+    'default_water_revenue_account_id' => 'إيراد المياه',
+    'default_other_revenue_account_id' => 'إيرادات أخرى',
+    'default_input_vat_account_id' => 'ضريبة المدخلات',
+];
+$banks = receiptCommissionRows($db, 'SELECT id,bankname,acountholder,acountnumber FROM bankacounts WHERE ownerid2=0 ORDER BY id');
+foreach ($banks as $bank) $accountSettings['bank_account_' . (int)$bank['id']] = 'بنك: ' . $bank['bankname'] . ' - ' . $bank['acountnumber'];
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $token = $_POST['csrf_token'] ?? '';
+    $action = is_string($_POST['action'] ?? null) ? $_POST['action'] : '';
+    if (!is_string($token) || !hash_equals($_SESSION['receipt_review_csrf'], $token)) {
+        $messages[] = ['danger', 'انتهت صلاحية النموذج. أعد تحميل الصفحة.'];
+    } elseif (!$canEdit) {
+        $messages[] = ['danger', 'ليس لديك صلاحية التعديل.'];
+    } elseif (!$ready) {
+        $messages[] = ['warning', 'افتح إدارة الأملاك أولاً لتثبيت تحديث المزامنة.'];
+    } elseif ($action === 'approve' || $action === 'void') {
+        $ids = array_slice(array_unique(array_filter(array_map('intval', (array)($_POST['invoice_ids'] ?? [])))), 0, 100);
+        $done = 0;
+        foreach ($ids as $id) {
+            $result = $action === 'approve' ? $integration->approveReceiptInvoice($id) : $integration->voidReceiptInvoice($id);
+            if (!empty($result['success'])) $done++;
+            else $messages[] = ['danger', 'الفاتورة #' . $id . ': ' . ($result['message'] ?? 'خطأ غير معروف')];
+        }
+        if (!$ids) $messages[] = ['warning', 'اختر فاتورة واحدة على الأقل.'];
+        elseif ($done) $messages[] = ['success', ($action === 'approve' ? 'تم اعتماد وترحيل ' : 'تم إلغاء ') . $done . ' فاتورة.'];
+    } elseif ($action === 'release') {
+        $result = $integration->releaseHeldReceipt((int)($_POST['receipt_id'] ?? 0), is_array($_POST['parts'] ?? null) ? $_POST['parts'] : []);
+        $messages[] = !empty($result['success']) ? ['success', 'تم اعتماد تفاصيل السند؛ سيظهر في المزامنة التالية.'] : ['danger', $result['message']];
+    } elseif ($action === 'accounts') {
+        $saved = true;
+        foreach ($accountSettings as $key => $label) {
+            $accountId = (int)($_POST['accounts'][$key] ?? 0);
+            if ($accountId > 0 && !receiptCommissionRows($db, 'SELECT account_id FROM acc_chart_of_accounts WHERE account_id=? AND is_active=1 AND is_leaf=1', [$accountId])) { $saved = false; continue; }
+            receiptCommissionQuery($db, "INSERT INTO acc_system_settings (setting_key,setting_value,setting_category,description_ar,formuid) VALUES (?,?,'amlak_integration',?,UUID())
+                ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)", [$key, $accountId > 0 ? (string)$accountId : '', mb_substr($label, 0, 250, 'UTF-8')])->close();
+        }
+        $messages[] = $saved ? ['success', 'تم حفظ حسابات المزامنة.'] : ['warning', 'حُفظت الحسابات الصحيحة فقط؛ أحد الحسابات غير طرفي أو غير نشط.'];
+    }
+}
+
+$drafts = $held = [];
+if ($ready) {
+    $drafts = receiptCommissionRows($db, "SELECT i.*,s.sanaddate,c.rent,c.rent_vat,c.commission,c.commission_vat,c.water,c.services,c.insurance,c.other,c.other_vat
+        FROM acc_invoices i JOIN sanad s ON s.idsanad=i.sanad_id LEFT JOIN sanad_components c ON c.idsanad=i.sanad_id
+        WHERE i.sanad_id>0 AND i.status='draft' ORDER BY i.invoice_date,i.invoice_id LIMIT 200");
+    $held = receiptCommissionRows($db, "SELECT c.*,sanad.mostagername,sanad.depositeamount,sanad.sanaddate,sanad.mybyan,sanad.kastid AS installment
+        FROM sanad_components c JOIN sanad ON sanad.idsanad=c.idsanad WHERE c.status='review' AND " . amlakSyncDateSql($db, 'sanaddate') . ' ORDER BY sanad.sanaddate,c.idsanad LIMIT 50');
+}
+$approved = $approvedLines = $approvedLinks = [];
+if ($ready) {
+    $approved = receiptCommissionRows($db, "SELECT j.entry_id,j.entry_number,j.entry_date,j.description,j.notes,j.reference_type,i.invoice_id,i.invoice_number,i.sanad_id
+        FROM acc_invoices i JOIN acc_journal_entries j ON j.invoice_id=i.invoice_id AND j.status='posted' AND COALESCE(j.reference_type,'')<>'reversal'"
+        . accountingLiveEntrySql($db) . " WHERE i.sanad_id>0 AND i.status='posted' ORDER BY i.invoice_id DESC,j.entry_id LIMIT 40");
+    if ($approved) {
+        $approvedIds = implode(',', array_map('intval', array_column($approved, 'entry_id')));
+        foreach (receiptCommissionRows($db, "SELECT l.*,a.account_code,a.account_name_ar FROM acc_journal_entry_lines l JOIN acc_chart_of_accounts a ON a.account_id=l.account_id
+            WHERE l.entry_id IN ({$approvedIds}) ORDER BY l.entry_id,l.line_number") as $line) $approvedLines[(int)$line['entry_id']][] = $line;
+        $approvedLinks = accountingEntryLinks($db, array_column($approved, 'entry_id'));
+    }
+}
+$partLabels = ['rent' => 'إيجار', 'rent_vat' => 'ضريبة الإيجار', 'commission' => 'عمولة', 'commission_vat' => 'ضريبة العمولة', 'water' => 'مياه',
+    'services' => 'خدمات', 'insurance' => 'تأمين', 'other' => 'إيراد آخر', 'other_vat' => 'ضريبة إيراد آخر'];
+$accounts = $manager->getAllAccounts(['is_active' => 1, 'is_leaf' => 1]);
+$token = accountingLinkEsc($_SESSION['receipt_review_csrf']);
+$receiptUrl = '/aqary/admin/include/amlak/selectprintform.hnt?formtype=recivevoucher&id=';
+?>
+<div class="container-fluid p-4" dir="rtl">
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+        <h3 class="mb-0"><i class="bi bi-clipboard-check me-2"></i><?= $sc_title ?></h3>
+        <div><a class="btn btn-outline-primary" href="sync_amlak.hnt">المزامنة</a> <a class="btn btn-outline-secondary" href="index.hnt">المحاسبة</a></div>
+    </div>
+    <?php if (!$ready): ?><div class="alert alert-warning">افتح إدارة الأملاك أولاً لتثبيت تحديث المزامنة.</div><?php endif; ?>
+    <?php foreach ($messages as [$type, $text]): ?><div class="alert alert-<?= $type ?>"><?= accountingLinkEsc($text) ?></div><?php endforeach; ?>
+
+    <div class="card mb-4">
+        <div class="card-header fw-bold">مسودات بانتظار الاعتماد (<?= count($drafts) ?>)</div>
+        <div class="card-body">
+            <p class="text-muted">الاعتماد يرحّل الفاتورة والتحصيل معاً. الإرسال للهيئة يبقى من صفحة الفواتير وبقرار المستخدم.</p>
+            <form method="post" id="draftsForm">
+                <input type="hidden" name="csrf_token" value="<?= $token ?>">
+                <div class="table-responsive"><table class="table table-sm align-middle">
+                    <thead><tr><th><input type="checkbox" class="form-check-input" id="allDrafts"></th><th>الفاتورة</th><th>السند</th><th>التاريخ</th><th>العميل</th><th>التفاصيل</th><th class="text-end">الضريبة</th><th class="text-end">الإجمالي</th><th></th></tr></thead>
+                    <tbody>
+                    <?php foreach ($drafts as $draft):
+                        $parts = [];
+                        $taxable = $untaxed = false;
+                        foreach ($partLabels as $key => $label) {
+                            $value = (float)($draft[$key] ?? 0);
+                            if ($value == 0) continue;
+                            $parts[] = $label . ' ' . number_format($value, 2);
+                            if (substr($key, -4) !== '_vat') { if ((float)($draft[$key . '_vat'] ?? 0) > 0) $taxable = true; else $untaxed = true; }
+                        } ?>
+                        <tr>
+                            <td><input type="checkbox" class="form-check-input draft-box" name="invoice_ids[]" value="<?= (int)$draft['invoice_id'] ?>"></td>
+                            <td><a target="_blank" rel="noopener" href="modules/invoices/view.hnt?id=<?= (int)$draft['invoice_id'] ?>"><?= accountingLinkEsc($draft['invoice_number']) ?></a></td>
+                            <td><a target="_blank" rel="noopener" href="<?= $receiptUrl . (int)$draft['sanad_id'] ?>">#<?= (int)$draft['sanad_id'] ?></a></td>
+                            <td><?= accountingLinkEsc($draft['invoice_date']) ?></td>
+                            <td><?= accountingLinkEsc($draft['customer_name']) ?></td>
+                            <td><?= accountingLinkEsc(implode(' | ', $parts)) ?>
+                                <?php if ($draft['zatca_status'] === 'submitted'): ?><span class="badge text-bg-info">أُرسلت للهيئة</span><?php endif; ?>
+                                <?php if ($taxable && $untaxed): ?><div class="small text-danger">فاتورة مختلطة: الإرسال الحالي للهيئة يسجل كل البنود بضريبة 15%.</div>
+                                <?php elseif ($untaxed): ?><div class="small text-danger">بلا ضريبة: الإرسال الحالي للهيئة يسجل كل البنود بضريبة 15%.</div><?php endif; ?></td>
+                            <td class="text-end"><?= number_format((float)$draft['vat_amount'], 2) ?></td>
+                            <td class="text-end fw-bold"><?= number_format((float)$draft['total_amount'], 2) ?></td>
+                            <td><button type="button" class="btn btn-sm btn-outline-primary text-nowrap" onclick="openReceiptEntries(<?= (int)$draft['invoice_id'] ?>)"><i class="bi bi-journal-text me-1"></i><?= $canEdit ? 'عرض وتعديل القيد' : 'عرض القيد' ?></button></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    <?php if (!$drafts): ?><tr><td colspan="9" class="text-center text-muted">لا توجد مسودات.</td></tr><?php endif; ?>
+                    </tbody>
+                </table></div>
+                <?php if ($canEdit && $drafts): ?>
+                <button class="btn btn-success" name="action" value="approve"><i class="bi bi-check2-all me-1"></i>اعتماد وترحيل المحدد</button>
+                <button class="btn btn-outline-danger" name="action" value="void"><i class="bi bi-x-circle me-1"></i>إلغاء المسودات المحددة</button>
+                <?php endif; ?>
+            </form>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header fw-bold">سندات محجوزة للمراجعة (<?= count($held) ?>)</div>
+        <div class="card-body">
+            <?php if (!$held): ?><p class="text-center text-muted mb-0">لا توجد سندات محجوزة.</p><?php endif; ?>
+            <?php foreach ($held as $row): ?>
+            <form method="post" class="border rounded p-3 mb-3 held-form" data-total="<?= accountingLinkEsc($row['depositeamount']) ?>">
+                <input type="hidden" name="csrf_token" value="<?= $token ?>"><input type="hidden" name="action" value="release"><input type="hidden" name="receipt_id" value="<?= (int)$row['idsanad'] ?>">
+                <div class="d-flex flex-wrap justify-content-between mb-2">
+                    <div><a target="_blank" rel="noopener" href="<?= $receiptUrl . (int)$row['idsanad'] . ((int)$row['installment'] > 0 ? '' : '&voucer_type=free2') ?>">سند #<?= (int)$row['idsanad'] ?></a> - <?= accountingLinkEsc($row['mostagername']) ?> - <?= date('d/m/Y', amlakSyncNormalizeTimestamp($row['sanaddate'])) ?><div class="small text-muted"><?= accountingLinkEsc($row['mybyan']) ?></div></div>
+                    <div class="fw-bold">المبلغ: <?= number_format((float)$row['depositeamount'], 2) ?> | الفرق: <span class="held-diff">0.00</span></div>
+                </div>
+                <div class="alert alert-warning py-2"><?= accountingLinkEsc(implode('، ', json_decode((string)$row['warnings'], true) ?: [])) ?></div>
+                <div class="row g-2">
+                    <?php foreach ($partLabels as $key => $label): ?>
+                    <div class="col-6 col-md-2"><label class="form-label small"><?= $label ?></label>
+                        <input type="number" step="0.01" min="0" class="form-control form-control-sm held-part" name="parts[<?= $key ?>]" value="<?= accountingLinkEsc($row[$key]) ?>" <?= $canEdit ? '' : 'disabled' ?>></div>
+                    <?php endforeach; ?>
+                    <?php if ($canEdit): ?><div class="col-6 col-md-2 d-flex align-items-end"><button class="btn btn-sm btn-primary w-100">حفظ وإطلاق السند</button></div><?php endif; ?>
+                </div>
+            </form>
+            <?php endforeach; ?>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header fw-bold">آخر القيود المرحلة من السندات</div>
+        <div class="card-body">
+            <p class="text-muted">القيد المرحّل لا يعدل؛ لتصحيحه افتحه واستخدم "عكس القيد"، ثم أعد المزامنة.</p>
+            <?php foreach ($approved as $row): ?>
+            <details class="border rounded p-2 mb-2">
+                <summary><?= accountingLinkEsc($row['entry_number']) ?> - <?= accountingLinkEsc($row['entry_date']) ?> - <?= accountingLinkEsc($row['description']) ?>
+                    <?php if ($row['notes'] === 'عُدل القيد عند الاعتماد'): ?><span class="badge text-bg-warning">عُدل عند الاعتماد</span><?php endif; ?></summary>
+                <div class="my-2"><?= accountingRenderEntryLinks($approvedLinks[(int)$row['entry_id']] ?? []) ?> <?= accountingEntryPageLink($row['entry_id'], 'فتح القيد') ?></div>
+                <table class="table table-sm mb-0"><thead><tr><th>الحساب</th><th>البيان</th><th class="text-end">مدين</th><th class="text-end">دائن</th></tr></thead><tbody>
+                <?php foreach ($approvedLines[(int)$row['entry_id']] ?? [] as $line): ?><tr><td><?= accountingLinkEsc($line['account_code'] . ' - ' . $line['account_name_ar']) ?></td><td><?= accountingLinkEsc($line['description']) ?></td>
+                    <td class="text-end"><?= (float)$line['debit_amount'] > 0 ? number_format((float)$line['debit_amount'], 2) : '-' ?></td><td class="text-end"><?= (float)$line['credit_amount'] > 0 ? number_format((float)$line['credit_amount'], 2) : '-' ?></td></tr><?php endforeach; ?>
+                </tbody></table>
+            </details>
+            <?php endforeach; ?>
+            <?php if (!$approved): ?><p class="text-center text-muted mb-0">لا توجد قيود مرحلة.</p><?php endif; ?>
+        </div>
+    </div>
+
+    <form method="post" class="card mb-4">
+        <div class="card-header fw-bold">حسابات المزامنة</div>
+        <div class="card-body row g-3">
+            <input type="hidden" name="csrf_token" value="<?= $token ?>"><input type="hidden" name="action" value="accounts">
+            <?php foreach ($accountSettings as $key => $label): $current = (int)$manager->getSetting($key, 0); ?>
+            <div class="col-md-4"><label class="form-label"><?= accountingLinkEsc($label) ?></label>
+                <select class="form-select" name="accounts[<?= $key ?>]" <?= $canEdit ? '' : 'disabled' ?>>
+                    <option value=""><?= strpos($key, 'bank_account_') === 0 ? 'حساب البنوك الافتراضي' : '-- اختر الحساب --' ?></option>
+                    <?php foreach ($accounts as $account): ?><option value="<?= (int)$account['account_id'] ?>" <?= $current === (int)$account['account_id'] ? 'selected' : '' ?>><?= accountingLinkEsc($account['account_code'] . ' - ' . $account['account_name_ar']) ?></option><?php endforeach; ?>
+                </select></div>
+            <?php endforeach; ?>
+            <?php if ($canEdit): ?><div class="col-12"><button class="btn btn-primary">حفظ الحسابات</button></div><?php endif; ?>
+        </div>
+    </form>
+</div>
+<div class="modal fade" id="receiptEntriesModal" tabindex="-1" data-bs-focus="false" dir="rtl">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">قيود الفاتورة <span id="entriesInvoice"></span></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+            <div id="entriesMessage"></div>
+            <div id="entriesBody"></div>
+        </div>
+        <div class="modal-footer">
+            <span class="text-muted me-auto small">بنود ذمم العميل والضريبة وذمة المندوب ثابتة.</span>
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إغلاق</button>
+            <?php if ($canEdit): ?><button type="button" class="btn btn-success" id="entriesApprove">اعتماد وترحيل بهذا القيد</button><?php endif; ?>
+        </div>
+    </div></div>
+</div>
+<script>
+const reviewToken = <?= json_encode($_SESSION['receipt_review_csrf']) ?>;
+const reviewCanEdit = <?= $canEdit ? 'true' : 'false' ?>;
+const reviewAccounts = <?= json_encode(array_map(function ($account) { return ['id' => (int)$account['account_id'], 'label' => $account['account_code'] . ' - ' . $account['account_name_ar']]; }, $accounts), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_INVALID_UTF8_SUBSTITUTE) ?>;
+let reviewEntries = null;
+function reviewMessage(type, text) {
+    const box = $('#entriesMessage').empty();
+    if (text) box.append($('<div class="alert"></div>').addClass('alert-' + type).text(text));
+}
+function reviewRow(line, side) {
+    const row = $('<tr class="entry-line"></tr>').attr('data-key', line.key).attr('data-mode', line.mode).attr('data-side', side);
+    const select = $('<select class="form-select form-select-sm line-account"></select>').prop('disabled', !reviewCanEdit || line.mode === 'fixed');
+    if (!reviewAccounts.some(a => a.id === line.account_id) && line.account_id) select.append($('<option></option>').val(line.account_id).text('#' + line.account_id));
+    reviewAccounts.forEach(a => select.append($('<option></option>').val(a.id).text(a.label)));
+    select.val(line.account_id);
+    const amount = $('<input type="number" step="0.01" min="0.01" class="form-control form-control-sm line-amount">').val((side === 'debit' ? line.debit : line.credit).toFixed(2)).prop('disabled', !reviewCanEdit || line.mode !== 'free');
+    const text = $('<input type="text" maxlength="250" class="form-control form-control-sm line-text">').val(line.description).prop('disabled', !reviewCanEdit);
+    row.append($('<td style="min-width:260px"></td>').append(select), $('<td style="min-width:220px"></td>').append(text),
+        $('<td></td>').append(side === 'debit' ? amount : '-'), $('<td></td>').append(side === 'credit' ? amount : '-'));
+    const tools = $('<td></td>');
+    if (reviewCanEdit && line.mode === 'free') tools.append($('<button type="button" class="btn btn-sm btn-outline-danger line-remove"><i class="bi bi-trash"></i></button>'));
+    return row.append(tools);
+}
+function reviewTable(name, title, lines) {
+    const free = lines.find(l => l.mode === 'free');
+    const freeSide = free && free.debit > 0 ? 'debit' : 'credit';
+    const box = $('<div class="entry-box border rounded p-2 mb-3"></div>').attr('data-entry', name).attr('data-free-side', freeSide);
+    const body = $('<tbody></tbody>');
+    lines.forEach(l => body.append(reviewRow(l, l.debit > 0 ? 'debit' : 'credit')));
+    box.append($('<h6></h6>').text(title), $('<div class="table-responsive"></div>').append($('<table class="table table-sm align-middle mb-1"><thead><tr><th>الحساب</th><th>البيان</th><th>مدين</th><th>دائن</th><th></th></tr></thead></table>').append(body)));
+    if (reviewCanEdit) box.append($('<button type="button" class="btn btn-sm btn-outline-primary line-add"><i class="bi bi-plus me-1"></i>إضافة بند</button>'));
+    return box.append($('<div class="fw-bold mt-2 entry-balance"></div>'));
+}
+function reviewBalance() {
+    let balanced = true;
+    $('.entry-box').each(function () {
+        let debit = 0, credit = 0;
+        $(this).find('.entry-line').each(function () {
+            const value = Math.round((parseFloat($(this).find('.line-amount').val()) || 0) * 100);
+            if ($(this).data('side') === 'debit') debit += value; else credit += value;
+        });
+        const ok = debit === credit && debit > 0;
+        balanced = balanced && ok;
+        $(this).find('.entry-balance').text('المدين ' + (debit / 100).toFixed(2) + ' | الدائن ' + (credit / 100).toFixed(2) + (ok ? ' - متوازن' : ' - الفرق ' + ((debit - credit) / 100).toFixed(2)))
+            .toggleClass('text-success', ok).toggleClass('text-danger', !ok);
+    });
+    $('#entriesApprove').prop('disabled', !balanced || !reviewEntries);
+}
+function openReceiptEntries(id) {
+    reviewEntries = null;
+    reviewMessage('', '');
+    $('#entriesBody').html('<div class="text-center py-4"><span class="spinner-border"></span></div>');
+    $('#entriesInvoice').text('');
+    $('#entriesApprove').prop('disabled', true);
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('receiptEntriesModal')).show();
+    $.ajax({url: 'receipt_review.api.hnt', type: 'POST', dataType: 'json', data: {action: 'preview', invoice_id: id, csrf_token: reviewToken}})
+        .done(function (data) {
+            $('#entriesBody').empty();
+            if (!data.success) { reviewMessage('danger', data.message); return; }
+            reviewEntries = {id: id};
+            $('#entriesInvoice').text(data.invoice_number + ' - ' + data.date);
+            $('#entriesBody').append(reviewTable('invoice', 'قيد الفاتورة', data.invoice), reviewTable('receipt', 'قيد التحصيل', data.receipt));
+            reviewBalance();
+        }).fail(function () { $('#entriesBody').empty(); reviewMessage('danger', 'تعذر الاتصال بالخادم'); });
+}
+function approveReceiptEntries(confirmOwner) {
+    const entries = {};
+    $('.entry-box').each(function () {
+        entries[$(this).data('entry')] = $(this).find('.entry-line').map(function () {
+            return {key: String($(this).attr('data-key') || ''), account_id: parseInt($(this).find('.line-account').val() || '0', 10), description: $(this).find('.line-text').val(), amount: $(this).find('.line-amount').val()};
+        }).get();
+    });
+    $('#entriesApprove').prop('disabled', true);
+    $.ajax({url: 'receipt_review.api.hnt', type: 'POST', dataType: 'json', data: {action: 'approve', invoice_id: reviewEntries.id, entries: JSON.stringify(entries), confirm_owner: confirmOwner ? 1 : '', csrf_token: reviewToken}})
+        .done(function (data) {
+            if (data.success) { reviewMessage('success', data.message); setTimeout(() => window.location.href = 'receipt_review.hnt', 1200); return; }
+            reviewMessage('danger', data.message);
+            reviewBalance();
+            if (data.message && data.message.indexOf('المستحق للمالك') !== -1) {
+                $('#entriesMessage').append($('<button type="button" class="btn btn-sm btn-warning mb-3">أؤكد تغيير المستحق للمالك والمتابعة</button>').on('click', () => approveReceiptEntries(true)));
+            }
+        }).fail(function () { reviewMessage('danger', 'تعذر الاتصال بالخادم'); reviewBalance(); });
+}
+$(function () {
+    $('#entriesBody').on('input change', '.line-amount', reviewBalance)
+        .on('click', '.line-remove', function () { $(this).closest('tr').remove(); reviewBalance(); })
+        .on('click', '.line-add', function () {
+            const box = $(this).closest('.entry-box'), side = box.data('free-side');
+            box.find('tbody').append(reviewRow({key: '', mode: 'free', account_id: 0, description: '', debit: 0, credit: 0}, side));
+            reviewBalance();
+        });
+    $('#entriesApprove').on('click', () => approveReceiptEntries(false));
+});
+</script>
+<script>
+$(function () {
+    $('#allDrafts').on('change', function () { $('.draft-box').prop('checked', this.checked); });
+    $('.held-form').each(function () {
+        var form = $(this);
+        function update() {
+            var sum = 0;
+            form.find('.held-part').each(function () { sum += Math.round((parseFloat(this.value) || 0) * 100); });
+            var diff = Math.round(parseFloat(form.data('total')) * 100) - sum;
+            form.find('.held-diff').text((diff / 100).toFixed(2)).toggleClass('text-danger', diff !== 0);
+        }
+        form.on('input', '.held-part', update);
+        update();
+    });
+});
+</script>
+<?php require '../../foter.hnt'; ?>

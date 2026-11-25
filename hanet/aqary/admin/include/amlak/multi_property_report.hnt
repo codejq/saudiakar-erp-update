@@ -536,24 +536,28 @@ if (count($selectedPropertyIds)) {
                             <tbody>
 <?php
     $counx = 0;
+    require_once __DIR__ . '/eradat_report_helpers.hnt';
     $allsandrakam = array();
 
-    while ($row = mysql_fetch_array($result)) {
-        // Remove duplicated entries
-        if (in_array($row['sanadrakam'], $allsandrakam)) {
-            $rid = mysql_fetch_array(mysql_query("SELECT sanadrakam FROM eradat WHERE sanadrakam='" . addslashes($row['sanadrakam']) . "'"));
-            if ($rid['sanadrakam']) {
-                loginfo("critical", "delete", "تم حذف الايرد رقم سند: {$row['sanadrakam']} البيان", "", "eradat", $row['sanadrakam'], $link);
-                mysql_query("DELETE FROM eradat WHERE sanadrakam='" . addslashes($row['sanadrakam']) . "'", $link);
-            }
-            continue;
-        }
-        $allsandrakam[] = $row['sanadrakam'];
+    require_once __DIR__ . '/receipt_components_store.hnt';
+    $incomeRows = array();
+    while ($row = mysql_fetch_assoc($result)) $incomeRows[] = $row;
+    $incomeParts = array();
+    foreach (receiptCommissionRows($link, "SELECT * FROM amlak WHERE idaqar IN ($selectedPropertyIdsSql)") as $partsProperty) {
+        $incomeParts += receiptDeliveryBreakdowns($link, array_values(array_filter($incomeRows, function ($incomeItem) use ($partsProperty) {
+            return intval($incomeItem['idaqar']) === intval($partsProperty['idaqar']);
+        })), $partsProperty);
+    }
+    foreach ($incomeRows as $row) {
+        // Display only: never delete income rows from a report.
+        if (eradatReportIsRepeated($row, $allsandrakam)) continue;
 
         $counx++;
         $rowWater = ($row['addwaterto'] == "" || $row['addwaterto'] == "malek") ? 0 : floatval($row['mywater']);
         $rowTamen = ($row['addtameento'] == "" || $row['addtameento'] == "malek") ? 0 : floatval($row['tamen']);
         $amount2 = floatval($row['amount']) - floatval($row['mysa3ee']) - floatval($row['services']) - $rowWater - $rowTamen;
+        // VAT the office files and commission VAT are not the owner's money.
+        if (isset($incomeParts[intval($row['iderad'])])) $amount2 -= receiptWithheldFromOwner($incomeParts[intval($row['iderad'])]);
 
         // Format date
         if (isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))) {
@@ -578,6 +582,16 @@ if (count($selectedPropertyIds)) {
                                  </tr>
 <?php
         $totalincome += $amount2;
+    }
+
+    // Insurance damages owed to the owners; no fee on them.
+    require_once __DIR__ . '/deposit_settlement_helpers.hnt';
+    foreach ($bankid > 0 || $payment_type > 0 ? array() : depositStatementCredits($link, $selectedPropertyIds, $startfrom, $enddate, (bool)$showtasfia) as $credit) {
+        $credit_date = isset($hnt_dll) && ($hnt_dll || (isset($hnt_supper_dll) && $hnt_supper_dll == 5))
+            ? date("d/m/Y", $credit['settlement_date']) : $arabicTools->arabicDate('hj:d/m/Y', $credit['settlement_date']);
+        echo "<tr class='text-center'><td>" . htmlspecialchars($credit['aqarname']) . "</td><td>x</td><td>تلفيات من تأمين المستأجر " . htmlspecialchars($credit['tenant_name']) . "</td><td>" . $credit_date . "</td><td>" . number_format($credit['owner_credit'], 2)
+            . "</td><td></td><td></td><td class='hidecommision'></td><td></td><td><strong class='text-success'>" . number_format($credit['owner_credit'], 2) . "</strong></td><td>0</td><td class='screenonlyonly'></td></tr>";
+        $totalincome += $credit['owner_credit'];
     }
 
     // Get expenses
@@ -702,7 +716,7 @@ if (count($selectedPropertyIds)) {
 
 <?php
     $incomeByProperty = [];
-    $incomeResult = mysql_query("SELECT eradat.idaqar, eradat.amount, eradat.mysa3ee, eradat.services, eradat.mywater, eradat.tamen, amlak.addwaterto, amlak.addtameento
+    $incomeResult = mysql_query("SELECT eradat.*, amlak.addwaterto, amlak.addtameento
                                   FROM eradat
                                   LEFT JOIN amlak ON eradat.idaqar = amlak.idaqar
                                   WHERE eradat.idaqar IN ($selectedPropertyIdsSql)
@@ -711,11 +725,16 @@ if (count($selectedPropertyIds)) {
                                   $tasfia_filter
                                   $bankid_eradat_filter
                                   $payment_type_eradat_filter", $link);
+    require_once __DIR__ . '/eradat_report_helpers.hnt';
+    $seenIncomeRows = array();
     while ($incomeRow = mysql_fetch_array($incomeResult)) {
+        if (eradatReportIsRepeated($incomeRow, $seenIncomeRows)) continue;
         $incomePropertyId = intval($incomeRow['idaqar']);
         $incomeWater = ($incomeRow['addwaterto'] == "" || $incomeRow['addwaterto'] == "malek") ? 0 : floatval($incomeRow['mywater']);
         $incomeTamen = ($incomeRow['addtameento'] == "" || $incomeRow['addtameento'] == "malek") ? 0 : floatval($incomeRow['tamen']);
         $incomeNet = floatval($incomeRow['amount']) - floatval($incomeRow['mysa3ee']) - floatval($incomeRow['services']) - $incomeWater - $incomeTamen;
+        // Fee base: the owner's income plus the rent VAT the office collected.
+        if (isset($incomeParts[intval($incomeRow['iderad'])])) $incomeNet -= $incomeParts[intval($incomeRow['iderad'])]['commission_vat'];
         if (!isset($incomeByProperty[$incomePropertyId])) {
             $incomeByProperty[$incomePropertyId] = 0;
         }

@@ -1,0 +1,158 @@
+<?php
+
+/**
+ * WhatsApp Module - Automatic Installation
+ * =========================================
+ * This script automatically installs the WhatsApp module
+ * Run once during first setup
+ */
+
+header('Content-Type: text/html; charset=utf8');
+
+// Start session
+session_start();
+
+// Check if already installed
+$installFlagFile = __DIR__ . '/.installed';
+if (file_exists($installFlagFile)) {
+    die('WhatsApp module is already installed. Delete .installed file to reinstall.');
+}
+
+include_once "../../connectdb.hnt";
+
+$dbHost = "{$qdb_server}:{$qdb_port}";
+$dbUser = $qdb_user;
+$dbPass = $qdb_pass;
+$dbName = $qdb_db; // CHANGE THIS
+
+$errors = array();
+$success = array();
+
+?>
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+
+<head>
+    <meta charset="utf-8">
+    <title>تثبيت وحدة واتساب</title>
+    <link rel="stylesheet" href="<?= $urlh ?>/css/bootstrap-5.3.8-dist/css/bootstrap.rtl.min.css">
+    <link rel="stylesheet" href="<?= $urlh ?>/css/bootstrap-icons-1.13.1/bootstrap-icons.min.css">
+    <!-- Bootstrap 5 Compatibility -->
+    <script src="<?= $urlh ?>/css/bootstrap-5.3.8-dist/js/bootstrap.bundle.min.js"></script>
+</head>
+
+<body>
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-8">
+                <div class="card">
+                    <div class="card-header bg-success text-white">
+                        <h4><i class="bi bi-whatsapp"></i> تثبيت وحدة واتساب</h4>
+                    </div>
+                    <div class="card-body">
+                        <?php
+                        // Step 1: Database Connection
+                        echo "<h5>1. الاتصال بقاعدة البيانات...</h5>";
+                        $db = @new mysqli($dbHost, $dbUser, $dbPass, $dbName);
+
+                        if ($db->connect_error) {
+                            $errors[] = "فشل الاتصال بقاعدة البيانات: " . $db->connect_error;
+                            echo "<div class='alert alert-danger'>❌ " . end($errors) . "</div>";
+                            print_r($db);
+                        } else {
+                            $success[] = "تم الاتصال بقاعدة البيانات بنجاح";
+                            echo "<div class='alert alert-success'>✓ " . end($success) . "</div>";
+
+                            $db->set_charset('utf8mb4');
+
+                            // Step 2: Create Tables
+                            echo "<h5>2. إنشاء الجداول...</h5>";
+                            $sqlFile = __DIR__ . '/database_schema.sql';
+
+                            if (file_exists($sqlFile)) {
+                                $sql = file_get_contents($sqlFile);
+                                print_r($db);
+                                // Remove comments and split queries
+                                $sql = preg_replace('/--.*$/m', '', $sql);
+                                $sql = preg_replace('/\/\*.*?\*\//s', '', $sql);
+                                $queries = array_filter(array_map('trim', explode(';', $sql)));
+
+                                $tableCount = 0;
+                                foreach ($queries as $query) {
+                                    if (!empty($query) && stripos($query, 'CREATE TABLE') !== false) {
+                                        if ($db->query($query)) {
+                                            $tableCount++;
+                                        }
+                                    }
+                                }
+
+                                // Execute all other queries
+                                foreach ($queries as $query) {
+                                    if (!empty($query) && stripos($query, 'CREATE TABLE') === false) {
+                                        @$db->query($query);
+                                    }
+                                }
+
+                                $success[] = "تم إنشاء $tableCount جدول بنجاح";
+                                echo "<div class='alert alert-success'>✓ " . end($success) . "</div>";
+                            } else {
+                                $errors[] = "ملف SQL غير موجود";
+                                echo "<div class='alert alert-danger'>❌ " . end($errors) . "</div>";
+                            }
+
+                            // Step 3: Create Directories
+                            echo "<h5>3. إنشاء المجلدات...</h5>";
+                            $dirs = array('uploads', 'logs');
+                            foreach ($dirs as $dir) {
+                                $path = __DIR__ . '/' . $dir;
+                                if (!is_dir($path)) {
+                                    if (mkdir($path, 0755, true)) {
+                                        $success[] = "تم إنشاء مجلد: $dir";
+                                        echo "<div class='alert alert-success'>✓ " . end($success) . "</div>";
+                                    }
+                                } else {
+                                    echo "<div class='alert alert-info'>ℹ مجلد $dir موجود مسبقاً</div>";
+                                }
+                            }
+
+                            // Step 4: Check Service
+                            echo "<h5>4. فحص خدمة واتساب...</h5>";
+                            $serviceUrl = 'http://localhost:8010/user/info';
+                            $ch = curl_init($serviceUrl);
+                            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                            curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+                            $response = @curl_exec($ch);
+                            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                            //curl_close($ch);
+
+                            if ($httpCode >= 200 && $httpCode < 500) {
+                                $success[] = "خدمة واتساب تعمل على المنفذ 8010";
+                                echo "<div class='alert alert-success'>✓ " . end($success) . "</div>";
+                            } else {
+                                echo "<div class='alert alert-warning'>⚠ خدمة واتساب غير متصلة. يرجى تشغيلها من صفحة الإعدادات</div>";
+                            }
+
+                            $db->close();
+                        }
+
+                        // Final Step: Create install flag
+                        if (empty($errors)) {
+                            file_put_contents($installFlagFile, date('Y-m-d H:i:s'));
+                            echo "<hr>";
+                            echo "<div class='alert alert-success'><h4>✓ اكتمل التثبيت بنجاح!</h4></div>";
+                            echo "<a href='index.hnt' class='btn btn-success btn-lg'>انتقل إلى لوحة التحكم</a>";
+                        } else {
+                            echo "<hr>";
+                            echo "<div class='alert alert-danger'><h4>❌ فشل التثبيت</h4>";
+                            echo "<p>يرجى مراجعة الأخطاء أعلاه وإعادة المحاولة</p></div>";
+                        }
+
+                        ?>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

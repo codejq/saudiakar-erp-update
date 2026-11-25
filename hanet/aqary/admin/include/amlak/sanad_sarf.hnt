@@ -38,6 +38,11 @@ $nonedeleverttomalek = isset($_REQUEST['nonedeleverttomalek']) ? floatval($_REQU
 
 // Handle AJAX form submission
 if ($amount && $ajax_request == 1) {
+    // Owners are paid only from the delivery pages, which apply VAT, fee and insurance rules.
+    if (!in_array($movement, array(1, 2, 5, 6, 7, 8, 9, 10), true)) {
+        echo json_encode(array('success' => false, 'message' => 'تسليم مبالغ الملاك يتم من شاشة تسليم المبالغ للمالك.'), JSON_UNESCAPED_UNICODE);
+        exit();
+    }
     // Process date
     $payeddate = explode("/", $sanadate_input);
     if (count($payeddate) == 3 && $payeddate[2] < 1700) {
@@ -48,6 +53,13 @@ if ($amount && $ajax_request == 1) {
     }
 
     $sanadate = mktime(0, 0, 0, $payeddate[1], $payeddate[0], $payeddate[2]);
+
+    // Office bank of the movement; none when only cash moves.
+    $transferBankId = 0;
+    if ($movement === 1 || $movement % 2 === 0) {
+        $bankRow = mysql_fetch_array(mysql_query("SELECT id FROM bankacounts WHERE ownerid2=0 AND id='" . intval($_REQUEST['bankid'] ?? 0) . "'", $link));
+        $transferBankId = intval($bankRow['id'] ?? 0);
+    }
 
     // Insert payment voucher
     $sql = "INSERT INTO sanadsarf SET
@@ -61,7 +73,8 @@ if ($amount && $ajax_request == 1) {
             aqarid = '" . $aqarid . "',
             checkrakam = '" . $checkrakam . "',
             checkdate = '" . $checkdate . "',
-            checkbank = '" . $checkbank . "'";
+            checkbank = '" . $checkbank . "',
+            bankid = '" . $transferBankId . "'";
 
     mysql_query($sql, $link);
     $sanadsarfrakam = mysql_insert_id();
@@ -235,14 +248,26 @@ if ($hnt_dll || $hnt_supper_dll == 5) {
                             <select name="movement" class="form-select" id="movement" required>
                                 <option value="1">من حساب الصندوق إلى حساب البنك</option>
                                 <option value="2">من حساب البنك إلى حساب الصندوق</option>
-                                <option value="3">من حساب الصندوق إلى حساب مالك عقار</option>
-                                <option value="4" selected>من حساب البنك إلى حساب مالك عقار</option>
                                 <option value="5">من حساب الصندوق إلى حساب مصروفات المكتب</option>
                                 <option value="6">من حساب البنك إلى حساب مصروفات المكتب</option>
                                 <option value="7">من حساب الصندوق إلى حساب أجور العاملين</option>
                                 <option value="8">من حساب البنك إلى حساب أجور العاملين</option>
                                 <option value="9">من حساب الصندوق إلى حساب مصروفات أخرى</option>
                                 <option value="10">من حساب البنك إلى حساب مصروفات أخرى</option>
+                            </select>
+                        </div>
+
+                        <!-- Office bank -->
+                        <div class="mb-3" id="transferBankSection">
+                            <label for="bankid" class="form-label"><i class="bi bi-bank me-1"></i>الحساب البنكي للمكتب</label>
+                            <select name="bankid" id="bankid" class="form-select">
+                                <option value="0">حساب البنوك الافتراضي</option>
+                                <?php
+                                $transferBanks = mysql_query("SELECT id, bankname, acountnumber FROM bankacounts WHERE ownerid2=0 ORDER BY id", $link);
+                                while ($transferBanks && ($bankRow = mysql_fetch_array($transferBanks))) {
+                                    echo '<option value="' . intval($bankRow['id']) . '">' . htmlspecialchars($bankRow['bankname'] . ' - ' . $bankRow['acountnumber']) . '</option>';
+                                }
+                                ?>
                             </select>
                         </div>
 

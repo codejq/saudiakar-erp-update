@@ -1,0 +1,308 @@
+<?php
+require_once'../../../connectdb.hnt';
+require_once'../../../reqloginajax.hnt';
+
+// Installation check
+require_once'../lib/DatabaseInstaller.class.php';
+try {
+    $installer = new DatabaseInstaller($link);
+    if (!$installer->tablesExist()) {
+        http_response_code(503);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => false,
+            'message' => 'Database not initialized',
+            'redirect' => '../index.hnt'
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+} catch (Exception $e) {
+    http_response_code(500);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['success' => false, 'message' => 'خطأ في النظام'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+header('Content-Type: application/json; charset=utf-8');
+
+// Check if user is authenticated
+if (!isset($_SESSION['useridv'])) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'غير مصرح'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+$userid = $_SESSION['useridv'];
+
+// Get action
+$action = isset($_POST['action']) ? $_POST['action'] : '';
+$file_ids = isset($_POST['file_ids']) ? $_POST['file_ids'] : [];
+
+if (empty($action) || empty($file_ids)) {
+    http_response_code(400);
+    echo json_encode(['success' => false, 'message' => 'بيانات غير صحيحة'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// Convert file_ids to integers for security
+$file_ids = array_map('intval', $file_ids);
+
+if ($action == 'delete') {
+    handleBulkDelete($userid, $file_ids, $link);
+} elseif ($action == 'share') {
+    handleBulkShare($userid, $file_ids, $link);
+} elseif ($action == 'move_category') {
+    handleBulkMoveCategory($userid, $file_ids, $link);
+} elseif ($action == 'restore') {
+    handleBulkRestore($userid, $file_ids, $link);
+} else {
+    http_response_code(400);
+    echo json_encode(['success' => false, 'message' => 'إجراء غير معروف'], JSON_UNESCAPED_UNICODE);
+}
+
+function handleBulkDelete($userid, $file_ids, $link) {
+    // Create placeholders for IN clause
+    $placeholders = str_repeat('?,', count($file_ids) - 1) . '?';
+
+    // Verify user owns all files
+    $verify_sql = "SELECT COUNT(*) as count FROM file_management
+                   WHERE file_id IN ($placeholders)
+                   AND owner_userid = ?";
+    $stmt = $link->prepare($verify_sql);
+    $params = array_merge($file_ids, [$userid]);
+    $types = str_repeat('i', count($params));
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $verify_row = $result->fetch_assoc();
+    $stmt->close();
+
+    if ($verify_row['count'] == 0) {
+        http_response_code(404);
+        echo json_encode(['success' => false, 'message' => 'لا توجد ملفات لحذفها'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    // Soft delete files
+    $delete_sql = "UPDATE file_management
+                   SET is_deleted = 1, deleted_date = NOW()
+                   WHERE file_id IN ($placeholders)
+                   AND owner_userid = ?";
+    $stmt = $link->prepare($delete_sql);
+    $stmt->bind_param($types, ...$params);
+    if ($stmt->execute()) {
+        $deleted_count = $verify_row['count'];
+        $stmt->close();
+
+        // Log the bulk deletion
+        $ip = $_SERVER['REMOTE_ADDR'];
+        foreach ($file_ids as $file_id) {
+            $log_sql = "INSERT INTO file_access_log
+                        (file_id, userid, action, access_date, ip_address)
+                        VALUES (?, ?, 'bulk_delete', NOW(), ?)";
+            $log_stmt = $link->prepare($log_sql);
+            $log_stmt->bind_param("iis", $file_id, $userid, $ip);
+            $log_stmt->execute();
+            $log_stmt->close();
+        }
+
+        http_response_code(200);
+        echo json_encode([
+            'success' => true,
+            'message' => "تم حذف $deleted_count ملف بنجاح",
+            'deleted_count' => $deleted_count
+        ], JSON_UNESCAPED_UNICODE);
+    } else {
+        http_response_code(500);
+        echo json_encode([
+            'success' => false,
+            'message' => 'فشل حذف الملفات: ' . $stmt->error
+        ], JSON_UNESCAPED_UNICODE);
+        $stmt->close();
+    }
+}
+
+function handleBulkShare($userid, $file_ids, $link) {
+    if (!isset($_POST['shared_with_userid']) || !isset($_POST['permission_type'])) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => 'بيانات غير صحيحة'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $shared_with_userid = intval($_POST['shared_with_userid']);
+    $permission_type = $_POST['permission_type'];
+
+    // Validate permission type
+    $valid_permissions = ['view', 'download', 'edit', 'share'];
+    if (!in_array($permission_type, $valid_permissions)) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => 'نوع الإذن غير صحيح'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $shared_count = 0;
+
+    foreach ($file_ids as $file_id) {
+        $file_id = intval($file_id);
+
+        // Verify user owns the file
+        $verify_sql = "SELECT * FROM file_management
+                       WHERE file_id = ?
+                       AND owner_userid = ?
+                       AND is_deleted = 0";
+        $stmt = $link->prepare($verify_sql);
+        $stmt->bind_param("ii", $file_id, $userid);
+        $stmt->execute();
+        $result = $stmt->get_result();
+
+        if ($result->num_rows == 0) {
+            $stmt->close();
+            continue;
+        }
+        $stmt->close();
+
+        // Check if already shared
+        $existing = "SELECT * FROM file_sharing
+                     WHERE file_id = ?
+                     AND shared_with_userid = ?";
+        $stmt = $link->prepare($existing);
+        $stmt->bind_param("ii", $file_id, $shared_with_userid);
+        $stmt->execute();
+        $existing_result = $stmt->get_result();
+
+        if ($existing_result->num_rows > 0) {
+            $stmt->close();
+            // Update existing share
+            $update_sql = "UPDATE file_sharing
+                           SET permission_type = ?, is_active = 1
+                           WHERE file_id = ?
+                           AND shared_with_userid = ?";
+            $stmt = $link->prepare($update_sql);
+            $stmt->bind_param("sii", $permission_type, $file_id, $shared_with_userid);
+            if ($stmt->execute()) {
+                $shared_count++;
+            }
+            $stmt->close();
+        } else {
+            $stmt->close();
+            // Create new share
+            $insert_sql = "INSERT INTO file_sharing
+                           (file_id, shared_by_userid, shared_with_userid, permission_type, created_date, is_active)
+                           VALUES (?, ?, ?, ?, NOW(), 1)";
+            $stmt = $link->prepare($insert_sql);
+            $stmt->bind_param("iiis", $file_id, $userid, $shared_with_userid, $permission_type);
+            if ($stmt->execute()) {
+                $shared_count++;
+            }
+            $stmt->close();
+        }
+    }
+
+    if ($shared_count > 0) {
+        http_response_code(200);
+        echo json_encode([
+            'success' => true,
+            'message' => "تم مشاركة $shared_count ملف بنجاح",
+            'shared_count' => $shared_count
+        ], JSON_UNESCAPED_UNICODE);
+    } else {
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'message' => 'فشل مشاركة الملفات'
+        ], JSON_UNESCAPED_UNICODE);
+    }
+}
+
+function handleBulkMoveCategory($userid, $file_ids, $link) {
+    if (!isset($_POST['new_category'])) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => 'الفئة الجديدة غير محددة'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $new_category = $_POST['new_category'];
+
+    // Create placeholders for IN clause
+    $placeholders = str_repeat('?,', count($file_ids) - 1) . '?';
+
+    $move_sql = "UPDATE file_management
+                 SET category = ?, modified_date = NOW()
+                 WHERE file_id IN ($placeholders)
+                 AND owner_userid = ?";
+
+    $stmt = $link->prepare($move_sql);
+    $params = array_merge([$new_category], $file_ids, [$userid]);
+    $types = 's' . str_repeat('i', count($file_ids)) . 'i';
+    $stmt->bind_param($types, ...$params);
+
+    if ($stmt->execute()) {
+        $count = $stmt->affected_rows;
+        $stmt->close();
+        http_response_code(200);
+        echo json_encode([
+            'success' => true,
+            'message' => "تم نقل $count ملف إلى الفئة الجديدة",
+            'moved_count' => $count
+        ], JSON_UNESCAPED_UNICODE);
+    } else {
+        http_response_code(500);
+        echo json_encode([
+            'success' => false,
+            'message' => 'فشل نقل الملفات: ' . $stmt->error
+        ], JSON_UNESCAPED_UNICODE);
+        $stmt->close();
+    }
+}
+
+function handleBulkRestore($userid, $file_ids, $link) {
+    // Create placeholders for IN clause
+    $placeholders = str_repeat('?,', count($file_ids) - 1) . '?';
+
+    // Verify user owns all deleted files
+    $verify_sql = "SELECT COUNT(*) as count FROM file_management
+                   WHERE file_id IN ($placeholders)
+                   AND owner_userid = ?
+                   AND is_deleted = 1";
+    $stmt = $link->prepare($verify_sql);
+    $params = array_merge($file_ids, [$userid]);
+    $types = str_repeat('i', count($params));
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $verify_row = $result->fetch_assoc();
+    $stmt->close();
+
+    if ($verify_row['count'] == 0) {
+        http_response_code(404);
+        echo json_encode(['success' => false, 'message' => 'لا توجد ملفات محذوفة لاستعادتها'], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    // Restore files
+    $restore_sql = "UPDATE file_management
+                    SET is_deleted = 0, deleted_date = NULL
+                    WHERE file_id IN ($placeholders)
+                    AND owner_userid = ?";
+    $stmt = $link->prepare($restore_sql);
+    $stmt->bind_param($types, ...$params);
+
+    if ($stmt->execute()) {
+        $restored_count = $verify_row['count'];
+        $stmt->close();
+        http_response_code(200);
+        echo json_encode([
+            'success' => true,
+            'message' => "تم استعادة $restored_count ملف بنجاح",
+            'restored_count' => $restored_count
+        ], JSON_UNESCAPED_UNICODE);
+    } else {
+        http_response_code(500);
+        echo json_encode([
+            'success' => false,
+            'message' => 'فشل استعادة الملفات: ' . $stmt->error
+        ], JSON_UNESCAPED_UNICODE);
+        $stmt->close();
+    }
+}
+?>

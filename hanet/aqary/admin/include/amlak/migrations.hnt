@@ -198,6 +198,9 @@ HTML;
             'aqar_id' => "ALTER TABLE acc_invoices ADD COLUMN aqar_id INT NULL AFTER owner_id",
             'subaqar_id' => "ALTER TABLE acc_invoices ADD COLUMN subaqar_id INT NULL AFTER aqar_id",
             'egar_id' => "ALTER TABLE acc_invoices ADD COLUMN egar_id INT NULL AFTER subaqar_id",
+            'sanad_id' => "ALTER TABLE acc_invoices ADD COLUMN sanad_id INT NULL, ADD INDEX idx_invoice_receipt (sanad_id)",
+            'reversed_credit_note_id' => "ALTER TABLE acc_invoices ADD COLUMN reversed_credit_note_id INT NULL",
+            'reversed_date' => "ALTER TABLE acc_invoices ADD COLUMN reversed_date DATE NULL",
             'vat_rate' => "ALTER TABLE acc_invoices ADD COLUMN vat_rate DECIMAL(5,2) DEFAULT 15.00 AFTER subtotal",
             'remaining_amount' => "ALTER TABLE acc_invoices ADD COLUMN remaining_amount DECIMAL(15,2) DEFAULT 0 AFTER paid_amount",
             'payment_method' => "ALTER TABLE acc_invoices ADD COLUMN payment_method VARCHAR(50) NULL AFTER payment_status",
@@ -331,7 +334,9 @@ HTML;
             'sanadsarf_id' => "ALTER TABLE acc_journal_entries ADD COLUMN sanadsarf_id INT(11) NULL AFTER sanad_id",
             'masrofat_id' => "ALTER TABLE acc_journal_entries ADD COLUMN masrofat_id INT(11) NULL AFTER sanadsarf_id",
             'invoice_id' => "ALTER TABLE acc_journal_entries ADD COLUMN invoice_id INT(11) NULL AFTER masrofat_id",
-            'sales_representative_userid' => "ALTER TABLE acc_journal_entries ADD COLUMN sales_representative_userid INT(11) NULL AFTER invoice_id"
+            'sales_representative_userid' => "ALTER TABLE acc_journal_entries ADD COLUMN sales_representative_userid INT(11) NULL AFTER invoice_id",
+            'reversed_by_entry_id' => "ALTER TABLE acc_journal_entries ADD COLUMN reversed_by_entry_id INT(11) NULL",
+            'reversed_entry_id' => "ALTER TABLE acc_journal_entries ADD COLUMN reversed_entry_id INT(11) NULL"
         ];
 
         foreach ($journalEntryColumnMigrations as $columnName => $alterSql) {
@@ -581,6 +586,41 @@ HTML;
                 $errors[] = 'فشل في حفظ إعداد التكامل ' . $settingKey . ': ' . $settingInsert->error;
             }
             $settingInsert->close();
+        }
+
+        // Receipt-sync accounts: found by category, so a customer's own use of a code is never taken over.
+        $receiptSyncAccounts = [
+            ['default_owner_recoverable_account_id', 'owner_recoverable', 'asset', 1140, 'مصروفات مستردة من الملاك', 'Owner recoverable expenses', '1100'],
+            ['default_input_vat_account_id', 'input_vat', 'asset', 1150, 'ضريبة القيمة المضافة - مدخلات', 'Input VAT', '1100'],
+            ['default_deposits_account_id', 'tenant_deposits', 'liability', 2130, 'تأمينات المستأجرين', 'Tenant deposits held', '2000'],
+            ['default_commission_revenue_account_id', 'commission_revenue', 'revenue', 4200, 'إيراد العمولات', 'Commission revenue', '4000'],
+            ['default_management_fee_account_id', 'management_fee', 'revenue', 4210, 'إيراد أتعاب إدارة الأملاك', 'Management fee revenue', '4000'],
+            ['default_services_revenue_account_id', 'services_revenue', 'revenue', 4220, 'إيراد الخدمات', 'Services revenue', '4000'],
+            ['default_water_revenue_account_id', 'water_revenue', 'revenue', 4230, 'إيراد المياه', 'Water revenue', '4000'],
+            ['default_other_revenue_account_id', 'other_revenue', 'revenue', 4290, 'إيرادات أخرى', 'Other revenue', '4000'],
+        ];
+        foreach ($receiptSyncAccounts as [$settingKey, $category, $type, $firstCode, $nameAr, $nameEn, $parentCode]) {
+            $current = mysql_fetch_assoc($this->query("SELECT setting_value FROM acc_system_settings WHERE setting_key='{$settingKey}' LIMIT 1"));
+            if ($current && (int)$current['setting_value'] > 0) continue;
+            $existing = mysql_fetch_assoc($this->query("SELECT account_id FROM acc_chart_of_accounts WHERE account_category='{$category}' AND account_type='{$type}' AND is_active=1 AND is_leaf=1 ORDER BY account_id LIMIT 1"));
+            $accountId = $existing ? (int)$existing['account_id'] : 0;
+            if (!$accountId) {
+                $code = 0;
+                for ($try = $firstCode; $try < $firstCode + 10; $try++) {
+                    if (!mysql_fetch_assoc($this->query("SELECT account_id FROM acc_chart_of_accounts WHERE account_code='{$try}' LIMIT 1"))) { $code = $try; break; }
+                }
+                if (!$code) { $errors[] = 'لا يوجد رمز حساب متاح: ' . $nameAr; continue; }
+                $parent = mysql_fetch_assoc($this->query("SELECT account_id,account_level FROM acc_chart_of_accounts WHERE account_code='{$parentCode}' LIMIT 1"));
+                $parentSql = $parent ? (int)$parent['account_id'] : 'NULL';
+                $level = $parent ? (int)$parent['account_level'] + 1 : 2;
+                $createdBy = ($GLOBALS['link'] ?? null) === $this->link ? (int)($_SESSION['useridv'] ?? 0) : 0;
+                $this->query("INSERT INTO acc_chart_of_accounts (account_code,account_name_ar,account_name_en,parent_account_id,account_type,account_category,account_level,is_leaf,is_active,created_by,formuid)
+                    VALUES ('{$code}','{$nameAr}','{$nameEn}',{$parentSql},'{$type}','{$category}',{$level},1,1,{$createdBy},UUID())");
+                $accountId = (int)mysql_insert_id($this->link);
+            }
+            $this->query("INSERT INTO acc_system_settings (setting_key,setting_value,setting_category,description_ar,formuid)
+                VALUES ('{$settingKey}','{$accountId}','amlak_integration','{$nameAr}',UUID())
+                ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)");
         }
 
         if ($errors) {
@@ -1242,6 +1282,63 @@ HTML;
         $this->query("ALTER TABLE amlak
             ADD COLUMN IF NOT EXISTS deed_number VARCHAR(100) NOT NULL DEFAULT '',
             ADD COLUMN IF NOT EXISTS national_address VARCHAR(244) NOT NULL DEFAULT ''");
+        // Accounting: whose income the rent is, and who files the rent VAT.
+        $this->query("ALTER TABLE amlak
+            ADD COLUMN IF NOT EXISTS rent_income_to VARCHAR(10) NOT NULL DEFAULT 'owner',
+            ADD COLUMN IF NOT EXISTS rent_vat_filed_by VARCHAR(10) NOT NULL DEFAULT 'office'");
+        // One frozen breakdown per receipt; status 'review' is held back from accounting sync.
+        $this->query("CREATE TABLE IF NOT EXISTS sanad_components (
+            idsanad INT NOT NULL,
+            kastid INT NOT NULL DEFAULT 0,
+            rent DECIMAL(12,2) NOT NULL DEFAULT 0,
+            rent_vat DECIMAL(12,2) NOT NULL DEFAULT 0,
+            commission DECIMAL(12,2) NOT NULL DEFAULT 0,
+            commission_vat DECIMAL(12,2) NOT NULL DEFAULT 0,
+            water DECIMAL(12,2) NOT NULL DEFAULT 0,
+            services DECIMAL(12,2) NOT NULL DEFAULT 0,
+            insurance DECIMAL(12,2) NOT NULL DEFAULT 0,
+            unclassified DECIMAL(12,2) NOT NULL DEFAULT 0,
+            status VARCHAR(10) NOT NULL DEFAULT 'ok',
+            warnings TEXT NOT NULL,
+            created_at BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY (idsanad), KEY idx_components_installment (kastid), KEY idx_components_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        $this->query("ALTER TABLE sanad_components
+            ADD COLUMN IF NOT EXISTS other DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER insurance,
+            ADD COLUMN IF NOT EXISTS other_vat DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER other");
+        $this->ensureScreen('accounting_receipt_review', 'مراجعة فواتير سندات القبض', 0, 'receipt-review-screen');
+        $this->query("CREATE TABLE IF NOT EXISTS deposit_settlements (
+            settlement_id INT NOT NULL AUTO_INCREMENT,
+            egar_id INT NOT NULL,
+            idaqar INT NOT NULL,
+            idsubaqar INT NOT NULL,
+            mostagerid INT NOT NULL DEFAULT 0,
+            tenant_name VARCHAR(245) NOT NULL DEFAULT '',
+            holder VARCHAR(10) NOT NULL,
+            insurance DECIMAL(12,2) NOT NULL,
+            damages DECIMAL(12,2) NOT NULL DEFAULT 0,
+            damages_to VARCHAR(10) NOT NULL DEFAULT '',
+            refund DECIMAL(12,2) NOT NULL DEFAULT 0,
+            owner_expense DECIMAL(12,2) NOT NULL DEFAULT 0,
+            owner_credit DECIMAL(12,2) NOT NULL DEFAULT 0,
+            office_income DECIMAL(12,2) NOT NULL DEFAULT 0,
+            payment_type INT NOT NULL DEFAULT 1,
+            bankid INT NOT NULL DEFAULT 0,
+            settlement_date BIGINT NOT NULL,
+            notes VARCHAR(500) NOT NULL DEFAULT '',
+            expense_id INT NOT NULL DEFAULT 0,
+            owner_sanadsarf_id INT NOT NULL DEFAULT 0,
+            accounting_entry_id INT NULL,
+            created_by_userid INT NOT NULL DEFAULT 0,
+            created_at BIGINT NOT NULL DEFAULT 0,
+            formuid VARCHAR(100) NOT NULL,
+            PRIMARY KEY (settlement_id), UNIQUE KEY uq_deposit_contract (egar_id), UNIQUE KEY uq_deposit_form (formuid),
+            KEY idx_deposit_property (idaqar,owner_sanadsarf_id), KEY idx_deposit_expense (expense_id), KEY idx_deposit_delivery (owner_sanadsarf_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        $this->query("INSERT INTO masrofattakweed (masrofkind,formuid) SELECT 'رد تأمين مستأجر','deposit-refund-category' FROM DUAL
+            WHERE NOT EXISTS (SELECT 1 FROM masrofattakweed WHERE masrofkind='رد تأمين مستأجر')");
+        $this->ensureScreen('deposit_settlement', 'تسوية تأمين المستأجر', 36, 'deposit-settlement-screen');
+        $this->ensureScreen('accounting_reverse', 'عكس القيود المحاسبية', 0, 'accounting-reverse-screen');
         $this->installOcrRuntime();
 
         $this->applyAccounting();

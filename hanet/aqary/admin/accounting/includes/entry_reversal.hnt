@@ -1,0 +1,142 @@
+<?php
+/**
+ * Reversal (قيد عكسي): the opposite entry, dated today. The original stays visible and its
+ * source becomes editable again. Never touches ZATCA.
+ */
+require_once __DIR__ . '/../../include/amlak/accounting_lock.hnt';
+
+trait EntryReversal {
+    private function postReversal(array $entry, string $reason, string $date): int {
+        $lines = [];
+        foreach (receiptCommissionRows($this->db, 'SELECT * FROM acc_journal_entry_lines WHERE entry_id=? ORDER BY line_number', [(int)$entry['entry_id']]) as $line) {
+            $lines[] = ['account_id' => (int)$line['account_id'], 'description' => mb_substr('عكس: ' . $line['description'], 0, 250, 'UTF-8'),
+                'debit_amount' => (float)$line['credit_amount'], 'credit_amount' => (float)$line['debit_amount'], 'cost_center_id' => $line['cost_center_id']];
+        }
+        if (!$lines) throw new RuntimeException('القيد بلا بنود.');
+        $result = $this->accountingManager->createJournalEntry([
+            'entry_date' => $date, 'entry_type' => 'adjustment', 'journal_id' => $entry['journal_id'],
+            'tenant_id' => $entry['tenant_id'], 'owner_id' => $entry['owner_id'], 'aqar_id' => $entry['aqar_id'],
+            'subaqar_id' => $entry['subaqar_id'], 'egar_id' => $entry['egar_id'], 'invoice_id' => $entry['invoice_id'],
+            // No source IDs: the reversed source must be free to sync again.
+            'reference_type' => 'reversal', 'reference_id' => (int)$entry['entry_id'],
+            'description' => 'قيد عكسي للقيد ' . $entry['entry_number'] . ' - ' . $reason, 'status' => 'posted',
+        ], $lines);
+        if (empty($result['success'])) throw new RuntimeException($result['message'] ?? $result['error'] ?? 'تعذر إنشاء القيد العكسي.');
+        $id = (int)$result['entry_id'];
+        receiptCommissionQuery($this->db, 'UPDATE acc_journal_entries SET reversed_by_entry_id=? WHERE entry_id=?', [$id, (int)$entry['entry_id']])->close();
+        receiptCommissionQuery($this->db, 'UPDATE acc_journal_entries SET reversed_entry_id=?,notes=? WHERE entry_id=?', [(int)$entry['entry_id'], $reason, $id])->close();
+        return $id;
+    }
+
+    private function liveEntries(string $where, array $params): array {
+        return receiptCommissionRows($this->db, "SELECT * FROM acc_journal_entries WHERE {$where} AND status='posted' AND COALESCE(reversed_by_entry_id,0)=0
+            AND COALESCE(reference_type,'')<>'reversal' ORDER BY entry_id FOR UPDATE", $params);
+    }
+
+    /** An invoice ZATCA already accepted needs its credit note sent first. */
+    private function reversalCreditNote(array $invoice, string $creditNoteNumber): ?array {
+        if ($invoice['zatca_status'] !== 'submitted' && trim((string)$invoice['zatca_uuid']) === '') return null;
+        if ($creditNoteNumber === '') throw new RuntimeException('أُرسلت الفاتورة للهيئة: أرسل إشعاراً دائناً ثم اكتب رقمه هنا.');
+        $note = receiptCommissionRows($this->db, "SELECT * FROM acc_invoices WHERE invoice_number=? AND invoice_type='credit_note' FOR UPDATE", [$creditNoteNumber])[0] ?? null;
+        if (!$note || $note['zatca_status'] !== 'submitted') throw new RuntimeException('الإشعار الدائن غير موجود أو لم يُرسل للهيئة.');
+        if ((int)$note['customer_id'] !== (int)$invoice['customer_id'] || trim((string)$note['customer_name']) !== trim((string)$invoice['customer_name'])
+            || abs((float)$note['total_amount'] - (float)$invoice['total_amount']) > 0.01
+            || abs((float)$note['vat_amount'] - (float)$invoice['vat_amount']) > 0.01) {
+            throw new RuntimeException('الإشعار الدائن لا يطابق عميل الفاتورة أو مبلغها أو ضريبتها.');
+        }
+        if (receiptCommissionRows($this->db, "SELECT invoice_id FROM acc_invoices WHERE sanad_id>0 AND reversed_credit_note_id=? LIMIT 1", [(int)$note['invoice_id']])) {
+            throw new RuntimeException('استُخدم هذا الإشعار الدائن لعكس فاتورة أخرى.');
+        }
+        return $note;
+    }
+
+    private function reverseReceipt(int $receiptId, array $chosen, string $reason, string $date, string $creditNoteNumber): array {
+        $receipt = receiptCommissionRows($this->db, 'SELECT * FROM sanad WHERE idsanad=? FOR UPDATE', [$receiptId])[0] ?? null;
+        $invoice = receiptCommissionRows($this->db, "SELECT * FROM acc_invoices WHERE sanad_id=? AND status='posted' ORDER BY invoice_id DESC LIMIT 1 FOR UPDATE", [$receiptId])[0] ?? null;
+        $receiptEntries = $this->liveEntries("(sanad_id=? OR (reference_type='sanad' AND reference_id=?))", [$receiptId, $receiptId]);
+        // Old entries made before receipt invoices: reverse only the chosen one (clears duplicates).
+        if (!$invoice) $targets = [$chosen];
+        else $targets = array_merge($receiptEntries, $this->liveEntries("reference_type='invoice' AND reference_id=? AND entry_type='auto'", [(int)$invoice['invoice_id']]));
+        $lastOne = $invoice || count($receiptEntries) === 1;
+        if ($lastOne && $receipt) {
+            if (receiptCommissionRows($this->db, 'SELECT ss.sanadid FROM sanadsarf ss JOIN eradat e ON e.iderad=ss.iderad WHERE e.sanadrakam=? LIMIT 1', [(string)$receiptId])) {
+                throw new RuntimeException('سُلّم هذا الإيراد للمالك: اعكس قيد التسليم واحذف سنده أولاً.');
+            }
+            foreach (receiptCommissionRows($this->db, "SELECT ss.sanadid FROM sanadsarf ss JOIN eradat e ON e.tasfia=ss.tasfia AND e.idaqar=ss.aqarid
+                WHERE e.sanadrakam=? AND e.tasfia<>'' AND ss.iderad=0", [(string)$receiptId]) as $closing) {
+                if (accountingLockReason($this->db, 'sanadsarf', $closing['sanadid']) !== '') throw new RuntimeException('صُفّي هذا الإيراد بسند صرف مرحّل: اعكس قيد السند أولاً.');
+            }
+            if (receiptCommissionReady($this->db)) {
+                foreach (receiptCommissionRows($this->db, 'SELECT m.idmasrof FROM masrofat m JOIN sanad_commission_splits c ON c.split_id=m.commission_split_id WHERE c.idsanad=?', [$receiptId]) as $payout) {
+                    if (accountingLockReason($this->db, 'masrofat', $payout['idmasrof']) !== '') throw new RuntimeException('صُرفت عمولة مندوب من هذا السند: اعكس قيد صرفها أولاً.');
+                }
+            }
+        }
+        $note = $invoice ? $this->reversalCreditNote($invoice, $creditNoteNumber) : null;
+        $ids = [];
+        foreach ($targets as $target) $ids[] = $this->postReversal($target, $reason, $date);
+        if ($invoice) {
+            // The credit note posted its own entry; the reversal already has that effect.
+            if ($note) foreach ($this->liveEntries("reference_type='invoice' AND reference_id=? AND entry_type='auto'", [(int)$note['invoice_id']]) as $noteEntry) $ids[] = $this->postReversal($noteEntry, $reason, $date);
+            receiptCommissionQuery($this->db, "UPDATE acc_invoices SET status='cancelled',payment_status='unpaid',paid_amount=0,remaining_amount=0,reversed_date=?,reversed_credit_note_id=? WHERE invoice_id=?",
+                [$date, $note ? (int)$note['invoice_id'] : null, (int)$invoice['invoice_id']])->close();
+        }
+        $left = $this->liveEntries("(sanad_id=? OR (reference_type='sanad' AND reference_id=?))", [$receiptId, $receiptId]);
+        receiptCommissionQuery($this->db, 'UPDATE sanad SET accounting_entry_id=? WHERE idsanad=?', [$left ? (int)$left[0]['entry_id'] : null, $receiptId])->close();
+        return $ids;
+    }
+
+    private function reverseSingle(string $table, string $idColumn, int $sourceId, array $entry, string $reason, string $date): array {
+        $id = $this->postReversal($entry, $reason, $date);
+        receiptCommissionQuery($this->db, "UPDATE {$table} SET accounting_entry_id=NULL WHERE {$idColumn}=?", [$sourceId])->close();
+        return [$id];
+    }
+
+    public function reverseEntry($entryId, $reason, $creditNoteNumber = ''): array {
+        try {
+            $reason = trim((string)$reason);
+            $creditNoteNumber = trim((string)$creditNoteNumber);
+            if (mb_strlen($reason, 'UTF-8') < 5 || mb_strlen($reason, 'UTF-8') > 500) throw new RuntimeException('اكتب سبب العكس (5 أحرف على الأقل).');
+            if (!accountingReversalReady($this->db)) throw new RuntimeException('افتح إدارة الأملاك أولاً لتثبيت تحديث القيود العكسية.');
+            $this->db->begin_transaction();
+            $entry = receiptCommissionRows($this->db, 'SELECT * FROM acc_journal_entries WHERE entry_id=? FOR UPDATE', [(int)$entryId])[0] ?? null;
+            if (!$entry || $entry['status'] !== 'posted') throw new RuntimeException('لا يعكس إلا قيد مرحّل.');
+            if ((int)$entry['reversed_by_entry_id'] > 0) throw new RuntimeException('تم عكس هذا القيد مسبقاً.');
+            $type = (string)$entry['reference_type'];
+            if ($type === 'reversal') throw new RuntimeException('لا يعكس القيد العكسي؛ أعد المزامنة بدلاً من ذلك.');
+            $date = date('Y-m-d');
+            $reference = (int)$entry['reference_id'];
+            $receiptId = (int)$entry['sanad_id'] ?: ($type === 'sanad' ? $reference : 0);
+            if (!$receiptId && $type === 'invoice' && $entry['entry_type'] === 'auto') {
+                $receiptId = (int)(receiptCommissionRows($this->db, 'SELECT sanad_id FROM acc_invoices WHERE invoice_id=?', [$reference])[0]['sanad_id'] ?? 0);
+            }
+            $deliveryId = (int)$entry['sanadsarf_id'] ?: ($type === 'sanadsarf' ? $reference : 0);
+            $expenseId = (int)$entry['masrofat_id'] ?: (in_array($type, ['masrofat', 'office_expense'], true) ? $reference : 0);
+            if ($type === 'deposit_settlement') {
+                $ids = $this->reverseDeposit($reference, $entry, $reason, $date);
+            } elseif ($receiptId) {
+                $ids = $this->reverseReceipt($receiptId, $entry, $reason, $date, $creditNoteNumber);
+            } elseif ($deliveryId) {
+                $ids = $this->reverseSingle('sanadsarf', 'sanadid', $deliveryId, $entry, $reason, $date);
+            } elseif ($expenseId) {
+                $expense = receiptCommissionRows($this->db, 'SELECT idaqar,tasfia FROM masrofat WHERE idmasrof=? FOR UPDATE', [$expenseId])[0] ?? null;
+                if ($expense && (int)$expense['idaqar'] > 0 && trim((string)$expense['tasfia']) !== '') {
+                    foreach (receiptCommissionRows($this->db, 'SELECT sanadid FROM sanadsarf WHERE tasfia=? AND aqarid=?', [$expense['tasfia'], (int)$expense['idaqar']]) as $delivery) {
+                        if (accountingLockReason($this->db, 'sanadsarf', $delivery['sanadid']) !== '') throw new RuntimeException('خُصم المصروف في تسليم مرحّل للمالك: اعكس قيد التسليم أولاً.');
+                    }
+                }
+                $ids = $this->reverseSingle('masrofat', 'idmasrof', $expenseId, $entry, $reason, $date);
+            } elseif ($type === '' && in_array($entry['entry_type'], ['manual', 'opening', 'closing', 'adjustment'], true)) {
+                $ids = [$this->postReversal($entry, $reason, $date)];
+            } else {
+                throw new RuntimeException('هذا النوع من القيود يعكس من شاشته الأصلية (دفعات الفواتير والعهد).');
+            }
+            $this->db->commit();
+            return ['success' => true, 'entry_ids' => $ids, 'message' => 'تم إنشاء ' . count($ids) . ' قيد عكسي بتاريخ اليوم.'];
+        } catch (Throwable $error) {
+            $this->db->rollback();
+            error_log('Entry reversal: ' . $error->getMessage());
+            return ['success' => false, 'message' => $error instanceof RuntimeException ? $error->getMessage() : 'تعذر عكس القيد. راجع سجل الخادم.'];
+        }
+    }
+}

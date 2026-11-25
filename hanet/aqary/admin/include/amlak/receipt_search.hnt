@@ -1,0 +1,101 @@
+<?php
+/**
+ * Search of the receipts list. Only named filters come from the URL; SQL is built here with bound values.
+ * Call after header.hnt / reqloginajax.hnt: both extract the request into variables.
+ */
+require_once __DIR__ . '/receipt_commission_helpers.hnt';
+
+/** Date of a free receipt, or NULL when period is not a full date. */
+const RECEIPT_FREE_DATE_SQL = "IF(TRIM(s.period) REGEXP '^[0-9]{1,2}/[0-9]{1,2}/(19|20)[0-9]{2}$',STR_TO_DATE(TRIM(s.period),'%d/%m/%Y'),NULL)";
+const RECEIPT_DATE_ORDER_SQL = "IF(s.sanaddate<86400,COALESCE(TIMESTAMPDIFF(SECOND,'1970-01-01'," . RECEIPT_FREE_DATE_SQL . "),0),s.sanaddate)";
+
+/** dd-mm-yyyy or dd/mm/yyyy (Hijri years are converted) to the start of that day; 0 when invalid. */
+function receiptSearchDay($value, $calendar): int {
+    if (!is_string($value) || !preg_match('~^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$~', trim($value), $part)) return 0;
+    [$day, $month, $year] = [(int)$part[1], (int)$part[2], (int)$part[3]];
+    if ($year > 1400 && $year < 1900) {
+        try {
+            $date = $calendar->u2g($day, $month, $year);
+        } catch (Throwable $error) {
+            return 0;
+        }
+        [$day, $month, $year] = [(int)$date['day'], (int)$date['month'], (int)$date['year']];
+    }
+    return checkdate($month, $day, $year) ? (int)mktime(0, 0, 0, $month, $day, $year) : 0;
+}
+
+function receiptSearchFilters(array $request, $calendar): array {
+    $text = function ($name) use ($request) { return is_string($request[$name] ?? null) ? trim($request[$name]) : ''; };
+    $number = function ($name) use ($text) { return max(0, (int)$text($name)); };
+    $from = $text('startfrom');
+    $to = $text('enddate');
+    // Old links send day, month and year separately.
+    if ($from === '' && $number('dd')) {
+        $from = $number('dd') . '-' . $number('mm') . '-' . $number('yy');
+        $to = $number('dd2') . '-' . $number('mm2') . '-' . $number('yy2');
+    }
+    $fromDay = receiptSearchDay($from, $calendar);
+    $toDay = receiptSearchDay($to, $calendar);
+    if ($fromDay && $toDay && $fromDay > $toDay) [$fromDay, $toDay] = [$toDay, $fromDay];
+    $perPage = $number('rowperpage');
+    return ['search' => mb_substr(mb_scrub($text('search'), 'UTF-8'), 0, 200, 'UTF-8'), 'idsanad' => $number('idsanad'), 'idaqar' => $number('idaqar'),
+        'from' => $fromDay, 'to' => $toDay, 'page' => max(1, $number('page')), 'rowperpage' => $perPage ? min($perPage, 500) : 40];
+}
+
+/** Active filters as URL parameters, for page and export links. */
+function receiptSearchQuery(array $filters): array {
+    $query = [];
+    if ($filters['search'] !== '') $query['search'] = $filters['search'];
+    if ($filters['idsanad']) $query['idsanad'] = $filters['idsanad'];
+    if ($filters['idaqar']) $query['idaqar'] = $filters['idaqar'];
+    if ($filters['from']) $query['startfrom'] = date('d-m-Y', $filters['from']);
+    if ($filters['to']) $query['enddate'] = date('d-m-Y', $filters['to']);
+    if ($filters['rowperpage'] !== 40) $query['rowperpage'] = $filters['rowperpage'];
+    return $query;
+}
+
+/** [WHERE clause, bound values] on alias s, joined to amlak a. Every word must be found; filters combine. */
+function receiptSearchWhere(array $filters): array {
+    $where = [];
+    $values = [];
+    $words = preg_split('/\s+/u', $filters['search'], -1, PREG_SPLIT_NO_EMPTY) ?: [];
+    foreach (array_slice($words, 0, 10) as $word) {
+        $parts = [];
+        foreach (['s.mostagername', 's.depositeamount', 's.recivername', 's.mybyan', 's.cheqnumber', 's.cheqon', 'a.aqarname'] as $column) {
+            $parts[] = "{$column} LIKE ?";
+            $values[] = '%' . addcslashes($word, '\\%_') . '%';
+        }
+        if (ctype_digit($word)) {
+            $parts[] = 's.idsanad=?';
+            $values[] = (int)$word;
+        }
+        $where[] = '(' . implode(' OR ', $parts) . ')';
+    }
+    foreach (['idsanad' => 's.idsanad=?', 'idaqar' => 's.idaqar=?'] as $name => $sql) {
+        if (!$filters[$name]) continue;
+        $where[] = $sql;
+        $values[] = $filters[$name];
+    }
+    if ($filters['from'] || $filters['to']) {
+        // Free receipts keep their date only as text in period.
+        $dated = ['s.sanaddate>=86400'];
+        $free = ['s.sanaddate<86400', RECEIPT_FREE_DATE_SQL . ' IS NOT NULL'];
+        $datedValues = $freeValues = [];
+        if ($filters['from']) {
+            $dated[] = 's.sanaddate>=?';
+            $datedValues[] = $filters['from'];
+            $free[] = RECEIPT_FREE_DATE_SQL . '>=?';
+            $freeValues[] = date('Y-m-d', $filters['from']);
+        }
+        if ($filters['to']) {
+            // The whole last day is included.
+            $dated[] = 's.sanaddate<?';
+            $datedValues[] = (int)strtotime('+1 day', $filters['to']);
+            $free[] = RECEIPT_FREE_DATE_SQL . '<=?';
+            $freeValues[] = date('Y-m-d', $filters['to']);
+        }
+        $where[] = '((' . implode(' AND ', $dated) . ') OR (' . implode(' AND ', $free) . '))';
+        $values = array_merge($values, $datedValues, $freeValues);
+    }
+    return [$where ? ' WHERE ' . implode(' AND ', $where) : '', $values];
+}

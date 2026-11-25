@@ -1,0 +1,143 @@
+<?php
+/** Insurance settlement when a tenant leaves: refund, damages, and who receives them. */
+$sc_title = 'تسوية تأمين المستأجر';
+$sc_id = '36';
+include_once '../../../nocash.hnt';
+include_once '../../../header.hnt';
+require_once '../../../lib/screen_permissions.hnt';
+require_once __DIR__ . '/deposit_settlement_helpers.hnt';
+
+if (!aqaryScreenCan($link, 'deposit_settlement', 'sees')) aqaryScreenDenyPage('ليس لديك صلاحية تسوية تأمين المستأجرين.');
+$ready = depositSettlementReady($link);
+if (empty($_SESSION['deposit_settlement_csrf'])) $_SESSION['deposit_settlement_csrf'] = bin2hex(random_bytes(24));
+$error = $success = '';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    try {
+        $token = $_POST['csrf_token'] ?? '';
+        if (!is_string($token) || !hash_equals($_SESSION['deposit_settlement_csrf'], $token)) throw new RuntimeException('انتهت صلاحية النموذج. أعد تحميل الصفحة.');
+        $action = $_POST['action'] ?? '';
+        if ($action === 'create') {
+            if (!aqaryScreenCan($link, 'deposit_settlement', 'adds')) throw new RuntimeException('ليس لديك صلاحية الإضافة.');
+            $success = 'تم حفظ تسوية التأمين رقم ' . depositSettlementCreate($link, array_filter($_POST, 'is_scalar'));
+        } elseif ($action === 'delete') {
+            if (!aqaryScreenCan($link, 'deposit_settlement', 'deleetes')) throw new RuntimeException('ليس لديك صلاحية الحذف.');
+            depositSettlementDelete($link, (int)($_POST['settlement_id'] ?? 0));
+            $success = 'تم حذف التسوية.';
+        }
+    } catch (Throwable $exception) {
+        error_log('Deposit settlement: ' . $exception->getMessage());
+        $error = $exception instanceof RuntimeException ? $exception->getMessage() : 'تعذر حفظ التسوية.';
+    }
+}
+
+$esc = 'receiptCommissionEsc';
+$search = trim((string)(is_scalar($_GET['search'] ?? '') ? ($_GET['search'] ?? '') : ''));
+$selectedId = (int)($_GET['egar_id'] ?? 0);
+$selected = null;
+$contracts = $settlements = [];
+if ($ready) {
+    $scope = receiptCommissionScope($link, 's');
+    if ($selectedId > 0) {
+        $selected = depositContract($link, $selectedId);
+        if ($selected && (!$selected['property'] || !receiptCommissionRows($link, "SELECT s.idaqar FROM amlak s WHERE s.idaqar=? AND {$scope}", [(int)$selected['property']['idaqar']]))) {
+            $selected = null;
+            $error = $error ?: 'العقد غير مرتبط بعقار متاح لك.';
+        }
+    } elseif ($search !== '') {
+        $like = '%' . $search . '%';
+        $contracts = receiptCommissionRows($link, "SELECT e.rakam3akdid,e.rakam3akd,e.tamen,e.status,t.mostagername FROM egar e
+            LEFT JOIN mostagereen t ON t.mostagerid=IF(e.mostagerid>0,e.mostagerid,CAST(e.elect AS UNSIGNED))
+            WHERE e.tamen>0 AND (t.mostagername LIKE ? OR e.rakam3akd=? OR e.rakam3akdid=?)
+            AND NOT EXISTS (SELECT 1 FROM deposit_settlements d WHERE d.egar_id=e.rakam3akdid) ORDER BY e.rakam3akdid DESC LIMIT 50", [$like, $search, ctype_digit($search) ? (int)$search : 0]);
+    }
+    $settlements = receiptCommissionRows($link, "SELECT d.*,s.aqarname FROM deposit_settlements d JOIN amlak s ON s.idaqar=d.idaqar WHERE {$scope} ORDER BY d.settlement_id DESC LIMIT 100");
+}
+$received = $selected ? depositInsuranceReceived($link, $selectedId, $selected['contract']) : null;
+$holder = $selected ? depositHolder($selected['property']) : '';
+$officeOwns = $selected && ($selected['property']['rent_income_to'] ?? 'owner') === 'office';
+$banks = $selected ? receiptCommissionRows($link, 'SELECT id,bankname,acountnumber FROM bankacounts WHERE ownerid2=0 ORDER BY id') : [];
+$token = $esc($_SESSION['deposit_settlement_csrf']);
+$names = ['owner' => 'المالك', 'office' => 'المكتب', '' => '-'];
+?>
+<div class="container-fluid py-4" dir="rtl">
+    <h3 class="mb-3"><i class="bi bi-shield-check me-2"></i><?= $sc_title ?></h3>
+    <?php if (!$ready): ?><div class="alert alert-warning">افتح إدارة الأملاك أولاً لتثبيت تحديث تسوية التأمين.</div><?php endif; ?>
+    <?php if ($error !== ''): ?><div class="alert alert-danger"><?= $esc($error) ?></div><?php endif; ?>
+    <?php if ($success !== ''): ?><div class="alert alert-success"><?= $esc($success) ?></div><?php endif; ?>
+
+    <form method="get" class="card card-body mb-4"><div class="row g-2">
+        <div class="col-md-6"><input class="form-control" name="search" value="<?= $esc($search) ?>" placeholder="اسم المستأجر أو رقم العقد"></div>
+        <div class="col-md-2"><button class="btn btn-success w-100">بحث</button></div>
+    </div></form>
+
+    <?php if ($search !== '' && !$selected): ?>
+    <div class="card card-body mb-4"><div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>العقد</th><th>المستأجر</th><th>التأمين في العقد</th><th></th></tr></thead><tbody>
+        <?php foreach ($contracts as $row): ?><tr><td><?= $esc($row['rakam3akd'] !== '' ? $row['rakam3akd'] : '#' . $row['rakam3akdid']) ?></td><td><?= $esc($row['mostagername']) ?></td><td><?= number_format((float)$row['tamen'], 2) ?></td>
+            <td><a class="btn btn-sm btn-primary" href="?egar_id=<?= (int)$row['rakam3akdid'] ?>">اختيار</a></td></tr><?php endforeach; ?>
+        <?php if (!$contracts): ?><tr><td colspan="4" class="text-center text-muted">لا توجد عقود لها تأمين غير مسوى.</td></tr><?php endif; ?>
+    </tbody></table></div></div>
+    <?php endif; ?>
+
+    <?php if ($selected): ?>
+    <form method="post" action="deposit_settlement.hnt" class="card card-body mb-4" id="depositForm" data-insurance="<?= $received['cents'] ?>" data-holder="<?= $holder ?>">
+        <input type="hidden" name="csrf_token" value="<?= $token ?>"><input type="hidden" name="action" value="create">
+        <input type="hidden" name="egar_id" value="<?= $selectedId ?>"><input type="hidden" name="formuid" value="<?= bin2hex(random_bytes(16)) ?>">
+        <div class="row g-3">
+            <div class="col-md-4"><strong>المستأجر:</strong> <?= $esc($selected['tenant_name']) ?></div>
+            <div class="col-md-4"><strong>العقار:</strong> <?= $esc($selected['property']['aqarname']) ?> - وحدة <?= $esc($selected['unit']['rakam']) ?></div>
+            <div class="col-md-4"><strong>التأمين المحصل:</strong> <?= number_format($received['cents'] / 100, 2) ?> — <strong>لدى:</strong> <?= $names[$holder] ?></div>
+            <?php if ($received['source'] === 'contract'): ?>
+            <div class="col-12"><div class="alert alert-warning mb-0"><label><input type="checkbox" class="form-check-input ms-1" name="confirm_received" value="1" required> لا يوجد تأمين مسجل في سندات العقد. أؤكد أن مبلغ التأمين المكتوب في العقد محصل فعلاً.</label></div></div>
+            <?php endif; ?>
+            <div class="col-md-3"><label class="form-label">خصم التلفيات</label><input type="number" class="form-control" name="damages" id="damages" min="0" step="0.01" max="<?= $received['cents'] / 100 ?>" value="0"></div>
+            <div class="col-md-3"><label class="form-label">التلفيات لصالح</label><select class="form-select" name="damages_to" id="damagesTo">
+                <?php if (!$officeOwns): ?><option value="owner">المالك</option><?php endif; ?><option value="office">المكتب</option></select></div>
+            <div class="col-md-3"><label class="form-label">تاريخ التسوية</label><input type="date" class="form-control" name="settlement_date" value="<?= date('Y-m-d') ?>" required></div>
+            <div class="col-md-3"><label class="form-label">طريقة رد المبلغ</label><select class="form-select" name="payment_type"><option value="1">نقداً</option><option value="2">شيك</option><option value="4">تحويل</option><option value="5">شبكة</option><option value="3">طريقة أخرى</option></select></div>
+            <div class="col-md-4"><label class="form-label">البنك (لغير النقد)</label><select class="form-select" name="bankid"><option value="0">-</option><?php foreach ($banks as $bank): ?><option value="<?= (int)$bank['id'] ?>"><?= $esc($bank['bankname'] . ' - ' . $bank['acountnumber']) ?></option><?php endforeach; ?></select></div>
+            <div class="col-md-8"><label class="form-label">ملاحظات</label><input class="form-control" name="notes" maxlength="500"></div>
+            <div class="col-12"><div class="alert alert-info mb-0" id="depositSummary"></div></div>
+            <div class="col-12"><button class="btn btn-success" <?= $received['cents'] > 0 && aqaryScreenCan($link, 'deposit_settlement', 'adds') ? '' : 'disabled' ?>>حفظ التسوية</button> <a class="btn btn-outline-secondary" href="deposit_settlement.hnt">إلغاء</a></div>
+        </div>
+    </form>
+    <script>
+    $(function () {
+        function summary() {
+            var form = $('#depositForm'), insurance = Number(form.data('insurance')), holder = form.data('holder');
+            var damages = Math.round((parseFloat($('#damages').val()) || 0) * 100), to = $('#damagesTo').val();
+            var refund = insurance - damages, money = function (v) { return (v / 100).toFixed(2); };
+            var text = 'يرد للمستأجر: ' + money(refund);
+            if (damages > 0) text += ' | التلفيات: ' + money(damages) + (to === 'office' ? ' إيراد للمكتب' : ' للمالك');
+            if (holder === 'owner') text += ' | مصروف على المالك: ' + money(refund + (to === 'office' ? damages : 0));
+            else if (to === 'owner' && damages > 0) text += ' | تضاف للتسليم القادم للمالك بدون نسبة';
+            if (damages > insurance) text = 'التلفيات لا تتجاوز التأمين؛ سجل الزيادة بسند قبض على المستأجر.';
+            $('#depositSummary').text(text);
+        }
+        $('#damages,#damagesTo').on('input change select2:select', summary);
+        summary();
+    });
+    </script>
+    <?php endif; ?>
+
+    <div class="card card-body"><h5>التسويات</h5><div class="table-responsive"><table class="table table-striped align-middle">
+        <thead><tr><th>#</th><th>التاريخ</th><th>المستأجر</th><th>العقار</th><th>التأمين</th><th>لدى</th><th>التلفيات</th><th>لصالح</th><th>المردود</th><th>الحالة</th><th></th></tr></thead><tbody>
+        <?php foreach ($settlements as $row): ?><tr>
+            <td><?= (int)$row['settlement_id'] ?></td><td><?= date('d/m/Y', (int)$row['settlement_date']) ?></td><td><?= $esc($row['tenant_name']) ?></td><td><?= $esc($row['aqarname']) ?></td>
+            <td><?= number_format((float)$row['insurance'], 2) ?></td><td><?= $names[$row['holder']] ?? '' ?></td><td><?= number_format((float)$row['damages'], 2) ?></td><td><?= $names[$row['damages_to']] ?? '' ?></td><td><?= number_format((float)$row['refund'], 2) ?></td>
+            <td><?= (int)$row['accounting_entry_id'] > 0 ? '<span class="badge text-bg-success">مرحّلة</span>' : '<span class="badge text-bg-secondary">غير مرحّلة</span>' ?>
+                <?php if ((float)$row['owner_credit'] > 0): ?><span class="badge text-bg-info"><?= (int)$row['owner_sanadsarf_id'] > 0 ? 'سُلّمت للمالك' : 'بانتظار التسليم' ?></span><?php endif; ?></td>
+            <td><?php if ((int)$row['accounting_entry_id'] === 0 && aqaryScreenCan($link, 'deposit_settlement', 'deleetes')): ?>
+                <form method="post" class="deposit-delete"><input type="hidden" name="csrf_token" value="<?= $token ?>"><input type="hidden" name="action" value="delete"><input type="hidden" name="settlement_id" value="<?= (int)$row['settlement_id'] ?>"><button class="btn btn-sm btn-outline-danger">حذف</button></form><?php endif; ?></td>
+        </tr><?php endforeach; ?>
+        <?php if (!$settlements): ?><tr><td colspan="11" class="text-center text-muted">لا توجد تسويات.</td></tr><?php endif; ?>
+    </tbody></table></div></div>
+</div>
+<script>
+$('.deposit-delete').on('submit', function (event) {
+    var form = this;
+    event.preventDefault();
+    confirm('هل تريد حذف التسوية؟', 'تأكيد', function () { form.submit(); });
+});
+</script>
+<?php require '../../../foter.hnt'; ?>
