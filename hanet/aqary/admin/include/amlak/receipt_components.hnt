@@ -73,6 +73,12 @@ function receiptInstallmentComponents(array $installment, array $contract): arra
     ];
 }
 
+/** VAT whose own amount is zero cannot be invoiced. */
+function receiptHasOrphanVat(array $components): bool {
+    foreach (['rent', 'commission', 'other'] as $key) if ($components[$key] <= 0 && $components[$key . '_vat'] > 0) return true;
+    return false;
+}
+
 /** Split one payment over the remaining components; never negative, never above what remains. */
 function receiptSplitPayment(int $payment, array $remaining, array $fees = []): array {
     $split = array_fill_keys(RECEIPT_COMPONENT_KEYS, 0);
@@ -80,9 +86,16 @@ function receiptSplitPayment(int $payment, array $remaining, array $fees = []): 
     if ($fees) {
         $left = $payment;
         foreach ($fees as $key => $fee) {
-            $split[$key] = max(0, min($fee, $remaining[$key], $left));
+            $open = $remaining[$key];
+            $split[$key] = max(0, min($fee, $open, $left));
             $left -= $split[$key];
             $remaining[$key] = 0;
+            // A commission paid whole brings its VAT with it; VAT never stays without its commission.
+            if ($key === 'commission' && $open > 0) {
+                $split['commission_vat'] = max(0, min((int)round($remaining['commission_vat'] * $split[$key] / $open), $left));
+                $left -= $split['commission_vat'];
+                $remaining['commission_vat'] = 0;
+            }
         }
         foreach (receiptSplitPayment($left, $remaining) as $key => $value) $split[$key] += $value;
         return $split;

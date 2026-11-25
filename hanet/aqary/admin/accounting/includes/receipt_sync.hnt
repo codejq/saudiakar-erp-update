@@ -76,7 +76,7 @@ trait ReceiptInvoiceSync {
     private function receiptEnsureComponents(array $receipt): array {
         $id = (int)$receipt['idsanad'];
         $stored = receiptCommissionRows($this->db, 'SELECT * FROM sanad_components WHERE idsanad=? FOR UPDATE', [$id]);
-        if ($stored) return $stored[0];
+        if ($stored) return $stored[0]['status'] === 'ok' && receiptHasOrphanVat(receiptComponentsFromRow($stored[0])) ? $this->receiptRepairOrphanVat($receipt, $stored[0]) : $stored[0];
         $amount = receiptComponentsCents($receipt['depositeamount']);
         $components = array_fill_keys(RECEIPT_COMPONENT_KEYS, 0);
         $warnings = [];
@@ -102,6 +102,41 @@ trait ReceiptInvoiceSync {
         }
         receiptComponentsStore($this->db, $id, ['components' => $components, 'warnings' => array_values(array_unique($warnings)), 'installment_id' => (int)$receipt['kastid']]);
         return receiptCommissionRows($this->db, 'SELECT * FROM sanad_components WHERE idsanad=?', [$id])[0];
+    }
+
+    /** An earlier split left VAT without its amount: split again while nothing was delivered, else hold it. */
+    private function receiptRepairOrphanVat(array $receipt, array $stored): array {
+        $id = (int)$receipt['idsanad'];
+        $income = receiptCommissionRows($this->db, 'SELECT * FROM eradat WHERE sanadrakam=? ORDER BY iderad FOR UPDATE', [(string)$id]);
+        $warning = 'ضريبة بلا مبلغ خاضع لها';
+        if (count($income) === 1 && trim((string)$income[0]['tasfia']) === '' && (int)$receipt['kastid'] > 0) {
+            $result = receiptOlderComponents($this->db, $receipt, ['amount' => $receipt['depositeamount']] + $income[0]);
+            $new = $result['components'];
+            if ($new && !$result['warnings'] && !receiptHasOrphanVat($new) && $new['unclassified'] === 0 && array_sum($new) === receiptComponentsCents($receipt['depositeamount'])) {
+                $sets = [];
+                $params = [];
+                foreach ($new as $key => $value) { $sets[] = $key . '=?'; $params[] = number_format($value / 100, 2, '.', ''); }
+                $params[] = $id;
+                receiptCommissionQuery($this->db, 'UPDATE sanad_components SET ' . implode(',', $sets) . " WHERE idsanad=?", $params)->close();
+                receiptCommissionQuery($this->db, 'UPDATE sanad SET commesion_vat=?,depositeamount_vat=? WHERE idsanad=?',
+                    [$new['commission_vat'] / 100, ($new['rent_vat'] + $new['other_vat']) / 100, $id])->close();
+                receiptCommissionQuery($this->db, "UPDATE eradat SET mysa3ee=?,mywater=?,services=?,tamen=? WHERE iderad=? AND tasfia=''",
+                    [$new['commission'] / 100, $new['water'] / 100, $new['services'] / 100, $new['insurance'] / 100, (int)$income[0]['iderad']])->close();
+                return receiptCommissionRows($this->db, 'SELECT * FROM sanad_components WHERE idsanad=?', [$id])[0];
+            }
+        }
+        receiptCommissionQuery($this->db, "UPDATE sanad_components SET status='review',warnings=? WHERE idsanad=?", [json_encode([$warning], JSON_UNESCAPED_UNICODE), $id])->close();
+        return ['status' => 'review', 'warnings' => json_encode([$warning], JSON_UNESCAPED_UNICODE)] + $stored;
+    }
+
+    /** Cancel a draft and make it again from its receipt. */
+    public function rebuildReceiptInvoice($invoiceId) {
+        $invoice = receiptCommissionRows($this->db, 'SELECT sanad_id FROM acc_invoices WHERE invoice_id=?', [(int)$invoiceId])[0] ?? null;
+        $void = $this->voidReceiptInvoice($invoiceId);
+        if (empty($void['success'])) return $void;
+        $result = $this->createDraftFromSanad((int)$invoice['sanad_id']);
+        if (!empty($result['success'])) return ['success' => true, 'message' => 'أعيد بناء المسودة من السند.'];
+        return ['success' => false, 'rebuilt' => true, 'message' => 'أُلغيت المسودة. ' . ($result['message'] ?? 'أعد المزامنة.')];
     }
 
     public function createDraftFromSanad($receiptId) {
@@ -230,7 +265,11 @@ trait ReceiptInvoiceSync {
         $itemTotal = receiptComponentsCents(receiptCommissionRows($this->db, 'SELECT COALESCE(SUM(line_total),0) t FROM acc_invoice_items WHERE invoice_id=?', [(int)$invoiceId])[0]['t']);
         if (abs(receiptComponentsCents($invoice['total_amount']) - $totals['total']) > 1 || abs(receiptComponentsCents($invoice['vat_amount']) - $totals['vat']) > 1
             || abs($itemTotal - $totals['total']) > 2) {
-            throw new RuntimeException('عُدلت الفاتورة فأصبحت لا تطابق سند القبض أو ضريبته. صححها أو ألغ المسودة.');
+            throw new RuntimeException(receiptHasOrphanVat($components)
+                ? 'في السند ضريبة بلا مبلغ خاضع لها. اضغط "إعادة بناء المسودة".'
+                : 'الفاتورة لا تطابق السند: إجمالي السند ' . number_format($totals['total'] / 100, 2) . ' وضريبته ' . number_format($totals['vat'] / 100, 2)
+                    . '، وإجمالي الفاتورة ' . number_format((float)$invoice['total_amount'], 2) . ' وضريبتها ' . number_format((float)$invoice['vat_amount'], 2)
+                    . ' ومجموع بنودها ' . number_format($itemTotal / 100, 2) . '. صححها أو اضغط "إعادة بناء المسودة".');
         }
         $context = $this->resolveSanadContext($receipt);
         $property = $context['aqar_id'] ? (receiptCommissionRows($this->db, 'SELECT * FROM amlak WHERE idaqar=?', [(int)$context['aqar_id']])[0] ?? []) : [];
@@ -354,6 +393,7 @@ trait ReceiptInvoiceSync {
             }
             if (array_sum($components) !== receiptComponentsCents($receipt['depositeamount'])) throw new RuntimeException('مجموع البنود يجب أن يساوي مبلغ السند.');
             foreach (['rent' => 'rent_vat', 'commission' => 'commission_vat', 'other' => 'other_vat'] as $base => $vat) {
+                if ($components[$vat] > 0 && $components[$base] <= 0) throw new RuntimeException('لا تسجل ضريبة بلا مبلغ خاضع لها.');
                 if ($components[$vat] > 0 && abs($components[$vat] - $components[$base] * RECEIPT_COMPONENT_VAT_PERCENT / 100) > 1.01) throw new RuntimeException('الضريبة لا تساوي 15% من البند الخاضع لها.');
             }
             if ($components['rent'] > 0 && (int)$receipt['idaqar'] <= 0) throw new RuntimeException('الإيجار يحتاج سنداً مرتبطاً بعقار.');
