@@ -381,6 +381,10 @@ final class AqaryAssistant
                 return $this->departmentPlanCard($action);
             case 'department_field_change':
                 return $this->departmentFieldCard($action);
+            case 'lookup_qr':
+                return $this->lookupQr($query);
+            case 'create_qr':
+                return $this->qrCard((array)($action['qr'] ?? array()), (array)($action['missing'] ?? array()));
         }
         return $none;
     }
@@ -772,6 +776,82 @@ final class AqaryAssistant
         }
         $builder->updateField($depId, $fieldId, array_intersect_key((array)($data['changes'] ?? array()), array_flip(array('name', 'values', 'required', 'active'))));
         return array('message' => 'تم تعديل الحقل.', 'links' => AqaryDepartmentBuilder::links($depId));
+    }
+
+    // ------------------------------------------------------------------ QR codes
+
+    /** Types the assistant can make from one value, as the create screen does. */
+    private const QR_TYPES = array('text' => 'نص', 'url' => 'رابط', 'email' => 'بريد إلكتروني', 'phone' => 'هاتف', 'whatsapp' => 'واتساب');
+
+    private function qrGenerator(): QRCodeGenerator
+    {
+        require_once dirname(__DIR__, 2) . '/qr/qr.class.hnt';
+        return new QRCodeGenerator($this->link);
+    }
+
+    private function lookupQr(string $query): array
+    {
+        $none = array('reply' => null, 'links' => array(), 'card' => null);
+        if (!aqaryScreenCan($this->link, '82', 'sees')) return array('reply' => 'ليست لديك صلاحية عرض أكواد QR.') + $none;
+        $rows = array_slice($this->qrGenerator()->getAllQR($query !== '' ? array('search' => $query) : array()), 0, 8);
+        if (!$rows) return array('reply' => $query !== '' ? 'لا توجد أكواد QR مطابقة لـ "' . $query . '".' : 'لا توجد أكواد QR بعد.') + $none;
+        $links = array_map(function ($r) { return array('title' => $r['qr_name'], 'url' => '/aqary/admin/qr/view.hnt?id=' . intval($r['id'])); }, $rows);
+        $reply = 'أكواد QR' . ($query !== '' ? ' المطابقة' : ' الأحدث') . ': ' . implode('، ', array_map(function ($r) {
+            return $r['qr_name'] . ' (' . number_format(intval($r['scan_count'])) . ' مسحة' . ($r['is_active'] ? '' : '، معطل') . ')';
+        }, $rows)) . '.';
+        return array('reply' => $reply, 'links' => $links, 'card' => null);
+    }
+
+    /** Checked QR fields; throws InvalidArgumentException. */
+    private static function qrClean(array $q): array
+    {
+        $name = trim((string)($q['name'] ?? ''));
+        $type = (string)($q['type'] ?? 'text');
+        $content = trim((string)($q['content'] ?? ''));
+        $size = intval($q['size'] ?? 256);
+        $level = strtoupper((string)($q['error_level'] ?? 'M'));
+        if ($name === '' || mb_strlen($name) > 255) throw new InvalidArgumentException('اسم رمز QR مطلوب (حتى 255 حرفاً).');
+        if (!isset(self::QR_TYPES[$type])) throw new InvalidArgumentException('نوع رمز QR غير مدعوم من المساعد.');
+        if ($content === '' || mb_strlen($content) > 2000) throw new InvalidArgumentException('محتوى رمز QR مطلوب (حتى 2000 حرف).');
+        if ($type === 'email' && !filter_var($content, FILTER_VALIDATE_EMAIL)) throw new InvalidArgumentException('البريد الإلكتروني غير صحيح.');
+        if (in_array($type, array('phone', 'whatsapp'), true)) {
+            $content = preg_replace('/[^0-9+]/', '', self::westernDigits($content));
+            if (strlen($content) < 6) throw new InvalidArgumentException('رقم الهاتف غير صحيح.');
+        }
+        if ($type === 'url' && !preg_match('~^(https?://)?[^\s/$.?#].[^\s]*$~i', $content)) throw new InvalidArgumentException('الرابط غير صحيح.');
+        if (!in_array($size, array(128, 256, 512, 1024), true)) $size = 256;
+        if (!in_array($level, array('L', 'M', 'Q', 'H'), true)) $level = 'M';
+        return array('name' => $name, 'type' => $type, 'content' => $content, 'size' => $size, 'error_level' => $level);
+    }
+
+    private function qrCard(array $q, array $missing): array
+    {
+        $none = array('reply' => null, 'links' => array(), 'card' => null);
+        if (!aqaryScreenCan($this->link, '83', 'adds')) return array('reply' => 'ليست لديك صلاحية إنشاء أكواد QR.') + $none;
+        $data = array('name' => self::clean($q['name'] ?? null, 255), 'type' => isset(self::QR_TYPES[$q['type'] ?? '']) ? $q['type'] : 'text',
+            'content' => self::clean($q['content'] ?? null, 2000), 'size' => intval($q['size'] ?? 256) ?: 256, 'error_level' => strtoupper((string)($q['error_level'] ?? 'M')));
+        $missing = array_values(array_filter(array_map('strval', $missing)));
+        if (!$data['name']) $missing[] = 'qr_name';
+        if (!$data['content']) $missing[] = 'qr_content';
+        return array('reply' => null, 'links' => array(), 'card' => array('type' => 'create_qr', 'data' => $data, 'types' => self::QR_TYPES, 'missing' => array_values(array_unique($missing))));
+    }
+
+    /** Creates a confirmed QR draft. @return array{message: string, links: array} */
+    public function confirmQr(array $d): array
+    {
+        if (!$this->allowed() || !aqaryScreenCan($this->link, '83', 'adds')) throw new InvalidArgumentException('ليست لديك صلاحية إنشاء أكواد QR.');
+        $q = self::qrClean($d);
+        $generator = $this->qrGenerator();
+        $file = $generator->generateQR($generator->formatContent($q['type'], array('content' => $q['content'])), $q['size'], $q['error_level']);
+        $id = $generator->createQR(array('qr_name' => $q['name'], 'qr_type' => $q['type'], 'content' => $q['content'], 'size' => $q['size'],
+            'error_level' => $q['error_level'], 'foreground_color' => '#000000', 'background_color' => '#FFFFFF',
+            'description' => 'أنشئ من المساعد الذكي', 'is_active' => 1, 'created_by' => $this->userId));
+        if (!$id) throw new InvalidArgumentException('تعذر حفظ رمز QR.');
+        $generator->setImagePath($id, $file);
+        return array('message' => 'تم إنشاء رمز QR "' . $q['name'] . '".', 'links' => array(
+            array('title' => 'عرض الرمز', 'url' => '/aqary/admin/qr/view.hnt?id=' . intval($id)),
+            array('title' => 'تحميل الصورة', 'url' => '/aqary/admin/qr/qrcodes/' . rawurlencode($file)),
+            array('title' => 'تعديل', 'url' => '/aqary/admin/qr/create.hnt?id=' . intval($id))));
     }
 
     // ------------------------------------------------------------------ confirm (the only direct write)

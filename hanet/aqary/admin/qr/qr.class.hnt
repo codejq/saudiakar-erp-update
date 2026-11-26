@@ -1,0 +1,562 @@
+<?php
+
+/**
+ * QR Code Generator Class
+ * ====================================
+ * Handles QR code generation and management
+ *
+ * @author QR Module
+ * @version 1.0
+ * @date 2025-10-16
+ */
+
+// Include QR library - adjust path as needed
+require_once(__DIR__ . '/phpqrcode/qrlib.php');
+
+class QRCodeGenerator {
+
+    private $db;
+    private $uploadDir;
+    private $qrDir;
+
+    /**
+     * Constructor
+     */
+    public function __construct($db) {
+        $this->db = $db;
+        $this->uploadDir = __DIR__ . '/uploads/';
+        $this->qrDir = __DIR__ . '/qrcodes/';
+
+        // Create directories if they don't exist
+        if (!is_dir($this->uploadDir)) {
+            mkdir($this->uploadDir, 0755, true);
+        }
+        if (!is_dir($this->qrDir)) {
+            mkdir($this->qrDir, 0755, true);
+        }
+    }
+
+    /**
+     * Generate QR code image
+     */
+    public function generateQR($content, $size = 256, $errorLevel = 'M', $filename = null) {
+        if (!$filename) {
+            $filename = 'qr_' . time() . '_' . uniqid() . '.png';
+        }
+
+        $filepath = $this->qrDir . $filename;
+
+        // Error correction levels: L, M, Q, H
+        $level = QR_ECLEVEL_M;
+        switch (strtoupper($errorLevel)) {
+            case 'L': $level = QR_ECLEVEL_L; break;
+            case 'M': $level = QR_ECLEVEL_M; break;
+            case 'Q': $level = QR_ECLEVEL_Q; break;
+            case 'H': $level = QR_ECLEVEL_H; break;
+        }
+
+        // Generate QR code
+        QRcode::png($content, $filepath, $level, intval($size / 32), 2);
+
+        return $filename;
+    }
+
+    /**
+     * Generate QR with custom colors
+     */
+    public function generateColoredQR($content, $size, $errorLevel, $fgColor, $bgColor, $filename = null) {
+        // First generate standard QR
+        $qrFile = $this->generateQR($content, $size, $errorLevel, $filename);
+        $filepath = $this->qrDir . $qrFile;
+
+        // Load image and apply colors
+        $im = imagecreatefrompng($filepath);
+
+        // Convert hex to RGB
+        $fg = $this->hexToRgb($fgColor);
+        $bg = $this->hexToRgb($bgColor);
+
+        // Replace colors
+        $width = imagesx($im);
+        $height = imagesy($im);
+
+        for ($x = 0; $x < $width; $x++) {
+            for ($y = 0; $y < $height; $y++) {
+                $rgb = imagecolorat($im, $x, $y);
+                $r = ($rgb >> 16) & 0xFF;
+                $g = ($rgb >> 8) & 0xFF;
+                $b = $rgb & 0xFF;
+
+                // If pixel is dark (QR code), use foreground color
+                if ($r < 128) {
+                    $newColor = imagecolorallocate($im, $fg['r'], $fg['g'], $fg['b']);
+                } else {
+                    $newColor = imagecolorallocate($im, $bg['r'], $bg['g'], $bg['b']);
+                }
+                imagesetpixel($im, $x, $y, $newColor);
+            }
+        }
+
+        // Save colored QR
+        imagepng($im, $filepath);
+        imagedestroy($im);
+
+        return $qrFile;
+    }
+
+    /**
+     * Convert hex color to RGB
+     */
+    private function hexToRgb($hex) {
+        $hex = str_replace('#', '', $hex);
+        return array(
+            'r' => hexdec(substr($hex, 0, 2)),
+            'g' => hexdec(substr($hex, 2, 2)),
+            'b' => hexdec(substr($hex, 4, 2))
+        );
+    }
+
+    /**
+     * Format content based on QR type
+     */
+    public function formatContent($type, $data) {
+        switch ($type) {
+            case 'text':
+                return $data['content'];
+
+            case 'url':
+                $url = $data['content'];
+                if (!preg_match("~^(?:f|ht)tps?://~i", $url)) {
+                    $url = "http://" . $url;
+                }
+                return $url;
+
+            case 'email':
+                return "mailto:" . $data['content'];
+
+            case 'phone':
+                return "tel:" . $data['content'];
+
+            case 'sms':
+                $phone = isset($data['phone']) ? $data['phone'] : $data['content'];
+                $message = isset($data['message']) ? $data['message'] : '';
+                return "SMSTO:" . $phone . ":" . $message;
+
+            case 'whatsapp':
+                $phone = $data['content'];
+                $message = isset($data['message']) ? $data['message'] : '';
+                return "https://wa.me/" . $phone . "?text=" . urlencode($message);
+
+            case 'vcard':
+                return $this->generateVCard($data);
+
+            case 'wifi':
+                return $this->generateWiFi($data);
+
+            case 'location':
+                $lat = isset($data['latitude']) ? $data['latitude'] : '';
+                $lng = isset($data['longitude']) ? $data['longitude'] : '';
+                return "geo:$lat,$lng";
+
+            case 'event':
+                return $this->generateEvent($data);
+
+            default:
+                return $data['content'];
+        }
+    }
+
+    /**
+     * Generate vCard format
+     */
+    private function generateVCard($data) {
+        $vcard = "BEGIN:VCARD\n";
+        $vcard .= "VERSION:3.0\n";
+        $vcard .= "FN:" . (isset($data['name']) ? $data['name'] : '') . "\n";
+        $vcard .= "TEL:" . (isset($data['phone']) ? $data['phone'] : '') . "\n";
+        $vcard .= "EMAIL:" . (isset($data['email']) ? $data['email'] : '') . "\n";
+        $vcard .= "ORG:" . (isset($data['organization']) ? $data['organization'] : '') . "\n";
+        $vcard .= "URL:" . (isset($data['website']) ? $data['website'] : '') . "\n";
+        $vcard .= "END:VCARD";
+        return $vcard;
+    }
+
+    /**
+     * Generate WiFi format
+     */
+    private function generateWiFi($data) {
+        $ssid = isset($data['ssid']) ? $data['ssid'] : '';
+        $password = isset($data['password']) ? $data['password'] : '';
+        $security = isset($data['security']) ? $data['security'] : 'WPA';
+        $hidden = isset($data['hidden']) && $data['hidden'] ? 'true' : 'false';
+
+        return "WIFI:T:$security;S:$ssid;P:$password;H:$hidden;;";
+    }
+
+    /**
+     * Generate Event format (iCal)
+     */
+    private function generateEvent($data) {
+        $event = "BEGIN:VEVENT\n";
+        $event .= "SUMMARY:" . (isset($data['title']) ? $data['title'] : '') . "\n";
+        $event .= "DTSTART:" . (isset($data['start']) ? $data['start'] : '') . "\n";
+        $event .= "DTEND:" . (isset($data['end']) ? $data['end'] : '') . "\n";
+        $event .= "LOCATION:" . (isset($data['location']) ? $data['location'] : '') . "\n";
+        $event .= "END:VEVENT";
+        return $event;
+    }
+
+    /**
+     * Create QR code record
+     */
+    private function createQRRaw($data) {
+        $stmt = $this->db->prepare("
+            INSERT INTO qr_codes
+            (qr_name, qr_type, content, size, error_level, foreground_color, background_color,
+             description, is_active, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ");
+
+        if (!$stmt) {
+            throw new Exception("فشل في تحضير الاستعلام: " . $this->db->error);
+        }
+
+        $stmt->bind_param(
+            "sssissssii",
+            $data['qr_name'],
+            $data['qr_type'],
+            $data['content'],
+            $data['size'],
+            $data['error_level'],
+            $data['foreground_color'],
+            $data['background_color'],
+            $data['description'],
+            $data['is_active'],
+            $data['created_by']
+        );
+
+        if ($stmt->execute()) {
+            return $this->db->insert_id;
+        }
+
+        return false;
+    }
+
+    /**
+     * Update QR code record
+     */
+    private function updateQRRaw($id, $data) {
+        $stmt = $this->db->prepare("
+            UPDATE qr_codes
+            SET qr_name = ?, qr_type = ?, content = ?, size = ?, error_level = ?,
+                foreground_color = ?, background_color = ?, description = ?, is_active = ?
+            WHERE id = ?
+        ");
+
+        $stmt->bind_param(
+            "sssissssii",
+            $data['qr_name'],
+            $data['qr_type'],
+            $data['content'],
+            $data['size'],
+            $data['error_level'],
+            $data['foreground_color'],
+            $data['background_color'],
+            $data['description'],
+            $data['is_active'],
+            $id
+        );
+
+        return $stmt->execute();
+    }
+
+    /**
+     * Get QR code by ID
+     */
+    private function getQRRaw($id) {
+        $stmt = $this->db->prepare("SELECT * FROM qr_codes WHERE id = ?");
+
+        if ($stmt === false) {
+            error_log("QR Module: Failed to prepare getQR query - " . $this->db->error);
+            return null;
+        }
+
+        $stmt->bind_param("i", $id);
+
+        if (!$stmt->execute()) {
+            error_log("QR Module: Failed to execute getQR query - " . $stmt->error);
+            return null;
+        }
+
+        return $stmt->get_result()->fetch_assoc();
+    }
+
+    /**
+     * Get all QR codes
+     */
+    private function getAllQRRaw($filters = array()) {
+        $where = array("1=1");
+        $params = array();
+        $types = "";
+
+        if (isset($filters['type']) && $filters['type'] != 'all') {
+            $where[] = "q.qr_type = ?";
+            $params[] = $filters['type'];
+            $types .= "s";
+        }
+
+        if (isset($filters['status'])) {
+            $where[] = "q.is_active = ?";
+            $params[] = $filters['status'];
+            $types .= "i";
+        }
+
+        if (isset($filters['search']) && !empty($filters['search'])) {
+            // Older rows were stored double-encoded; match them as well.
+            $where[] = "(q.qr_name LIKE ? OR q.content LIKE ? OR q.qr_name LIKE ? OR q.content LIKE ?)";
+            $search = "%" . $filters['search'] . "%";
+            $legacy = "%" . self::doubleEncode($filters['search']) . "%";
+            array_push($params, $search, $search, $legacy, $legacy);
+            $types .= "ssss";
+        }
+
+        // Query directly from qr_codes table with LEFT JOIN for attachments count
+        $sql = "SELECT q.*, COUNT(DISTINCT a.id) as attachment_count
+                FROM qr_codes q
+                LEFT JOIN qr_attachments a ON q.id = a.qr_id
+                WHERE " . implode(" AND ", $where) . "
+                GROUP BY q.id
+                ORDER BY q.created_at DESC";
+
+        $stmt = $this->db->prepare($sql);
+
+        // Check if prepare failed
+        if ($stmt === false) {
+            // Table might not exist yet, return empty array
+            error_log("QR Module: Database query failed - " . $this->db->error);
+            return array();
+        }
+
+        if (!empty($params)) {
+            $stmt->bind_param($types, ...$params);
+        }
+
+        if (!$stmt->execute()) {
+            error_log("QR Module: Query execution failed - " . $stmt->error);
+            return array();
+        }
+
+        $result = $stmt->get_result();
+
+        $qrcodes = array();
+        while ($row = $result->fetch_assoc()) {
+            $qrcodes[] = $row;
+        }
+
+        return $qrcodes;
+    }
+
+    /**
+     * Delete QR code
+     */
+    private function deleteQRRaw($id) {
+        // Get QR info first
+        $qr = $this->getQRRaw($id);
+
+        if ($qr) {
+            // Delete QR image file
+            if ($qr['qr_image_path'] && file_exists($this->qrDir . $qr['qr_image_path'])) {
+                unlink($this->qrDir . $qr['qr_image_path']);
+            }
+
+            // Delete attachments
+            $attachments = $this->getAttachmentsRaw($id);
+            foreach ($attachments as $attachment) {
+                if (file_exists($attachment['file_path'])) {
+                    unlink($attachment['file_path']);
+                }
+            }
+
+            // Delete from database
+            $stmt = $this->db->prepare("DELETE FROM qr_codes WHERE id = ?");
+            $stmt->bind_param("i", $id);
+            return $stmt->execute();
+        }
+
+        return false;
+    }
+
+    /**
+     * Add attachment
+     */
+    private function addAttachmentRaw($qrId, $file) {
+        $filename = basename($file['name']);
+        $filepath = $this->uploadDir . time() . '_' . $filename;
+
+        if (move_uploaded_file($file['tmp_name'], $filepath)) {
+            $stmt = $this->db->prepare("
+                INSERT INTO qr_attachments (qr_id, file_name, file_path, file_type, file_size)
+                VALUES (?, ?, ?, ?, ?)
+            ");
+
+            $fileType = $file['type'];
+            $fileSize = $file['size'];
+
+            $stmt->bind_param("isssi", $qrId, $filename, $filepath, $fileType, $fileSize);
+            return $stmt->execute();
+        }
+
+        return false;
+    }
+
+    /**
+     * Get attachments for QR
+     */
+    private function getAttachmentsRaw($qrId) {
+        $stmt = $this->db->prepare("SELECT * FROM qr_attachments WHERE qr_id = ? ORDER BY display_order");
+        $stmt->bind_param("i", $qrId);
+        $stmt->execute();
+        $result = $stmt->get_result();
+
+        $attachments = array();
+        while ($row = $result->fetch_assoc()) {
+            $attachments[] = $row;
+        }
+
+        return $attachments;
+    }
+
+    /**
+     * Increment scan count
+     */
+    private function incrementScanRaw($qrId) {
+        $ip = $_SERVER['REMOTE_ADDR'] ?? '';
+        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
+
+        // Update scan count
+        $stmt = $this->db->prepare("UPDATE qr_codes SET scan_count = scan_count + 1 WHERE id = ?");
+        if ($stmt === false) {
+            return false;
+        }
+        $stmt->bind_param("i", $qrId);
+        $success = $stmt->execute();
+
+        // Log the scan
+        $stmt2 = $this->db->prepare("INSERT INTO qr_scans (qr_id, ip_address, user_agent) VALUES (?, ?, ?)");
+        if ($stmt2 !== false) {
+            $stmt2->bind_param("iss", $qrId, $ip, $userAgent);
+            $stmt2->execute();
+        }
+
+        return $success;
+    }
+
+    /**
+     * Get statistics
+     */
+    private function getStatsRaw() {
+        // Query directly instead of using stored procedure
+        $sql = "SELECT
+                    COUNT(*) as total_qr_codes,
+                    SUM(scan_count) as total_scans,
+                    SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active_count,
+                    SUM(CASE WHEN is_active = 0 THEN 1 ELSE 0 END) as inactive_count
+                FROM qr_codes";
+
+        $result = $this->db->query($sql);
+
+        if ($result === false) {
+            // Table doesn't exist yet, return default stats
+            return array(
+                'total_qr_codes' => 0,
+                'total_scans' => 0,
+                'active_count' => 0,
+                'inactive_count' => 0
+            );
+        }
+
+        $stats = $result->fetch_assoc();
+
+        // Ensure numeric values
+        $stats['total_qr_codes'] = intval($stats['total_qr_codes'] ?? 0);
+        $stats['total_scans'] = intval($stats['total_scans'] ?? 0);
+        $stats['active_count'] = intval($stats['active_count'] ?? 0);
+        $stats['inactive_count'] = intval($stats['inactive_count'] ?? 0);
+
+        return $stats;
+    }
+    // ------------------------------------------------------------------ text encoding
+    // The app's connection is latin1, so QR rows saved through it were stored double-encoded,
+    // while rows saved over UTF-8 are correct. QR data is read and written over UTF-8 here, the
+    // connection's own setting is restored afterwards, and double-encoded text is repaired on read.
+
+    /** Windows-1252 bytes 0x80-0x9F as MySQL's latin1 maps them. */
+    private const CP1252 = array(0x20AC => 0x80, 0x201A => 0x82, 0x0192 => 0x83, 0x201E => 0x84, 0x2026 => 0x85, 0x2020 => 0x86,
+        0x2021 => 0x87, 0x02C6 => 0x88, 0x2030 => 0x89, 0x0160 => 0x8A, 0x2039 => 0x8B, 0x0152 => 0x8C, 0x017D => 0x8E,
+        0x2018 => 0x91, 0x2019 => 0x92, 0x201C => 0x93, 0x201D => 0x94, 0x2022 => 0x95, 0x2013 => 0x96, 0x2014 => 0x97,
+        0x02DC => 0x98, 0x2122 => 0x99, 0x0161 => 0x9A, 0x203A => 0x9B, 0x0153 => 0x9C, 0x017E => 0x9E, 0x0178 => 0x9F);
+
+    /** Original text of a double-encoded value; any other value comes back unchanged. */
+    public static function repairText($value) {
+        if (!is_string($value) || $value === '' || !preg_match('/[\x{00C0}-\x{00FF}]/u', $value)) return $value;
+        $bytes = '';
+        foreach (preg_split('//u', $value, -1, PREG_SPLIT_NO_EMPTY) as $char) {
+            $code = mb_ord($char, 'UTF-8');
+            if ($code < 0x100) $bytes .= chr($code);
+            elseif (isset(self::CP1252[$code])) $bytes .= chr(self::CP1252[$code]);
+            else return $value;
+        }
+        // Only text that becomes valid UTF-8 with non-Latin letters was double-encoded.
+        return mb_check_encoding($bytes, 'UTF-8') && preg_match('/[^\x00-\x7F]/', $bytes) && !preg_match('/[\x{00C0}-\x{00FF}]/u', $bytes) ? $bytes : $value;
+    }
+
+    /** Double-encoded form of a text, to find old rows. */
+    public static function doubleEncode($value) {
+        $map = array_flip(self::CP1252);
+        $out = '';
+        foreach (str_split((string)$value) as $byte) {
+            $code = ord($byte);
+            $out .= isset($map[$code]) ? mb_chr($map[$code], 'UTF-8') : mb_chr($code, 'UTF-8');
+        }
+        return $out;
+    }
+
+    private function repairRow($row) {
+        if (!is_array($row)) return $row;
+        foreach (array('qr_name', 'content', 'description', 'file_name') as $field) {
+            if (isset($row[$field])) $row[$field] = self::repairText($row[$field]);
+        }
+        return $row;
+    }
+
+    private function overUtf8(callable $work) {
+        $previous = $this->db->character_set_name();
+        $switch = strtolower((string)$previous) !== 'utf8mb4';
+        if ($switch) $this->db->set_charset('utf8mb4');
+        try {
+            return $work();
+        } finally {
+            if ($switch) $this->db->set_charset($previous);
+        }
+    }
+
+    public function createQR($data) { return $this->overUtf8(function () use ($data) { return $this->createQRRaw($data); }); }
+    public function updateQR($id, $data) { return $this->overUtf8(function () use ($id, $data) { return $this->updateQRRaw($id, $data); }); }
+    public function getQR($id) { return $this->repairRow($this->overUtf8(function () use ($id) { return $this->getQRRaw($id); })); }
+    public function getAllQR($filters = array()) { return array_map(array($this, 'repairRow'), $this->overUtf8(function () use ($filters) { return $this->getAllQRRaw($filters); })); }
+    public function deleteQR($id) { return $this->overUtf8(function () use ($id) { return $this->deleteQRRaw($id); }); }
+    public function addAttachment($qrId, $file) { return $this->overUtf8(function () use ($qrId, $file) { return $this->addAttachmentRaw($qrId, $file); }); }
+    public function getAttachments($qrId) { return array_map(array($this, 'repairRow'), $this->overUtf8(function () use ($qrId) { return $this->getAttachmentsRaw($qrId); })); }
+    public function incrementScan($qrId) { return $this->overUtf8(function () use ($qrId) { return $this->incrementScanRaw($qrId); }); }
+    public function getStats() { return $this->overUtf8(function () { return $this->getStatsRaw(); }); }
+
+    public function setImagePath($id, $file) {
+        return $this->overUtf8(function () use ($id, $file) {
+            $stmt = $this->db->prepare("UPDATE qr_codes SET qr_image_path = ? WHERE id = ?");
+            if (!$stmt) return false;
+            $stmt->bind_param("si", $file, $id);
+            return $stmt->execute();
+        });
+    }
+}
+?>

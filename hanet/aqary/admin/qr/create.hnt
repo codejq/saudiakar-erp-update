@@ -1,0 +1,293 @@
+<?php
+/**
+ * Create QR Code Page
+ * ====================================
+ */
+
+$pageTitle = 'إنشاء رمز QR جديد';
+$sc_title = 'إنشاء رمز QR';
+$sc_id = "83";
+include_once "../../nocash.hnt";
+
+// Handle form submission BEFORE header output
+$message = '';
+$errors = array();
+// Editing an existing QR: create.hnt?id=N (the edit buttons link here).
+$editId = intval($_POST['id'] ?? $_GET['id'] ?? 0);
+$editQr = null;
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once('./qr_init.hnt');
+    if ($editId > 0) {
+        $editQr = $qrGenerator->getQR($editId);
+        if (!$editQr) $errors[] = 'رمز QR غير موجود';
+    }
+
+    $qrName = isset($_POST['qr_name']) ? trim($_POST['qr_name']) : '';
+    $qrType = isset($_POST['qr_type']) ? trim($_POST['qr_type']) : '';
+    $content = isset($_POST['content']) ? trim($_POST['content']) : '';
+    $size = isset($_POST['size']) ? intval($_POST['size']) : 256;
+    $errorLevel = isset($_POST['error_level']) ? $_POST['error_level'] : 'M';
+    $fgColor = isset($_POST['fg_color']) ? $_POST['fg_color'] : ($editQr['foreground_color'] ?? '#000000');
+    $bgColor = isset($_POST['bg_color']) ? $_POST['bg_color'] : ($editQr['background_color'] ?? '#FFFFFF');
+    if (!preg_match('/^#[0-9A-Fa-f]{6}$/', $fgColor)) $fgColor = '#000000';
+    if (!preg_match('/^#[0-9A-Fa-f]{6}$/', $bgColor)) $bgColor = '#FFFFFF';
+    if (!in_array($errorLevel, array('L', 'M', 'Q', 'H'), true)) $errorLevel = 'M';
+    if (!in_array($size, array(128, 256, 512, 1024), true)) $size = 256;
+    $description = isset($_POST['description']) ? trim($_POST['description']) : (string)($editQr['description'] ?? '');
+
+    if (empty($qrName)) {
+        $errors[] = 'اسم رمز QR مطلوب';
+    }
+    if (empty($qrType)) {
+        $errors[] = 'نوع رمز QR مطلوب';
+    }
+    if (empty($content)) {
+        $errors[] = 'محتوى رمز QR مطلوب';
+    }
+
+    if (empty($errors)) {
+        try {
+            // Format content based on type
+            $formattedContent = $qrGenerator->formatContent($qrType, array(
+                'content' => $content,
+                'phone' => $content,
+                'message' => isset($_POST['message']) ? $_POST['message'] : '',
+                'latitude' => isset($_POST['latitude']) ? $_POST['latitude'] : '',
+                'longitude' => isset($_POST['longitude']) ? $_POST['longitude'] : ''
+            ));
+
+            // Generate QR code image
+            $qrFilename = $qrGenerator->generateQR($formattedContent, $size, $errorLevel);
+
+            // Get user ID from session
+            $userId = isset($_SESSION['useridv']) ? intval($_SESSION['useridv']) : 1;
+
+            // Prepare data for database
+            $qrData = array(
+                'qr_name' => $qrName,
+                'qr_type' => $qrType,
+                'content' => $content,
+                'size' => $size,
+                'error_level' => $errorLevel,
+                'foreground_color' => $fgColor,
+                'background_color' => $bgColor,
+                'description' => $description,
+                'is_active' => 1,
+                'created_by' => $userId
+            );
+
+            if ($editQr) {
+                // Same record: keep its status, scans and creator; replace the image.
+                $qrData['is_active'] = intval($editQr['is_active']);
+                $qrId = $qrGenerator->updateQR($editId, $qrData) ? $editId : false;
+                if ($qrId && !empty($editQr['qr_image_path']) && $editQr['qr_image_path'] !== $qrFilename
+                    && basename($editQr['qr_image_path']) === $editQr['qr_image_path'] && is_file(__DIR__ . '/qrcodes/' . $editQr['qr_image_path'])) {
+                    @unlink(__DIR__ . '/qrcodes/' . $editQr['qr_image_path']);
+                }
+            } else {
+                // Create QR record in database
+                $qrId = $qrGenerator->createQR($qrData);
+            }
+
+            if ($qrId) {
+                // Update the record with the image path
+                $qrGenerator->setImagePath($qrId, $qrFilename);
+
+                // Redirect to view page (this happens BEFORE any header output)
+                header("Location: view.hnt?id=" . $qrId);
+                exit();
+            } else {
+                $errors[] = 'فشل في حفظ رمز QR في قاعدة البيانات';
+            }
+        } catch (Exception $e) {
+            $errors[] = 'حدث خطأ: ' . $e->getMessage();
+        }
+    }
+}
+
+// Now include header and qr_init for normal page display
+$canscroll = 0;
+$showdhmltazkeer = 0;
+include_once "../../header.hnt";
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    require_once('./qr_init.hnt');
+    if ($editId > 0) {
+        $editQr = $qrGenerator->getQR($editId);
+        if (!$editQr) $errors[] = 'رمز QR غير موجود';
+    }
+}
+// Form values: what was posted, else the QR being edited, else the defaults.
+$posted = $_SERVER['REQUEST_METHOD'] === 'POST';
+$formValue = function ($post, $field, $default) use ($posted, $editQr) {
+    if ($posted && isset($_POST[$post])) return (string)$_POST[$post];
+    return $editQr && isset($editQr[$field]) ? (string)$editQr[$field] : $default;
+};
+$formName = $formValue('qr_name', 'qr_name', '');
+$formType = $formValue('qr_type', 'qr_type', '');
+$formContent = $formValue('content', 'content', '');
+$formSize = $formValue('size', 'size', '256');
+$formLevel = $formValue('error_level', 'error_level', 'M');
+// Older QRs were saved with level 0 by a bug; show the default.
+if (!in_array($formLevel, array('L', 'M', 'Q', 'H'), true)) $formLevel = 'M';
+$isEdit = (bool)$editQr;
+$esc = function ($value) { return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); };
+?>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+<div class="container mt-4">
+    <div class="row">
+        <div class="col-md-8 offset-md-2">
+            <div class="card border-0 shadow-lg" style="border-radius: 12px; overflow: hidden;">
+                <div class="card-header" style="background: #1f4e5f; color: white; border: none; padding: 2rem;">
+                    <div class="d-flex align-items-center">
+                        <i class="fas <?= $isEdit ? 'fa-pen-to-square' : 'fa-plus-circle' ?>" style="font-size: 2rem; margin-left: 15px;"></i>
+                        <div>
+                            <h3 class="mb-0" style="font-weight: 700;"><?= $isEdit ? 'تعديل رمز QR' : 'إنشاء رمز QR جديد' ?></h3>
+                            <small class="text-white" style="opacity: 0.9;"><?= $isEdit ? $esc($editQr['qr_name']) : 'أنشئ رمز QR قابل للمسح الضوئي' ?></small>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-body p-4">
+                    <?php if (!empty($message)): ?>
+                        <div class="alert alert-success alert-dismissible fade show" role="alert" style="border-radius: 8px; border: none;">
+                            <i class="fas fa-check-circle me-2"></i>
+                            <strong>نجح!</strong> <?php echo $message; ?>
+                            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                        </div>
+                    <?php endif; ?>
+
+                    <?php if (!empty($errors)): ?>
+                        <div class="alert alert-danger alert-dismissible fade show" role="alert" style="border-radius: 8px; border: none;">
+                            <i class="fas fa-exclamation-circle me-2"></i>
+                            <strong>أخطاء:</strong>
+                            <ul class="mb-0 mt-2">
+                                <?php foreach ($errors as $error): ?>
+                                    <li><i class="fas fa-times-circle me-1"></i><?php echo $error; ?></li>
+                                <?php endforeach; ?>
+                            </ul>
+                            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                        </div>
+                    <?php endif; ?>
+
+                    <form method="POST" enctype="multipart/form-data">
+                        <?php if ($isEdit): ?><input type="hidden" name="id" value="<?= intval($editQr['id']) ?>"><?php endif; ?>
+                        <!-- QR Name -->
+                        <div class="mb-4">
+                            <label for="qr_name" class="form-label" style="font-weight: 600; margin-bottom: 0.75rem;">
+                                <i class="fas fa-tag me-2" style="color: #1f4e5f;"></i>اسم رمز QR <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" class="form-control" id="qr_name" name="qr_name"
+                                   placeholder="مثال: رمز الموقع الإلكتروني" required value="<?= $esc($formName) ?>"
+                                   style="border-radius: 8px; border: 1px solid #ddd; padding: 0.75rem;">
+                        </div>
+
+                        <!-- QR Type -->
+                        <div class="mb-4">
+                            <label for="qr_type" class="form-label" style="font-weight: 600; margin-bottom: 0.75rem;">
+                                <i class="fas fa-list me-2" style="color: #1f4e5f;"></i>نوع الرمز <span class="text-danger">*</span>
+                            </label>
+                            <select class="form-select" id="qr_type" name="qr_type" required
+                                    style="border-radius: 8px; border: 1px solid #ddd; padding: 0.75rem;">
+                                <option value="">اختر نوع الرمز</option>
+                                <option value="text"<?= $formType === 'text' ? ' selected' : '' ?>>📝 نص</option>
+                                <option value="url"<?= $formType === 'url' ? ' selected' : '' ?>>🔗 رابط / URL</option>
+                                <option value="email"<?= $formType === 'email' ? ' selected' : '' ?>>📧 بريد إلكتروني</option>
+                                <option value="phone"<?= $formType === 'phone' ? ' selected' : '' ?>>☎️ هاتف</option>
+                                <option value="sms"<?= $formType === 'sms' ? ' selected' : '' ?>>💬 رسالة نصية</option>
+                                <option value="whatsapp"<?= $formType === 'whatsapp' ? ' selected' : '' ?>>💬 واتساب</option>
+                                <option value="vcard"<?= $formType === 'vcard' ? ' selected' : '' ?>>👤 بطاقة جهة اتصال</option>
+                                <option value="wifi"<?= $formType === 'wifi' ? ' selected' : '' ?>>📡 شبكة WiFi</option>
+                                <option value="location"<?= $formType === 'location' ? ' selected' : '' ?>>📍 موقع جغرافي</option>
+                                <option value="event"<?= $formType === 'event' ? ' selected' : '' ?>>📅 حدث</option>
+                            </select>
+                        </div>
+
+                        <!-- QR Content -->
+                        <div class="mb-4">
+                            <label for="content" class="form-label" style="font-weight: 600; margin-bottom: 0.75rem;">
+                                <i class="fas fa-pen me-2" style="color: #1f4e5f;"></i>محتوى رمز QR <span class="text-danger">*</span>
+                            </label>
+                            <textarea class="form-control" id="content" name="content" rows="4"
+                                      placeholder="أدخل المحتوى الذي تريد ترميزه في رمز QR" required
+                                      style="border-radius: 8px; border: 1px solid #ddd; padding: 0.75rem; resize: vertical;"><?= $esc($formContent) ?></textarea>
+                        </div>
+
+                        <div class="row">
+                            <!-- QR Size -->
+                            <div class="col-md-6 mb-4">
+                                <label for="size" class="form-label" style="font-weight: 600; margin-bottom: 0.75rem;">
+                                    <i class="fas fa-expand me-2" style="color: #1f4e5f;"></i>حجم الرمز
+                                </label>
+                                <select class="form-select" id="size" name="size"
+                                        style="border-radius: 8px; border: 1px solid #ddd; padding: 0.75rem;">
+                                    <option value="128"<?= $formSize === '128' ? ' selected' : '' ?>>128 × 128 (صغير)</option>
+                                    <option value="256"<?= $formSize === '256' ? ' selected' : '' ?>>256 × 256 (متوسط)</option>
+                                    <option value="512"<?= $formSize === '512' ? ' selected' : '' ?>>512 × 512 (كبير)</option>
+                                    <option value="1024"<?= $formSize === '1024' ? ' selected' : '' ?>>1024 × 1024 (كبير جداً)</option>
+                                </select>
+                            </div>
+
+                            <!-- Error Correction Level -->
+                            <div class="col-md-6 mb-4">
+                                <label for="error_level" class="form-label" style="font-weight: 600; margin-bottom: 0.75rem;">
+                                    <i class="fas fa-shield-alt me-2" style="color: #1f4e5f;"></i>تصحيح الأخطاء
+                                </label>
+                                <select class="form-select" id="error_level" name="error_level"
+                                        style="border-radius: 8px; border: 1px solid #ddd; padding: 0.75rem;">
+                                    <option value="L"<?= $formLevel === 'L' ? ' selected' : '' ?>>منخفض (7%)</option>
+                                    <option value="M"<?= $formLevel === 'M' ? ' selected' : '' ?>>متوسط (15%)</option>
+                                    <option value="Q"<?= $formLevel === 'Q' ? ' selected' : '' ?>>عالي (25%)</option>
+                                    <option value="H"<?= $formLevel === 'H' ? ' selected' : '' ?>>عالي جداً (30%)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Action Buttons -->
+                        <div class="d-flex gap-2 mt-5">
+                            <button type="submit" class="btn btn-primary btn-lg" style="border-radius: 8px; font-weight: 600; padding: 0.75rem 2rem;">
+                                <i class="fas <?= $isEdit ? 'fa-save' : 'fa-plus-circle' ?> me-2"></i><?= $isEdit ? 'حفظ التعديل' : 'إنشاء رمز QR' ?>
+                            </button>
+                            <a href="<?= $isEdit ? 'view.hnt?id=' . intval($editQr['id']) : 'index.hnt' ?>" class="btn btn-outline-secondary btn-lg" style="border-radius: 8px; font-weight: 600; padding: 0.75rem 2rem;">
+                                <i class="fas fa-times-circle me-2"></i>إلغاء
+                            </a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    .form-control:focus, .form-select:focus {
+        border-color: #1f4e5f !important;
+        box-shadow: 0 0 0 0.2rem rgba(31, 78, 95, 0.25) !important;
+    }
+
+    .form-control, .form-select {
+        transition: border-color 0.3s, box-shadow 0.3s;
+    }
+
+    .btn-primary {
+        background: #1f4e5f;
+        border: none;
+    }
+
+    .btn-primary:hover {
+        background: #163a47;
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(31, 78, 95, 0.3);
+    }
+
+    .btn-outline-secondary:hover {
+        background-color: #f8f9fa;
+        transform: translateY(-2px);
+    }
+</style>
+
+<?php
+include_once "../../footer.hnt";
+?>

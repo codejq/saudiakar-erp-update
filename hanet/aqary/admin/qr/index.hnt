@@ -1,0 +1,218 @@
+<?php
+$pageTitle = 'لوحة تحكم أكواد QR';
+$sc_title = 'إدارة أكواد QR';
+$sc_id = "82";
+include_once "../../nocash.hnt";
+
+$canscroll = 0;
+if (isset($edit3kod) && $edit3kod) {
+    $canscroll = 0;
+}
+$showdhmltazkeer = 0;
+include_once "../../header.hnt";
+
+require_once('./qr_init.hnt');
+
+$message = '';
+$messageType = '';
+
+// Handle actions
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    $action = isset($_POST['action']) ? $_POST['action'] : '';
+    $id = isset($_POST['id']) ? intval($_POST['id']) : 0;
+
+    switch ($action) {
+        case 'delete':
+            if ($qrGenerator->deleteQR($id)) {
+                $message = 'تم حذف رمز QR بنجاح';
+                $messageType = 'success';
+                qr_log_activity('delete', 'حذف رمز QR: ' . $id);
+            } else {
+                $message = 'فشل حذف رمز QR';
+                $messageType = 'danger';
+            }
+            break;
+
+        case 'toggle_status':
+            $qr = $qrGenerator->getQR($id);
+            $newStatus = $qr['is_active'] == 1 ? 0 : 1;
+            $stmt = $db->prepare("UPDATE qr_codes SET is_active = ? WHERE id = ?");
+            $stmt->bind_param("ii", $newStatus, $id);
+            if ($stmt->execute()) {
+                $message = 'تم تحديث الحالة بنجاح';
+                $messageType = 'success';
+            }
+            break;
+    }
+}
+
+// Get filters
+$typeFilter = isset($_GET['type']) ? $_GET['type'] : 'all';
+$statusFilter = isset($_GET['status']) ? intval($_GET['status']) : -1;
+$searchQuery = isset($_GET['search']) ? trim($_GET['search']) : '';
+
+// Build filters
+$filters = array();
+if ($typeFilter != 'all') {
+    $filters['type'] = $typeFilter;
+}
+if ($statusFilter >= 0) {
+    $filters['status'] = $statusFilter;
+}
+if ($searchQuery) {
+    $filters['search'] = $searchQuery;
+}
+
+// Get QR codes
+$qrCodes = $qrGenerator->getAllQR($filters);
+
+// Get statistics
+$stats = $qrGenerator->getStats();
+?>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<?php $qrEsc = function ($value) { return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }; ?>
+
+<div class="container-fluid py-3 qr-page" dir="rtl">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
+        <div class="d-flex align-items-center gap-3">
+            <div class="qr-mark"><i class="fas fa-qrcode"></i></div>
+            <div>
+                <h4 class="mb-0 fw-bold">إدارة أكواد QR</h4>
+                <div class="text-muted small">إنشاء أكواد QR وتعديلها وتتبع مسحها</div>
+            </div>
+        </div>
+        <a href="create.hnt" class="btn qr-btn-main"><i class="fas fa-plus me-1"></i> رمز QR جديد</a>
+    </div>
+
+    <?php if ($message): ?>
+    <div class="alert alert-<?= $qrEsc($messageType) ?> alert-dismissible fade show py-2" role="alert">
+        <?= $qrEsc($message) ?>
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="إغلاق"></button>
+    </div>
+    <?php endif; ?>
+
+    <div class="row g-3 mb-3">
+        <?php foreach (array(
+            array('إجمالي الأكواد', $stats['total_qr_codes'], 'fa-qrcode', ''),
+            array('المفعلة', $stats['active_count'], 'fa-circle-check', '1'),
+            array('المعطلة', $stats['inactive_count'], 'fa-circle-pause', '0'),
+            array('إجمالي المسحات', $stats['total_scans'], 'fa-mobile-screen', null),
+        ) as $card): ?>
+        <div class="col-6 col-lg-3">
+            <?php if ($card[3] !== null): ?><a class="text-decoration-none" href="index.hnt<?= $card[3] !== '' ? '?status=' . $card[3] : '' ?>"><?php endif; ?>
+            <div class="qr-stat h-100<?= $card[3] !== null && (string)$statusFilter === ($card[3] === '' ? '-1' : $card[3]) ? ' active' : '' ?>">
+                <div><div class="label"><?= $card[0] ?></div><div class="value"><?= number_format((int)$card[1]) ?></div></div>
+                <i class="fas <?= $card[2] ?>"></i>
+            </div>
+            <?php if ($card[3] !== null): ?></a><?php endif; ?>
+        </div>
+        <?php endforeach; ?>
+    </div>
+
+    <form method="get" class="qr-filters mb-3">
+        <div class="row g-2 align-items-end">
+            <div class="col-md-5"><label class="form-label" for="qrSearch">بحث</label>
+                <input type="search" id="qrSearch" name="search" class="form-control" placeholder="الاسم أو المحتوى" value="<?= $qrEsc($searchQuery) ?>"></div>
+            <div class="col-6 col-md-3"><label class="form-label" for="qrType">النوع</label>
+                <select name="type" id="qrType" class="form-select">
+                    <option value="all">جميع الأنواع</option>
+                    <?php foreach (qr_get_all_types() as $key => $label): ?>
+                    <option value="<?= $qrEsc($key) ?>" <?= $typeFilter == $key ? 'selected' : '' ?>><?= $qrEsc($label) ?></option>
+                    <?php endforeach; ?>
+                </select></div>
+            <div class="col-6 col-md-2"><label class="form-label" for="qrStatus">الحالة</label>
+                <select name="status" id="qrStatus" class="form-select">
+                    <option value="-1" <?= $statusFilter == -1 ? 'selected' : '' ?>>الكل</option>
+                    <option value="1" <?= $statusFilter == 1 ? 'selected' : '' ?>>مفعل</option>
+                    <option value="0" <?= $statusFilter == 0 ? 'selected' : '' ?>>معطل</option>
+                </select></div>
+            <div class="col-md-2 d-flex gap-2">
+                <button type="submit" class="btn qr-btn-main flex-grow-1"><i class="fas fa-magnifying-glass me-1"></i> عرض</button>
+                <?php if ($searchQuery !== '' || $typeFilter !== 'all' || $statusFilter >= 0): ?><a href="index.hnt" class="btn btn-outline-secondary" title="مسح التصفية"><i class="fas fa-xmark"></i></a><?php endif; ?>
+            </div>
+        </div>
+    </form>
+
+    <div class="qr-list">
+        <div class="qr-list-head"><span><i class="fas fa-list me-1"></i> الأكواد</span><span class="text-muted small"><?= number_format(count($qrCodes)) ?> رمز</span></div>
+        <?php if (empty($qrCodes)): ?>
+        <div class="text-center py-5">
+            <i class="fas fa-qrcode text-muted" style="font-size:3rem;opacity:.4"></i>
+            <p class="text-muted mt-3 mb-3"><?= $searchQuery !== '' || $typeFilter !== 'all' || $statusFilter >= 0 ? 'لا توجد أكواد مطابقة للتصفية.' : 'لا توجد أكواد بعد.' ?></p>
+            <a href="create.hnt" class="btn qr-btn-main"><i class="fas fa-plus me-1"></i> رمز QR جديد</a>
+        </div>
+        <?php else: ?>
+        <div class="table-responsive">
+            <table class="table align-middle mb-0 qr-table">
+                <thead><tr><th style="width:76px"></th><th>الاسم والمحتوى</th><th>النوع</th><th class="text-center">المسحات</th><th class="text-center">الحالة</th><th>التاريخ</th><th class="text-center" style="width:190px">الإجراءات</th></tr></thead>
+                <tbody>
+                <?php foreach ($qrCodes as $qr): $qrId = (int)$qr['id']; ?>
+                <tr data-view="view.hnt?id=<?= $qrId ?>">
+                    <td><?php if ($qr['qr_image_path']): ?><img src="<?= $qrEsc(qr_get_image_url($qr['qr_image_path'])) ?>" class="qr-thumb" alt="" loading="lazy">
+                        <?php else: ?><div class="qr-thumb d-flex align-items-center justify-content-center"><i class="fas fa-qrcode text-muted"></i></div><?php endif; ?></td>
+                    <td><div class="fw-bold"><?= $qrEsc($qr['qr_name']) ?></div>
+                        <div class="text-muted small text-truncate" style="max-width:60vw" title="<?= $qrEsc($qr['content']) ?>"><?= $qrEsc(mb_substr((string)$qr['content'], 0, 80)) ?></div></td>
+                    <td><span class="qr-type"><i class="<?= $qrEsc(qr_get_type_icon($qr['qr_type'])) ?> me-1"></i><?= $qrEsc(qr_get_type_label($qr['qr_type'])) ?></span></td>
+                    <td class="text-center fw-bold"><?= number_format((int)$qr['scan_count']) ?></td>
+                    <td class="text-center">
+                        <form method="post" class="d-inline">
+                            <input type="hidden" name="action" value="toggle_status"><input type="hidden" name="id" value="<?= $qrId ?>">
+                            <button type="submit" class="qr-status <?= $qr['is_active'] ? 'on' : 'off' ?>" title="اضغط لتغيير الحالة"><?= $qr['is_active'] ? 'مفعل' : 'معطل' ?></button>
+                        </form>
+                    </td>
+                    <td class="small text-muted text-nowrap"><?= $qrEsc(qr_format_datetime($qr['created_at'])) ?></td>
+                    <td class="text-center text-nowrap">
+                        <a href="view.hnt?id=<?= $qrId ?>" class="btn btn-sm btn-outline-secondary" title="عرض"><i class="fas fa-eye"></i></a>
+                        <a href="create.hnt?id=<?= $qrId ?>" class="btn btn-sm btn-outline-secondary" title="تعديل"><i class="fas fa-pen"></i></a>
+                        <?php if ($qr['qr_image_path']): ?><a href="<?= $qrEsc(qr_get_image_url($qr['qr_image_path'])) ?>" class="btn btn-sm btn-outline-secondary" download title="تحميل"><i class="fas fa-download"></i></a><?php endif; ?>
+                        <form method="post" class="d-inline" onsubmit="return confirm('حذف رمز QR «' + this.dataset.name + '»؟');" data-name="<?= $qrEsc($qr['qr_name']) ?>">
+                            <input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="<?= $qrId ?>">
+                            <button type="submit" class="btn btn-sm btn-outline-danger" title="حذف"><i class="fas fa-trash-can"></i></button>
+                        </form>
+                    </td>
+                </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php endif; ?>
+    </div>
+</div>
+
+<style>
+.qr-page { width: 100%; }
+.qr-mark { width: 52px; height: 52px; border-radius: 12px; background: #1f4e5f; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 1.6rem; }
+.qr-btn-main { background: #1f4e5f; border-color: #1f4e5f; color: #fff; }
+.qr-btn-main:hover, .qr-btn-main:focus { background: #163a47; border-color: #163a47; color: #fff; }
+.qr-stat { background: #fff; border: 1px solid #dfe3e8; border-inline-start: 4px solid #1f4e5f; border-radius: 10px; padding: .9rem 1rem; display: flex; justify-content: space-between; align-items: center; color: #1f2d33; transition: border-color .15s, box-shadow .15s; }
+.qr-stat .label { color: #5a6570; font-size: .88rem; }
+.qr-stat .value { font-size: 1.6rem; font-weight: 700; }
+.qr-stat i { font-size: 1.6rem; color: #9aa7b1; }
+a .qr-stat:hover, .qr-stat.active { box-shadow: 0 0 0 2px rgba(31,78,95,.18); }
+.qr-filters { background: #fff; border: 1px solid #dfe3e8; border-radius: 10px; padding: .9rem 1rem; }
+.qr-filters .form-label { font-size: .85rem; font-weight: 600; color: #455a64; margin-bottom: .25rem; }
+.qr-list { background: #fff; border: 1px solid #dfe3e8; border-radius: 10px; overflow: hidden; }
+.qr-list-head { display: flex; justify-content: space-between; align-items: center; padding: .75rem 1rem; border-bottom: 1px solid #dfe3e8; background: #f6f8fa; font-weight: 700; }
+.qr-table thead th { background: #fff; color: #5a6570; font-size: .85rem; font-weight: 600; border-bottom: 1px solid #dfe3e8; white-space: nowrap; }
+.qr-table tbody tr { cursor: pointer; }
+.qr-table tbody tr:hover { background: #f6f8fa; }
+.qr-thumb { width: 56px; height: 56px; object-fit: contain; border: 1px solid #e3e7eb; border-radius: 8px; background: #fff; }
+.qr-type { display: inline-block; padding: .2rem .55rem; border-radius: 6px; background: #eef2f4; color: #1f2d33; font-size: .85rem; white-space: nowrap; }
+.qr-status { border: 1px solid; border-radius: 20px; padding: .15rem .7rem; font-size: .82rem; background: #fff; cursor: pointer; }
+.qr-status.on { color: #1e6b45; border-color: #9fd3b6; background: #eef8f2; }
+.qr-status.off { color: #6b7780; border-color: #cfd6db; background: #f4f6f7; }
+</style>
+
+<script>
+// A row opens its QR, except clicks on buttons, links and forms.
+document.querySelectorAll('.qr-table tbody tr[data-view]').forEach(function (row) {
+    row.addEventListener('click', function (e) {
+        if (!e.target.closest('button, a, form')) window.location.href = row.dataset.view;
+    });
+});
+</script>
+
+<?php
+include_once "../../footer.hnt";
+?>
