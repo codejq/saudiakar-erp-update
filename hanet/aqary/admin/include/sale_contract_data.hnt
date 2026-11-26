@@ -1,0 +1,40 @@
+<?php
+/**
+ * Saved details of a sale contract (custummer.descrption). Older rows were serialized in a
+ * one-byte encoding, so their lengths count characters and unserialize() refuses them.
+ * Read only: nothing is converted or rewritten here.
+ */
+function saleContractData($stored): array {
+    $stored = (string)$stored;
+    $data = @unserialize($stored, ['allowed_classes' => false]);
+    if (is_array($data)) return $data;
+    if (!mb_check_encoding($stored, 'UTF-8') || !preg_match('/^a:(\d+):\{/', $stored, $head)) return [];
+    $chars = preg_split('//u', $stored, -1, PREG_SPLIT_NO_EMPTY);
+    $total = count($chars);
+    $position = strlen($head[0]);
+    $take = function (int $length) use ($chars, &$position): string {
+        $text = implode('', array_slice($chars, $position, $length));
+        $position += $length;
+        return $text;
+    };
+    $value = function () use ($chars, $total, &$position, $take) {
+        $type = $chars[$position] ?? '';
+        if ($type === 'N') return $take(2) === 'N;' ? '' : null;
+        if (!in_array($type, ['s', 'i', 'd', 'b'], true) || ($chars[$position + 1] ?? '') !== ':') return null;
+        $position += 2;
+        $number = '';
+        while ($position < $total && !in_array($chars[$position], [':', ';'], true)) $number .= $take(1);
+        if ($type !== 's') return $take(1) === ';' && is_numeric($number) ? $number : null;
+        if (!ctype_digit($number) || $take(2) !== ':"') return null;
+        $text = $take((int)$number);
+        return $take(2) === '";' ? $text : null;
+    };
+    $data = [];
+    for ($index = 0; $index < (int)$head[1]; $index++) {
+        $key = $value();
+        $item = $value();
+        if ($key === null || $item === null) return [];
+        $data[$key] = $item;
+    }
+    return ($chars[$position] ?? '') === '}' && $position === $total - 1 ? $data : [];
+}

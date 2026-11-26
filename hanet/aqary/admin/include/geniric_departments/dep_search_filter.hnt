@@ -1,0 +1,141 @@
+<?php
+/**
+ * WHERE clause of a department records page, built on the server with bound values.
+ * New links send the saved search (qry_id) and the typed values (q[0], q[1], ...).
+ * Old links that still carry "sqlwhere" are read only when they match the form the old
+ * search screen produced, with the department's own columns; anything else is ignored.
+ */
+
+/** Columns a filter may use: the department's fields and its fixed columns. */
+function depFilterColumns(mysqli $link, int $depId): array
+{
+    $columns = array('id' => true, 'masderid' => true, 'malekid' => true);
+    $stmt = $link->prepare('SELECT fld_en_name FROM department_field WHERE dep_id=?');
+    $stmt->bind_param('i', $depId);
+    $stmt->execute();
+    foreach ($stmt->get_result()->fetch_all() as $row) {
+        if (preg_match('/^[A-Za-z0-9_]{1,64}$/', (string)$row[0])) $columns[$row[0]] = true;
+    }
+    $stmt->close();
+    return $columns;
+}
+
+/** One condition as SQL with a placeholder. Numbers compare as numbers, like the old screen did. */
+function depFilterCondition(string $column, string $logic, string $value, array &$params): string
+{
+    $logic = strtolower(trim($logic));
+    if ($logic === 'like') {
+        $params[] = '%' . addcslashes($value, '\\%_') . '%';
+        return "`{$column}` LIKE ?";
+    }
+    if (!in_array($logic, array('=', '!=', '<', '>'), true)) $logic = '=';
+    $params[] = $value;
+    if ($logic !== '!=' && is_numeric($value)) return "CAST(`{$column}` AS DECIMAL(20,4)) {$logic} ?";
+    return "`{$column}` {$logic} ?";
+}
+
+/**
+ * Filter of a saved search. Empty values are left out; the first condition joins with AND and
+ * the rest keep their saved "and"/"or", in the same order as the old screen.
+ * @return array{sql: string, params: array, used: bool}
+ */
+function depFilterFromSearch(mysqli $link, int $depId, int $queryId, array $values): array
+{
+    // Same rule as the search form: conditions on fields that no longer exist are skipped and not counted.
+    $columns = array_diff_key(depFilterColumns($link, $depId), array('id' => 1, 'masderid' => 1, 'malekid' => 1));
+    $stmt = $link->prepare('SELECT f.* FROM dep_query_field f JOIN department_query q ON q.qry_id=CAST(f.query_id AS UNSIGNED)
+        WHERE q.qry_id=? AND q.dep_id=? ORDER BY f.id');
+    $stmt->bind_param('ii', $queryId, $depId);
+    $stmt->execute();
+    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+    $sql = '';
+    $params = array();
+    $index = 0;
+    foreach ($rows as $row) {
+        $column = (string)$row['sqlfildname'];
+        if (!isset($columns[$column])) continue;
+        $raw = $values[$index] ?? null;
+        $index++;
+        $value = trim(is_scalar($raw) ? (string)$raw : '');
+        if ($value === '') continue;
+        $join = $sql === '' ? 'AND' : (strtolower((string)$row['sqloprator']) === 'or' ? 'OR' : 'AND');
+        $sql .= ' ' . $join . ' ' . depFilterCondition($column, (string)$row['sqllogic'], mb_substr($value, 0, 500, 'UTF-8'), $params);
+    }
+    return array('sql' => $sql === '' ? '' : ' WHERE 1=1' . $sql, 'params' => $params, 'used' => $sql !== '');
+}
+
+/**
+ * Old "sqlwhere" links: WHERE 1=1 followed by "AND|OR column operator value" parts, where the
+ * value is a quoted text (with % for "contains") or a number. Returns null when it does not match.
+ */
+function depFilterFromLegacy(mysqli $link, int $depId, string $where): ?array
+{
+    $where = trim(str_replace(array("\r", "\n"), ' ', $where));
+    if ($where === '') return array('sql' => '', 'params' => array(), 'used' => false);
+    if (!preg_match('/^WHERE\s+1\s*=\s*1(.*)$/isu', $where, $match)) return null;
+    $rest = $match[1];
+    $columns = depFilterColumns($link, $depId);
+    $part = '/^\s*(AND|OR)\s+`?([A-Za-z0-9_]{1,64})`?\s+(like|match|!=|=|<|>)\s+(?:\'([^\']*)\'|(-?\d+(?:\.\d+)?))/iu';
+    $sql = '';
+    $params = array();
+    while (trim($rest) !== '') {
+        if (!preg_match($part, $rest, $m)) return null;
+        if (!isset($columns[$m[2]])) return null;
+        $rest = substr($rest, strlen($m[0]));
+        $value = isset($m[5]) && $m[5] !== '' ? $m[5] : $m[4];
+        $logic = strtolower($m[3]);
+        if ($logic === 'like') {
+            $value = trim($value, '%');
+            // The old page changed an empty "contains" into "%-%"; both meant "no value".
+            if ($value === '' || $value === '-') continue;
+        } elseif ($value === '') {
+            continue;
+        }
+        $join = $sql === '' ? 'AND' : strtoupper($m[1]);
+        $sql .= ' ' . $join . ' ' . depFilterCondition($m[2], $logic, $value, $params);
+    }
+    return array('sql' => $sql === '' ? '' : ' WHERE 1=1' . $sql, 'params' => $params, 'used' => $sql !== '');
+}
+
+/** Filter for the current request, and the query string that keeps it on the next page. */
+function depFilterRequest(mysqli $link, int $depId, array $request): array
+{
+    $queryId = intval($request['qry_id'] ?? 0);
+    if ($queryId > 0) {
+        $values = is_array($request['q'] ?? null) ? array_map(function ($v) { return is_scalar($v) ? (string)$v : ''; }, $request['q']) : array();
+        $filter = depFilterFromSearch($link, $depId, $queryId, $values);
+        $filter['query'] = http_build_query(array('qry_id' => $queryId, 'q' => $values));
+        $filter['invalid'] = false;
+        return $filter;
+    }
+    $legacy = is_string($request['sqlwhere'] ?? null) ? $request['sqlwhere'] : '';
+    $filter = depFilterFromLegacy($link, $depId, $legacy);
+    if ($filter === null) return array('sql' => '', 'params' => array(), 'used' => false, 'query' => '', 'invalid' => true);
+    $filter['query'] = $filter['used'] ? http_build_query(array('sqlwhere' => $legacy)) : '';
+    $filter['invalid'] = false;
+    return $filter;
+}
+
+/** Runs a statement with the filter's values; false on failure, like mysql_query(). */
+function depFilterQuery(mysqli $link, string $sql, array $params)
+{
+    try {
+        $stmt = $link->prepare($sql);
+        if (!$stmt) return false;
+        if ($params) $stmt->bind_param(str_repeat('s', count($params)), ...$params);
+        if (!$stmt->execute()) return false;
+        return $stmt->get_result();
+    } catch (mysqli_sql_exception $error) {
+        return false;
+    }
+}
+
+/** ORDER BY from the saved report setting: a plain column or label only. */
+function depFilterOrderBy(string $column, string $direction): string
+{
+    $column = trim($column, " `'\"");
+    $direction = strtolower(trim($direction)) === 'asc' ? 'ASC' : 'DESC';
+    if ($column === '' || !preg_match('/^[\p{L}\p{N}_ ]{1,64}$/u', $column)) return ' id DESC ';
+    return ' `' . $column . '` ' . $direction . ' ';
+}

@@ -1,0 +1,386 @@
+<?php
+/**
+ * Builds generic departments (الأقسام): the department and its table, its fields, and its
+ * search lists. Same rules as departments.hnt, departments_sub.hnt and departments_search.hnt.
+ * Callers check screen permissions (84 departments and fields, 118 searches).
+ */
+final class AqaryDepartmentBuilder
+{
+    public const MAX_FIELDS = 40;
+    public const MAX_SEARCHES = 10;
+    public const MAX_CONDITIONS = 10;
+    /** "match" is offered by the old screen but is not valid SQL there, so it is not used. */
+    public const LOGIC = array('like' => 'يحتوي', '=' => 'يساوي', '!=' => 'لا يساوي', '<' => 'أصغر من', '>' => 'أكبر من');
+
+    private $link;
+
+    public function __construct(mysqli $link)
+    {
+        $this->link = $link;
+    }
+
+    /** Field types as rendered by dep_add_edit.hnt. */
+    public static function types(): array
+    {
+        return array(
+            1 => array('label' => 'مربع نص', 'icon' => 'bi-input-cursor-text', 'hint' => 'نص قصير في سطر واحد'),
+            2 => array('label' => 'مساحة نص', 'icon' => 'bi-textarea-t', 'hint' => 'نص طويل متعدد الأسطر'),
+            3 => array('label' => 'قائمة منسدلة', 'icon' => 'bi-menu-button-wide', 'hint' => 'اختيار قيمة واحدة من قائمة'),
+            4 => array('label' => 'أزرار اختيار', 'icon' => 'bi-ui-radios', 'hint' => 'اختيار قيمة واحدة ظاهرة'),
+            5 => array('label' => 'مربع تأشير', 'icon' => 'bi-check2-square', 'hint' => 'نعم أو لا'),
+            6 => array('label' => 'ملف مرفق', 'icon' => 'bi-paperclip', 'hint' => 'رفع ملف أو صورة'),
+            7 => array('label' => 'موقع على الخريطة', 'icon' => 'bi-geo-alt', 'hint' => 'تحديد الموقع على الخريطة'),
+        );
+    }
+
+    /** Latin name from an Arabic label, made unique with a suffix. */
+    public static function latinName(string $label, string $suffix): string
+    {
+        $map = array('ا'=>'a','أ'=>'a','إ'=>'i','آ'=>'a','ب'=>'b','ت'=>'t','ث'=>'th','ج'=>'j','ح'=>'h','خ'=>'kh',
+            'د'=>'d','ذ'=>'th','ر'=>'r','ز'=>'z','س'=>'s','ش'=>'sh','ص'=>'s','ض'=>'d','ط'=>'t','ظ'=>'z','ع'=>'a',
+            'غ'=>'gh','ف'=>'f','ق'=>'q','ك'=>'k','ل'=>'l','م'=>'m','ن'=>'n','ه'=>'h','و'=>'w','ؤ'=>'w','ي'=>'y',
+            'ى'=>'a','ئ'=>'y','ة'=>'h');
+        $name = preg_replace('/[^a-z]/', '', strtolower(strtr($label, $map)));
+        return ($name === '' ? 'field' : substr($name, 0, 40)) . '_' . $suffix;
+    }
+
+    public static function identifier(string $name): bool
+    {
+        return (bool)preg_match('/^[A-Za-z0-9_]{1,64}$/', $name);
+    }
+
+    // ------------------------------------------------------------------ reading
+
+    public function departments(): array
+    {
+        return $this->rows("SELECT dep_id, dep_name, dep_table_name FROM departments_name WHERE COALESCE(dep_isdeleted,'')='' ORDER BY dep_order, dep_id");
+    }
+
+    public function department(int $id): ?array
+    {
+        $rows = $this->rows("SELECT * FROM departments_name WHERE dep_id=? AND COALESCE(dep_isdeleted,'')='' LIMIT 1", array($id));
+        return $rows[0] ?? null;
+    }
+
+    /** Exact name first, then a name containing the words. */
+    public function findDepartment(string $query): ?array
+    {
+        $query = trim($query);
+        if ($query === '') return null;
+        if (ctype_digit($query)) return $this->department((int)$query);
+        $best = null;
+        foreach ($this->departments() as $row) {
+            $name = trim((string)$row['dep_name']);
+            if ($name === $query) return $this->department((int)$row['dep_id']);
+            if ($best === null && (mb_strpos($name, $query) !== false || mb_strpos($query, $name) !== false)) $best = $row;
+        }
+        return $best ? $this->department((int)$best['dep_id']) : null;
+    }
+
+    public function fields(int $depId): array
+    {
+        return $this->rows('SELECT fld_id, fld_name, fld_en_name, fld_type, fld_values, fld_isactive, fld_required FROM department_field WHERE dep_id=? ORDER BY fld_id', array($depId));
+    }
+
+    public function searches(int $depId): array
+    {
+        return $this->rows("SELECT qry_id, qry_name FROM department_query WHERE dep_id=? AND COALESCE(qry_isdeleted,'')='' ORDER BY qry_id", array($depId));
+    }
+
+    public function findField(int $depId, string $query): ?array
+    {
+        $query = trim($query);
+        foreach ($this->fields($depId) as $row) if (trim($row['fld_name']) === $query || (string)$row['fld_id'] === $query) return $row;
+        foreach ($this->fields($depId) as $row) if ($query !== '' && mb_strpos($row['fld_name'], $query) !== false) return $row;
+        return null;
+    }
+
+    // ------------------------------------------------------------------ checks (pure, used for drafts and before saving)
+
+    public static function cleanName($value, string $what, int $max = 100): string
+    {
+        $value = trim(preg_replace('/\s+/u', ' ', is_scalar($value) ? (string)$value : ''));
+        if ($value === '') throw new InvalidArgumentException($what . ' مطلوب.');
+        if (mb_strlen($value, 'UTF-8') > $max) throw new InvalidArgumentException($what . ' طويل جداً (الحد ' . $max . ' حرفاً).');
+        return $value;
+    }
+
+    /** @return array{name: string, type: int, values: string, required: bool, active: bool} */
+    public static function cleanField(array $field): array
+    {
+        $name = self::cleanName($field['name'] ?? '', 'اسم الحقل');
+        $type = (int)($field['type'] ?? 1);
+        if (!isset(self::types()[$type])) throw new InvalidArgumentException('نوع الحقل غير صحيح: ' . $name);
+        $values = is_array($field['values'] ?? null) ? implode("\n", array_map('strval', $field['values'])) : (string)($field['values'] ?? '');
+        if ($type === 3 || $type === 4) {
+            $options = array_values(array_unique(array_filter(array_map('trim', preg_split('/\r\n|\r|\n|;|,|،/u', $values) ?: array()), 'strlen')));
+            if (!$options) throw new InvalidArgumentException('أدخل خيارات الحقل "' . $name . '".');
+            foreach ($options as $option) if (mb_strlen($option, 'UTF-8') > 200) throw new InvalidArgumentException('خيار طويل جداً في الحقل "' . $name . '".');
+            $values = implode("\r\n", array_slice($options, 0, 100));
+        } else {
+            $values = '';
+        }
+        return array('name' => $name, 'type' => $type, 'values' => $values,
+            'required' => !empty($field['required']), 'active' => !array_key_exists('active', $field) || !empty($field['active']));
+    }
+
+    /** $fieldNames: the department's field names (existing and new). */
+    public static function cleanSearch(array $search, array $fieldNames): array
+    {
+        $name = self::cleanName($search['name'] ?? '', 'اسم البحث');
+        $conditions = array();
+        foreach (array_slice(array_values((array)($search['conditions'] ?? array())), 0, self::MAX_CONDITIONS) as $condition) {
+            if (!is_array($condition)) continue;
+            $field = trim((string)($condition['field'] ?? ''));
+            if (!in_array($field, $fieldNames, true)) throw new InvalidArgumentException('البحث "' . $name . '" يستخدم حقلاً غير موجود: ' . $field);
+            $logic = (string)($condition['logic'] ?? 'like');
+            if (!isset(self::LOGIC[$logic])) throw new InvalidArgumentException('طريقة مقارنة غير صحيحة في البحث "' . $name . '".');
+            $fixed = ($condition['input'] ?? 'user') === 'value';
+            // With "user" the value is only the box's starting value, which the user can change.
+            $value = mb_substr(trim(is_scalar($condition['value'] ?? null) ? (string)$condition['value'] : ''), 0, 200, 'UTF-8');
+            if ($fixed && $value === '') throw new InvalidArgumentException('أدخل القيمة الثابتة للحقل "' . $field . '" في البحث "' . $name . '".');
+            $conditions[] = array('field' => $field, 'logic' => $logic, 'input' => $fixed ? 'value' : 'user', 'value' => $value,
+                'join' => ($condition['join'] ?? 'and') === 'or' ? 'or' : 'and', 'required' => !empty($condition['required']));
+        }
+        if (!$conditions) throw new InvalidArgumentException('البحث "' . $name . '" يحتاج شرطاً واحداً على الأقل.');
+        return array('name' => $name, 'conditions' => $conditions, 'active' => !array_key_exists('active', $search) || !empty($search['active']));
+    }
+
+    /** A full plan: new or existing department, new fields, new searches. Throws on the first problem. */
+    public function cleanPlan(array $plan): array
+    {
+        $existing = null;
+        if (!empty($plan['department_id'])) {
+            $existing = $this->department((int)$plan['department_id']);
+            if (!$existing) throw new InvalidArgumentException('القسم غير موجود.');
+        }
+        $name = $existing ? (string)$existing['dep_name'] : self::cleanName($plan['department_name'] ?? '', 'اسم القسم');
+        if (!$existing) {
+            foreach ($this->departments() as $row) if (trim($row['dep_name']) === $name) throw new InvalidArgumentException('يوجد قسم بالاسم نفسه: ' . $name . '. اطلب الإضافة إليه.');
+        }
+        $known = $existing ? array_map(function ($f) { return trim($f['fld_name']); }, $this->fields((int)$existing['dep_id'])) : array();
+        $fields = array();
+        foreach (array_slice(array_values((array)($plan['fields'] ?? array())), 0, self::MAX_FIELDS) as $field) {
+            if (!is_array($field)) continue;
+            $clean = self::cleanField($field);
+            if (in_array($clean['name'], $known, true)) throw new InvalidArgumentException('الحقل "' . $clean['name'] . '" مكرر أو موجود مسبقاً.');
+            $known[] = $clean['name'];
+            $fields[] = $clean;
+        }
+        $searches = array();
+        $searchNames = $existing ? array_map(function ($s) { return trim($s['qry_name']); }, $this->searches((int)$existing['dep_id'])) : array();
+        foreach (array_slice(array_values((array)($plan['searches'] ?? array())), 0, self::MAX_SEARCHES) as $search) {
+            if (!is_array($search)) continue;
+            $clean = self::cleanSearch($search, $known);
+            if (in_array($clean['name'], $searchNames, true)) throw new InvalidArgumentException('البحث "' . $clean['name'] . '" مكرر أو موجود مسبقاً.');
+            $searchNames[] = $clean['name'];
+            $searches[] = $clean;
+        }
+        if (!$existing && !$fields) throw new InvalidArgumentException('القسم الجديد يحتاج حقلاً واحداً على الأقل.');
+        if ($existing && !$fields && !$searches) throw new InvalidArgumentException('لا يوجد ما يضاف.');
+        return array('department_id' => $existing ? (int)$existing['dep_id'] : 0, 'department_name' => $name, 'fields' => $fields, 'searches' => $searches);
+    }
+
+    // ------------------------------------------------------------------ writing
+
+    /**
+     * Applies a plan from cleanPlan(). Table changes cannot be rolled back, so each step is
+     * done in order and the result says what was made if a later step fails.
+     * @return array{department_id: int, created: bool, fields: int, searches: int}
+     */
+    public function apply(array $plan): array
+    {
+        $plan = $this->cleanPlan($plan);
+        $created = false;
+        $depId = $plan['department_id'];
+        if ($depId === 0) {
+            $depId = $this->createDepartment($plan['department_name']);
+            $created = true;
+        }
+        $done = array('department_id' => $depId, 'created' => $created, 'fields' => 0, 'searches' => 0);
+        try {
+            foreach ($plan['fields'] as $field) { $this->addField($depId, $field); $done['fields']++; }
+            foreach ($plan['searches'] as $search) { $this->addSearch($depId, $search); $done['searches']++; }
+        } catch (Throwable $error) {
+            error_log('Department builder: ' . $error->getMessage());
+            throw new RuntimeException(($created ? 'أُنشئ القسم' : 'حُفظ جزء') . ' مع ' . $done['fields'] . ' حقل و' . $done['searches']
+                . ' بحث، ثم تعذر إكمال الباقي. أكمله من شاشة القسم.', 0, $error);
+        }
+        return $done;
+    }
+
+    public function createDepartment(string $name): int
+    {
+        $name = self::cleanName($name, 'اسم القسم');
+        $suffix = (string)time() . random_int(10, 99);
+        $latin = self::latinName($name, $suffix);
+        $table = 'dgn_' . $latin;
+        if (!self::identifier($table)) throw new InvalidArgumentException('اسم القسم غير صالح.');
+        $order = (int)($this->rows('SELECT COALESCE(MAX(dep_order),0)+1 n FROM departments_name')[0]['n'] ?? 1);
+        $this->query("CREATE TABLE IF NOT EXISTS `{$table}` (id INT(11) NOT NULL AUTO_INCREMENT, masderid VARCHAR(200) NOT NULL,
+            malekid VARCHAR(200) NOT NULL, oldmalekid VARCHAR(200) NOT NULL, PRIMARY KEY (id))");
+        $this->query("INSERT INTO departments_name (dep_name, dep_en_name, dep_order, dep_image, dep_image_small, dep_isactive, dep_malek_isactive,
+            dep_waseet_isactive, dep_table_name, dep_lastmodified, dep_isdeleted, formuid) VALUES (?,?,?,?,?,'1',1,1,?,?,'',?)",
+            array($name, $latin, $order, 'images/48x48/general.png', 'images/24x24/general.png', $table, (string)time(), 'ai-' . bin2hex(random_bytes(8))));
+        return (int)$this->link->insert_id;
+    }
+
+    public function addField(int $depId, array $field): int
+    {
+        $department = $this->department($depId);
+        if (!$department) throw new InvalidArgumentException('القسم غير موجود.');
+        $field = self::cleanField($field);
+        $table = (string)$department['dep_table_name'];
+        $column = self::latinName($field['name'], (string)time() . random_int(100, 999));
+        if (!self::identifier($table) || !self::identifier($column)) throw new InvalidArgumentException('اسم جدول القسم غير صالح.');
+        if ($this->rows('SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?', array($table, $column))) {
+            throw new RuntimeException('Column exists: ' . $column);
+        }
+        // The column first, so a field never exists without storage.
+        $this->query("ALTER TABLE `{$table}` ADD `{$column}` " . ($field['type'] === 2 ? 'TEXT NOT NULL' : 'VARCHAR(600) NOT NULL'));
+        $this->query('INSERT INTO department_field (fld_name, fld_en_name, fld_table_name, fld_isactive, fld_required, fld_values, dep_id, fld_type, formuid)
+            VALUES (?,?,?,?,?,?,?,?,?)', array($field['name'], $column, $table, $field['active'] ? '1' : '2', $field['required'] ? '1' : '2',
+            $field['values'], $depId, (string)$field['type'], 'ai-' . bin2hex(random_bytes(8))));
+        return (int)$this->link->insert_id;
+    }
+
+    /** Name, options, required and active only; the data column keeps its type. */
+    public function updateField(int $depId, int $fieldId, array $changes): void
+    {
+        $current = $this->rows('SELECT * FROM department_field WHERE fld_id=? AND dep_id=?', array($fieldId, $depId))[0] ?? null;
+        if (!$current) throw new InvalidArgumentException('الحقل غير موجود.');
+        $merged = array('name' => $changes['name'] ?? $current['fld_name'], 'type' => (int)$current['fld_type'],
+            'values' => $changes['values'] ?? $current['fld_values'],
+            'required' => array_key_exists('required', $changes) ? !empty($changes['required']) : $current['fld_required'] == 1,
+            'active' => array_key_exists('active', $changes) ? !empty($changes['active']) : $current['fld_isactive'] == 1);
+        $field = self::cleanField($merged);
+        foreach ($this->fields($depId) as $row) {
+            if ((int)$row['fld_id'] !== $fieldId && trim($row['fld_name']) === $field['name']) throw new InvalidArgumentException('يوجد حقل بالاسم نفسه.');
+        }
+        $this->query('UPDATE department_field SET fld_name=?, fld_values=?, fld_required=?, fld_isactive=? WHERE fld_id=? AND dep_id=?',
+            array($field['name'], $field['values'], $field['required'] ? '1' : '2', $field['active'] ? '1' : '2', $fieldId, $depId));
+    }
+
+    /** Removes the field from the forms; its column and saved values stay, as on the fields screen. */
+    public function deleteField(int $depId, int $fieldId): void
+    {
+        if (!$this->rows('SELECT fld_id FROM department_field WHERE fld_id=? AND dep_id=?', array($fieldId, $depId))) throw new InvalidArgumentException('الحقل غير موجود.');
+        $this->query('DELETE FROM department_field WHERE fld_id=? AND dep_id=?', array($fieldId, $depId));
+    }
+
+    public function addSearch(int $depId, array $search): int
+    {
+        [$search, $fields] = $this->searchInput($depId, $search);
+        $this->query("INSERT INTO department_query (qry_name, qry_sql, dep_id, qry_image, qry_fields, qry_en_name, qry_isdeleted, qry_isactive, qry_order, qry_lastmodified, formuid)
+            VALUES (?,'',?,?,'',?,'',?,'0',?,?)", array($search['name'], $depId, 'images/48x482/xmag.png',
+            self::latinName($search['name'], (string)time()), $search['active'] ? '1' : '2', (string)time(), 'ai-' . bin2hex(random_bytes(8))));
+        $queryId = (int)$this->link->insert_id;
+        $this->writeConditions($queryId, $search['conditions'], $fields);
+        return $queryId;
+    }
+
+    /** Same search number, so menus and saved links keep working; its conditions are replaced. */
+    public function updateSearch(int $depId, int $queryId, array $search): void
+    {
+        if (!$this->rows("SELECT qry_id FROM department_query WHERE qry_id=? AND dep_id=? AND COALESCE(qry_isdeleted,'')=''", array($queryId, $depId))) {
+            throw new InvalidArgumentException('قائمة البحث غير موجودة.');
+        }
+        [$search, $fields] = $this->searchInput($depId, $search);
+        foreach ($this->searches($depId) as $row) {
+            if ((int)$row['qry_id'] !== $queryId && trim($row['qry_name']) === $search['name']) throw new InvalidArgumentException('يوجد بحث بالاسم نفسه في هذا القسم.');
+        }
+        $this->link->begin_transaction();
+        try {
+            $this->query('UPDATE department_query SET qry_name=?, qry_isactive=?, qry_lastmodified=? WHERE qry_id=? AND dep_id=?',
+                array($search['name'], $search['active'] ? '1' : '2', (string)time(), $queryId, $depId));
+            $this->query('DELETE FROM dep_query_field WHERE query_id=?', array((string)$queryId));
+            $this->writeConditions($queryId, $search['conditions'], $fields);
+            $this->link->commit();
+        } catch (Throwable $error) {
+            $this->link->rollback();
+            throw $error;
+        }
+    }
+
+    /** Hidden as before (qry_isdeleted), so it can be restored. */
+    public function deleteSearch(int $depId, int $queryId): void
+    {
+        if (!$this->rows("SELECT qry_id FROM department_query WHERE qry_id=? AND dep_id=?", array($queryId, $depId))) throw new InvalidArgumentException('قائمة البحث غير موجودة.');
+        $this->query("UPDATE department_query SET qry_isdeleted='yes', qry_lastmodified=? WHERE qry_id=? AND dep_id=?", array((string)time(), $queryId, $depId));
+    }
+
+    /** Searches of a department with their conditions, for the builder screen. */
+    public function searchList(int $depId): array
+    {
+        $names = array();
+        foreach ($this->fields($depId) as $row) $names[$row['fld_en_name']] = $row['fld_name'];
+        $list = array();
+        foreach ($this->rows("SELECT qry_id, qry_name, qry_isactive, qry_lastmodified FROM department_query WHERE dep_id=? AND COALESCE(qry_isdeleted,'')='' ORDER BY CAST(qry_order AS UNSIGNED), qry_id", array($depId)) as $row) {
+            $conditions = array();
+            foreach ($this->rows('SELECT * FROM dep_query_field WHERE query_id=? ORDER BY id', array((string)$row['qry_id'])) as $c) {
+                $logic = strtolower((string)$c['sqllogic']);
+                $conditions[] = array('field' => $names[$c['sqlfildname']] ?? '', 'column' => $c['sqlfildname'], 'missing' => !isset($names[$c['sqlfildname']]),
+                    'logic' => isset(self::LOGIC[$logic]) ? $logic : '=', 'input' => $c['inputfrom'] === 'specificvalue' ? 'value' : 'user',
+                    'value' => (string)$c['datavalue'], 'join' => strtolower((string)$c['sqloprator']) === 'or' ? 'or' : 'and', 'required' => $c['isrequired'] === 'yes');
+            }
+            $list[] = array('id' => (int)$row['qry_id'], 'name' => $row['qry_name'], 'active' => $row['qry_isactive'] == '1',
+                'modified' => (int)$row['qry_lastmodified'], 'conditions' => $conditions);
+        }
+        return $list;
+    }
+
+    /** Checked search and the department's fields by name. Conditions may name a field or its column. */
+    private function searchInput(int $depId, array $search): array
+    {
+        $fields = array();
+        $byColumn = array();
+        foreach ($this->fields($depId) as $row) { $fields[trim($row['fld_name'])] = $row; $byColumn[$row['fld_en_name']] = trim($row['fld_name']); }
+        foreach ((array)($search['conditions'] ?? array()) as $key => $condition) {
+            if (is_array($condition) && empty($condition['field']) && isset($byColumn[(string)($condition['column'] ?? '')])) $search['conditions'][$key]['field'] = $byColumn[$condition['column']];
+        }
+        return array(self::cleanSearch($search, array_keys($fields)), $fields);
+    }
+
+    private function writeConditions(int $queryId, array $conditions, array $fields): void
+    {
+        foreach ($conditions as $condition) {
+            $field = $fields[$condition['field']];
+            $source = $condition['input'] === 'value' ? 'specificvalue' : ($condition['value'] !== '' ? 'defultvalue' : 'fromuser');
+            $this->query('INSERT INTO dep_query_field (sqlfildname, sqloprator, sqllogic, inputfrom, isrequired, datavalue, sqlfild_ar_name, query_id, formuid)
+                VALUES (?,?,?,?,?,?,?,?,?)', array($field['fld_en_name'], $condition['join'], $condition['logic'], $source,
+                $condition['required'] ? 'yes' : 'no', $condition['value'], $field['fld_name'], (string)$queryId, 'ai-' . bin2hex(random_bytes(8))));
+        }
+    }
+
+    public static function links(int $depId): array
+    {
+        return array(
+            array('title' => 'فتح القسم', 'url' => '/aqary/admin/include/geniric_departments/dep_show.hnt?dep_id=' . $depId),
+            array('title' => 'حقول القسم', 'url' => '/aqary/admin/departments_sub.hnt?dep_id=' . $depId),
+            array('title' => 'قوائم البحث', 'url' => '/aqary/admin/departments_search.hnt?dep_id_show=' . $depId),
+        );
+    }
+
+    // ------------------------------------------------------------------ database
+
+    private function query(string $sql, array $params = array()): void
+    {
+        $stmt = $this->link->prepare($sql);
+        if (!$stmt || !$stmt->execute($params ? array_map(function ($v) { return is_string($v) ? $v : (string)$v; }, $params) : null)) {
+            throw new RuntimeException($stmt ? $stmt->error : $this->link->error);
+        }
+        $stmt->close();
+    }
+
+    private function rows(string $sql, array $params = array()): array
+    {
+        $stmt = $this->link->prepare($sql);
+        if (!$stmt || !$stmt->execute($params ? array_map(function ($v) { return is_string($v) ? $v : (string)$v; }, $params) : null)) {
+            throw new RuntimeException($stmt ? $stmt->error : $this->link->error);
+        }
+        $result = $stmt->get_result();
+        $rows = $result ? $result->fetch_all(MYSQLI_ASSOC) : array();
+        $stmt->close();
+        return $rows;
+    }
+}

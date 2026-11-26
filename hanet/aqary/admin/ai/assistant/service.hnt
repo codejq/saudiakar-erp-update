@@ -9,7 +9,7 @@
  *  3. the model's JSON answer becomes a reply, a screen to open, related screens and at most one action:
  *     lookups are answered here from the company's own data (respecting screen permissions and the
  *     restricted users' assigned properties); create actions come back as drafts the user confirms.
- *     Only "create tenant" is saved from the chat. Contracts and vouchers open their normal screen
+ *     Only "create tenant" and confirmed custom-department drafts are saved from the chat. Contracts and vouchers open their normal screen
  *     pre-filled, so all of its calendar, installment, ZATCA and accounting logic still applies.
  */
 
@@ -19,6 +19,7 @@ require_once dirname(__DIR__, 3) . '/lib/screen_permissions.hnt';
 require_once dirname(__DIR__, 3) . '/lib/ocr/ocr_runtime.hnt';
 require_once dirname(__DIR__) . '/lib/OpenRouterAPI.class.php';
 require_once __DIR__ . '/ejar.hnt';
+require_once dirname(__DIR__, 2) . '/include/geniric_departments/dep_builder.hnt';
 
 final class AqaryAssistant
 {
@@ -374,6 +375,12 @@ final class AqaryAssistant
                     return array('reply' => 'ليست لديك صلاحية إنشاء ' . ($payment ? 'سندات الصرف.' : 'سندات القبض.')) + $none;
                 }
                 return array('reply' => null, 'links' => array(), 'card' => $this->voucherCard($payment, (array)($action['voucher'] ?? array())));
+            case 'lookup_department':
+                return $this->lookupDepartment((string)(self::clean($action['department_query'] ?? null) ?? $query));
+            case 'department_plan':
+                return $this->departmentPlanCard($action);
+            case 'department_field_change':
+                return $this->departmentFieldCard($action);
         }
         return $none;
     }
@@ -624,6 +631,149 @@ final class AqaryAssistant
             'url' => '/aqary/admin/hnt-office/recive_voucher.hnt' . ($payment ? '?paymentvou=1' : ''));
     }
 
+    // ------------------------------------------------------------------ custom departments
+
+    private function departments(): AqaryDepartmentBuilder
+    {
+        return new AqaryDepartmentBuilder($this->link);
+    }
+
+    private function lookupDepartment(string $query): array
+    {
+        $none = array('reply' => null, 'links' => array(), 'card' => null);
+        if (!aqaryScreenCan($this->link, '84', 'sees')) return array('reply' => 'ليست لديك صلاحية إدارة الأقسام.') + $none;
+        $builder = $this->departments();
+        $department = $builder->findDepartment($query);
+        if (!$department) {
+            $names = array_map(function ($d) { return $d['dep_name']; }, $builder->departments());
+            return array('reply' => 'لم أجد هذا القسم.' . ($names ? ' الأقسام: ' . implode('، ', $names) . '.' : '')) + $none;
+        }
+        $types = AqaryDepartmentBuilder::types();
+        $fields = array_map(function ($f) use ($types) {
+            return $f['fld_name'] . ' (' . ($types[(int)$f['fld_type']]['label'] ?? '') . ($f['fld_required'] == 1 ? '، مطلوب' : '') . ($f['fld_isactive'] == 1 ? '' : '، موقوف') . ')';
+        }, $builder->fields((int)$department['dep_id']));
+        $searches = array_map(function ($q) { return $q['qry_name']; }, $builder->searches((int)$department['dep_id']));
+        $reply = 'قسم ' . $department['dep_name'] . ': ' . ($fields ? count($fields) . ' حقل: ' . implode('، ', $fields) : 'بلا حقول') . '.'
+            . "\nقوائم البحث: " . ($searches ? implode('، ', $searches) : 'لا يوجد') . '.';
+        return array('reply' => $reply, 'links' => AqaryDepartmentBuilder::links((int)$department['dep_id']), 'card' => null);
+    }
+
+    /** Draft of a new department, or of new fields and searches for an existing one. */
+    private function departmentPlanCard(array $action): array
+    {
+        $none = array('reply' => null, 'links' => array(), 'card' => null);
+        $builder = $this->departments();
+        $plan = array('fields' => (array)($action['fields'] ?? array()), 'searches' => (array)($action['searches'] ?? array()));
+        $query = (string)(self::clean($action['department_query'] ?? null) ?? '');
+        if ($query !== '') {
+            $department = $builder->findDepartment($query);
+            if (!$department) return array('reply' => 'لم أجد القسم "' . $query . '". اذكر اسمه كما في شاشة الأقسام أو اطلب إنشاء قسم جديد.') + $none;
+            $plan['department_id'] = (int)$department['dep_id'];
+        } else {
+            $plan['department_name'] = $action['department']['name'] ?? null;
+        }
+        $denied = $this->departmentDenied($plan);
+        if ($denied !== '') return array('reply' => $denied) + $none;
+        try {
+            $clean = $builder->cleanPlan($plan);
+        } catch (InvalidArgumentException $error) {
+            return array('reply' => 'لا يمكن تجهيز المسودة: ' . $error->getMessage()) + $none;
+        }
+        return array('reply' => self::departmentSummary($clean), 'links' => array(), 'card' => array('type' => 'department_plan', 'data' => $clean,
+            'types' => array_map(function ($t) { return $t['label']; }, AqaryDepartmentBuilder::types()), 'logic' => AqaryDepartmentBuilder::LOGIC));
+    }
+
+    private function departmentFieldCard(array $action): array
+    {
+        $none = array('reply' => null, 'links' => array(), 'card' => null);
+        $builder = $this->departments();
+        $department = $builder->findDepartment((string)(self::clean($action['department_query'] ?? null) ?? ''));
+        if (!$department) return array('reply' => 'لم أجد القسم. اذكر اسمه كما في شاشة الأقسام.') + $none;
+        $field = $builder->findField((int)$department['dep_id'], (string)(self::clean($action['field_query'] ?? null) ?? ''));
+        if (!$field) return array('reply' => 'لم أجد هذا الحقل في قسم ' . $department['dep_name'] . '.') + $none;
+        $delete = !empty($action['delete']);
+        if (!aqaryScreenCan($this->link, '84', $delete ? 'deleetes' : 'edits')) return array('reply' => 'ليست لديك صلاحية ' . ($delete ? 'حذف' : 'تعديل') . ' حقول الأقسام.') + $none;
+        $changes = array();
+        foreach ((array)($action['field_changes'] ?? array()) as $key => $value) {
+            if (in_array($key, array('name', 'values', 'required', 'active'), true) && $value !== null) $changes[$key] = $value;
+        }
+        if (!$delete && !$changes) return array('reply' => 'ما التغيير المطلوب على الحقل "' . $field['fld_name'] . '"؟') + $none;
+        $data = array('department_id' => (int)$department['dep_id'], 'department_name' => $department['dep_name'], 'field_id' => (int)$field['fld_id'],
+            'field_name' => $field['fld_name'], 'field_type' => (int)$field['fld_type'], 'delete' => $delete, 'changes' => $changes,
+            'current' => array('values' => str_replace("\r\n", '، ', (string)$field['fld_values']), 'required' => $field['fld_required'] == 1, 'active' => $field['fld_isactive'] == 1));
+        if (!$delete) {
+            try {
+                AqaryDepartmentBuilder::cleanField(array('name' => $changes['name'] ?? $field['fld_name'], 'type' => (int)$field['fld_type'],
+                    'values' => $changes['values'] ?? $field['fld_values'], 'required' => true));
+            } catch (InvalidArgumentException $error) {
+                return array('reply' => 'لا يمكن تجهيز التعديل: ' . $error->getMessage()) + $none;
+            }
+        }
+        $reply = $delete ? 'مسودة حذف الحقل "' . $field['fld_name'] . '" من قسم ' . $department['dep_name'] . '. البيانات المحفوظة فيه تبقى ولا تظهر.'
+            : 'مسودة تعديل الحقل "' . $field['fld_name'] . '" في قسم ' . $department['dep_name'] . '.';
+        return array('reply' => $reply, 'links' => array(), 'card' => array('type' => 'department_field_change', 'data' => $data));
+    }
+
+    /** Empty when allowed; otherwise the refusal. */
+    private function departmentDenied(array $plan): string
+    {
+        if (empty($plan['department_id']) && !aqaryScreenCan($this->link, '84', 'adds')) return 'ليست لديك صلاحية إنشاء الأقسام.';
+        if (!empty($plan['fields']) && !aqaryScreenCan($this->link, '84', 'adds')) return 'ليست لديك صلاحية إضافة حقول للأقسام.';
+        if (!empty($plan['searches']) && !aqaryScreenCan($this->link, '118', 'adds')) return 'ليست لديك صلاحية إنشاء قوائم البحث.';
+        return '';
+    }
+
+    /** Text of the draft, so the next message can refer to it. */
+    private static function departmentSummary(array $plan): string
+    {
+        $types = AqaryDepartmentBuilder::types();
+        $lines = array(($plan['department_id'] ? 'إضافة إلى قسم ' : 'مسودة قسم جديد: ') . $plan['department_name'] . '.');
+        if ($plan['fields']) {
+            $lines[] = 'الحقول: ' . implode('، ', array_map(function ($f) use ($types) {
+                return $f['name'] . ' (' . $types[$f['type']]['label'] . ($f['values'] !== '' ? ': ' . str_replace("\r\n", ' / ', $f['values']) : '') . ($f['required'] ? '، مطلوب' : '') . ')';
+            }, $plan['fields'])) . '.';
+        }
+        if ($plan['searches']) {
+            $lines[] = 'قوائم البحث: ' . implode('، ', array_map(function ($q) {
+                return $q['name'] . ' (' . implode(' ', array_map(function ($c) { return $c['field'] . ' ' . AqaryDepartmentBuilder::LOGIC[$c['logic']] . ($c['input'] === 'value' ? ' ' . $c['value'] : ''); }, $q['conditions'])) . ')';
+            }, $plan['searches'])) . '.';
+        }
+        $lines[] = 'راجعها ثم أكّد، أو اطلب التعديل.';
+        return implode("\n", $lines);
+    }
+
+    /** Applies a confirmed department draft. @return array{message: string, links: array} */
+    public function confirmDepartment(string $type, array $data): array
+    {
+        if (!$this->allowed()) throw new InvalidArgumentException('ليست لديك صلاحية استخدام المساعد.');
+        $builder = $this->departments();
+        if ($type === 'department_plan') {
+            $plan = array('department_id' => (int)($data['department_id'] ?? 0), 'department_name' => $data['department_name'] ?? null,
+                'fields' => (array)($data['fields'] ?? array()), 'searches' => (array)($data['searches'] ?? array()));
+            $denied = $this->departmentDenied($plan);
+            if ($denied !== '') throw new InvalidArgumentException($denied);
+            try {
+                $done = $builder->apply($plan);
+            } catch (RuntimeException $error) {
+                if ($error instanceof InvalidArgumentException) throw $error;
+                throw new InvalidArgumentException($error->getMessage());
+            }
+            $message = ($done['created'] ? 'تم إنشاء القسم ' : 'تمت الإضافة إلى قسم ') . (string)($plan['department_name'] ?? $builder->department($done['department_id'])['dep_name'] ?? '')
+                . ' (' . $done['fields'] . ' حقل، ' . $done['searches'] . ' بحث).' . ($done['created'] ? ' أيقونته افتراضية ويمكن تغييرها من شاشة الأقسام.' : '');
+            return array('message' => $message, 'links' => AqaryDepartmentBuilder::links($done['department_id']));
+        }
+        $depId = (int)($data['department_id'] ?? 0);
+        $fieldId = (int)($data['field_id'] ?? 0);
+        $delete = !empty($data['delete']);
+        if (!aqaryScreenCan($this->link, '84', $delete ? 'deleetes' : 'edits')) throw new InvalidArgumentException('ليست لديك صلاحية لهذا الإجراء.');
+        if ($delete) {
+            $builder->deleteField($depId, $fieldId);
+            return array('message' => 'تم حذف الحقل من نماذج القسم. بياناته المحفوظة باقية.', 'links' => AqaryDepartmentBuilder::links($depId));
+        }
+        $builder->updateField($depId, $fieldId, array_intersect_key((array)($data['changes'] ?? array()), array_flip(array('name', 'values', 'required', 'active'))));
+        return array('message' => 'تم تعديل الحقل.', 'links' => AqaryDepartmentBuilder::links($depId));
+    }
+
     // ------------------------------------------------------------------ confirm (the only direct write)
 
     public function canCreateTenant(): bool
@@ -800,6 +950,14 @@ final class AqaryAssistant
             'Currency: SAR',
         );
         if ($currentUrl !== '') $lines[] = 'The user is on: ' . mb_substr($currentUrl, 0, 200);
+        if (aqaryScreenCan($this->link, '84', 'sees')) {
+            try {
+                $names = array_map(function ($d) { return $d['dep_name']; }, (new AqaryDepartmentBuilder($this->link))->departments());
+                $lines[] = 'Departments: ' . ($names ? implode('، ', array_slice($names, 0, 40)) : 'none yet');
+            } catch (Throwable $error) {
+                // Older databases without departments tables.
+            }
+        }
         return implode("\n", $lines);
     }
 

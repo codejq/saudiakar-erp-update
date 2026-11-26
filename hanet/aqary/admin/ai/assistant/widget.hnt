@@ -75,6 +75,7 @@ $aqaryAssistantCfg = array(
     .aqa-links a:hover,.aqa-links button:hover{background:var(--aqa-accent);color:#fff}
     .aqa-card{background:var(--aqa-card);border:1px solid var(--aqa-accent);border-radius:12px;padding:11px;margin:0 0 10px;font-size:.85rem}
     .aqa-card h6{font-size:.92rem;color:var(--aqa-head);margin:0 0 8px;font-weight:700}
+    .aqa-dep{margin:6px 0}.aqa-dep ul{margin:4px 0 0;padding-inline-start:18px}.aqa-dep li{margin:2px 0}.aqa-dep small{color:#5f6b7a}
     .aqa-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
     .aqa-grid .full{grid-column:1/-1}
     .aqa-card label{display:block;font-size:.75rem;color:var(--aqa-muted);margin:0 0 2px}
@@ -439,6 +440,29 @@ $aqaryAssistantCfg = array(
                 h += '</div></div>';
             }
             button = 'فتح شاشة العقد معبّأة';
+        } else if (a.type === 'department_plan') {
+            const types = a.types || {}, logic = a.logic || {};
+            h += '<h6><i class="bi bi-grid-3x3-gap"></i> ' + (d.department_id ? 'إضافة إلى قسم: ' : 'قسم جديد: ') + esc(d.department_name) + '</h6>';
+            if ((d.fields || []).length) {
+                h += '<div class="aqa-dep"><b>الحقول (' + d.fields.length + ')</b><ul>' + d.fields.map((f) => '<li>' + esc(f.name) + ' <small>— ' + esc(types[f.type] || '')
+                    + (f.values ? ': ' + esc(f.values.split('\r\n').join(' / ')) : '') + (f.required ? ' · مطلوب' : '') + '</small></li>').join('') + '</ul></div>';
+            }
+            if ((d.searches || []).length) {
+                h += '<div class="aqa-dep"><b>قوائم البحث (' + d.searches.length + ')</b><ul>' + d.searches.map((q) => '<li>' + esc(q.name) + ' <small>— '
+                    + q.conditions.map((c, i) => (i ? (c.join === 'or' ? 'أو ' : 'و ') : '') + esc(c.field) + ' ' + esc(logic[c.logic] || c.logic) + (c.input === 'value' ? ' ' + esc(c.value) : ' (يدخله المستخدم)')).join(' ') + '</small></li>').join('') + '</ul></div>';
+            }
+            h += '<div class="aqa-dep"><small>لتغيير شيء اكتب طلبك في المحادثة وسأجهز مسودة جديدة.</small></div>';
+            button = d.department_id ? 'تأكيد وإضافة' : 'تأكيد وإنشاء القسم';
+        } else if (a.type === 'department_field_change') {
+            const c = d.changes || {};
+            h += '<h6><i class="bi bi-input-cursor-text"></i> ' + (d.delete ? 'حذف حقل' : 'تعديل حقل') + ': ' + esc(d.field_name) + '</h6><div class="aqa-grid">' + ro('القسم', d.department_name);
+            if (d.delete) { h += ro('الأثر', 'يختفي من النماذج وتبقى بياناته محفوظة'); }
+            if (c.name !== undefined) { h += ro('الاسم الجديد', c.name); }
+            if (c.values !== undefined) { h += ro('الخيارات الجديدة', Array.isArray(c.values) ? c.values.join(' / ') : c.values); }
+            if (c.required !== undefined) { h += ro('مطلوب', c.required ? 'نعم' : 'لا'); }
+            if (c.active !== undefined) { h += ro('مفعّل', c.active ? 'نعم' : 'لا'); }
+            h += '</div>';
+            button = d.delete ? 'تأكيد الحذف' : 'تأكيد التعديل';
         } else if (a.type === 'draft_rent_receipt') {
             h += '<h6><i class="bi bi-cash-coin"></i> سند قبض إيجار</h6><div class="aqa-grid">' + ro('المستأجر', d.tenant_label)
                 + ro('المتأخرات', d.arrears_count ? d.arrears_count + ' قسط · ' + Number(d.arrears_amount).toLocaleString('ar-SA') + ' ريال' : 'لا يوجد') + '</div>';
@@ -551,7 +575,11 @@ $aqaryAssistantCfg = array(
         a.data = readCard(el, a); a.busy = true; a.error = null; render();
         const d = a.data;
         try {
-            if (a.type === 'create_tenant') {
+            if (a.type === 'department_plan' || a.type === 'department_field_change') {
+                const r = await post({ action: 'confirm', type: a.type, data: JSON.stringify(a.data) });
+                if (!r.ok) { throw new Error(r.data.message || 'تعذّر الحفظ.'); }
+                a.done = { message: r.data.message, links: r.data.links || [] };
+            } else if (a.type === 'create_tenant') {
                 const t = await createTenant(d);
                 const next = [{ title: 'بيانات المستأجر', url: t.url }];
                 if (t.contract_url) { next.push({ title: 'عقد إيجار لهذا المستأجر', url: t.contract_url }); }

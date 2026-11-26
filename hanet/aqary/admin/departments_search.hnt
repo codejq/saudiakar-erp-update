@@ -1,0 +1,330 @@
+<?php
+/**
+ * Search lists of the generic departments (قوائم البحث): add, edit, try and remove.
+ * GET renders the page; POST with ajax=1 answers JSON. Rules live in dep_builder.hnt.
+ */
+$sc_title = 'قوائم البحث في الأقسام';
+$sc_id = '118';
+$depSearchAjax = ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && ($_POST['ajax'] ?? '') === '1';
+
+function depSearchRespond(bool $ok, string $message, array $extra = array(), int $status = 200): void
+{
+    while (ob_get_level() > 0) ob_end_clean();
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(array('success' => $ok, 'message' => $message) + $extra, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+
+if ($depSearchAjax) {
+    $is_ajax_request = true;
+    ob_start();
+    include_once '../reqloginajax.hnt';
+    require_once __DIR__ . '/../lib/screen_permissions.hnt';
+    require_once __DIR__ . '/include/geniric_departments/dep_builder.hnt';
+    if (empty($_SESSION['useridv'])) depSearchRespond(false, 'انتهت الجلسة، سجّل الدخول من جديد.', array(), 401);
+    $token = (string)($_SESSION['dep_search_csrf'] ?? '');
+    if ($token === '' || !hash_equals($token, (string)($_POST['csrf'] ?? ''))) depSearchRespond(false, 'انتهت صلاحية الصفحة، حدّثها ثم حاول مرة أخرى.', array(), 403);
+
+    $action = (string)($_POST['do'] ?? '');
+    $depId = intval($_POST['dep_id'] ?? 0);
+    $queryId = intval($_POST['qry_id'] ?? 0);
+    $operation = $action === 'delete' ? 'deleetes' : ($queryId > 0 ? 'edits' : 'adds');
+    if (!in_array($action, array('save', 'delete'), true)) depSearchRespond(false, 'طلب غير معروف.', array(), 400);
+    if (!aqaryScreenCan($link, $sc_id, $operation)) depSearchRespond(false, 'ليست لديك صلاحية لهذا الإجراء.', array(), 403);
+    try {
+        $builder = new AqaryDepartmentBuilder($link);
+        if (!$builder->department($depId)) depSearchRespond(false, 'القسم غير موجود.', array(), 404);
+        if ($action === 'delete') {
+            $builder->deleteSearch($depId, $queryId);
+            depSearchRespond(true, 'تم حذف قائمة البحث.', array('searches' => $builder->searchList($depId)));
+        }
+        $search = json_decode((string)($_POST['search'] ?? ''), true);
+        if (!is_array($search)) depSearchRespond(false, 'بيانات البحث غير صحيحة.', array(), 422);
+        if ($queryId > 0) $builder->updateSearch($depId, $queryId, $search);
+        else {
+            foreach ($builder->searches($depId) as $row) {
+                if (trim($row['qry_name']) === trim((string)($search['name'] ?? ''))) depSearchRespond(false, 'يوجد بحث بالاسم نفسه في هذا القسم.', array(), 422);
+            }
+            $queryId = $builder->addSearch($depId, $search);
+        }
+        depSearchRespond(true, 'تم حفظ قائمة البحث.', array('id' => $queryId, 'searches' => $builder->searchList($depId)));
+    } catch (InvalidArgumentException $error) {
+        depSearchRespond(false, $error->getMessage(), array(), 422);
+    } catch (Throwable $error) {
+        error_log('departments_search: ' . $error->getMessage());
+        depSearchRespond(false, 'تعذر الحفظ، حاول مرة أخرى.', array(), 500);
+    }
+}
+
+include_once '../nocash.hnt';
+include_once '../header.hnt';
+require_once __DIR__ . '/../lib/screen_permissions.hnt';
+require_once __DIR__ . '/include/geniric_departments/dep_builder.hnt';
+if (!aqaryScreenCan($link, $sc_id, 'sees')) aqaryScreenDenyPage('ليست لديك صلاحية عرض قوائم البحث.');
+if (empty($_SESSION['dep_search_csrf'])) $_SESSION['dep_search_csrf'] = bin2hex(random_bytes(32));
+
+$depSearchH = function ($value) { return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); };
+$depSearchBuilder = new AqaryDepartmentBuilder($link);
+$depSearchDepartments = $depSearchBuilder->departments();
+$depSearchId = intval($_GET['dep_id_show'] ?? 0);
+$depSearchCurrent = $depSearchId ? $depSearchBuilder->department($depSearchId) : null;
+$depSearchFields = array();
+$depSearchList = array();
+if ($depSearchCurrent) {
+    foreach ($depSearchBuilder->fields($depSearchId) as $row) {
+        $depSearchFields[] = array('column' => $row['fld_en_name'], 'name' => trim($row['fld_name']), 'type' => (int)$row['fld_type'],
+            // Only list fields have options; other types may keep a hint text in fld_values.
+            'options' => in_array((int)$row['fld_type'], array(3, 4), true)
+                ? array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', (string)$row['fld_values'])), 'strlen')) : array());
+    }
+    $depSearchList = $depSearchBuilder->searchList($depSearchId);
+}
+$depSearchJs = function ($value) { return json_encode($value, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_INVALID_UTF8_SUBSTITUTE); };
+?>
+<style>
+.dsb { max-width: 1320px; margin: 0 auto; }
+.dsb .card { border: 1px solid #dfe3e8; border-radius: 10px; box-shadow: none; }
+.dsb .card-header { background: #f6f8fa; border-bottom: 1px solid #dfe3e8; font-weight: 700; }
+.dsb-search { border: 1px solid #e3e7eb; border-radius: 8px; padding: .75rem .9rem; margin-bottom: .6rem; background: #fff; }
+.dsb-search.active-edit { border-color: #1f4e5f; box-shadow: 0 0 0 2px rgba(31,78,95,.12); }
+.dsb-search .name { font-weight: 700; }
+.dsb-search .rule { color: #5a6570; font-size: .88rem; }
+.dsb-cond { border: 1px solid #e3e7eb; border-radius: 8px; padding: .7rem; margin-bottom: .6rem; background: #fbfcfd; }
+.dsb-join { display: flex; justify-content: center; margin: -.2rem 0 .4rem; }
+.dsb-join .btn { min-width: 64px; }
+.dsb-preview { background: #f6f8fa; border: 1px dashed #c7cfd6; border-radius: 8px; padding: .7rem .9rem; color: #263238; }
+.dsb label { font-size: .85rem; font-weight: 600; color: #455a64; }
+.dsb .missing { color: #b42318; }
+</style>
+
+<div class="container-fluid py-3 dsb" dir="rtl">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+        <h4 class="mb-0"><i class="bi bi-search me-2"></i><?= $depSearchH($sc_title) ?></h4>
+        <div class="d-flex gap-2">
+            <select class="form-select" id="dsbDepartment" aria-label="القسم" style="min-width:240px">
+                <option value="">-- اختر القسم --</option>
+                <?php foreach ($depSearchDepartments as $dep) { ?>
+                <option value="<?= (int)$dep['dep_id'] ?>" <?= (int)$dep['dep_id'] === $depSearchId ? 'selected' : '' ?>><?= $depSearchH($dep['dep_name']) ?></option>
+                <?php } ?>
+            </select>
+            <a class="btn btn-outline-secondary" href="departments.hnt"><i class="bi bi-arrow-right me-1"></i>الأقسام</a>
+        </div>
+    </div>
+
+    <?php if (!$depSearchCurrent) { ?>
+    <div class="alert alert-light border text-center py-5"><i class="bi bi-hand-index me-2"></i>اختر القسم لعرض قوائم البحث فيه وإضافة قوائم جديدة.</div>
+    <?php } elseif (!$depSearchFields) { ?>
+    <div class="alert alert-warning">لا توجد حقول في قسم <?= $depSearchH($depSearchCurrent['dep_name']) ?>. أضف الحقول أولاً من
+        <a href="departments_sub.hnt?dep_id=<?= $depSearchId ?>">حقول القسم</a>.</div>
+    <?php } else { ?>
+    <div class="row g-3">
+        <div class="col-lg-5">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-list-ul me-1"></i>قوائم البحث في <?= $depSearchH($depSearchCurrent['dep_name']) ?></span>
+                    <button type="button" class="btn btn-sm btn-primary" id="dsbNew" style="background:#1f4e5f;border-color:#1f4e5f"><i class="bi bi-plus-lg me-1"></i>قائمة جديدة</button>
+                </div>
+                <div class="card-body" id="dsbList"></div>
+            </div>
+        </div>
+        <div class="col-lg-7">
+            <div class="card">
+                <div class="card-header" id="dsbFormTitle">قائمة بحث جديدة</div>
+                <div class="card-body">
+                    <div class="row g-2 mb-3">
+                        <div class="col-md-8"><label for="dsbName">اسم القائمة</label>
+                            <input type="text" class="form-control" id="dsbName" maxlength="100" placeholder="مثال: بحث برقم اللوحة"></div>
+                        <div class="col-md-4 d-flex align-items-end"><div class="form-check form-switch mb-2">
+                            <input class="form-check-input" type="checkbox" role="switch" id="dsbActive" checked>
+                            <label class="form-check-label" for="dsbActive">تظهر في القسم</label></div></div>
+                    </div>
+                    <label class="mb-1">الشروط</label>
+                    <div id="dsbConditions"></div>
+                    <button type="button" class="btn btn-outline-primary btn-sm mb-3" id="dsbAdd"><i class="bi bi-plus-lg me-1"></i>إضافة شرط</button>
+                    <div class="dsb-preview mb-3"><b>المعنى:</b> <span id="dsbPreview"></span></div>
+                    <div id="dsbMessage"></div>
+                    <div class="d-flex flex-wrap gap-2">
+                        <button type="button" class="btn btn-success" id="dsbSave"><i class="bi bi-check2 me-1"></i><span>حفظ القائمة</span></button>
+                        <a class="btn btn-outline-secondary" id="dsbTry" target="_blank" rel="noopener" hidden><i class="bi bi-box-arrow-up-left me-1"></i>تجربة البحث</a>
+                        <button type="button" class="btn btn-outline-secondary" id="dsbCancel" hidden>إلغاء التعديل</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <?php } ?>
+</div>
+
+<script>
+(function () {
+    const departmentBox = document.getElementById('dsbDepartment');
+    const openDepartment = function () {
+        window.location.href = 'departments_search.hnt' + (departmentBox.value ? '?dep_id_show=' + encodeURIComponent(departmentBox.value) : '');
+    };
+    // header.hnt turns selects into Select2, which reports changes through jQuery only.
+    if (window.jQuery) window.jQuery(departmentBox).on('change', openDepartment);
+    else departmentBox.addEventListener('change', openDepartment);
+    if (!document.getElementById('dsbList')) return;
+
+    const DEP_ID = <?= $depSearchId ?>;
+    const CSRF = <?= $depSearchJs($_SESSION['dep_search_csrf']) ?>;
+    const FIELDS = <?= $depSearchJs($depSearchFields) ?>;
+    const CAN = <?= $depSearchJs(array('adds' => aqaryScreenCan($link, $sc_id, 'adds'), 'edits' => aqaryScreenCan($link, $sc_id, 'edits'), 'deleetes' => aqaryScreenCan($link, $sc_id, 'deleetes'))) ?>;
+    const LOGIC = { like: 'يحتوي', '=': 'يساوي', '!=': 'لا يساوي', '<': 'أصغر من', '>': 'أكبر من' };
+    let searches = <?= $depSearchJs($depSearchList) ?>;
+    let editing = 0;
+    let rows = [];
+    const $ = (id) => document.getElementById(id);
+    const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+    const fieldOf = (name) => FIELDS.find((f) => f.name === name) || null;
+
+    /** Comparisons that make sense for a field type. */
+    function logicFor(field) {
+        if (!field) return ['like', '='];
+        if (field.type === 3 || field.type === 4) return ['=', '!=', 'like'];
+        if (field.type === 5) return ['='];
+        if (field.type === 1) return ['like', '=', '!=', '>', '<'];
+        return ['like', '=', '!='];
+    }
+    function blankRow() { return { field: FIELDS[0].name, logic: logicFor(FIELDS[0])[0], input: 'user', value: '', join: 'and', required: false }; }
+
+    function describe(list) {
+        if (!list.length) return 'أضف شرطاً واحداً على الأقل.';
+        return 'يعرض السجلات التي ' + list.map((c, i) => {
+            const value = c.input === 'value' ? '«' + (c.value || '…') + '»' : 'ما يكتبه المستخدم' + (c.value ? ' (يبدأ بـ «' + c.value + '»)' : '');
+            return (i ? (c.join === 'or' ? ' أو ' : ' و ') : '') + 'فيها «' + (c.field || '؟') + '» ' + (LOGIC[c.logic] || c.logic) + ' ' + value;
+        }).join('') + '. الحقول التي يتركها المستخدم فارغة لا تدخل في البحث.';
+    }
+
+    function renderList() {
+        const box = $('dsbList');
+        if (!searches.length) { box.innerHTML = '<p class="text-muted text-center my-4">لا توجد قوائم بحث بعد. ابدأ بقائمة جديدة.</p>'; return; }
+        box.innerHTML = searches.map((s) => '<div class="dsb-search' + (s.id === editing ? ' active-edit' : '') + '">'
+            + '<div class="d-flex justify-content-between align-items-start gap-2"><div><div class="name">' + esc(s.name)
+            + (s.active ? '' : ' <span class="badge text-bg-secondary">مخفية</span>') + '</div>'
+            + '<div class="rule">' + s.conditions.map((c, i) => (i ? (c.join === 'or' ? 'أو ' : 'و ') : '')
+                + '<span class="' + (c.missing ? 'missing' : '') + '">' + esc(c.missing ? 'حقل محذوف' : c.field) + '</span> ' + esc(LOGIC[c.logic] || c.logic)
+                + (c.input === 'value' ? ' «' + esc(c.value) + '»' : '')).join(' ') + '</div></div>'
+            + '<div class="btn-group btn-group-sm flex-shrink-0">'
+            + '<a class="btn btn-outline-secondary" target="_blank" rel="noopener" title="تجربة" href="include/geniric_departments/dep_search.hnt?dep_id=' + DEP_ID + '&qry_id=' + s.id + '"><i class="bi bi-box-arrow-up-left"></i></a>'
+            + (CAN.edits ? '<button type="button" class="btn btn-outline-primary" data-edit="' + s.id + '" title="تعديل"><i class="bi bi-pencil"></i></button>' : '')
+            + (CAN.deleetes ? '<button type="button" class="btn btn-outline-danger" data-delete="' + s.id + '" title="حذف"><i class="bi bi-trash"></i></button>' : '')
+            + '</div></div></div>').join('');
+    }
+
+    function renderRows() {
+        $('dsbConditions').innerHTML = rows.map((c, i) => {
+            const field = fieldOf(c.field);
+            const allowed = logicFor(field);
+            if (!allowed.includes(c.logic)) c.logic = allowed[0];
+            const options = field && field.options.length;
+            const valueBox = options
+                ? '<select class="form-select form-select-sm" data-k="value" data-i="' + i + '"><option value="">' + (c.input === 'value' ? '-- اختر --' : 'بدون') + '</option>'
+                    + field.options.map((o) => '<option' + (o === c.value ? ' selected' : '') + '>' + esc(o) + '</option>').join('') + '</select>'
+                : '<input class="form-control form-control-sm" data-k="value" data-i="' + i + '" maxlength="200" value="' + esc(c.value) + '" placeholder="' + (c.input === 'value' ? 'القيمة' : 'اختياري') + '">';
+            return (i ? '<div class="dsb-join"><div class="btn-group btn-group-sm" role="group" aria-label="ربط الشرط">'
+                    + '<button type="button" class="btn ' + (c.join === 'and' ? 'btn-secondary' : 'btn-outline-secondary') + '" data-join="and" data-i="' + i + '">و</button>'
+                    + '<button type="button" class="btn ' + (c.join === 'or' ? 'btn-secondary' : 'btn-outline-secondary') + '" data-join="or" data-i="' + i + '">أو</button></div></div>' : '')
+                + '<div class="dsb-cond"><div class="row g-2 align-items-end">'
+                + '<div class="col-md-4"><label>الحقل</label><select class="form-select form-select-sm" data-k="field" data-i="' + i + '">'
+                + (field ? '' : '<option value="" selected>حقل محذوف - اختر غيره</option>')
+                + FIELDS.map((f) => '<option' + (f.name === c.field ? ' selected' : '') + '>' + esc(f.name) + '</option>').join('') + '</select></div>'
+                + '<div class="col-md-3"><label>المقارنة</label><select class="form-select form-select-sm" data-k="logic" data-i="' + i + '">'
+                + allowed.map((l) => '<option value="' + l + '"' + (l === c.logic ? ' selected' : '') + '>' + LOGIC[l] + '</option>').join('') + '</select></div>'
+                + '<div class="col-md-5"><label>القيمة</label><div class="input-group input-group-sm">'
+                + '<select class="form-select form-select-sm" style="max-width:9.5rem" data-k="input" data-i="' + i + '">'
+                + '<option value="user"' + (c.input === 'user' ? ' selected' : '') + '>يكتبها المستخدم</option>'
+                + '<option value="value"' + (c.input === 'value' ? ' selected' : '') + '>قيمة ثابتة</option></select>' + valueBox + '</div></div>'
+                + '<div class="col-12 d-flex justify-content-between align-items-center">'
+                + (c.input === 'user' ? '<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" id="dsbReq' + i + '" data-k="required" data-i="' + i + '"' + (c.required ? ' checked' : '')
+                    + '><label class="form-check-label" for="dsbReq' + i + '">يجب أن يكتبها المستخدم</label></div>' : '<span class="small text-muted">القيمة الثابتة تظهر للمستخدم ويمكنه تغييرها.</span>')
+                + (rows.length > 1 ? '<button type="button" class="btn btn-link btn-sm text-danger p-0" data-remove="' + i + '"><i class="bi bi-x-circle me-1"></i>حذف الشرط</button>' : '')
+                + '</div></div></div>';
+        }).join('');
+        $('dsbPreview').textContent = describe(rows);
+        $('dsbAdd').disabled = rows.length >= 10;
+    }
+
+    function message(type, text) { $('dsbMessage').innerHTML = text ? '<div class="alert alert-' + type + ' py-2">' + esc(text) + '</div>' : ''; }
+
+    function openForm(search) {
+        editing = search ? search.id : 0;
+        $('dsbFormTitle').textContent = search ? 'تعديل: ' + search.name : 'قائمة بحث جديدة';
+        $('dsbName').value = search ? search.name : '';
+        $('dsbActive').checked = search ? search.active : true;
+        rows = search ? search.conditions.map((c) => ({ field: c.missing ? '' : c.field, logic: c.logic, input: c.input, value: c.value, join: c.join, required: c.required })) : [blankRow()];
+        $('dsbCancel').hidden = !search;
+        $('dsbTry').hidden = !search;
+        if (search) $('dsbTry').href = 'include/geniric_departments/dep_search.hnt?dep_id=' + DEP_ID + '&qry_id=' + search.id;
+        $('dsbSave').querySelector('span').textContent = search ? 'حفظ التعديل' : 'حفظ القائمة';
+        $('dsbSave').disabled = !(search ? CAN.edits : CAN.adds);
+        message('', '');
+        renderRows();
+        renderList();
+    }
+
+    async function send(data) {
+        const body = new FormData();
+        body.append('ajax', '1'); body.append('csrf', CSRF); body.append('dep_id', String(DEP_ID));
+        Object.keys(data).forEach((k) => body.append(k, data[k]));
+        const response = await fetch('departments_search.hnt', { method: 'POST', body: body, credentials: 'same-origin' });
+        let json = {};
+        try { json = await response.json(); } catch (e) { json = { success: false, message: 'رد غير متوقع من الخادم.' }; }
+        return json;
+    }
+
+    $('dsbConditions').addEventListener('input', (e) => {
+        const t = e.target, i = Number(t.dataset.i);
+        if (t.dataset.k === 'value' && t.tagName === 'INPUT') { rows[i].value = t.value; $('dsbPreview').textContent = describe(rows); }
+    });
+    const onRowChange = (t) => {
+        const i = Number(t.dataset.i), k = t.dataset.k;
+        if (!k || !rows[i]) return;
+        rows[i][k] = k === 'required' ? t.checked : t.value;
+        if (k === 'field') { rows[i].value = ''; rows[i].logic = logicFor(fieldOf(t.value))[0]; }
+        renderRows();
+    };
+    // Selects present when header.hnt runs Select2 report changes through jQuery only.
+    if (window.jQuery) window.jQuery($('dsbConditions')).on('change', '[data-k]', function () { onRowChange(this); });
+    else $('dsbConditions').addEventListener('change', (e) => onRowChange(e.target));
+    $('dsbConditions').addEventListener('click', (e) => {
+        const join = e.target.closest('[data-join]'), remove = e.target.closest('[data-remove]');
+        if (join) { rows[Number(join.dataset.i)].join = join.dataset.join; renderRows(); }
+        if (remove) { rows.splice(Number(remove.dataset.remove), 1); renderRows(); }
+    });
+    $('dsbAdd').addEventListener('click', () => { rows.push(blankRow()); renderRows(); });
+    $('dsbNew').addEventListener('click', () => openForm(null));
+    $('dsbCancel').addEventListener('click', () => openForm(null));
+    $('dsbList').addEventListener('click', (e) => {
+        const edit = e.target.closest('[data-edit]'), del = e.target.closest('[data-delete]');
+        if (edit) openForm(searches.find((s) => s.id === Number(edit.dataset.edit)));
+        if (del) {
+            const s = searches.find((x) => x.id === Number(del.dataset.delete));
+            if (!s || !window.confirm('حذف قائمة البحث «' + s.name + '»؟')) return;
+            send({ do: 'delete', qry_id: String(s.id) }).then((r) => {
+                if (r.success) { searches = r.searches; if (editing === s.id) openForm(null); else renderList(); }
+                message(r.success ? 'success' : 'danger', r.message);
+            });
+        }
+    });
+    $('dsbSave').addEventListener('click', async () => {
+        const name = $('dsbName').value.trim();
+        if (!name) { message('warning', 'اكتب اسم القائمة.'); $('dsbName').focus(); return; }
+        if (rows.some((c) => !c.field)) { message('warning', 'اختر حقلاً لكل شرط.'); return; }
+        if (rows.some((c) => c.input === 'value' && !c.value.trim())) { message('warning', 'أدخل القيمة الثابتة لكل شرط بقيمة ثابتة.'); return; }
+        $('dsbSave').disabled = true;
+        const r = await send({ do: 'save', qry_id: String(editing), search: JSON.stringify({ name: name, active: $('dsbActive').checked, conditions: rows }) });
+        $('dsbSave').disabled = false;
+        if (r.success) {
+            searches = r.searches;
+            openForm(searches.find((s) => s.id === r.id) || null);
+            message('success', r.message + ' يمكنك تجربته الآن.');
+        } else {
+            message('danger', r.message);
+        }
+    });
+    openForm(null);
+})();
+</script>
+<?php require '../foter.hnt'; ?>
