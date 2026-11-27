@@ -1,0 +1,47 @@
+<?php
+/**
+ * Matching-properties query stored with each property request (requestaqar.mysqlquery).
+ * request.hnt runs it to show "N عقار" and links it to the land / building / villa lists.
+ * Used by request.hnt and by the AI assistant, so both build exactly the same query.
+ *
+ * A property matches when ANY given value is close: area, total price or metre price within
+ * 20%, or the district / street contains the requested text. Other request types have no query.
+ */
+function aqaryRequestMatchSql($type, $area, $totalPrice, $meterPrice, $district, $street): string
+{
+    // The query is stored as text and later run as-is, so quotes and backslashes are dropped from the text values.
+    $text = function ($value) {
+        return str_replace(array("'", '"', '\\'), '', trim((string)$value));
+    };
+    $area = intval($area);
+    $totalPrice = intval($totalPrice);
+    $meterPrice = intval($meterPrice);
+    $district = $text($district);
+    $street = $text($street);
+
+    $smallPrice = $totalPrice - (0.2 * $totalPrice);
+    $bigPrice = $totalPrice + (0.2 * $totalPrice);
+    $smallMeter = $meterPrice - (0.2 * $meterPrice);
+    $bigMeter = $meterPrice + (0.2 * $meterPrice);
+    $smallArea = $area - (0.2 * $area);
+    $bigArea = $area + (0.2 * $area);
+
+    $tables = array('arady' => 'ardid', 'emara' => 'emaraid', 'vila' => 'vilaid');
+    if (!isset($tables[$type])) return '';
+    $id = $tables[$type];
+
+    $parts = array();
+    if ($area) $parts[] = " or (mesaha >'$smallArea'  and mesaha < '$bigArea' ) ";
+    if ($totalPrice) $parts[] = " or (price > '$smallPrice' and price < '$bigPrice' ) or ( pricesom > '$smallPrice' and  pricesom < '$bigPrice' ) ";
+    if ($district !== '') $parts[] = " or ( BINARY hay like '%$district%') ";
+    if ($street !== '') {
+        // Lands keep the side street in share3f; buildings and villas keep the main street in block.
+        $parts[] = $type === 'arady'
+            ? " or ( BINARY share3f like '%$street%') or ( BINARY share3 like '%$street%') "
+            : " or ( BINARY block like '%$street%') or ( BINARY share3 like '%$street%') ";
+    }
+    if ($type === 'arady' && $meterPrice) $parts[] = " or (meterprice > '$smallMeter' and meterprice < '$bigMeter' ) ";
+
+    $count = $type === 'arady' ? "count($id)" : "count( $id )";
+    return " select $count as dd from $type\n\twhere $id='-1'\n\t" . implode("\n\t", $parts) . "\n\t";
+}

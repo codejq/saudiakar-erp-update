@@ -1,0 +1,215 @@
+<?php
+/**
+ * TV Display Management Dashboard
+ * Modern system for managing TV displays in real estate offices
+ */
+
+$sc_title = "إدارة شاشات العرض التلفزيونية";
+$sc_id = "145";
+
+include_once "../nocash.hnt";
+include_once "../header.hnt";
+
+// Get all TV displays
+$displays_sql = "SELECT * FROM tv_displays ORDER BY display_order";
+$displays_result = mysql_query($displays_sql, $link);
+$displays = [];
+while ($row = mysql_fetch_array($displays_result)) {
+    $displays[] = $row;
+}
+?>
+
+<style>
+/* Flat, muted colours: one colour per display, tinted icons for the totals. */
+.tv-head { background: #1f4e5f; }
+.display-card { border: 1px solid #dfe3e8; border-radius: 10px; overflow: hidden; box-shadow: none; }
+.display-card:hover { border-color: #b9c3cb; }
+.display-preview { height: 150px; display: flex; align-items: center; justify-content: center; position: relative; }
+.display-preview i { font-size: 56px; color: rgba(255, 255, 255, .92); }
+.tone-0 { background: #3d5a80; } .tone-1 { background: #2a7f7a; } .tone-2 { background: #b7791f; }
+.tone-3 { background: #8c4f3d; } .tone-4 { background: #3b7d4f; } .tone-5 { background: #5c6b7a; }
+.display-status { position: absolute; top: 10px; right: 10px; padding: 3px 10px; border-radius: 4px; font-size: .75rem; font-weight: 600; background: #fff; }
+.status-active { color: #2e7d32; }
+.status-inactive { color: #5c6b7a; }
+.quick-actions { display: flex; gap: .5rem; padding: .75rem 1rem; border-top: 1px solid #edf0f2; background: #fafbfc; }
+.stats-box { background: #fff; border: 1px solid #dfe3e8; border-radius: 10px; padding: 1rem 1.1rem; display: flex; align-items: center; gap: .9rem; }
+.stats-icon { width: 48px; height: 48px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 22px; }
+.icon-slate { background: #e7eef3; color: #1f4e5f; } .icon-green { background: #e6f2e8; color: #2e7d32; }
+.icon-amber { background: #fbf0dc; color: #a0670f; } .icon-teal { background: #e2f1f1; color: #23706c; }
+</style>
+
+<div class="container-fluid py-4">
+    <!-- Page Header -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header text-white tv-head">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h4 class="mb-0">
+                            <i class="bi bi-tv me-2"></i>
+                            <?= $sc_title ?>
+                        </h4>
+                        <button class="btn btn-light" onclick="window.location.href='tvdisplay_editor.hnt'">
+                            <i class="bi bi-plus-circle me-1"></i>
+                            إنشاء شاشة عرض جديدة
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Statistics -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-3">
+            <div class="stats-box">
+                <div class="stats-icon icon-slate">
+                    <i class="bi bi-tv-fill"></i>
+                </div>
+                <div>
+                    <div class="text-muted small">إجمالي الشاشات</div>
+                    <div class="h4 mb-0"><?= count($displays) ?></div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-box">
+                <div class="stats-icon icon-green">
+                    <i class="bi bi-play-circle-fill"></i>
+                </div>
+                <div>
+                    <div class="text-muted small">الشاشات النشطة</div>
+                    <div class="h4 mb-0">
+                        <?php
+                        $active_count = 0;
+                        foreach ($displays as $d) {
+                            if ($d['is_active'] == 1) $active_count++;
+                        }
+                        echo $active_count;
+                        ?>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-box">
+                <div class="stats-icon icon-amber">
+                    <i class="bi bi-images"></i>
+                </div>
+                <div>
+                    <div class="text-muted small">إجمالي الشرائح</div>
+                    <div class="h4 mb-0">
+                        <?php
+                        $slides_count_result = mysql_query("SELECT COUNT(*) as total FROM tv_slides", $link);
+                        $slides_count = mysql_fetch_array($slides_count_result);
+                        echo $slides_count['total'];
+                        ?>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stats-box">
+                <div class="stats-icon icon-teal">
+                    <i class="bi bi-building"></i>
+                </div>
+                <div>
+                    <div class="text-muted small">العقارات المعروضة</div>
+                    <div class="h4 mb-0">
+                        <?php
+                        $property_count = mysql_query("SELECT COUNT(*) as total FROM tv_slides WHERE slide_type='property'", $link);
+                        $property = mysql_fetch_array($property_count);
+                        echo $property['total'];
+                        ?>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Displays Grid -->
+    <?php if (count($displays) > 0) { ?>
+    <div class="row g-4">
+        <?php foreach ($displays as $displayIndex => $display) {
+            // Count slides for this display
+            $slide_count_query = mysql_query("SELECT COUNT(*) as count FROM tv_slides WHERE display_id = '" . intval($display['display_id']) . "'", $link);
+            $slide_count = mysql_fetch_array($slide_count_query);
+        ?>
+        <div class="col-md-6 col-lg-4">
+            <div class="card display-card shadow-sm">
+                <div class="display-preview tone-<?= $displayIndex % 6 ?>">
+                    <span class="display-status <?= $display['is_active'] == 1 ? 'status-active' : 'status-inactive' ?>">
+                        <?= $display['is_active'] == 1 ? 'نشط' : 'متوقف' ?>
+                    </span>
+                    <i class="bi bi-tv-fill"></i>
+                </div>
+                <div class="card-body">
+                    <h5 class="card-title mb-2"><?= htmlspecialchars((string)$display['display_name'], ENT_QUOTES, 'UTF-8') ?></h5>
+                    <p class="text-muted small mb-3"><?= htmlspecialchars((string)$display['display_description'], ENT_QUOTES, 'UTF-8') ?></p>
+
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div class="small">
+                            <i class="bi bi-images text-muted me-1"></i>
+                            <span><?= $slide_count['count'] ?> شريحة</span>
+                        </div>
+                        <div class="small">
+                            <i class="bi bi-clock text-muted me-1"></i>
+                            <span><?= $display['transition_duration'] ?>ث</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="quick-actions">
+                    <a href="tvdisplay_player.hnt?id=<?= intval($display['display_id']) ?>" target="_blank" onclick="return openTvPlayer(this.href)"
+                       class="btn btn-sm btn-outline-success flex-fill policy_<?= $sc_id ?>_sees" title="عرض">
+                        <i class="bi bi-play-fill"></i>
+                        عرض
+                    </a>
+                    <a href="tvdisplay_editor.hnt?id=<?= $display['display_id'] ?>"
+                       class="btn btn-sm btn-outline-secondary flex-fill policy_<?= $sc_id ?>_edits" title="تعديل">
+                        <i class="bi bi-pencil"></i>
+                        تعديل
+                    </a>
+                    <button onclick="deleteDisplay(<?= intval($display['display_id']) ?>, <?= htmlspecialchars(json_encode((string)$display['display_name'], JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT), ENT_QUOTES, 'UTF-8') ?>)"
+                            class="btn btn-sm btn-outline-danger policy_<?= $sc_id ?>_deleetes" title="حذف">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+        <?php } ?>
+    </div>
+    <?php } else { ?>
+    <div class="text-center py-5">
+        <i class="bi bi-tv" style="font-size: 80px; color: #d1d5db;"></i>
+        <h4 class="text-muted mt-3">لا توجد شاشات عرض</h4>
+        <p class="text-muted">ابدأ بإنشاء أول شاشة عرض تلفزيونية لعقاراتك</p>
+        <button class="btn mt-3 text-white" style="background:#1f4e5f" onclick="window.location.href='tvdisplay_editor.hnt'">
+            <i class="bi bi-plus-circle me-2"></i>
+            إنشاء شاشة عرض جديدة
+        </button>
+    </div>
+    <?php } ?>
+</div>
+
+<script>
+function deleteDisplay(id, name) {
+    if (!confirm('هل أنت متأكد من حذف شاشة العرض: ' + name + '؟\n\nسيتم حذف جميع الشرائح المرتبطة بها.')) {
+        return;
+    }
+
+    window.location.href = 'tvdisplay_editor.hnt?action=delete&id=' + id;
+}
+
+// Opens the TV player in its own window covering the screen; the player then goes full screen on the first click.
+function openTvPlayer(url) {
+    const features = 'popup=yes,left=0,top=0,width=' + screen.availWidth + ',height=' + screen.availHeight;
+    const win = window.open(url, 'tvplayer', features);
+    if (!win) return true;   // popup blocked: follow the link in a new tab instead
+    win.focus();
+    return false;
+}
+</script>
+
+<?php
+require("../foter.hnt");
+?>

@@ -9,7 +9,8 @@
  *  3. the model's JSON answer becomes a reply, a screen to open, related screens and at most one action:
  *     lookups are answered here from the company's own data (respecting screen permissions and the
  *     restricted users' assigned properties); create actions come back as drafts the user confirms.
- *     Only "create tenant" and confirmed custom-department drafts are saved from the chat. Contracts and vouchers open their normal screen
+ *     Only "create tenant", QR codes, property requests / land / building / villa offers (listings.hnt) and
+ *     confirmed custom-department drafts are saved from the chat. Contracts and vouchers open their normal screen
  *     pre-filled, so all of its calendar, installment, ZATCA and accounting logic still applies.
  */
 
@@ -20,6 +21,7 @@ require_once dirname(__DIR__, 3) . '/lib/ocr/ocr_runtime.hnt';
 require_once dirname(__DIR__) . '/lib/OpenRouterAPI.class.php';
 require_once __DIR__ . '/ejar.hnt';
 require_once dirname(__DIR__, 2) . '/include/geniric_departments/dep_builder.hnt';
+require_once __DIR__ . '/listings.hnt';
 
 final class AqaryAssistant
 {
@@ -385,6 +387,18 @@ final class AqaryAssistant
                 return $this->lookupQr($query);
             case 'create_qr':
                 return $this->qrCard((array)($action['qr'] ?? array()), (array)($action['missing'] ?? array()));
+            case 'lookup_listings':
+            case 'listing_create':
+            case 'listing_update':
+                $listing = is_array($action['listing'] ?? null) ? $action['listing'] : array();
+                $kind = (string)($listing['kind'] ?? $action['kind'] ?? '');
+                if (!isset(AqaryAssistantListings::kinds()[$kind])) return array('reply' => 'حدد النوع: طلب عقار أو أرض أو عمارة أو فيلا.') + $none;
+                $listings = new AqaryAssistantListings($this->link, $this->userId);
+                if ($type === 'lookup_listings') {
+                    if ($query !== '' && empty($listing['query'])) $listing['query'] = $query;
+                    return $listings->search($kind, $listing);
+                }
+                return $listings->card($kind, $type === 'listing_create' ? 'create' : 'edit', $action);
         }
         return $none;
     }
@@ -852,6 +866,13 @@ final class AqaryAssistant
             array('title' => 'عرض الرمز', 'url' => '/aqary/admin/qr/view.hnt?id=' . intval($id)),
             array('title' => 'تحميل الصورة', 'url' => '/aqary/admin/qr/qrcodes/' . rawurlencode($file)),
             array('title' => 'تعديل', 'url' => '/aqary/admin/qr/create.hnt?id=' . intval($id))));
+    }
+
+    /** Saves a confirmed request / land / building / villa draft (listings.hnt checks the screen permissions). */
+    public function confirmListing(array $data): array
+    {
+        if (!$this->allowed()) throw new InvalidArgumentException('ليست لديك صلاحية استخدام المساعد الذكي.');
+        return (new AqaryAssistantListings($this->link, $this->userId))->confirm($data);
     }
 
     // ------------------------------------------------------------------ confirm (the only direct write)

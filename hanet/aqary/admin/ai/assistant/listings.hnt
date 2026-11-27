@@ -1,0 +1,679 @@
+<?php
+/**
+ * AI assistant: property requests (request.hnt) and the land / building / villa offers
+ * (arady.hnt, emara.hnt, vila.hnt): search, add and edit.
+ *
+ * Search answers come from the company's data. Add / edit come back as a draft card the user
+ * checks and confirms; confirm() then saves through the same columns the screens use, with the
+ * same screen permissions. Owner and broker details are hidden from users the screens hide them from.
+ */
+
+require_once dirname(__DIR__, 2) . '/include/request_match.hnt';
+
+final class AqaryAssistantListings
+{
+    public const STATUS = array('' => 'متاح', '1' => 'محجوز', '2' => 'مباع', '4' => 'مؤرشف');
+    private const STATUS_WORDS = array('available' => '', 'reserved' => '1', 'sold' => '2', 'archived' => '4');
+    private const DIRECT = array('1' => 'من المالك مباشرة', '0' => 'عن طريق وسيط');
+
+    private $link;
+    private $userId;
+    private $fullAccess = null;
+
+    public function __construct(mysqli $link, int $userId)
+    {
+        $this->link = $link;
+        $this->userId = $userId;
+    }
+
+    /**
+     * What each kind is and which of its columns the assistant may fill.
+     * Field: key => [column, Arabic label, input (text|textarea|num|int|select), max length or options].
+     */
+    public static function kinds(): array
+    {
+        $common = array(
+            'price' => array('price', 'السعر (الحد)', 'num', 0),
+            'offer_price' => array('pricesom', 'السوم', 'num', 0),
+            'direct' => array('mobasher', 'مباشر أو وسيط', 'select', self::DIRECT),
+            'status' => array('statusx', 'الحالة', 'select', self::STATUS),
+            'status_for' => array('reversedfor', 'محجوز / مباع لـ', 'text', 245),
+            'financing' => array('tamweelmethod', 'طريقة التمويل', 'text', 245),
+            'payment_method' => array('daf3method', 'طريقة الدفع', 'text', 245),
+            'notes' => array('note', 'ملاحظات', 'textarea', 4000),
+            'private_notes' => array('secretinfo', 'معلومات سرية', 'textarea', 245),
+        );
+        $built = array(
+            'address' => array('address', 'العنوان', 'text', 250),
+            'area' => array('mesaha', 'المساحة الإجمالية', 'num', 0),
+            'building_area' => array('benamesaha', 'مساحة البناء', 'text', 245),
+            'floors' => array('adwarnum', 'عدد الأدوار', 'int', 0),
+            'units' => array('wehdatnum', 'عدد الوحدات', 'int', 0),
+            'bathrooms' => array('hamamatnum', 'دورات المياه', 'int', 0),
+            'kitchens' => array('matbakhnum', 'المطابخ', 'int', 0),
+            'age' => array('aqarage', 'عمر العقار', 'text', 245),
+            'annual_income' => array('dakhl', 'الدخل السنوي', 'text', 200),
+        );
+        return array(
+            'land' => array(
+                'label' => 'أرض', 'plural' => 'الأراضي', 'table' => 'arady', 'id' => 'ardid', 'creator' => 'custummerid',
+                'add' => array('3'), 'edit' => array('111', '3'), 'see' => array('4', '2'),
+                'view' => '/aqary/admin/include/vieward.hnt?id=', 'edit_url' => '/aqary/admin/include/addard.hnt?editid=',
+                'list_url' => '/aqary/admin/include/updateard.hnt',
+                'number' => 'ardrakam', 'type' => 'ardtype', 'core' => array('type', 'district', 'number', 'area', 'price'),
+                'fields' => array(
+                    'type' => array('ardtype', 'نوع الأرض', 'select', array('1' => 'استثمارية', '2' => 'سكنية', '3' => 'تجارية', '4' => 'أرض خام', '5' => 'أخرى')),
+                    'number' => array('ardrakam', 'رقم القطعة', 'text', 25),
+                    'block' => array('block', 'رقم البلوك', 'text', 40),
+                    'district' => array('hay', 'الحي', 'text', 250),
+                    'main_street' => array('share3', 'الشارع الرئيسي', 'text', 245),
+                    'side_street' => array('share3f', 'الشارع الفرعي', 'text', 245),
+                    'area' => array('mesaha', 'المساحة', 'num', 0),
+                    'length' => array('tol', 'الطول', 'text', 40),
+                    'width' => array('al3ard', 'العرض', 'text', 40),
+                    'meter_price' => array('meterprice', 'سعر المتر (سوم)', 'num', 0),
+                    'meter_price_limit' => array('meterpricehad', 'سعر المتر (حد)', 'num', 0),
+                ) + $common,
+            ),
+            'building' => array(
+                'label' => 'عمارة', 'plural' => 'العمائر', 'table' => 'emara', 'id' => 'emaraid', 'creator' => 'custumerid',
+                'add' => array('15'), 'edit' => array('15'), 'see' => array('16', '14'),
+                'view' => '/aqary/admin/include/emara/viewemara.hnt?id=', 'edit_url' => '/aqary/admin/include/emara/addemara.hnt?editid=',
+                'list_url' => '/aqary/admin/include/emara/updatemara.hnt',
+                'number' => 'emararakam', 'type' => 'emaratype', 'core' => array('type', 'district', 'area', 'floors', 'units', 'price'),
+                'fields' => array(
+                    'type' => array('emaratype', 'نوع العمارة', 'select', self::textOptions(array('استثمارية', 'سكنية', 'تجارية', 'عوائل', 'عزاب'))),
+                    'number' => array('emararakam', 'رقم العمارة', 'text', 25),
+                    'district' => array('hay', 'الحي', 'text', 70),
+                    'main_street' => array('block', 'الشارع الرئيسي', 'text', 70),
+                    'side_street' => array('share3', 'الشارع الفرعي', 'text', 245),
+                    'rooms' => array('ghorfanum', 'الغرف بالشقة', 'int', 0),
+                ) + $built + $common,
+            ),
+            'villa' => array(
+                'label' => 'فيلا', 'plural' => 'الفلل', 'table' => 'vila', 'id' => 'vilaid', 'creator' => 'custumerid',
+                'add' => array('26'), 'edit' => array('26'), 'see' => array('27', '13'),
+                'view' => '/aqary/admin/include/vila/viewvila.hnt?id=', 'edit_url' => '/aqary/admin/include/vila/addvila.hnt?editid=',
+                'list_url' => '/aqary/admin/include/vila/updatvila.hnt',
+                'number' => 'vilarakam', 'type' => 'vilatype', 'core' => array('type', 'district', 'area', 'bedrooms', 'price'),
+                'fields' => array(
+                    'type' => array('vilatype', 'نوع الفيلا', 'select', self::textOptions(array('فيلا', 'دبلكس', 'دبلكس ملاصق', 'درج صالة', 'درج صالة مع شقق مسروقة', 'دورين مفصوله', 'دور+ 3 شقق', 'تجارية', 'عوائل', 'سكن عمال', 'عزوبي', 'قصر', 'استراحة', 'نوع آخر'))),
+                    'number' => array('vilarakam', 'رقم الفيلا', 'text', 25),
+                    'district' => array('hay', 'الحي', 'text', 70),
+                    'main_street' => array('block', 'الشارع الرئيسي', 'text', 70),
+                    'side_street' => array('share3', 'الشارع الفرعي', 'text', 245),
+                    'bedrooms' => array('nomghorf', 'غرف النوم', 'text', 245),
+                    'rooms' => array('ghorfanum', 'عدد الغرف', 'int', 0),
+                    'halls' => array('salatnumber', 'عدد الصالات', 'text', 245),
+                ) + $built + $common,
+            ),
+            'request' => array(
+                'label' => 'طلب عقار', 'plural' => 'طلبات العقار', 'table' => 'requestaqar', 'id' => 'requestid', 'creator' => 'userid',
+                'add' => array('79'), 'edit' => array('79'), 'see' => array('79'),
+                'view' => '/aqary/admin/request.hnt?requestid=', 'edit_url' => '/aqary/admin/request.hnt?requestid=',
+                'list_url' => '/aqary/admin/request.hnt',
+                'number' => null, 'type' => 'aqartype', 'core' => array('name', 'mobile', 'type', 'district', 'price', 'description'),
+                'fields' => array(
+                    'name' => array('requestername', 'اسم صاحب الطلب', 'text', 240),
+                    'mobile' => array('mobile', 'الجوال', 'text', 200),
+                    'phone' => array('phone', 'الهاتف / الفاكس', 'text', 100),
+                    'type' => array('aqartype', 'نوع العقار المطلوب', 'select', array()),   // filled from the departments at run time
+                    'area' => array('mesaha', 'المساحة', 'text', 100),
+                    'price' => array('totalprice', 'السعر الإجمالي', 'text', 100),
+                    'meter_price' => array('meterprice', 'سعر المتر', 'text', 100),
+                    'district' => array('hay', 'الحي أو المنطقة', 'text', 100),
+                    'street' => array('share3', 'الشارع', 'text', 100),
+                    'description' => array('description', 'وصف الطلب', 'textarea', 4000),
+                ),
+            ),
+        );
+    }
+
+    private static function textOptions(array $values): array
+    {
+        return array_combine($values, $values);
+    }
+
+    /** One kind with run-time options (request types include the custom departments). */
+    private function kind(string $kind): array
+    {
+        $kinds = self::kinds();
+        if (!isset($kinds[$kind])) throw new InvalidArgumentException('نوع غير معروف.');
+        $k = $kinds[$kind];
+        if ($kind === 'request') {
+            $types = array('arady' => 'اراضي', 'emara' => 'عمائر', 'vila' => 'فلل');
+            try {
+                foreach ($this->rows("SELECT dep_id, dep_name FROM departments_name WHERE dep_isdeleted='' ORDER BY dep_order") as $d) {
+                    $types[(string)$d['dep_id']] = (string)$d['dep_name'];
+                }
+            } catch (Throwable $error) {
+                // Older databases without departments.
+            }
+            $types['other'] = 'نوع آخر';
+            $k['fields']['type'][3] = $types;
+        }
+        return $k;
+    }
+
+    // ------------------------------------------------------------------ permissions
+
+    private function can(array $k, string $what): bool
+    {
+        $screens = $k[$what === 'adds' ? 'add' : ($what === 'edits' ? 'edit' : 'see')];
+        return aqaryScreenCanAny($this->link, $screens, $what);
+    }
+
+    /** Users the screens let see others' owners and brokers (all privileges or "see other brokers"). */
+    private function fullAccess(): bool
+    {
+        if ($this->fullAccess === null) {
+            $row = $this->row('SELECT COALESCE(g.allprevilage,0) allprevilage FROM user u LEFT JOIN usergroups g ON g.groupid=u.groupid WHERE u.userid=? LIMIT 1', array($this->userId));
+            $this->fullAccess = !empty($row['allprevilage']) || !empty($_SESSION['seeothermasder']);
+        }
+        return $this->fullAccess;
+    }
+
+    /** Requests can be changed by their author or by users with full access, as on request.hnt. */
+    private function mayManage(array $k, array $row): bool
+    {
+        return intval($row[$k['creator']] ?? 0) === $this->userId || $this->fullAccess();
+    }
+
+    // ------------------------------------------------------------------ search
+
+    /** @return array{reply: string, links: array, card: null} */
+    public function search(string $kind, array $f): array
+    {
+        $k = $this->kind($kind);
+        $none = array('links' => array(), 'card' => null);
+        if (!$this->can($k, 'sees')) return array('reply' => 'ليست لديك صلاحية عرض ' . $k['plural'] . '.') + $none;
+
+        $where = array('1=1');
+        $params = array();
+        $t = $k['fields'];
+        $query = self::text($f['query'] ?? null);
+        if ($kind === 'request') {
+            if ($query !== '') {
+                $digits = self::number($query);
+                if ($digits !== null && strlen((string)intval($digits)) >= 5) {
+                    $where[] = '(mobile LIKE ? OR phone LIKE ?)';
+                    array_push($params, '%' . intval($digits) . '%', '%' . intval($digits) . '%');
+                } else {
+                    $where[] = '(requestername LIKE ? OR description LIKE ? OR hay LIKE ? OR share3 LIKE ?)';
+                    $p = self::pattern($query);
+                    array_push($params, $p, $p, $p, $p);
+                }
+            }
+        } else {
+            if ($query !== '') {
+                $where[] = '(' . $t['district'][0] . ' LIKE ? OR ' . $t['main_street'][0] . ' LIKE ? OR ' . $t['side_street'][0] . ' LIKE ? OR ' . $k['number'] . ' LIKE ? OR note LIKE ?)';
+                $p = self::pattern($query);
+                array_push($params, $p, $p, $p, '%' . $query . '%', $p);
+            }
+            $number = self::text($f['number'] ?? null);
+            if ($number !== '') { $where[] = $k['number'] . ' = ?'; $params[] = self::westernDigits($number); }
+            // Archived offers are left out unless asked for.
+            $status = self::statusCode($f['status'] ?? null);
+            if ($status === null) $where[] = "COALESCE(statusx,'') <> '4'";
+            elseif ($status === '') $where[] = "COALESCE(statusx,'') NOT IN ('1','2','3','4')";
+            else { $where[] = 'statusx = ?'; $params[] = $status; }
+            foreach (array('min_area' => '>=', 'max_area' => '<=') as $key => $op) {
+                $v = self::number($f[$key] ?? null);
+                if ($v !== null) { $where[] = "mesaha {$op} ?"; $params[] = $v; }
+            }
+            $min = self::number($f['min_price'] ?? null);
+            $max = self::number($f['max_price'] ?? null);
+            if ($min !== null || $max !== null) {
+                // Either the limit price or the current bid in the range; 0 means "not entered".
+                $range = function ($col) use ($min, $max, &$params) {
+                    $c = array("{$col} > 0");
+                    if ($min !== null) { $c[] = "{$col} >= ?"; $params[] = $min; }
+                    if ($max !== null) { $c[] = "{$col} <= ?"; $params[] = $max; }
+                    return '(' . implode(' AND ', $c) . ')';
+                };
+                $where[] = '(' . $range('price') . ' OR ' . $range('pricesom') . ')';
+            }
+        }
+        $district = self::text($f['district'] ?? null);
+        if ($district !== '') { $where[] = 'hay LIKE ?'; $params[] = self::pattern($district); }
+        $type = $this->optionKey($t['type'][3] ?? $k['fields']['type'][3], $f['type'] ?? null);
+        if ($type !== null) { $where[] = $k['type'] . ' = ?'; $params[] = $type; }
+
+        $sql = ' FROM ' . $k['table'] . ' WHERE ' . implode(' AND ', $where);
+        $total = intval(($this->row('SELECT COUNT(*) n' . $sql, $params))['n'] ?? 0);
+        if (!$total) return array('reply' => 'لا توجد نتائج مطابقة في ' . $k['plural'] . '.') + $none;
+        $rows = $this->rows('SELECT *' . $sql . ' ORDER BY ' . $k['id'] . ' DESC LIMIT 8', $params);
+
+        $lines = array();
+        $links = array();
+        foreach ($rows as $row) {
+            $lines[] = $this->summary($kind, $k, $row);
+            if (count($links) < 5) $links[] = array('title' => '#' . intval($row[$k['id']]) . ' ' . $this->shortTitle($kind, $k, $row), 'url' => $k['view'] . intval($row[$k['id']]));
+        }
+        $reply = 'وجدت ' . number_format($total) . ' ' . ($total === 1 ? $k['label'] : 'من ' . $k['plural']) . ($total > count($rows) ? '، هذه أحدث ' . count($rows) : '') . ":\n" . implode("\n", $lines);
+        $links[] = array('title' => 'قائمة ' . $k['plural'], 'url' => $k['list_url']);
+        return array('reply' => $reply, 'links' => $links, 'card' => null);
+    }
+
+    /** One line about a record, without owner or broker details. */
+    private function summary(string $kind, array $k, array $row): string
+    {
+        $parts = array('#' . intval($row[$k['id']]));
+        $f = $k['fields'];
+        if ($kind === 'request') {
+            $own = $this->mayManage($k, $row);
+            $parts[] = $own ? (string)$row['requestername'] : '********';
+            if ($own && $row['mobile'] !== '') $parts[] = (string)$row['mobile'];
+            $parts[] = $f['type'][3][(string)$row['aqartype']] ?? (string)$row['aqartype'];
+            if (trim((string)$row['hay']) !== '') $parts[] = 'حي ' . trim((string)$row['hay']);
+            if (trim((string)$row['totalprice']) !== '') $parts[] = $row['totalprice'] . ' ريال';
+            $matches = $this->requestMatches($row);
+            if ($matches !== null) $parts[] = $matches . ' عقار مطابق';
+            return implode(' — ', $parts);
+        }
+        $parts[] = $this->shortTitle($kind, $k, $row);
+        if (trim((string)$row['hay']) !== '') $parts[] = 'حي ' . trim((string)$row['hay']);
+        if (floatval($row['mesaha']) > 0) $parts[] = rtrim(rtrim(number_format((float)$row['mesaha'], 2, '.', ','), '0'), '.') . ' م²';
+        if (floatval($row['price']) > 0) $parts[] = 'الحد ' . number_format((float)$row['price']) . ' ريال';
+        if (floatval($row['pricesom']) > 0) $parts[] = 'السوم ' . number_format((float)$row['pricesom']) . ' ريال';
+        $status = (string)$row['statusx'];
+        $parts[] = self::STATUS[in_array($status, array('1', '2', '4'), true) ? $status : ''];
+        return implode(' — ', $parts);
+    }
+
+    private function shortTitle(string $kind, array $k, array $row): string
+    {
+        if ($kind === 'request') return $this->mayManage($k, $row) ? 'طلب ' . trim((string)$row['requestername']) : $k['label'];
+        $type = $k['fields']['type'][3][(string)$row[$k['type']]] ?? trim((string)$row[$k['type']]);
+        $title = trim($k['label'] . ' ' . ($type !== $k['label'] ? $type : ''));
+        $number = trim((string)$row[$k['number']]);
+        return $title . ($number !== '' && $number !== '0' ? ' رقم ' . $number : '');
+    }
+
+    /** Count of matching offers, from the query stored with the request (as request.hnt shows it). */
+    private function requestMatches(array $row): ?int
+    {
+        $sql = trim(stripslashes((string)$row['mysqlquery']));
+        if ($sql === '' || !preg_match('/^select count\(\s*(ardid|emaraid|vilaid)\s*\) as dd from\s+(arady|emara|vila)\s+where /i', $sql)) return null;
+        try {
+            $result = $this->link->query($sql);
+            $r = $result ? $result->fetch_assoc() : null;
+            return $r ? intval($r['dd']) : null;
+        } catch (Throwable $error) {
+            return null;
+        }
+    }
+
+    // ------------------------------------------------------------------ drafts
+
+    /** A create or edit draft card. @return array{reply: ?string, links: array, card: ?array} */
+    public function card(string $kind, string $mode, array $action): array
+    {
+        $k = $this->kind($kind);
+        $none = array('links' => array(), 'card' => null);
+        $values = is_array($action['values'] ?? null) ? $action['values'] : array();
+        if ($mode === 'create') {
+            if (!$this->can($k, 'adds')) return array('reply' => 'ليست لديك صلاحية إضافة ' . $k['label'] . '.') + $none;
+            $current = array();
+            $id = 0;
+        } else {
+            if (!$this->can($k, 'edits')) return array('reply' => 'ليست لديك صلاحية تعديل ' . $k['plural'] . '.') + $none;
+            $found = $this->resolve($kind, $k, $action);
+            if (!$found['row']) return array('reply' => $found['reply'], 'links' => $found['links'], 'card' => null);
+            $row = $found['row'];
+            if ($kind === 'request' && !$this->mayManage($k, $row)) return array('reply' => 'هذا الطلب لمستخدم آخر، ولا يمكنك تعديله.') + $none;
+            $id = intval($row[$k['id']]);
+            $current = array();
+            foreach ($k['fields'] as $key => $field) $current[$key] = self::shown($field, $row[$field[0]] ?? '');
+        }
+
+        $given = array();
+        foreach ($values as $key => $value) {
+            if (!isset($k['fields'][$key]) && !in_array($key, array('owner_name', 'owner_phone', 'broker_name', 'broker_phone'), true)) continue;
+            $clean = $this->draftValue($k, $key, $value);
+            if ($clean !== null) $given[$key] = $clean;
+        }
+        if ($mode === 'edit' && !$given) {
+            return array('reply' => 'ما التعديل المطلوب على ' . $this->shortTitle($kind, $k, $row) . ' (#' . $id . ')؟', 'links' => array(array('title' => 'فتح السجل', 'url' => $k['view'] . $id)), 'card' => null);
+        }
+
+        // Create: the core fields plus whatever was given. Edit: only the changed fields.
+        $keys = $mode === 'create' ? array_values(array_unique(array_merge($k['core'], array_keys($given)))) : array_keys($given);
+        $fields = array();
+        foreach ($keys as $key) {
+            $field = $k['fields'][$key] ?? array(null, self::extraLabel($key), 'text', 245);
+            $fields[] = array('key' => $key, 'label' => $field[1], 'input' => $field[2] === 'select' ? 'select' : ($field[2] === 'textarea' ? 'textarea' : ($field[2] === 'text' ? 'text' : 'number')),
+                'options' => $field[2] === 'select' ? self::optionList($field[3]) : null,
+                'value' => $given[$key] ?? ($mode === 'create' ? self::defaultValue($key) : ($current[$key] ?? '')),
+                'old' => $mode === 'edit' ? ($current[$key] ?? '') : null);
+        }
+        if ($mode === 'create' && $kind !== 'request') {
+            foreach (array('owner_name', 'owner_phone') as $key) {
+                if (!isset($given[$key])) $fields[] = array('key' => $key, 'label' => self::extraLabel($key), 'input' => 'text', 'options' => null, 'value' => '', 'old' => null);
+            }
+        }
+        $missing = array();
+        foreach ($this->requiredKeys($kind) as $key) {
+            if (($given[$key] ?? '') === '' && ($mode === 'create')) $missing[] = $k['fields'][$key][1];
+        }
+        $title = $mode === 'create' ? ($kind === 'request' ? 'طلب عقار جديد' : $k['label'] . ' جديدة للعرض')
+            : 'تعديل ' . $this->shortTitle($kind, $k, $row) . ' (#' . $id . ')';
+        if ($mode === 'create' && $kind === 'building') $title = 'عمارة جديدة للعرض';
+        return array('reply' => null, 'links' => array(), 'card' => array(
+            'type' => 'listing_form',
+            'data' => array('kind' => $kind, 'mode' => $mode, 'id' => $id, 'title' => $title, 'fields' => $fields),
+            'missing' => $missing,
+        ));
+    }
+
+    /** The record an edit is about: by its number (#id), or a search that finds exactly one. */
+    private function resolve(string $kind, array $k, array $action): array
+    {
+        $id = intval(self::number($action['record_id'] ?? null) ?? 0);
+        if ($id > 0) {
+            $row = $this->row('SELECT * FROM ' . $k['table'] . ' WHERE ' . $k['id'] . '=? LIMIT 1', array($id));
+            return $row ? array('row' => $row) : array('row' => null, 'reply' => 'لا يوجد ' . $k['label'] . ' برقم #' . $id . '.', 'links' => array());
+        }
+        $filters = is_array($action['listing'] ?? null) ? $action['listing'] : array();
+        unset($filters['kind']);
+        $filters = array_filter($filters, function ($v) { return self::text($v) !== ''; });
+        if (!$filters && self::text($action['query'] ?? null) !== '') $filters = array('query' => $action['query']);
+        if (!array_filter($filters)) return array('row' => null, 'reply' => 'أي ' . $k['label'] . ' تقصد؟ اكتب رقمه (#) أو ابحث عنه أولاً.', 'links' => array());
+        $found = $this->search($kind, $filters + array('status' => 'any'));
+        $ids = array();
+        foreach ($found['links'] as $l) if (preg_match('/[?&](?:id|editid|requestid)=(\d+)/', $l['url'], $m)) $ids[] = intval($m[1]);
+        if (count($ids) === 1) return array('row' => $this->row('SELECT * FROM ' . $k['table'] . ' WHERE ' . $k['id'] . '=? LIMIT 1', array($ids[0])));
+        if (!$ids) return array('row' => null, 'reply' => 'لم أجد ' . $k['label'] . ' مطابقاً لأعدّله.', 'links' => array());
+        return array('row' => null, 'reply' => $found['reply'] . "\nأيها تقصد؟ اكتب رقمه، مثل: عدّل #" . $ids[0] . '.', 'links' => $found['links']);
+    }
+
+    private function requiredKeys(string $kind): array
+    {
+        return $kind === 'request' ? array('name', 'mobile', 'type', 'description') : array('type', 'district');
+    }
+
+    private static function extraLabel(string $key): string
+    {
+        return array('owner_name' => 'اسم المالك', 'owner_phone' => 'جوال المالك', 'broker_name' => 'اسم الوسيط', 'broker_phone' => 'جوال الوسيط')[$key] ?? $key;
+    }
+
+    private static function defaultValue(string $key)
+    {
+        return $key === 'direct' ? '1' : ($key === 'status' ? '' : '');
+    }
+
+    private static function optionList(array $options): array
+    {
+        $list = array();
+        foreach ($options as $value => $label) $list[] = array('value' => (string)$value, 'label' => (string)$label);
+        return $list;
+    }
+
+    /** A value as the card shows it (option key, number, or text). */
+    private static function shown(array $field, $value): string
+    {
+        $value = trim((string)$value);
+        if ($field[2] === 'select') {
+            if ($field[0] === 'statusx') return in_array($value, array('1', '2', '4'), true) ? $value : '';
+            return $value;
+        }
+        if (in_array($field[2], array('num', 'int'), true)) return floatval($value) ? self::plain((float)$value) : '';
+        return $value;
+    }
+
+    private function draftValue(array $k, string $key, $value): ?string
+    {
+        if (is_array($value) || $value === null || (is_string($value) && (trim($value) === '' || strtolower(trim($value)) === 'null'))) return null;
+        $field = $k['fields'][$key] ?? array(null, '', 'text', 245);
+        if ($field[0] === 'statusx') return self::statusCode($value);
+        if ($field[2] === 'select') return $this->optionKey($field[3], $value);
+        if (in_array($field[2], array('num', 'int'), true)) {
+            $n = self::number($value);
+            return $n === null ? null : (string)($field[2] === 'int' ? intval($n) : $n);
+        }
+        // Numbers in short text (plot no., phone, street no.) are kept in Western digits, as the forms type them.
+        $text = $field[2] === 'textarea' ? trim((string)$value) : self::westernDigits((string)$value);
+        return mb_substr($text, 0, $field[3] ?: 245);
+    }
+
+    /** Option key from a key or a label (Arabic spelling tolerant); null when it is not one of them. */
+    private function optionKey(array $options, $value): ?string
+    {
+        if ($value === null || is_array($value)) return null;
+        $value = trim((string)$value);
+        if ($value === '') return null;
+        if (isset($options[$value])) return (string)$value;
+        $want = AqaryAssistant::normalize($value);
+        foreach ($options as $key => $label) {
+            if (AqaryAssistant::normalize((string)$label) === $want) return (string)$key;
+        }
+        foreach ($options as $key => $label) {
+            $l = AqaryAssistant::normalize((string)$label);
+            if ($l !== '' && (mb_strpos($l, $want) !== false || mb_strpos($want, $l) !== false)) return (string)$key;
+        }
+        return null;
+    }
+
+    private static function statusCode($value): ?string
+    {
+        if ($value === null || is_array($value)) return null;
+        $value = trim(mb_strtolower((string)$value));
+        if ($value === '' || $value === 'any' || $value === 'null') return null;
+        if (isset(self::STATUS_WORDS[$value])) return self::STATUS_WORDS[$value];
+        if (in_array($value, array('0', '1', '2', '4'), true)) return $value === '0' ? '' : $value;
+        $n = AqaryAssistant::normalize($value);
+        foreach (array('متاح' => '', 'محجوز' => '1', 'مباع' => '2', 'مورشف' => '4', 'ارشيف' => '4') as $word => $code) {
+            if (mb_strpos($n, AqaryAssistant::normalize($word)) !== false) return $code;
+        }
+        return null;
+    }
+
+    // ------------------------------------------------------------------ confirm
+
+    /** Saves a confirmed draft. @return array{message: string, links: array} */
+    public function confirm(array $d): array
+    {
+        $kind = (string)($d['kind'] ?? '');
+        $mode = ($d['mode'] ?? '') === 'edit' ? 'edit' : 'create';
+        $k = $this->kind($kind);
+        if (!$this->can($k, $mode === 'create' ? 'adds' : 'edits')) throw new InvalidArgumentException('ليست لديك صلاحية ' . ($mode === 'create' ? 'الإضافة.' : 'التعديل.'));
+        $values = is_array($d['values'] ?? null) ? $d['values'] : array();
+
+        $set = array();
+        foreach ($k['fields'] as $key => $field) {
+            if (!array_key_exists($key, $values)) continue;
+            $raw = $values[$key];
+            $empty = $raw === null || trim((string)$raw) === '';
+            if ($empty) {
+                if ($mode === 'edit') $set[$field[0]] = in_array($field[2], array('num', 'int'), true) ? 0 : '';
+                continue;
+            }
+            $clean = $this->draftValue($k, $key, $raw);
+            if ($clean === null && $field[0] !== 'statusx') throw new InvalidArgumentException('قيمة غير صحيحة في: ' . $field[1]);
+            $set[$field[0]] = in_array($field[2], array('num', 'int'), true) ? ($field[2] === 'int' ? intval($clean) : (float)$clean) : (string)$clean;
+        }
+        if (array_key_exists('statusx', $set) && $set['statusx'] === '' && $kind === 'land') $set['statusx'] = '0';
+
+        $id = 0;
+        $this->link->begin_transaction();
+        try {
+            if ($mode === 'create') {
+                foreach ($this->requiredKeys($kind) as $key) {
+                    if (($set[$k['fields'][$key][0]] ?? '') === '') throw new InvalidArgumentException('مطلوب: ' . $k['fields'][$key][1] . '.');
+                }
+                $set += $this->createDefaults($kind, $k);
+                if ($kind !== 'request') $set = $this->withOwnerAndBroker($set, $values);
+                if ($kind === 'request') $set['mysqlquery'] = $this->requestQuery($set);
+                $id = $this->insert($k['table'], $set);
+            } else {
+                $id = intval($d['id'] ?? 0);
+                $row = $this->row('SELECT * FROM ' . $k['table'] . ' WHERE ' . $k['id'] . '=? LIMIT 1 FOR UPDATE', array($id));
+                if (!$row) throw new InvalidArgumentException('السجل غير موجود.');
+                if ($kind === 'request' && !$this->mayManage($k, $row)) throw new InvalidArgumentException('هذا الطلب لمستخدم آخر، ولا يمكنك تعديله.');
+                if (!$set) throw new InvalidArgumentException('لا يوجد ما يُحفظ.');
+                foreach ($this->requiredKeys($kind) as $key) {
+                    $col = $k['fields'][$key][0];
+                    if (array_key_exists($col, $set) && $set[$col] === '') throw new InvalidArgumentException('لا يمكن ترك ' . $k['fields'][$key][1] . ' فارغاً.');
+                }
+                if ($kind === 'request') {
+                    // The page also refreshes the date and the matching query on every save.
+                    $set['mysqlquery'] = $this->requestQuery($set + $row);
+                    $set['requestdate'] = (string)time();
+                }
+                $this->update($k['table'], $k['id'], $id, $set);
+            }
+            $this->link->commit();
+        } catch (Throwable $error) {
+            $this->link->rollback();
+            throw $error;
+        }
+
+        $saved = $this->row('SELECT * FROM ' . $k['table'] . ' WHERE ' . $k['id'] . '=? LIMIT 1', array($id));
+        $name = $saved ? $this->shortTitle($kind, $k, $saved) : $k['label'];
+        $message = ($mode === 'create' ? 'تمت إضافة ' : 'تم تعديل ') . $name . ' (#' . $id . ').';
+        $links = array(array('title' => $kind === 'request' ? 'فتح الطلب' : 'عرض', 'url' => $k['view'] . $id));
+        if ($kind !== 'request') $links[] = array('title' => 'النموذج الكامل (صور، خريطة، حدود)', 'url' => $k['edit_url'] . $id);
+        if ($kind === 'request' && $saved) {
+            $matches = $this->requestMatches($saved);
+            if ($matches !== null) $message .= ' العقارات المطابقة: ' . $matches . '.';
+        }
+        return array('message' => $message, 'links' => $links, 'id' => $id);
+    }
+
+    /** Columns every new row needs, the same values the add screens write. */
+    private function createDefaults(string $kind, array $k): array
+    {
+        $formuid = 'ai-assistant-' . bin2hex(random_bytes(8));
+        if ($kind === 'request') {
+            return array('requestdate' => (string)time(), 'userid' => $this->userId, 'formuid' => $formuid,
+                'description' => '', 'aqartype' => '', 'hay' => '', 'share3' => '', 'phone' => '', 'mobile' => '', 'mesaha' => '', 'totalprice' => '', 'meterprice' => '');
+        }
+        $base = array('st_date' => time(), $k['creator'] => $this->userId, 'formuid' => $formuid, 'mokhatatid' => 0,
+            'note' => '', 'googlexyz' => '', 'polypath' => '', 'mapid' => 0, 'center_x' => 0, 'center_y' => 0, 'enbleslideshow' => '1',
+            'mobasher' => '1', 'masderid' => 0, 'malekid' => 0, 'oldmalekid' => 0);
+        if ($kind === 'land') {
+            $base += array('statusx' => '0', 'secretinfo' => '', 'reversedfor' => '', 'soldto' => '', 'meterpricehad' => '', 'ploypath' => '', 'ardtype' => '1');
+        } else {
+            $base += array('statusx' => '');
+        }
+        return $base;
+    }
+
+    /** Owner (malek) and broker (masder) as the add screens store them: reuse an exact match, else add one. */
+    private function withOwnerAndBroker(array $set, array $values): array
+    {
+        $owner = self::text($values['owner_name'] ?? null);
+        $ownerPhone = self::phone(self::text($values['owner_phone'] ?? null));
+        if ($owner !== '') {
+            $found = $this->row("SELECT malekid FROM malek WHERE malekbayan1=? AND malekbayan2=? AND malekbayan3='' LIMIT 1", array($owner, $ownerPhone));
+            $set['malekid'] = $found ? intval($found['malekid'])
+                : $this->insert('malek', array('malekbayan1' => $owner, 'malekbayan2' => $ownerPhone, 'malekbayan3' => '', 'malekbayan4' => '', 'malekbayan5' => '',
+                    'malekbayan6' => '', 'malekbayan7' => '', 'malekbayan8' => '', 'malekbayan9' => '', 'malekbayan10' => '', 'userid' => $this->userId,
+                    'formuid' => 'ai-assistant-' . bin2hex(random_bytes(8))));
+            $set['malekbayan1'] = $owner;
+            $set['malekbayan2'] = $ownerPhone;
+        }
+        $broker = self::text($values['broker_name'] ?? null);
+        if ($broker !== '') {
+            $found = $this->row('SELECT masderid FROM masder WHERE masdername=? LIMIT 1', array($broker));
+            $set['masderid'] = $found ? intval($found['masderid'])
+                : $this->insert('masder', array('masdername' => mb_substr($broker, 0, 150), 'masdertel' => mb_substr(self::phone(self::text($values['broker_phone'] ?? null)), 0, 25),
+                    'masderphone' => '', 'masderfax' => '', 'masderemail' => '', 'masderaddress' => '', 'addationalinfo' => '',
+                    'formuid' => 'ai-assistant-' . bin2hex(random_bytes(8)), 'userid' => $this->userId));
+            $set['mobasher'] = '0';
+        }
+        return $set;
+    }
+
+    private function requestQuery(array $r): string
+    {
+        return aqaryRequestMatchSql($r['aqartype'] ?? '', $r['mesaha'] ?? '', $r['totalprice'] ?? '', $r['meterprice'] ?? '', $r['hay'] ?? '', $r['share3'] ?? '');
+    }
+
+    // ------------------------------------------------------------------ data helpers
+
+    private function insert(string $table, array $set): int
+    {
+        $cols = array_keys($set);
+        $stmt = $this->link->prepare('INSERT INTO `' . $table . '` (`' . implode('`,`', $cols) . '`) VALUES (' . implode(',', array_fill(0, count($cols), '?')) . ')');
+        if (!$stmt) throw new RuntimeException($this->link->error);
+        $stmt->execute(array_map(array(self::class, 'sqlValue'), array_values($set)));
+        $id = intval($stmt->insert_id);
+        $stmt->close();
+        if ($id <= 0) throw new RuntimeException('Insert into ' . $table . ' returned no id');
+        return $id;
+    }
+
+    private function update(string $table, string $idCol, int $id, array $set): void
+    {
+        $stmt = $this->link->prepare('UPDATE `' . $table . '` SET `' . implode('`=?, `', array_keys($set)) . '`=? WHERE `' . $idCol . '`=? LIMIT 1');
+        if (!$stmt) throw new RuntimeException($this->link->error);
+        $stmt->execute(array_merge(array_map(array(self::class, 'sqlValue'), array_values($set)), array((string)$id)));
+        $stmt->close();
+    }
+
+    public static function sqlValue($value): string
+    {
+        return is_float($value) ? self::plain($value) : (string)$value;
+    }
+
+    private function rows(string $sql, array $params = array()): array
+    {
+        $stmt = $this->link->prepare($sql);
+        if (!$stmt) throw new RuntimeException($this->link->error);
+        $stmt->execute($params ? array_map('strval', $params) : null);
+        $result = $stmt->get_result();
+        $rows = $result ? $result->fetch_all(MYSQLI_ASSOC) : array();
+        $stmt->close();
+        return $rows;
+    }
+
+    private function row(string $sql, array $params = array()): ?array
+    {
+        $rows = $this->rows($sql, $params);
+        return $rows[0] ?? null;
+    }
+
+    /** 1500 -> "1500", 2.50 -> "2.5" (no exponent, no grouping). */
+    private static function plain(float $value): string
+    {
+        $text = number_format($value, 4, '.', '');
+        return strpos($text, '.') !== false ? rtrim(rtrim($text, '0'), '.') : $text;
+    }
+
+    /** Phone in Western digits without spaces or dashes. */
+    private static function phone(string $value): string
+    {
+        $value = self::westernDigits($value);
+        return preg_match('/^[\d\s\-+()]+$/', $value) ? preg_replace('/[^\d+]/', '', $value) : $value;
+    }
+
+    private static function text($value): string
+    {
+        return is_scalar($value) && strtolower(trim((string)$value)) !== 'null' ? trim((string)$value) : '';
+    }
+
+    private static function westernDigits(string $value): string
+    {
+        return strtr(trim($value), array('٠' => '0', '١' => '1', '٢' => '2', '٣' => '3', '٤' => '4', '٥' => '5', '٦' => '6', '٧' => '7', '٨' => '8', '٩' => '9', '٫' => '.', '٬' => ','));
+    }
+
+    /** A plain number from "1,500,000", "٩٠٠٠٠٠" or 2.5; null when it is not a number. */
+    private static function number($value): ?string
+    {
+        if (!is_scalar($value)) return null;
+        $value = str_replace(array(',', ' ', '،'), '', self::westernDigits((string)$value));
+        if (!preg_match('/^\d+(\.\d+)?$/', $value)) return null;
+        return $value;
+    }
+
+    /** LIKE pattern tolerant to Arabic spelling and to the legacy double-encoded columns (see AqaryAssistant::namePattern). */
+    private static function pattern(string $query): string
+    {
+        $query = preg_replace('/[\x{064B}-\x{065F}\x{0670}\x{0640}]/u', '', trim($query)) ?? trim($query);
+        $query = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $query) ?? $query;
+        $query = preg_replace('/[أإآاةهىي]/u', '%', $query);
+        $words = preg_split('/\s+/u', $query, -1, PREG_SPLIT_NO_EMPTY) ?: array();
+        return '%' . implode('%', $words) . '%';
+    }
+}

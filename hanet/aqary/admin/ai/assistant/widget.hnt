@@ -79,7 +79,7 @@ $aqaryAssistantCfg = array(
     .aqa-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
     .aqa-grid .full{grid-column:1/-1}
     .aqa-card label{display:block;font-size:.75rem;color:var(--aqa-muted);margin:0 0 2px}
-    .aqa-card input,.aqa-card select{width:100%;font-size:.82rem;padding:4px 7px;border:1px solid var(--aqa-line);border-radius:7px;background:#fff;color:var(--aqa-text)}
+    .aqa-card input,.aqa-card select,.aqa-card textarea{width:100%;font-family:inherit;resize:vertical;font-size:.82rem;padding:4px 7px;border:1px solid var(--aqa-line);border-radius:7px;background:#fff;color:var(--aqa-text)}
     .aqa-card .ro{font-weight:600;padding:3px 0}
     .aqa-btn{border:0;border-radius:10px;padding:6px 12px;font-size:.82rem;font-weight:700;cursor:pointer}
     .aqa-btn.primary{background:var(--aqa-accent);color:#fff}
@@ -450,6 +450,28 @@ $aqaryAssistantCfg = array(
             h += field('', 'qr_content', d.content, true);
             h += '</div>';
             button = 'تأكيد وإنشاء الرمز';
+        } else if (a.type === 'listing_form') {
+            // Request / land / building / villa draft: the fields come from the server with their labels and options.
+            h += '<h6><i class="bi bi-' + ({ request: 'clipboard-check', land: 'map', building: 'building', villa: 'house-door' }[d.kind] || 'pencil-square') + '"></i> ' + esc(d.title) + '</h6><div class="aqa-grid">';
+            (d.fields || []).forEach((f) => {
+                const v = f.value ?? '', name = 'f_' + f.key;
+                let control;
+                if (f.input === 'select') {
+                    control = '<select data-f="' + esc(name) + '">' + (f.options || []).map((o) => '<option value="' + esc(o.value) + '"' + (String(o.value) === String(v) ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('') + '</select>';
+                } else if (f.input === 'textarea') {
+                    control = '<textarea data-f="' + esc(name) + '" rows="2">' + esc(v) + '</textarea>';
+                } else {
+                    control = '<input type="' + (f.input === 'number' ? 'number' : 'text') + '" data-f="' + esc(name) + '" value="' + esc(v) + '"' + (f.input === 'number' ? ' step="any" min="0"' : '') + '>';
+                }
+                let old = '';
+                if (f.old !== null && f.old !== undefined && String(f.old) !== String(v)) {
+                    const shown = f.input === 'select' ? ((f.options || []).find((o) => String(o.value) === String(f.old)) || { label: f.old }).label : f.old;
+                    old = '<small style="display:block;color:#8a96a3">الحالي: ' + esc(shown === '' ? '—' : shown) + '</small>';
+                }
+                h += '<div' + (f.input === 'textarea' || f.key === 'name' ? ' class="full"' : '') + '><label>' + esc(f.label) + '</label>' + control + old + '</div>';
+            });
+            h += '</div>';
+            button = d.mode === 'edit' ? 'تأكيد وحفظ التعديل' : 'تأكيد وإضافة';
         } else if (a.type === 'department_plan') {
             const types = a.types || {}, logic = a.logic || {};
             h += '<h6><i class="bi bi-grid-3x3-gap"></i> ' + (d.department_id ? 'إضافة إلى قسم: ' : 'قسم جديد: ') + esc(d.department_name) + '</h6>';
@@ -588,6 +610,12 @@ $aqaryAssistantCfg = array(
             if (a.type === 'create_qr') {
                 const r = await post({ action: 'confirm', type: 'create_qr', data: JSON.stringify({ name: d.qr_name, type: d.type, content: d.qr_content, size: d.size, error_level: d.error_level }) });
                 if (!r.ok) { throw new Error(r.data.message || 'تعذّر إنشاء الرمز.'); }
+                a.done = { message: r.data.message, links: r.data.links || [] };
+            } else if (a.type === 'listing_form') {
+                const values = {};
+                Object.keys(d).forEach((k) => { if (k.startsWith('f_')) { values[k.slice(2)] = d[k]; } });
+                const r = await post({ action: 'confirm', type: 'listing_save', data: JSON.stringify({ kind: d.kind, mode: d.mode, id: d.id, values: values }) });
+                if (!r.ok) { throw new Error(r.data.message || 'تعذّر الحفظ.'); }
                 a.done = { message: r.data.message, links: r.data.links || [] };
             } else if (a.type === 'department_plan' || a.type === 'department_field_change') {
                 const r = await post({ action: 'confirm', type: a.type, data: JSON.stringify(a.data) });

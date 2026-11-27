@@ -1,0 +1,116 @@
+<?php
+/**
+ * Ready-made transition effects and backgrounds for TV displays.
+ * Shared by the editor (pickers) and the player (CSS classes).
+ */
+
+function tv_transition_presets(): array
+{
+    return [
+        'fade'  => ['label' => 'تلاشي',  'icon' => 'circle-half'],
+        'slide' => ['label' => 'انزلاق', 'icon' => 'arrow-left-right'],
+        'zoom'  => ['label' => 'تكبير',  'icon' => 'zoom-in'],
+        'rise'  => ['label' => 'صعود',   'icon' => 'arrow-up'],
+        'flip'  => ['label' => 'قلب',    'icon' => 'arrow-repeat'],
+        'none'  => ['label' => 'بدون',   'icon' => 'slash-circle'],
+    ];
+}
+
+/** Each background has a CSS value; 'classic' is the original look and the default. */
+function tv_background_presets(): array
+{
+    return [
+        'classic'  => ['label' => 'الافتراضي', 'css' => 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)'],
+        'teal'     => ['label' => 'أزرق مخضر', 'css' => '#1f4e5f'],
+        'navy'     => ['label' => 'كحلي',      'css' => '#1b2a41'],
+        'charcoal' => ['label' => 'فحمي',      'css' => '#24292f'],
+        'forest'   => ['label' => 'أخضر غامق', 'css' => '#1e4d3a'],
+        'maroon'   => ['label' => 'عنابي',     'css' => '#5a1f2b'],
+        'bronze'   => ['label' => 'برونزي',    'css' => '#6b4a22'],
+        'slate'    => ['label' => 'رمادي أزرق', 'css' => '#3d4f61'],
+        'grid'     => ['label' => 'شبكة',      'css' => 'linear-gradient(rgba(255,255,255,.06) 1px, transparent 1px) 0 0 / 48px 48px, linear-gradient(90deg, rgba(255,255,255,.06) 1px, transparent 1px) 0 0 / 48px 48px, #1f2a36'],
+        'dots'     => ['label' => 'نقاط',      'css' => 'radial-gradient(rgba(255,255,255,.12) 1.5px, transparent 1.5px) 0 0 / 28px 28px, #22313f'],
+        'stripes'  => ['label' => 'خطوط',      'css' => 'repeating-linear-gradient(135deg, rgba(255,255,255,.04) 0 18px, transparent 18px 36px), #1f4e5f'],
+        'black'    => ['label' => 'أسود',      'css' => '#000000'],
+    ];
+}
+
+function tv_pick_transition($value): string
+{
+    $value = (string)$value;
+    return isset(tv_transition_presets()[$value]) ? $value : 'fade';
+}
+
+/** $allowEmpty: a slide may leave it empty to follow the display's background. */
+function tv_pick_background($value, bool $allowEmpty = false): string
+{
+    $value = (string)$value;
+    if ($allowEmpty && $value === '') return '';
+    return isset(tv_background_presets()[$value]) ? $value : 'classic';
+}
+
+/** True when the column exists, so pages keep working before the migration has run. */
+function tv_has_column($link, string $table, string $column): bool
+{
+    static $cache = [];
+    $key = $table . '.' . $column;
+    if (!isset($cache[$key])) {
+        $result = mysql_query("SHOW COLUMNS FROM `" . str_replace('`', '', $table) . "` LIKE '" . addslashes($column) . "'", $link);
+        $cache[$key] = $result && mysql_num_rows($result) > 0;
+    }
+    return $cache[$key];
+}
+
+/** CSS rules ".tvbg-<key>{background:...}" for every preset. */
+function tv_background_css(string $prefix = '.tvbg-'): string
+{
+    $css = '';
+    foreach (tv_background_presets() as $key => $preset) {
+        $css .= $prefix . $key . '{background:' . $preset['css'] . ';}' . "\n";
+    }
+    return $css;
+}
+
+/** YouTube video id from a watch, youtu.be, shorts, embed or live link; '' when it is not one. */
+function tv_youtube_id($url): string
+{
+    $url = trim((string)$url);
+    if ($url === '') return '';
+    if (preg_match('~^[A-Za-z0-9_-]{11}$~', $url)) return $url;
+    if (!preg_match('~^(?:https?://)?(?:www\.|m\.|music\.)?(?:youtube\.com|youtube-nocookie\.com|youtu\.be)/~i', $url)) return '';
+    if (preg_match('~youtu\.be/([A-Za-z0-9_-]{11})~i', $url, $m)) return $m[1];
+    if (preg_match('~/(?:shorts|embed|live|v)/([A-Za-z0-9_-]{11})~i', $url, $m)) return $m[1];
+    if (preg_match('~[?&]v=([A-Za-z0-9_-]{11})~', $url, $m)) return $m[1];
+    return '';
+}
+
+/** A slide's media is either a file in media.tvdisplay or a YouTube link. */
+function tv_media_is_link($media): bool
+{
+    return (bool)preg_match('~^https?://~i', (string)$media);
+}
+
+/** Allowed uploads per kind: extension => accepted MIME prefix. */
+function tv_upload_types(string $kind): array
+{
+    if ($kind === 'video') return ['mp4' => 'video/', 'webm' => 'video/', 'm4v' => 'video/'];
+    return ['jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'webp' => 'image/webp'];
+}
+
+/** Web address of a slide's own file, or '' for a link or no file. */
+function tv_media_src($media): string
+{
+    $media = (string)$media;
+    if ($media === '' || tv_media_is_link($media)) return '';
+    return upload_url('media.tvdisplay', $media);
+}
+
+/** What the slide shows: 'youtube', 'video' (own file), 'image' or '' for none. */
+function tv_media_kind(array $slide): string
+{
+    $media = (string)($slide['media_url'] ?? '');
+    if ($media === '') return '';
+    if (tv_media_is_link($media)) return tv_youtube_id($media) !== '' ? 'youtube' : '';
+    $ext = strtolower(pathinfo($media, PATHINFO_EXTENSION));
+    return isset(tv_upload_types('video')[$ext]) ? 'video' : 'image';
+}
